@@ -1,0 +1,11 @@
+@import "tailwindcss";
+@import "leaflet/dist/leaflet.css";
+
+.scenic-draft-marker-dot {
+  width: 22px;
+  height: 22px;
+  border-radius: 9999px;
+  background-color: #2563eb;
+  border: 3px solid #ffffff;
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.4);
+}
