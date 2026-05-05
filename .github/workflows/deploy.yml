@@ -1,12 +1,8 @@
 name: deploy
 
-# Runs after build.yml succeeds on main (or via manual dispatch). Using
-# workflow_run gives us a hard gate: a failing lint never produces a deploy.
+# Manual-only. Run from the Actions tab once you're confident the build is
+# green on main.
 on:
-  workflow_run:
-    workflows: [build]
-    types: [completed]
-    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -20,8 +16,6 @@ concurrency:
 
 jobs:
   pages-build:
-    # workflow_dispatch has no upstream conclusion, so allow it unconditionally.
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -30,8 +24,6 @@ jobs:
         uses: oven-sh/setup-bun@v1
       - name: Setup Pages
         uses: actions/configure-pages@v5
-        with:
-          static_site_generator: next
       - name: Restore cache
         uses: actions/cache@v4
         with:
