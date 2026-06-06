@@ -1,14 +1,12 @@
 "use client";
 
 import L from "leaflet";
-import iconUrl from "leaflet/dist/images/marker-icon.png";
-import iconRetinaUrl from "leaflet/dist/images/marker-icon-2x.png";
-import shadowUrl from "leaflet/dist/images/marker-shadow.png";
 import { useEffect, useMemo, useRef } from "react";
 import {
   MapContainer,
   Marker,
   TileLayer,
+  Tooltip,
   useMap,
   useMapEvents,
 } from "react-leaflet";
@@ -31,31 +29,33 @@ interface LoggerMapProps {
 const DEFAULT_CENTER: [number, number] = [37.7749, -122.4194];
 const DEFAULT_ZOOM = 13;
 
-// PNG imports are a union: Webpack/`next build` returns StaticImageData,
-// Turbopack-dev sometimes returns a plain URL string. Normalize both.
-function toUrl(asset: string | { src: string }): string {
-  return typeof asset === "string" ? asset : asset.src;
-}
+const savedPinSvg = `
+<svg xmlns="http://www.w3.org/2000/svg" width="30" height="40" viewBox="0 0 30 40">
+  <defs>
+    <linearGradient id="scenicPinGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#34d399"/>
+      <stop offset="100%" stop-color="#059669"/>
+    </linearGradient>
+  </defs>
+  <path d="M15 1C7.82 1 2 6.82 2 14c0 9.5 13 24 13 24s13-14.5 13-24C28 6.82 22.18 1 15 1z"
+        fill="url(#scenicPinGrad)" stroke="#ffffff" stroke-width="2"/>
+  <circle cx="15" cy="14" r="4.5" fill="#ffffff"/>
+</svg>`.trim();
 
-// Leaflet's auto-detection of its image path breaks under bundlers. Skip the
-// L.Icon.Default dance entirely and hand each Marker an explicit Icon built
-// from bundler-emitted asset URLs.
-const savedIcon = new L.Icon({
-  iconUrl: toUrl(iconUrl),
-  iconRetinaUrl: toUrl(iconRetinaUrl),
-  shadowUrl: toUrl(shadowUrl),
-  iconSize: [25, 41],
-  iconAnchor: [12, 41],
-  popupAnchor: [1, -34],
-  tooltipAnchor: [16, -28],
-  shadowSize: [41, 41],
+const savedIcon = L.divIcon({
+  className: "scenic-saved-pin",
+  html: savedPinSvg,
+  iconSize: [30, 40],
+  iconAnchor: [15, 39],
+  popupAnchor: [0, -34],
+  tooltipAnchor: [0, -34],
 });
 
 const draftIcon = L.divIcon({
-  className: "scenic-draft-marker",
-  html: '<div class="scenic-draft-marker-dot"></div>',
-  iconSize: [22, 22],
-  iconAnchor: [11, 11],
+  className: "",
+  html: '<div class="scenic-draft-pin"><div class="scenic-draft-pin-ring"></div><div class="scenic-draft-pin-dot"></div></div>',
+  iconSize: [28, 28],
+  iconAnchor: [14, 14],
 });
 
 function MapClickHandler({
@@ -93,6 +93,14 @@ function MapFlyTo({ target }: { target: MapTarget | null }) {
   return null;
 }
 
+function summarizePin(pin: Pin): string {
+  const note = pin.text.trim();
+  if (note) {
+    return note;
+  }
+  return pin.address;
+}
+
 export default function LoggerMap({
   pins,
   draft,
@@ -110,7 +118,16 @@ export default function LoggerMap({
           eventHandlers={{
             click: () => onPinSelect(pin),
           }}
-        />
+        >
+          <Tooltip
+            direction="top"
+            offset={[0, -8]}
+            opacity={1}
+            className="scenic-tooltip"
+          >
+            {summarizePin(pin)}
+          </Tooltip>
+        </Marker>
       )),
     [pins, onPinSelect],
   );
