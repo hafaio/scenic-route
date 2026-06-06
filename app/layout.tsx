@@ -1,4 +1,5 @@
 import type { Metadata, Viewport } from "next";
+import ThemeProvider from "../components/theme-provider";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -16,9 +17,16 @@ export default function RootLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="en" className="h-full">
+    <html lang="en" className="h-full" suppressHydrationWarning>
       <body className="h-full bg-slate-50 text-slate-900 dark:bg-slate-900 dark:text-slate-100">
-        {children}
+        <ThemeProvider
+          attribute="class"
+          defaultTheme="system"
+          enableSystem
+          disableTransitionOnChange
+        >
+          {children}
+        </ThemeProvider>
       </body>
     </html>
   );

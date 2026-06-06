@@ -95,11 +95,11 @@ export default function LoggerSearch({
   return (
     <div
       ref={wrapperRef}
-      className="absolute top-3 left-3 right-3 z-[1000] md:left-1/2 md:-translate-x-1/2 md:w-[28rem] md:max-w-[90vw]"
+      className="absolute top-16 left-3 right-3 z-[1000] md:top-3 md:left-1/2 md:-translate-x-1/2 md:w-[28rem] md:max-w-[90vw]"
     >
-      <div className="flex items-center gap-2 rounded-2xl bg-white px-3 py-2 shadow-lg ring-1 ring-black/5 dark:bg-slate-800 dark:ring-white/10">
+      <div className="flex items-center gap-2 rounded-2xl bg-white/85 px-3 py-2 shadow-lg ring-1 ring-black/5 backdrop-blur-md dark:bg-slate-800/80 dark:ring-white/10">
         <FiSearch
-          className="text-slate-400 dark:text-slate-500"
+          className="h-4 w-4 text-slate-400 dark:text-slate-500"
           aria-hidden="true"
         />
         <input
@@ -122,35 +122,37 @@ export default function LoggerSearch({
               setResults([]);
               setIsOpen(false);
             }}
-            className="rounded-full p-1 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-700"
+            className="rounded-full p-1.5 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-700"
             aria-label="Clear search"
           >
             <FiX />
           </button>
         ) : null}
+        <span className="h-5 w-px bg-slate-200 dark:bg-slate-700" />
         <button
           type="button"
           onClick={handleLocate}
           disabled={isLocating}
-          className="rounded-full p-1.5 text-slate-500 hover:bg-slate-100 disabled:opacity-50 dark:text-slate-300 dark:hover:bg-slate-700"
+          className="grid h-7 w-7 place-items-center rounded-full bg-brand-500 text-white shadow-sm transition hover:bg-brand-600 disabled:opacity-50"
           aria-label="Use my location"
+          title="Center on my location"
         >
-          <FiCrosshair />
+          <FiCrosshair className={isLocating ? "animate-spin" : undefined} />
         </button>
       </div>
       {error ? (
-        <div className="mt-2 rounded-lg bg-rose-100 px-3 py-1.5 text-xs text-rose-800 dark:bg-rose-900/40 dark:text-rose-100">
+        <div className="mt-2 rounded-xl bg-rose-100/90 px-3 py-1.5 text-xs text-rose-800 shadow ring-1 ring-rose-200/60 backdrop-blur-md dark:bg-rose-900/40 dark:text-rose-100 dark:ring-rose-700/40">
           {error}
         </div>
       ) : null}
       {isOpen && results.length > 0 ? (
-        <ul className="mt-2 max-h-80 overflow-y-auto rounded-2xl bg-white shadow-lg ring-1 ring-black/5 dark:bg-slate-800 dark:ring-white/10">
+        <ul className="mt-2 max-h-80 overflow-y-auto rounded-2xl bg-white/95 shadow-2xl ring-1 ring-black/5 backdrop-blur-md dark:bg-slate-800/95 dark:ring-white/10">
           {results.map((result) => (
             <li key={result.placeId}>
               <button
                 type="button"
                 onClick={() => handleSelect(result)}
-                className="block w-full px-3 py-2 text-left text-sm hover:bg-slate-50 dark:hover:bg-slate-700"
+                className="block w-full px-3 py-2.5 text-left text-sm hover:bg-slate-50 dark:hover:bg-slate-700/60"
               >
                 <div className="line-clamp-2 text-slate-800 dark:text-slate-100">
                   {result.displayName}
