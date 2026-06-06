@@ -2,7 +2,7 @@
 
 import dynamic from "next/dynamic";
 import { useCallback, useEffect, useState } from "react";
-import { FiLogOut, FiRefreshCw } from "react-icons/fi";
+import { FiLogOut, FiMapPin, FiRefreshCw } from "react-icons/fi";
 import {
   type AuthInfo,
   createPin,
@@ -18,8 +18,10 @@ import { reverseGeocode } from "../src/geocode";
 import type { Pin, PinDraft } from "../src/pin";
 import type { MapTarget } from "./logger-map";
 import LoggerSearch from "./logger-search";
+import LoggerToolbar from "./logger-toolbar";
 import Login from "./login";
 import PinEditor from "./pin-editor";
+import ThemeToggle from "./theme-toggle";
 
 // Leaflet touches `window` at module load, so the map must be client-only.
 const LoggerMap = dynamic(() => import("./logger-map"), {
@@ -40,6 +42,18 @@ type Editing =
   | { mode: "create"; draft: PinDraft }
   | { mode: "edit"; pin: Pin }
   | null;
+
+function BrandLogo({ size = 28 }: { size?: number }) {
+  return (
+    <span
+      className="scenic-logo-pin grid place-items-center rounded-2xl bg-gradient-to-br from-brand-400 to-brand-600 text-white shadow-lg"
+      style={{ width: size * 1.4, height: size * 1.4 }}
+      aria-hidden="true"
+    >
+      <FiMapPin style={{ width: size * 0.7, height: size * 0.7 }} />
+    </span>
+  );
+}
 
 export default function Logger() {
   const configured = isFirebaseConfigured();
@@ -75,6 +89,7 @@ export default function Logger() {
   }, [configured]);
 
   const uid = auth.kind === "signedIn" ? auth.info.user.uid : null;
+  const email = auth.kind === "signedIn" ? auth.info.user.email : null;
   const isAdmin = auth.kind === "signedIn" && auth.info.admin;
 
   useEffect(() => {
@@ -186,8 +201,11 @@ export default function Logger() {
 
   if (!configured) {
     return (
-      <main className="flex h-dvh w-full items-center justify-center p-6">
-        <div className="max-w-md rounded-2xl bg-white p-6 text-center shadow-lg ring-1 ring-black/5 dark:bg-slate-800 dark:ring-white/10">
+      <main className="scenic-aurora flex h-dvh w-full items-center justify-center p-6">
+        <div className="max-w-md rounded-3xl bg-white/90 p-8 text-center shadow-2xl ring-1 ring-black/5 backdrop-blur-md dark:bg-slate-800/90 dark:ring-white/10">
+          <div className="mb-4 flex justify-center">
+            <BrandLogo size={28} />
+          </div>
           <h1 className="text-lg font-semibold">Firebase isn't configured</h1>
           <p className="mt-2 text-sm text-slate-500 dark:text-slate-400">
             Edit <code>src/firebase.ts</code> and replace the
@@ -201,8 +219,11 @@ export default function Logger() {
 
   if (auth.kind === "loading") {
     return (
-      <main className="flex h-dvh w-full items-center justify-center text-sm text-slate-400">
-        Loading…
+      <main className="scenic-aurora flex h-dvh w-full flex-col items-center justify-center gap-4">
+        <BrandLogo size={32} />
+        <p className="text-sm font-medium text-slate-500 dark:text-slate-400">
+          Loading…
+        </p>
       </main>
     );
   }
@@ -213,20 +234,25 @@ export default function Logger() {
 
   if (!isAdmin) {
     return (
-      <main className="flex h-dvh w-full items-center justify-center p-6">
-        <div className="w-full max-w-sm rounded-2xl bg-white p-6 text-center shadow-lg ring-1 ring-black/5 dark:bg-slate-800 dark:ring-white/10">
+      <main className="scenic-aurora relative flex h-dvh w-full items-center justify-center p-6">
+        <div className="absolute top-3 right-3">
+          <ThemeToggle />
+        </div>
+        <div className="w-full max-w-sm rounded-3xl bg-white/90 p-8 text-center shadow-2xl ring-1 ring-black/5 backdrop-blur-md dark:bg-slate-800/90 dark:ring-white/10">
+          <div className="mb-4 flex justify-center">
+            <BrandLogo size={28} />
+          </div>
           <h1 className="text-lg font-semibold">Access pending</h1>
           <p className="mt-2 text-sm text-slate-500 dark:text-slate-400">
-            Your account is signed in but doesn't have admin access yet. An
-            admin has to grant the <code>admin</code> custom claim on your
-            account.
+            You're signed in, but your account doesn't have admin access yet.
+            Ask an admin to grant you the <code>admin</code> claim.
           </p>
-          <div className="mt-4 flex flex-col gap-2">
+          <div className="mt-5 flex flex-col gap-2">
             <button
               type="button"
               onClick={handleRefreshClaims}
               disabled={refreshing}
-              className="inline-flex items-center justify-center gap-2 rounded-lg bg-slate-900 px-3 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-white"
+              className="inline-flex items-center justify-center gap-2 rounded-xl bg-brand-500 px-3 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-brand-600 disabled:opacity-50"
             >
               <FiRefreshCw
                 className={refreshing ? "animate-spin" : undefined}
@@ -236,7 +262,7 @@ export default function Logger() {
             <button
               type="button"
               onClick={handleSignOut}
-              className="inline-flex items-center justify-center gap-2 rounded-lg px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-700"
+              className="inline-flex items-center justify-center gap-2 rounded-xl px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-700"
             >
               <FiLogOut />
               Sign out
@@ -258,16 +284,12 @@ export default function Logger() {
         onMapClick={handleMapClick}
         onPinSelect={handlePinSelect}
       />
+      <LoggerToolbar
+        email={email}
+        pinCount={pins.length}
+        onSignOut={handleSignOut}
+      />
       <LoggerSearch onSelect={handleSearchSelect} onLocate={handleLocate} />
-      <button
-        type="button"
-        onClick={handleSignOut}
-        className="absolute bottom-3 left-3 z-[1000] inline-flex items-center gap-1.5 rounded-full bg-white/90 px-3 py-2 text-xs font-medium text-slate-700 shadow ring-1 ring-black/5 hover:bg-white dark:bg-slate-800/90 dark:text-slate-200 dark:ring-white/10 dark:hover:bg-slate-800"
-        aria-label="Sign out"
-      >
-        <FiLogOut />
-        Sign out
-      </button>
       {editing ? (
         <PinEditor
           target={editing.mode === "create" ? editing.draft : editing.pin}
