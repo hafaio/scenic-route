@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import { FiCheck, FiMapPin, FiTrash2, FiX } from "react-icons/fi";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { FiCheck, FiCopy, FiMapPin, FiTrash2, FiX } from "react-icons/fi";
 import type { Pin, PinDraft } from "../src/pin";
+import { encodePlusCode } from "../src/plus-code";
 
 interface PinEditorProps {
   target: Pin | PinDraft;
@@ -21,7 +22,21 @@ export default function PinEditor({
 }: PinEditorProps) {
   const [text, setText] = useState<string>(target.text);
   const [isBusy, setIsBusy] = useState<boolean>(false);
+  const [copiedCode, setCopiedCode] = useState<boolean>(false);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+
+  const plusCode = useMemo(
+    () => encodePlusCode(target.lat, target.lng),
+    [target.lat, target.lng],
+  );
+
+  const handleCopyCode = async () => {
+    try {
+      await navigator.clipboard.writeText(plusCode);
+      setCopiedCode(true);
+      window.setTimeout(() => setCopiedCode(false), 1500);
+    } catch {}
+  };
 
   useEffect(() => {
     setText(target.text);
@@ -93,9 +108,20 @@ export default function PinEditor({
             <h2 className="mt-0.5 break-words text-base font-semibold text-slate-900 dark:text-slate-100">
               {target.address}
             </h2>
-            <p className="mt-1 text-xs text-slate-400 dark:text-slate-500">
-              {target.lat.toFixed(5)}, {target.lng.toFixed(5)}
-            </p>
+            <button
+              type="button"
+              onClick={handleCopyCode}
+              title="Copy Plus Code — paste into Google or Apple Maps to find this spot"
+              className="mt-2 inline-flex items-center gap-1.5 rounded-full bg-brand-50 px-2.5 py-1 font-mono text-[11px] font-semibold tracking-wider text-brand-700 ring-1 ring-brand-100 transition hover:bg-brand-100 dark:bg-brand-500/10 dark:text-brand-400 dark:ring-brand-500/20 dark:hover:bg-brand-500/20"
+            >
+              <span>{plusCode}</span>
+              {copiedCode ? (
+                <FiCheck className="h-3 w-3" aria-label="Copied" />
+              ) : (
+                <FiCopy className="h-3 w-3" aria-hidden="true" />
+              )}
+              <span className="sr-only">Copy Plus Code</span>
+            </button>
           </div>
           <button
             type="button"
