@@ -16,8 +16,9 @@ import {
 } from "../src/firebase";
 import { reverseGeocode } from "../src/geocode";
 import type { Pin, PinDraft } from "../src/pin";
+import FollowToggle from "./follow-toggle";
+import LogHereButton from "./log-here-button";
 import type { MapTarget } from "./logger-map";
-import LoggerSearch from "./logger-search";
 import LoggerToolbar from "./logger-toolbar";
 import Login from "./login";
 import PinEditor from "./pin-editor";
@@ -61,7 +62,13 @@ export default function Logger() {
   const [pins, setPins] = useState<Pin[]>([]);
   const [editing, setEditing] = useState<Editing>(null);
   const [target, setTarget] = useState<MapTarget | null>(null);
+  const [userLocation, setUserLocation] = useState<{
+    lat: number;
+    lng: number;
+  } | null>(null);
+  const [logging, setLogging] = useState<boolean>(false);
   const [refreshing, setRefreshing] = useState<boolean>(false);
+  const [following, setFollowing] = useState<boolean>(true);
 
   useEffect(() => {
     if (!configured) {
@@ -101,7 +108,8 @@ export default function Logger() {
     return unsubscribe;
   }, [isAdmin]);
 
-  // Initial geolocation: center the map if the user grants permission.
+  // Live geolocation: keep the user marker in sync. Follow centering is owned
+  // by the map-side controller, which reacts to userLocation + following.
   useEffect(() => {
     if (!isAdmin) {
       return;
@@ -109,53 +117,75 @@ export default function Logger() {
     if (!("geolocation" in navigator)) {
       return;
     }
-    navigator.geolocation.getCurrentPosition(
+    const watchId = navigator.geolocation.watchPosition(
       (position) => {
-        setTarget({
-          lat: position.coords.latitude,
-          lng: position.coords.longitude,
-          zoom: 14,
-        });
+        const lat = position.coords.latitude;
+        const lng = position.coords.longitude;
+        setUserLocation({ lat, lng });
       },
       () => {},
-      { timeout: 10_000 },
+      { enableHighAccuracy: false, maximumAge: 30_000 },
     );
+    return () => navigator.geolocation.clearWatch(watchId);
   }, [isAdmin]);
 
-  const handleMapClick = useCallback(async (lat: number, lng: number) => {
-    let address = "Unknown location";
-    try {
-      const result = await reverseGeocode(lat, lng);
-      if (result) {
-        address = result.displayName;
-      }
-    } catch {}
-    setEditing({ mode: "create", draft: { lat, lng, address, text: "" } });
+  const handleToggleFollow = useCallback(() => {
+    setFollowing((on) => !on);
   }, []);
+
+  // Released whenever the user pans/zooms the map themselves. Stable so the
+  // map-side controller can keep it as a long-lived listener; the functional
+  // updater makes flipping to false idempotent.
+  const handleDisengageFollow = useCallback(() => {
+    setFollowing(() => false);
+  }, []);
+
+  const handleLogHere = useCallback(async () => {
+    const openEditorAt = async (lat: number, lng: number) => {
+      let address = "Unknown location";
+      try {
+        const result = await reverseGeocode(lat, lng);
+        if (result) {
+          address = result.displayName;
+        }
+      } catch {}
+      setEditing({ mode: "create", draft: { lat, lng, address, text: "" } });
+    };
+    if (!("geolocation" in navigator)) {
+      return;
+    }
+    setLogging(true);
+    navigator.geolocation.getCurrentPosition(
+      async (position) => {
+        try {
+          await openEditorAt(
+            position.coords.latitude,
+            position.coords.longitude,
+          );
+        } finally {
+          setLogging(false);
+        }
+      },
+      async () => {
+        try {
+          // High-accuracy fix failed; fall back to the last watched position.
+          if (userLocation) {
+            await openEditorAt(userLocation.lat, userLocation.lng);
+          }
+        } finally {
+          setLogging(false);
+        }
+      },
+      { enableHighAccuracy: true, timeout: 10_000 },
+    );
+  }, [userLocation]);
 
   const handlePinSelect = useCallback((pin: Pin) => {
     setEditing({ mode: "edit", pin });
     setTarget({ lat: pin.lat, lng: pin.lng, zoom: 16 });
-  }, []);
-
-  const handleSearchSelect = useCallback(
-    (result: { lat: number; lng: number; displayName: string }) => {
-      setTarget({ lat: result.lat, lng: result.lng, zoom: 16 });
-      setEditing({
-        mode: "create",
-        draft: {
-          lat: result.lat,
-          lng: result.lng,
-          address: result.displayName,
-          text: "",
-        },
-      });
-    },
-    [],
-  );
-
-  const handleLocate = useCallback((lat: number, lng: number) => {
-    setTarget({ lat, lng, zoom: 16 });
+    // Flying to a saved pin moves the camera away from the user, so release
+    // follow mode rather than fighting the geolocation watcher.
+    setFollowing(false);
   }, []);
 
   const handleCancel = useCallback(() => {
@@ -281,7 +311,9 @@ export default function Logger() {
         pins={pins}
         draft={draft}
         target={target}
-        onMapClick={handleMapClick}
+        userLocation={userLocation}
+        following={following}
+        onDisengageFollow={handleDisengageFollow}
         onPinSelect={handlePinSelect}
       />
       <LoggerToolbar
@@ -289,7 +321,14 @@ export default function Logger() {
         pinCount={pins.length}
         onSignOut={handleSignOut}
       />
-      <LoggerSearch onSelect={handleSearchSelect} onLocate={handleLocate} />
+      <FollowToggle active={following} onToggle={handleToggleFollow} />
+      {!editing ? (
+        <LogHereButton
+          onClick={handleLogHere}
+          disabled={userLocation === null}
+          busy={logging}
+        />
+      ) : null}
       {editing ? (
         <PinEditor
           target={editing.mode === "create" ? editing.draft : editing.pin}

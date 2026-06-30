@@ -8,7 +8,6 @@ import {
   TileLayer,
   Tooltip,
   useMap,
-  useMapEvents,
 } from "react-leaflet";
 import type { Pin, PinDraft } from "../src/pin";
 
@@ -22,7 +21,9 @@ interface LoggerMapProps {
   pins: Pin[];
   draft: PinDraft | null;
   target: MapTarget | null;
-  onMapClick: (lat: number, lng: number) => void;
+  userLocation: { lat: number; lng: number } | null;
+  following: boolean;
+  onDisengageFollow: () => void;
   onPinSelect: (pin: Pin) => void;
 }
 
@@ -58,38 +59,94 @@ const draftIcon = L.divIcon({
   iconAnchor: [14, 14],
 });
 
-function MapClickHandler({
-  onMapClick,
-}: {
-  onMapClick: (lat: number, lng: number) => void;
-}) {
-  useMapEvents({
-    click(event) {
-      onMapClick(event.latlng.lat, event.latlng.lng);
-    },
-  });
-  return null;
+const userIcon = L.divIcon({
+  className: "",
+  html: '<div class="scenic-user-pin"><div class="scenic-user-pin-ring"></div><div class="scenic-user-pin-dot"></div></div>',
+  iconSize: [28, 28],
+  iconAnchor: [14, 14],
+});
+
+interface MapControllerProps {
+  target: MapTarget | null;
+  following: boolean;
+  userLocation: { lat: number; lng: number } | null;
+  onDisengageFollow: () => void;
 }
 
-function MapFlyTo({ target }: { target: MapTarget | null }) {
+function MapController({
+  target,
+  following,
+  userLocation,
+  onDisengageFollow,
+}: MapControllerProps) {
   const map = useMap();
-  const lastKey = useRef<string>("");
+  const lastTargetKey = useRef<string>("");
+  const hasZoomedRef = useRef<boolean>(false);
+  const wasFollowingRef = useRef<boolean>(following);
+
+  // Imperative fly-to for explicit targets (e.g. selecting a saved pin).
   useEffect(() => {
     if (!target) {
       // Reset so re-flying to the same coords (e.g. after a popup close)
       // isn't deduped against the last fly-to.
-      lastKey.current = "";
+      lastTargetKey.current = "";
       return;
     }
     const key = `${target.lat},${target.lng},${target.zoom ?? ""}`;
-    if (key === lastKey.current) {
+    if (key === lastTargetKey.current) {
       return;
     }
-    lastKey.current = key;
+    lastTargetKey.current = key;
     map.flyTo([target.lat, target.lng], target.zoom ?? map.getZoom(), {
       duration: 0.8,
     });
   }, [target, map]);
+
+  // Follow camera: recenter on the user while follow mode is engaged.
+  useEffect(() => {
+    const justEngaged = following && !wasFollowingRef.current;
+    wasFollowingRef.current = following;
+    if (!following || !userLocation) {
+      return;
+    }
+    const { lat, lng } = userLocation;
+    if (!hasZoomedRef.current) {
+      // First centering on the user: zoom in to street level.
+      hasZoomedRef.current = true;
+      map.flyTo([lat, lng], 16, { duration: 0.8 });
+    } else if (justEngaged) {
+      // Re-engaged via the toggle: snap back to the user at the current zoom.
+      map.flyTo([lat, lng], map.getZoom(), { duration: 0.8 });
+    } else {
+      // Steady-state follow: pan to the user, keeping their chosen zoom.
+      map.setView([lat, lng], map.getZoom(), { animate: true });
+    }
+  }, [following, userLocation, map]);
+
+  // While following, anchor zoom gestures on the map center (i.e. the user)
+  // instead of the cursor/pinch point, so zooming doesn't drift off the user.
+  // Restore the default cursor-anchored zoom once follow is released.
+  useEffect(() => {
+    const zoomAnchor = following ? "center" : true;
+    map.options.scrollWheelZoom = zoomAnchor;
+    map.options.doubleClickZoom = zoomAnchor;
+    map.options.touchZoom = zoomAnchor;
+  }, [following, map]);
+
+  // Only a user pan releases follow mode. Zoom gestures keep following on, so
+  // the next position update simply re-centers at the user's chosen zoom.
+  // Programmatic camera moves (flyTo/setView) never fire dragstart, so any
+  // dragstart is the user grabbing the map.
+  useEffect(() => {
+    const handleDragStart = () => {
+      onDisengageFollow();
+    };
+    map.on("dragstart", handleDragStart);
+    return () => {
+      map.off("dragstart", handleDragStart);
+    };
+  }, [map, onDisengageFollow]);
+
   return null;
 }
 
@@ -105,7 +162,9 @@ export default function LoggerMap({
   pins,
   draft,
   target,
-  onMapClick,
+  userLocation,
+  following,
+  onDisengageFollow,
   onPinSelect,
 }: LoggerMapProps) {
   const markers = useMemo(
@@ -145,9 +204,19 @@ export default function LoggerMap({
         subdomains="abcd"
         maxZoom={20}
       />
-      <MapClickHandler onMapClick={onMapClick} />
-      <MapFlyTo target={target} />
+      <MapController
+        target={target}
+        following={following}
+        userLocation={userLocation}
+        onDisengageFollow={onDisengageFollow}
+      />
       {markers}
+      {userLocation ? (
+        <Marker
+          position={[userLocation.lat, userLocation.lng]}
+          icon={userIcon}
+        />
+      ) : null}
       {draft ? (
         <Marker position={[draft.lat, draft.lng]} icon={draftIcon} />
       ) : null}
