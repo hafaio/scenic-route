@@ -11,15 +11,6 @@ export interface GeocodeResult {
   type: string;
 }
 
-interface NominatimSearchHit {
-  place_id: number | string;
-  lat: string;
-  lon: string;
-  display_name: string;
-  type?: string;
-  class?: string;
-}
-
 interface NominatimReverseResponse {
   place_id?: number | string;
   lat?: string;
@@ -30,7 +21,6 @@ interface NominatimReverseResponse {
   error?: string;
 }
 
-const searchCache = new Map<string, GeocodeResult[]>();
 const reverseCache = new Map<string, GeocodeResult | null>();
 
 function setBounded<K, V>(map: Map<K, V>, key: K, value: V): void {
@@ -43,48 +33,8 @@ function setBounded<K, V>(map: Map<K, V>, key: K, value: V): void {
   map.set(key, value);
 }
 
-function searchKey(queryString: string): string {
-  return queryString.toLowerCase().replace(/\s+/g, " ").trim();
-}
-
 function reverseKey(lat: number, lng: number): string {
   return `${lat.toFixed(5)},${lng.toFixed(5)}`;
-}
-
-export async function searchAddress(
-  queryString: string,
-  signal?: AbortSignal,
-): Promise<GeocodeResult[]> {
-  const key = searchKey(queryString);
-  if (key.length < 3) {
-    return [];
-  }
-  const cached = searchCache.get(key);
-  if (cached) {
-    return cached;
-  }
-  const url = new URL("/search", NOMINATIM_BASE);
-  url.searchParams.set("q", key);
-  url.searchParams.set("format", "json");
-  url.searchParams.set("addressdetails", "0");
-  url.searchParams.set("limit", "8");
-  const response = await fetch(url.toString(), {
-    signal,
-    headers: { "Accept-Language": "en", "X-Client": USER_AGENT_NOTE },
-  });
-  if (!response.ok) {
-    throw new Error(`Nominatim search failed: ${response.status}`);
-  }
-  const hits = (await response.json()) as NominatimSearchHit[];
-  const results: GeocodeResult[] = hits.map((hit) => ({
-    placeId: String(hit.place_id),
-    lat: Number.parseFloat(hit.lat),
-    lng: Number.parseFloat(hit.lon),
-    displayName: hit.display_name,
-    type: hit.type ?? hit.class ?? "place",
-  }));
-  setBounded(searchCache, key, results);
-  return results;
 }
 
 export async function reverseGeocode(
