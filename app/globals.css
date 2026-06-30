@@ -53,6 +53,27 @@
   }
 }
 
+.scenic-user-pin {
+  position: relative;
+  width: 28px;
+  height: 28px;
+}
+.scenic-user-pin-dot {
+  position: absolute;
+  inset: 8px;
+  border-radius: 9999px;
+  background-color: #3b82f6;
+  border: 2px solid #ffffff;
+  box-shadow: 0 2px 6px rgb(0 0 0 / 0.35);
+}
+.scenic-user-pin-ring {
+  position: absolute;
+  inset: 0;
+  border-radius: 9999px;
+  background-color: rgb(59 130 246 / 0.45);
+  animation: scenic-pulse 1.8s ease-out infinite;
+}
+
 /* CartoDB doesn't ship a dark variant of Voyager. Inverting + hue-rotating the
    tile pane gives a dark map that keeps Voyager's full road/label detail.
    Scoped to .leaflet-tile-pane so markers and tooltips render normally. */
