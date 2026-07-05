@@ -1,7 +1,7 @@
-import {
-  type FirestoreDataConverter,
-  type QueryDocumentSnapshot,
-  type SnapshotOptions,
+import type {
+  FirestoreDataConverter,
+  QueryDocumentSnapshot,
+  SnapshotOptions,
   Timestamp,
 } from "firebase/firestore";
 
@@ -36,17 +36,9 @@ export interface PinDoc {
 }
 
 export const pinConverter: FirestoreDataConverter<Pin, PinDoc> = {
-  toFirestore(pin): PinDoc {
-    return {
-      lat: pin.lat as number,
-      lng: pin.lng as number,
-      address: pin.address as string,
-      text: pin.text as string,
-      creator: pin.creator as string,
-      createdAt: Timestamp.fromDate(pin.createdAt as Date),
-      lastModifier: pin.lastModifier as string,
-      modifiedAt: Timestamp.fromDate(pin.modifiedAt as Date),
-    };
+  // pins are written raw with serverTimestamp() sentinels, never through this converter
+  toFirestore(): PinDoc {
+    throw new Error("pinConverter is read-only");
   },
   fromFirestore(
     snapshot: QueryDocumentSnapshot<PinDoc>,

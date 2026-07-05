@@ -7,7 +7,6 @@ import {
   type AuthInfo,
   createPin,
   deletePin,
-  isFirebaseConfigured,
   refreshClaims,
   signOutUser,
   updatePin,
@@ -57,7 +56,6 @@ function BrandLogo({ size = 28 }: { size?: number }) {
 }
 
 export default function Logger() {
-  const configured = isFirebaseConfigured();
   const [auth, setAuth] = useState<AuthState>({ kind: "loading" });
   const [pins, setPins] = useState<Pin[]>([]);
   const [editing, setEditing] = useState<Editing>(null);
@@ -75,9 +73,6 @@ export default function Logger() {
   const [banner, setBanner] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!configured) {
-      return;
-    }
     const unsubscribe = watchAuth((info) => {
       // onIdTokenChanged re-fires with a fresh AuthInfo each refresh; keep the old ref when uid+admin match to avoid a re-render
       setAuth((prev) => {
@@ -95,7 +90,7 @@ export default function Logger() {
       });
     });
     return unsubscribe;
-  }, [configured]);
+  }, []);
 
   const uid = auth.kind === "signedIn" ? auth.info.user.uid : null;
   const email = auth.kind === "signedIn" ? auth.info.user.email : null;
@@ -254,24 +249,6 @@ export default function Logger() {
       setRefreshing(false);
     }
   }, []);
-
-  if (!configured) {
-    return (
-      <main className="scenic-aurora flex h-dvh w-full items-center justify-center p-6">
-        <div className="max-w-md rounded-3xl bg-white/90 p-8 text-center shadow-2xl ring-1 ring-black/5 backdrop-blur-md dark:bg-slate-800/90 dark:ring-white/10">
-          <div className="mb-4 flex justify-center">
-            <BrandLogo size={28} />
-          </div>
-          <h1 className="text-lg font-semibold">Firebase isn't configured</h1>
-          <p className="mt-2 text-sm text-slate-500 dark:text-slate-400">
-            Edit <code>src/firebase.ts</code> and replace the
-            <code> firebaseConfig</code> placeholder values with the ones from
-            your Firebase project.
-          </p>
-        </div>
-      </main>
-    );
-  }
 
   if (auth.kind === "loading") {
     return (
