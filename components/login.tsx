@@ -61,8 +61,7 @@ export default function Login() {
     setIsResetting(true);
     try {
       await sendPasswordReset(email);
-      // Firebase doesn't reveal whether the email exists (to prevent
-      // enumeration); show the same message either way.
+      // firebase hides whether the email exists (anti-enumeration); show the same message either way
       setInfo(`If an account exists for ${email}, a reset link is on its way.`);
     } catch (err) {
       setError(describeError(err));

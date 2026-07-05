@@ -84,11 +84,10 @@ function MapController({
   const hasZoomedRef = useRef<boolean>(false);
   const wasFollowingRef = useRef<boolean>(following);
 
-  // Imperative fly-to for explicit targets (e.g. selecting a saved pin).
+  // fly to an explicit target (e.g. a selected saved pin)
   useEffect(() => {
     if (!target) {
-      // Reset so re-flying to the same coords (e.g. after a popup close)
-      // isn't deduped against the last fly-to.
+      // clear the key so re-selecting the same target (e.g. after closing the editor) still flies
       lastTargetKey.current = "";
       return;
     }
@@ -102,7 +101,7 @@ function MapController({
     });
   }, [target, map]);
 
-  // Follow camera: recenter on the user while follow mode is engaged.
+  // follow camera: recenter on the user while engaged
   useEffect(() => {
     const justEngaged = following && !wasFollowingRef.current;
     wasFollowingRef.current = following;
@@ -111,21 +110,19 @@ function MapController({
     }
     const { lat, lng } = userLocation;
     if (!hasZoomedRef.current) {
-      // First centering on the user: zoom in to street level.
+      // first fix: zoom in to street level
       hasZoomedRef.current = true;
       map.flyTo([lat, lng], 16, { duration: 0.8 });
     } else if (justEngaged) {
-      // Re-engaged via the toggle: snap back to the user at the current zoom.
+      // re-engaged: snap back at the current zoom
       map.flyTo([lat, lng], map.getZoom(), { duration: 0.8 });
     } else {
-      // Steady-state follow: pan to the user, keeping their chosen zoom.
+      // steady state: pan to the user, keeping their zoom
       map.setView([lat, lng], map.getZoom(), { animate: true });
     }
   }, [following, userLocation, map]);
 
-  // While following, anchor zoom gestures on the map center (i.e. the user)
-  // instead of the cursor/pinch point, so zooming doesn't drift off the user.
-  // Restore the default cursor-anchored zoom once follow is released.
+  // while following, anchor zoom on the map center (the user) not the cursor, so it doesn't drift off them
   useEffect(() => {
     const zoomAnchor = following ? "center" : true;
     map.options.scrollWheelZoom = zoomAnchor;
@@ -133,10 +130,7 @@ function MapController({
     map.options.touchZoom = zoomAnchor;
   }, [following, map]);
 
-  // Only a user pan releases follow mode. Zoom gestures keep following on, so
-  // the next position update simply re-centers at the user's chosen zoom.
-  // Programmatic camera moves (flyTo/setView) never fire dragstart, so any
-  // dragstart is the user grabbing the map.
+  // only a pan (dragstart) releases follow; programmatic flyTo/setView don't fire dragstart, so any dragstart is a real user grab
   useEffect(() => {
     const handleDragStart = () => {
       onDisengageFollow();

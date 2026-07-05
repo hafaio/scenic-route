@@ -53,9 +53,7 @@ export const pinConverter: FirestoreDataConverter<Pin, PinDoc> = {
     options?: SnapshotOptions,
   ): Pin {
     const data = snapshot.data(options);
-    // Backstop for the rare path where data() is called without the
-    // serverTimestamps: "estimate" option: an unresolved server timestamp
-    // surfaces as null. Fall back to "now" so the converter doesn't throw.
+    // without the "estimate" option an unresolved server timestamp reads as null; fall back to now
     return {
       id: snapshot.id,
       lat: data.lat,

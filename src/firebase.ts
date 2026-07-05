@@ -15,9 +15,12 @@ import {
   deleteDoc,
   doc,
   type Firestore,
-  getFirestore,
+  type FirestoreError,
+  initializeFirestore,
   onSnapshot,
   orderBy,
+  persistentLocalCache,
+  persistentMultipleTabManager,
   query,
   serverTimestamp,
   updateDoc,
@@ -70,24 +73,37 @@ function ensureAuth(): Auth {
 
 function ensureDb(): Firestore {
   if (!dbInstance) {
-    dbInstance = getFirestore(ensureApp());
+    dbInstance = initializeFirestore(ensureApp(), {
+      localCache: persistentLocalCache({
+        tabManager: persistentMultipleTabManager(),
+      }),
+    });
   }
   return dbInstance;
 }
 
-// Subscribes to both auth state changes AND token refreshes, so promoting a
-// user to admin (which mutates the token's custom claims) propagates without
-// a re-login as soon as the token refreshes.
+// onIdTokenChanged (not onAuthStateChanged) so an admin promotion propagates on token refresh without re-login
 export function watchAuth(
   callback: (info: AuthInfo | null) => void,
 ): () => void {
+  let latestInvocation = 0;
   return onIdTokenChanged(ensureAuth(), async (user) => {
+    const invocation = ++latestInvocation;
     if (!user) {
       callback(null);
       return;
     }
-    const result = await user.getIdTokenResult();
-    callback({ user, admin: result.claims.admin === true });
+    // fall back to a non-admin session on a failed token refresh
+    let admin = false;
+    try {
+      const result = await user.getIdTokenResult();
+      admin = result.claims.admin === true;
+    } catch {}
+    // drop stale completions so a late token fetch can't revive a signed-out session
+    if (invocation !== latestInvocation) {
+      return;
+    }
+    callback({ user, admin });
   });
 }
 
@@ -103,8 +119,7 @@ export async function sendPasswordReset(email: string): Promise<void> {
   await sendPasswordResetEmail(ensureAuth(), email);
 }
 
-// Force-refreshes the ID token so a freshly-set admin claim is picked up
-// without signing out. The watchAuth listener fires automatically on refresh.
+// force-refresh so a newly-granted admin claim is picked up without re-login; watchAuth then re-fires
 export async function refreshClaims(): Promise<void> {
   const user = ensureAuth().currentUser;
   if (!user) {
@@ -121,18 +136,25 @@ function pinsCollection() {
   return rawPinsCollection().withConverter(pinConverter);
 }
 
-export function watchPins(callback: (pins: Pin[]) => void): () => void {
+export function watchPins(
+  callback: (pins: Pin[]) => void,
+  onError?: (error: FirestoreError) => void,
+): () => void {
   const q = query(pinsCollection(), orderBy("modifiedAt", "desc"));
-  return onSnapshot(q, (snapshot) => {
-    // serverTimestamps: "estimate" substitutes the local write time for
-    // unresolved server timestamps so freshly-created pins don't surface as
-    // nulls in the listener that fires before server-ack.
-    callback(
-      snapshot.docs.map((docSnap) =>
-        docSnap.data({ serverTimestamps: "estimate" }),
-      ),
-    );
-  });
+  return onSnapshot(
+    q,
+    (snapshot) => {
+      // "estimate" so freshly-created pins don't surface as null before server-ack
+      callback(
+        snapshot.docs.map((docSnap) =>
+          docSnap.data({ serverTimestamps: "estimate" }),
+        ),
+      );
+    },
+    (error) => {
+      onError?.(error);
+    },
+  );
 }
 
 export async function createPin(uid: string, draft: PinDraft): Promise<string> {

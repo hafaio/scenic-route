@@ -22,8 +22,7 @@ export default function ThemeToggle({ className }: { className?: string }) {
   const { theme, setTheme } = useTheme();
   const [mounted, setMounted] = useState<boolean>(false);
 
-  // next-themes is client-only — render a stable placeholder during SSR /
-  // first paint so React doesn't trip the hydration mismatch guard.
+  // next-themes is client-only; render a stable placeholder until mounted to avoid a hydration mismatch
   useEffect(() => {
     setMounted(true);
   }, []);
