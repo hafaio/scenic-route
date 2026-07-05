@@ -2,7 +2,7 @@
 
 import dynamic from "next/dynamic";
 import { useCallback, useEffect, useState } from "react";
-import { FiLogOut, FiMapPin, FiRefreshCw } from "react-icons/fi";
+import { FiLogOut, FiMapPin, FiRefreshCw, FiX } from "react-icons/fi";
 import {
   type AuthInfo,
   createPin,
@@ -24,7 +24,7 @@ import Login from "./login";
 import PinEditor from "./pin-editor";
 import ThemeToggle from "./theme-toggle";
 
-// Leaflet touches `window` at module load, so the map must be client-only.
+// leaflet touches `window` at module load, so the map must be client-only
 const LoggerMap = dynamic(() => import("./logger-map"), {
   ssr: false,
   loading: () => (
@@ -69,15 +69,17 @@ export default function Logger() {
   const [logging, setLogging] = useState<boolean>(false);
   const [refreshing, setRefreshing] = useState<boolean>(false);
   const [following, setFollowing] = useState<boolean>(true);
+  const [locationError, setLocationError] = useState<
+    "denied" | "unavailable" | null
+  >(null);
+  const [banner, setBanner] = useState<string | null>(null);
 
   useEffect(() => {
     if (!configured) {
       return;
     }
     const unsubscribe = watchAuth((info) => {
-      // Token refreshes re-fire onIdTokenChanged with a fresh AuthInfo even
-      // when uid+admin haven't changed. Returning the previous reference
-      // when the relevant fields match keeps React from re-rendering.
+      // onIdTokenChanged re-fires with a fresh AuthInfo each refresh; keep the old ref when uid+admin match to avoid a re-render
       setAuth((prev) => {
         if (!info) {
           return prev.kind === "signedOut" ? prev : { kind: "signedOut" };
@@ -104,12 +106,13 @@ export default function Logger() {
       setPins([]);
       return;
     }
-    const unsubscribe = watchPins(setPins);
+    const unsubscribe = watchPins(setPins, () => {
+      setBanner("Live updates stopped. Reload the page to reconnect.");
+    });
     return unsubscribe;
   }, [isAdmin]);
 
-  // Live geolocation: keep the user marker in sync. Follow centering is owned
-  // by the map-side controller, which reacts to userLocation + following.
+  // follow centering lives in the map-side controller (reacts to userLocation + following)
   useEffect(() => {
     if (!isAdmin) {
       return;
@@ -122,8 +125,13 @@ export default function Logger() {
         const lat = position.coords.latitude;
         const lng = position.coords.longitude;
         setUserLocation({ lat, lng });
+        setLocationError(null);
       },
-      () => {},
+      (error) => {
+        setLocationError(
+          error.code === error.PERMISSION_DENIED ? "denied" : "unavailable",
+        );
+      },
       { enableHighAccuracy: false, maximumAge: 30_000 },
     );
     return () => navigator.geolocation.clearWatch(watchId);
@@ -133,9 +141,7 @@ export default function Logger() {
     setFollowing((on) => !on);
   }, []);
 
-  // Released whenever the user pans/zooms the map themselves. Stable so the
-  // map-side controller can keep it as a long-lived listener; the functional
-  // updater makes flipping to false idempotent.
+  // stable identity for a long-lived map listener; functional updater keeps disengage idempotent
   const handleDisengageFollow = useCallback(() => {
     setFollowing(() => false);
   }, []);
@@ -166,11 +172,15 @@ export default function Logger() {
           setLogging(false);
         }
       },
-      async () => {
+      async (error) => {
         try {
-          // High-accuracy fix failed; fall back to the last watched position.
+          // high-accuracy fix failed; fall back to the last watched position
           if (userLocation) {
             await openEditorAt(userLocation.lat, userLocation.lng);
+          } else {
+            setLocationError(
+              error.code === error.PERMISSION_DENIED ? "denied" : "unavailable",
+            );
           }
         } finally {
           setLogging(false);
@@ -183,13 +193,13 @@ export default function Logger() {
   const handlePinSelect = useCallback((pin: Pin) => {
     setEditing({ mode: "edit", pin });
     setTarget({ lat: pin.lat, lng: pin.lng, zoom: 16 });
-    // Flying to a saved pin moves the camera away from the user, so release
-    // follow mode rather than fighting the geolocation watcher.
+    // selecting a pin flies away from the user, so release follow rather than fight the watcher
     setFollowing(false);
   }, []);
 
   const handleCancel = useCallback(() => {
     setEditing(null);
+    setTarget(null);
   }, []);
 
   const handleSave = useCallback(
@@ -197,12 +207,20 @@ export default function Logger() {
       if (!uid || !editing) {
         return;
       }
-      if (editing.mode === "create") {
-        await createPin(uid, { ...editing.draft, text });
-      } else {
-        await updatePin(uid, editing.pin.id, { text });
-      }
+      const write =
+        editing.mode === "create"
+          ? createPin(uid, { ...editing.draft, text })
+          : updatePin(uid, editing.pin.id, { text });
+      // optimistic close
       setEditing(null);
+      setTarget(null);
+      try {
+        await write;
+      } catch {
+        setBanner(
+          "Couldn't save your pin. Check your connection and try again.",
+        );
+      }
     },
     [uid, editing],
   );
@@ -211,8 +229,16 @@ export default function Logger() {
     if (editing?.mode !== "edit") {
       return;
     }
-    await deletePin(editing.pin.id);
+    const write = deletePin(editing.pin.id);
     setEditing(null);
+    setTarget(null);
+    try {
+      await write;
+    } catch {
+      setBanner(
+        "Couldn't delete your pin. Check your connection and try again.",
+      );
+    }
   }, [editing]);
 
   const handleSignOut = useCallback(async () => {
@@ -303,6 +329,13 @@ export default function Logger() {
     );
   }
 
+  const locationHint =
+    locationError === "denied"
+      ? "Location access is blocked — enable it in your browser settings."
+      : locationError === "unavailable"
+        ? "Couldn't get your location. Make sure location services are on."
+        : null;
+
   const draft = editing?.mode === "create" ? editing.draft : null;
 
   return (
@@ -322,11 +355,25 @@ export default function Logger() {
         onSignOut={handleSignOut}
       />
       <FollowToggle active={following} onToggle={handleToggleFollow} />
+      {banner ? (
+        <div className="absolute top-16 left-1/2 z-[1200] flex max-w-[90vw] -translate-x-1/2 items-center gap-3 rounded-2xl bg-slate-900/90 px-4 py-2.5 text-sm font-medium text-white shadow-xl backdrop-blur-md dark:bg-slate-100/95 dark:text-slate-900">
+          <span>{banner}</span>
+          <button
+            type="button"
+            onClick={() => setBanner(null)}
+            aria-label="Dismiss"
+            className="grid h-6 w-6 shrink-0 place-items-center rounded-full text-white/70 hover:bg-white/10 hover:text-white dark:text-slate-500 dark:hover:bg-slate-900/10 dark:hover:text-slate-900"
+          >
+            <FiX />
+          </button>
+        </div>
+      ) : null}
       {!editing ? (
         <LogHereButton
           onClick={handleLogHere}
           disabled={userLocation === null}
           busy={logging}
+          hint={locationHint}
         />
       ) : null}
       {editing ? (

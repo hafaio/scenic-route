@@ -6,15 +6,22 @@ interface LogHereButtonProps {
   onClick: () => void;
   disabled?: boolean;
   busy?: boolean;
+  hint?: string | null;
 }
 
 export default function LogHereButton({
   onClick,
   disabled,
   busy,
+  hint,
 }: LogHereButtonProps) {
   return (
-    <div className="fixed bottom-0 left-1/2 z-[1000] -translate-x-1/2 pb-[max(1rem,env(safe-area-inset-bottom))]">
+    <div className="fixed bottom-0 left-1/2 z-[1000] flex -translate-x-1/2 flex-col items-center gap-2 pb-[max(1rem,env(safe-area-inset-bottom))]">
+      {hint ? (
+        <p className="max-w-xs rounded-full bg-slate-900/85 px-3 py-1.5 text-center text-xs font-medium text-white shadow-lg backdrop-blur-md dark:bg-slate-100/90 dark:text-slate-900">
+          {hint}
+        </p>
+      ) : null}
       <button
         type="button"
         onClick={onClick}
