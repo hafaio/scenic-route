@@ -47,17 +47,7 @@ let app: FirebaseApp | null = null;
 let authInstance: Auth | null = null;
 let dbInstance: Firestore | null = null;
 
-export function isFirebaseConfigured(): boolean {
-  return (
-    !firebaseConfig.apiKey.startsWith("REPLACE_ME") &&
-    !firebaseConfig.projectId.startsWith("REPLACE_ME")
-  );
-}
-
 function ensureApp(): FirebaseApp {
-  if (!isFirebaseConfigured()) {
-    throw new Error("Firebase is not configured");
-  }
   if (!app) {
     app = initializeApp(firebaseConfig);
   }
