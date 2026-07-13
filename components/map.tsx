@@ -17,7 +17,7 @@ export interface MapTarget {
   zoom?: number;
 }
 
-interface LoggerMapProps {
+interface MapViewProps {
   pins: Pin[];
   draft: PinDraft | null;
   target: MapTarget | null;
@@ -27,7 +27,7 @@ interface LoggerMapProps {
   onPinSelect: (pin: Pin) => void;
 }
 
-const DEFAULT_CENTER: [number, number] = [37.7749, -122.4194];
+const DEFAULT_CENTER: [number, number] = [40.7128, -74.006];
 const DEFAULT_ZOOM = 13;
 
 const savedPinSvg = `
@@ -152,7 +152,7 @@ function summarizePin(pin: Pin): string {
   return pin.address;
 }
 
-export default function LoggerMap({
+export default function MapView({
   pins,
   draft,
   target,
@@ -160,7 +160,7 @@ export default function LoggerMap({
   following,
   onDisengageFollow,
   onPinSelect,
-}: LoggerMapProps) {
+}: MapViewProps) {
   const markers = useMemo(
     () =>
       pins.map((pin) => (
