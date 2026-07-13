@@ -1,0 +1,2 @@
+data/streets/*.bin filter=lfs diff=lfs merge=lfs -text
+data/tree-cover/*.bin filter=lfs diff=lfs merge=lfs -text

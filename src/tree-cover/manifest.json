@@ -1,0 +1,93 @@
+{
+  "version": 2,
+  "cities": [
+    {
+      "id": "nyc",
+      "name": "New York City",
+      "bounds": {
+        "north": 40.91708775996398,
+        "west": -74.25756483723904,
+        "south": 40.495240832188195,
+        "east": -73.69539751103963
+      },
+      "trees": 898618,
+      "updated": "2026-07-13",
+      "attribution": "NYC Parks Forestry (ForMS) via NYC Open Data",
+      "sourceUrl": "https://data.cityofnewyork.us/d/hn5i-inap",
+      "field": {
+        "file": "nyc.bin",
+        "format": 1,
+        "cols": 2372,
+        "rows": 2348,
+        "bytes": 5569504,
+        "sha256": "4ec50dca67032ccb6aa807104c90933ebbe1651f2173478a50e56fb43060c5b0",
+        "cellMeters": 20,
+        "broadSigmaMeters": 70,
+        "tightSigmaMeters": 20,
+        "saturationTreesPerHectare": 30.43,
+        "woodlandPolygons": 4864,
+        "woodlandSquareKm": 43.652,
+        "woodlandFloor": 0.85,
+        "density": {
+          "min": 0,
+          "max": 1,
+          "mean": 0.409,
+          "median": 0.41,
+          "percentiles": {
+            "p1": 0,
+            "p5": 0,
+            "p10": 0.001,
+            "p20": 0.117,
+            "p30": 0.249,
+            "p40": 0.339,
+            "p50": 0.41,
+            "p60": 0.478,
+            "p70": 0.551,
+            "p80": 0.646,
+            "p90": 0.847,
+            "p95": 0.858,
+            "p97": 1,
+            "p99": 1
+          }
+        },
+        "updated": "2026-07-13",
+        "attribution": "OpenStreetMap contributors",
+        "sourceUrl": "https://www.openstreetmap.org/copyright"
+      },
+      "streets": {
+        "file": "nyc.bin",
+        "format": 2,
+        "segments": 120115,
+        "vertices": 735056,
+        "bytes": 6400249,
+        "sha256": "90762db16733a931c6686093d4e86d63388ae0ab269b239d8b9ca39a7a98b923",
+        "densifyMeters": 25,
+        "density": {
+          "min": 0,
+          "max": 1,
+          "mean": 0.532,
+          "median": 0.549,
+          "percentiles": {
+            "p1": 0,
+            "p5": 0,
+            "p10": 0.024,
+            "p20": 0.187,
+            "p30": 0.32,
+            "p40": 0.438,
+            "p50": 0.549,
+            "p60": 0.66,
+            "p70": 0.775,
+            "p80": 0.876,
+            "p90": 0.987,
+            "p95": 1,
+            "p97": 1,
+            "p99": 1
+          }
+        },
+        "updated": "2026-07-13",
+        "attribution": "NYC DoITT Street Centerline (CSCL) via NYC Open Data",
+        "sourceUrl": "https://data.cityofnewyork.us/d/inkn-q76z"
+      }
+    }
+  ]
+}
