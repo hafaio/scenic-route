@@ -98,10 +98,6 @@ export default function MapApp() {
 
   // follow centering lives in the map-side controller (reacts to userLocation + following)
   useEffect(() => {
-    if (!isAdmin) {
-      setUserLocation(null);
-      return;
-    }
     if (!("geolocation" in navigator)) {
       return;
     }
@@ -120,7 +116,7 @@ export default function MapApp() {
       { enableHighAccuracy: false, maximumAge: 30_000 },
     );
     return () => navigator.geolocation.clearWatch(watchId);
-  }, [isAdmin]);
+  }, []);
 
   const handleToggleFollow = useCallback(() => {
     setFollowing((on) => !on);
@@ -269,7 +265,7 @@ export default function MapApp() {
         draft={draft}
         target={target}
         userLocation={userLocation}
-        following={isAdmin && following}
+        following={following}
         treeCover={treeCover}
         onDisengageFollow={handleDisengageFollow}
         onPinSelect={handlePinSelect}
@@ -284,9 +280,7 @@ export default function MapApp() {
         onSignOut={handleSignOut}
         onRefreshClaims={handleRefreshClaims}
       />
-      {isAdmin ? (
-        <FollowToggle active={following} onToggle={handleToggleFollow} />
-      ) : null}
+      <FollowToggle active={following} onToggle={handleToggleFollow} />
       {banner ? (
         <div className="absolute top-16 left-1/2 z-[1200] flex max-w-[90vw] -translate-x-1/2 items-center gap-3 rounded-2xl bg-slate-900/90 px-4 py-2.5 text-sm font-medium text-white shadow-xl backdrop-blur-md dark:bg-slate-100/95 dark:text-slate-900">
           <span>{banner}</span>
