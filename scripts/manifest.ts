@@ -35,8 +35,8 @@ export interface Distribution {
   percentiles: Record<Percentile, number>;
 }
 
-// data/tree-cover/<id>.bin: tree density per unit area on a regular grid, normalized
-// to 0..1. Layout documented in scripts/build-tree-data.ts.
+// data/tree-cover/<id>.bin: tree density per unit area on a regular grid, normalized to
+// 0..1. layout: scripts/README.md
 export interface FieldLayer {
   file: string;
   format: number;
@@ -58,7 +58,7 @@ export interface FieldLayer {
 }
 
 // data/streets/<id>.bin: the street geometry, carrying the tight field sampled at every
-// vertex. Layout documented in scripts/build-tree-data.ts.
+// vertex. layout: scripts/README.md
 export interface StreetLayer {
   file: string;
   format: number;
@@ -106,7 +106,7 @@ export async function readManifest(): Promise<Manifest> {
   } else {
     const parsed = JSON.parse(existing) as Manifest;
     // An ingest writes one city back into whatever it read, so a manifest it cannot read is
-    // a stop rather than a fresh start: the alternative drops every other city from it.
+    // a stop rather than a fresh start: starting over would drop every other city.
     if (parsed.version !== MANIFEST_VERSION) {
       throw new Error(
         `${MANIFEST_PATH} is v${parsed.version}, not v${MANIFEST_VERSION}: re-ingest every city, or delete it to start over`,

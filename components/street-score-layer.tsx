@@ -12,31 +12,29 @@ interface Segment {
   densities: Uint8Array; // the tree density at each vertex, 0..255 on the field's scale
 }
 
-// Written by scripts/build-street-tiles.ts, which documents the layout; one chunk per
-// z12 tile, fetched lazily as tiles need it.
+// One chunk per z12 tile, fetched lazily. layout: scripts/README.md
 // Relative, so it picks up the basePath the deploy injects; the app is a single-route SPA.
 const CHUNK_URL = "streets/{x}/{y}.bin";
 const CHUNK_FORMAT = 2;
 const CHUNK_ZOOM = 12;
 
 const TILE_SIZE = 256;
-// Below this the fill carries the map on its own: the lines would be hairlines, and a
-// whole screen of them would pull in every chunk in the city.
+// Below this the lines would be hairlines, and a screen of them would pull in every chunk
+// in the city; the fill carries the map on its own.
 const MIN_ZOOM = 13;
 const MAX_ZOOM = 20;
 
-// Above the smooth fill (zIndex 2) but still in the tile pane, so the dark-mode pane
-// filter in globals.css inverts the lines along with everything under them.
+// Above the fill (zIndex 2) but still in the tile pane, so the dark-mode pane filter in
+// globals.css inverts the lines along with everything under them.
 const Z_INDEX = 3;
 
 // Lines read as street width, so they grow with zoom: about 1.5 px at z13, 5 px at z17.
 const BASE_WIDTH = 1.5;
 const WIDTH_PER_ZOOM = 1.32;
 
-// A vertex's density is drawn from the level it quantizes into, so the pieces of a road
-// that share a level can be stroked as one path instead of one call each. 32 levels is
-// finer than the alpha curve can resolve on a two-pixel line, so the gradient along a
-// road still looks continuous.
+// Density is quantized into levels so the pieces of a road that share one can be stroked as
+// a single path. 32 levels is finer than the alpha curve resolves on a 2 px line, so the
+// gradient along a road still reads as continuous.
 const LEVEL_BITS = 3;
 const LEVELS = 256 >> LEVEL_BITS;
 const COLORS: readonly string[] = Array.from({ length: LEVELS }, (_, level) =>
@@ -98,8 +96,8 @@ function decodeChunk(buffer: ArrayBuffer): Segment[] {
 }
 
 // One in-flight fetch per chunk, shared by every tile that needs it. A 404 is an answer —
-// the tile is all water, and it caches as empty — but anything else is a failure, and the
-// entry is dropped so the next tile over this chunk goes back for it.
+// the tile is all water, and caches as empty — but any other failure drops the entry, so
+// the next tile over this chunk goes back for it.
 function loadChunk(tileX: number, tileY: number): Promise<Segment[]> {
   const key = `${tileX}/${tileY}`;
   const pending = chunks.get(key);
@@ -162,8 +160,7 @@ class StreetScoreGrid extends L.GridLayer {
     loadChunk(chunkX, chunkY).then(
       (segments) => {
         // The tile is handed back before its chunk arrives, so by now the layer can be off
-        // the map (tree cover switched off, or React rebuilding it) and the tile dropped.
-        // Either way there is nothing left to draw into, and no Leaflet to report to.
+        // the map and the tile dropped: nothing to draw into, no Leaflet to report to.
         if (!this.stillDrawable(tile)) {
           return;
         }
@@ -187,12 +184,10 @@ class StreetScoreGrid extends L.GridLayer {
     return this.onMap && !this.discarded.has(tile);
   }
 
-  // Projected at the tile's own zoom, so the lines are drawn at the resolution they are
-  // shown at and stay crisp however far in the map goes. A road is a gradient, not a flat
-  // colour: each piece takes the level its two ends average to, and the pieces are
-  // gathered into one path per level so a tile costs a stroke per level rather than a
-  // stroke per piece. Runs meet butt to butt, so nowhere do two translucent strokes
-  // overlap and bead.
+  // Projected at the tile's own zoom, so the lines stay crisp however far in the map goes.
+  // Each piece takes the level its two ends average to, and the pieces are gathered into
+  // one path per level, so a tile costs a stroke per level rather than per piece. Runs meet
+  // butt to butt: two translucent strokes overlapping would bead.
   private draw(
     context: CanvasRenderingContext2D,
     segments: Segment[],
@@ -233,9 +228,9 @@ class StreetScoreGrid extends L.GridLayer {
         low = Math.min(low, ys[vertex]);
         high = Math.max(high, ys[vertex]);
       }
-      // The chunk covers a whole z12 tile, so most of its segments miss this one; a
-      // segment can still cross the tile between two vertices outside it, so the test is
-      // on the segment's box rather than on its vertices.
+      // The chunk covers a whole z12 tile, so most of its segments miss this one. A segment
+      // can cross the tile between two vertices that are both outside it, so the test is on
+      // its box rather than on its vertices.
       const overlaps =
         right >= -margin &&
         left <= TILE_SIZE + margin &&

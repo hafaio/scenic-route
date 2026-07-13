@@ -10,11 +10,10 @@ export interface Coord {
 const PAGE_SIZE = 50_000;
 const MAX_ATTEMPTS = 3;
 const RETRY_DELAY_MS = 2_000;
-const TREE_DATASET = "hn5i-inap";
-const TREE_COUNT = 898_618;
-// The expected counts are constants and the city keeps planting, so what a read is checked
-// against is a floor, not a number: anything above it is drift, and only a shortfall this
-// far below it is a page the server quietly cut short rather than a year of removals.
+const TREE_DATASET = "hn5i-inap"; // ForMS "Forestry Tree Points"
+const TREE_COUNT = 898_618; // standing trees at the last refresh; a floor, not a number
+// The city keeps planting, so only a shortfall this far below the expected count is a page
+// the server quietly cut short rather than a year of removals.
 const SHORTFALL = 0.05;
 
 async function fetchJson<Row>(url: string): Promise<Row[]> {
@@ -39,9 +38,8 @@ async function fetchJson<Row>(url: string): Promise<Row[]> {
   throw new Error(`failed to fetch ${url}: ${lastError}`);
 }
 
-// Pages a dataset in `:id` order, the only ordering Socrata guarantees is stable
-// across the requests that make up one paged read. The whole result is cached on disk
-// under the dataset and its query, so a second run of the pipeline does no network at all.
+// Pages in `:id` order, the only ordering Socrata guarantees is stable across the requests
+// that make up one paged read.
 export async function fetchDataset<Row>(
   dataset: string,
   query: Record<string, string>,
