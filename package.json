@@ -16,26 +16,26 @@
     "build-tiles": "bun run scripts/build-street-tiles.ts"
   },
   "dependencies": {
-    "firebase": "^12.0.0",
+    "firebase": "^12.16.0",
     "leaflet": "^1.9.4",
-    "next": "^15.3.5",
+    "next": "^16.2.10",
     "next-themes": "^0.4.6",
-    "react": "^19.1.1",
-    "react-dom": "^19.1.1",
-    "react-icons": "^5.5.0",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "react-icons": "^5.7.0",
     "react-leaflet": "^5.0.0"
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.2.4",
-    "@tailwindcss/postcss": "^4.1.13",
-    "@types/leaflet": "^1.9.12",
-    "@types/node": "^24.5.2",
+    "@biomejs/biome": "^2.5.3",
+    "@tailwindcss/postcss": "^4.3.2",
+    "@types/leaflet": "^1.9.21",
+    "@types/node": "^26.1.1",
     "@types/pngjs": "^6.0.5",
-    "@types/react": "^19.1.15",
-    "@types/react-dom": "^19.1.9",
-    "firebase-admin": "^13.8.0",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "firebase-admin": "^14.1.0",
     "pngjs": "^7.0.0",
-    "tailwindcss": "^4.1.13",
-    "typescript": "^5.9.2"
+    "tailwindcss": "^4.3.2",
+    "typescript": "^6.0.3"
   }
 }
