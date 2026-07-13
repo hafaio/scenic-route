@@ -1,6 +1,5 @@
 const NOMINATIM_BASE = "https://nominatim.openstreetmap.org";
-const USER_AGENT_NOTE =
-  "scenic-route logger (https://github.com/hafaio/scenic-route)";
+const USER_AGENT_NOTE = "scenic-route (https://github.com/hafaio/scenic-route)";
 const MAX_CACHE_ENTRIES = 200;
 
 export interface GeocodeResult {

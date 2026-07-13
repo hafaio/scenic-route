@@ -2,10 +2,9 @@
 
 A web app for tagging and annotating places along the way.
 
-## Routes
-
-- `/logger` — drop pins on a map, attach freeform notes. Admin-only,
-  Firebase-backed.
+The map is the app: it opens at `/` for everyone, with a basemap and a tree-cover
+overlay. Signing in as an admin adds the Firebase-backed pins — drop them at your
+location and attach freeform notes.
 
 ## Development
 
