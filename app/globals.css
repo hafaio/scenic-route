@@ -80,6 +80,12 @@
 .dark .leaflet-tile-pane {
   filter: invert(1) hue-rotate(180deg) brightness(0.95) contrast(0.95);
 }
+/* Leaflet paints not-yet-loaded areas with the container's background, which sits outside
+   the filtered pane — so in dark mode it has to be given the inverted grey itself, or
+   zooming flashes light patches between the dark tiles. */
+.dark .leaflet-container {
+  background: #222222;
+}
 
 .scenic-tooltip.leaflet-tooltip {
   background: rgb(15 23 42 / 0.92);
