@@ -17,7 +17,7 @@ const META: Record<
 };
 
 // next-themes hands back whatever string is in storage, so anything unrecognised (or the
-// undefined it renders with on the server) falls back to the default choice
+// undefined it renders with on the server) falls back to the default choice.
 function toChoice(theme: string | undefined): ThemeChoice {
   return theme === "light" || theme === "dark" ? theme : "system";
 }
@@ -26,7 +26,6 @@ export default function ThemeToggle({ className }: { className?: string }) {
   const { theme, setTheme } = useTheme();
   const [mounted, setMounted] = useState<boolean>(false);
 
-  // next-themes is client-only; render a stable placeholder until mounted to avoid a hydration mismatch
   useEffect(() => {
     setMounted(true);
   }, []);
@@ -35,11 +34,9 @@ export default function ThemeToggle({ className }: { className?: string }) {
   // then the button is the placeholder it renders on the server.
   const current: ThemeChoice = mounted ? toChoice(theme) : "system";
 
-  // The choice the next click steps from — always the one the button is announcing, so it
-  // does what its label says even before mount. A click moves it on straight away rather
-  // than waiting for the re-render: setTheme resolves against the theme of the render it
-  // was taken from, so without this two clicks landing in one React batch would both pick
-  // the same target and the second would be swallowed.
+  // The choice the next click steps from, moved on by the click itself rather than by the
+  // re-render: two clicks landing in one React batch would otherwise both step from the
+  // same theme and the second would be swallowed.
   const stepFrom = useRef<ThemeChoice>(current);
   useEffect(() => {
     stepFrom.current = current;

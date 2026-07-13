@@ -1,8 +1,7 @@
-// The tree-density colour scale, shared by the tile builder (scripts/build-street-tiles.ts),
-// the street overlay and the legend so all three read as one ramp. Its input is the
-// normalized density scripts/build-tree-data.ts writes: 0 for no trees, 1 at the
-// saturation point the manifest records. Only the light ramp exists: dark mode inverts
-// the whole tile pane in CSS.
+// The tree-density colour scale, shared by the tile builder and the street overlay so both
+// read as one ramp. Its input is the normalized density: 0 for no trees, 1 at the
+// saturation point the manifest records. Only the light ramp exists — dark mode inverts the
+// whole tile pane in CSS. See scripts/README.md.
 
 export interface Rgb {
   red: number;
@@ -28,20 +27,14 @@ const STOPS: readonly Rgb[] = RAMP.map((hex) => ({
   blue: Number.parseInt(hex.slice(5, 7), 16),
 }));
 
-// Transparency, not lightness, is what carries the low end: a handful of trees is a
-// whisper you can barely see rather than a vivid pale green washed over the whole city.
-// Half the city's land sits at or below 0.4 of the saturation density, so an alpha that
-// rose with it would tint everything and wash the map out; cubing it holds that crowded
-// middle down to a haze — 0.4 comes out at an alpha of 0.04 — and spends the opacity on
-// the ground that is genuinely leafy.
 const MAX_ALPHA = 0.62;
+// Transparency, not lightness, carries the low end. Half the city's land sits below 0.4 of
+// saturation, so a linear alpha would tint everything and wash the map out; cubing holds
+// that crowded middle down to a haze (0.4 -> alpha 0.04).
 const ALPHA_CURVE = 3;
 
-// The background fill and the street lines are the same function of the same quantity,
-// which is the point of the whole scale — a leafy street has to read as a darker line on
-// the green it sits in, and a bare one as a pale gap through it. The only difference is
-// this: a line two pixels wide has far less area to make its colour with than the field
-// under it, so it is drawn a little more opaque to hold its own against it.
+// Same colour, same quantity — but a 2 px line has far less area to make its colour with
+// than the field under it, so it takes a little more opacity to hold its own against it.
 export const ROAD_OPACITY = 1.2;
 
 function clamp(density: number): number {

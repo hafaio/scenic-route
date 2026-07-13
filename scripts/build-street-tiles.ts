@@ -1,12 +1,7 @@
-// Usage:
-//   bun run build-tiles
-//
-// Renders the tree-density field and the street network (data/tree-cover/<id>.bin and
-// data/streets/<id>.bin, both tracked in Git LFS) into the two overlays the client
-// draws: the field as raster tiles at public/tiles/tree-cover/{z}/{x}/{y}.png, and the
-// streets as vector chunks at public/streets/{x}/{y}.bin, bucketed by z12 tile so the
-// client can redraw them crisply at any zoom. Both are build output — gitignored,
-// rebuilt by `bun dev` and `bun export` whenever the inputs change.
+// `bun run build-tiles`: renders data/tree-cover/<id>.bin and data/streets/<id>.bin into
+// the two overlays the client draws — raster tiles at public/tiles/tree-cover/{z}/{x}/{y}.png
+// and vector chunks at public/streets/{x}/{y}.bin. Both are gitignored build output, rebuilt
+// by `bun dev` and `bun export`. See scripts/README.md.
 
 import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { availableParallelism } from "node:os";
@@ -23,17 +18,15 @@ import { rampAlpha, rampColor } from "../src/tree-cover/ramp";
 
 type City = (typeof manifest.cities)[number];
 
-// Deflating a few thousand PNGs is the bulk of the work and each tile is independent, so
-// this file runs as its own worker: the main thread plans the tiles and hands each worker
-// a contiguous slice of that plan by index. The plan is a pure function of the manifest,
-// so a worker rebuilds the identical one rather than being shipped it.
+// One worker's share of the tile plan, by index. The plan is a pure function of the
+// manifest, so a worker rebuilds the identical one rather than being shipped it.
 interface Slice {
   from: number;
   to: number;
 }
 
-// The normalized density on a regular lat/lng grid, straight off disk: one byte per
-// cell, whose centre sits half a cell in from its north-west corner.
+// The normalized density on a regular lat/lng grid, straight off disk: one byte per cell,
+// whose centre sits half a cell in from its north-west corner.
 interface Field {
   cells: Uint8Array;
   cols: number;
@@ -81,7 +74,7 @@ const RAMP_PATH = join(
   "ramp.ts",
 );
 
-// data/<layer>/<id>.bin layouts, both documented in scripts/build-tree-data.ts
+// layouts: scripts/README.md
 const STREET_FORMAT = 2;
 const FIELD_FORMAT = 1;
 const CHUNK_FORMAT = 2;
@@ -91,9 +84,8 @@ const CHUNK_ZOOM = 12;
 
 const TILE_SIZE = 256;
 const MIN_ZOOM = 9;
-const MAX_ZOOM = 15;
-// Below this the fill is invisible anyway, and a tile of it costs more than it says.
-const MIN_ALPHA = 2;
+const MAX_ZOOM = 15; // the blur has no detail past this; Leaflet upscales beyond it
+const MIN_ALPHA = 2; // below this the fill is invisible, and the pixel costs more than it says
 
 function readVarint(bytes: Uint8Array, cursor: Cursor): number {
   let value = 0;
@@ -259,9 +251,8 @@ function tileIndex(pixel: number, zoom: number): number {
   return Math.min(2 ** zoom - 1, Math.max(0, Math.floor(pixel / TILE_SIZE)));
 }
 
-// RGBA for every density the field can hold, so the per-pixel loop is a lookup rather
-// than a ramp evaluation. The field is already normalized, so a byte of it indexes this
-// table directly.
+// RGBA for every density a field byte can hold, so the per-pixel loop is a lookup rather
+// than a ramp evaluation.
 function buildRamp(): Uint8ClampedArray {
   const table = new Uint8ClampedArray(256 * 4);
   for (let step = 0; step < 256; step++) {
@@ -276,10 +267,9 @@ function buildRamp(): Uint8ClampedArray {
   return table;
 }
 
-// Grid columns are linear in longitude and rows linear in latitude, but Mercator y is
-// not linear in latitude, so every tile row needs its own unprojection. The field is
-// then sampled bilinearly, which is what keeps the fill smooth instead of blocky — at
-// z15 a 20 m cell is about 7 px across, so nearest-neighbour would show the grid.
+// Mercator y is not linear in latitude, so every tile row needs its own unprojection. The
+// field is then sampled bilinearly: at z15 a 20 m cell is about 7 px across, so
+// nearest-neighbour would show the grid.
 function paint(
   pixels: Uint8ClampedArray,
   field: Field,
@@ -312,7 +302,7 @@ function paint(
     const alongRow = lines[y] - rowFloor;
     const topRow = rowFloor * cols;
     // The last row and column have nothing beyond them to interpolate towards, so they
-    // stand in for themselves rather than the cell being skipped.
+    // stand in for themselves rather than the cell being dropped.
     const bottomRow = rowFloor + 1 < rows ? topRow + cols : topRow;
 
     for (let x = 0; x < TILE_SIZE; x++) {
@@ -366,26 +356,7 @@ function writeVarint(bytes: Uint8Array, offset: number, value: number): number {
   return cursor + 1;
 }
 
-// Binary layout of public/streets/{x}/{y}.bin — the segments touching one z12 tile,
-// little-endian throughout, decoded by components/street-score-layer.tsx:
-//
-//   header, CHUNK_HEADER_BYTES
-//     0   u8[4]  magic "STCK"
-//     4   u16    format version
-//     6   u16    header bytes
-//     8   u32    segment count
-//     12  u32    reserved
-//     16  f64    origin longitude, degrees
-//     24  f64    origin latitude, degrees
-//     32  f64    coordinate scale, degrees per quantized unit
-//
-//   segments, one after another, `segment count` of them
-//     u16    vertex count, at least 2
-//     then `vertex count` (longitude, latitude) pairs, each the zigzag LEB128 varint
-//     delta from the previous vertex — the first from the origin. Degrees are
-//     origin + unit * scale, quantized to about 0.1 m.
-//     then `vertex count` bytes, the normalized tree density at each of those vertices,
-//     so the line is drawn as a gradient rather than as one flat colour.
+// layout: scripts/README.md
 function encodeChunk(
   network: Network,
   members: number[],
@@ -441,10 +412,8 @@ function encodeChunk(
   return bytes.subarray(0, offset);
 }
 
-// A segment goes into every z12 tile its bounding box touches; segments are short, so the
-// few it lands in beyond the ones it truly crosses cost nothing and cannot leave a gap at
-// a tile seam. The chunk's origin is its tile's north-west corner, which keeps the first
-// delta of each segment small.
+// A segment goes into every z12 tile its bounding box touches, which overshoots slightly
+// but cannot leave a gap at a tile seam.
 async function writeChunks(network: Network): Promise<[number, number]> {
   const { starts, lngs, lats } = network;
   const segments = starts.length - 1;
@@ -515,8 +484,8 @@ async function isFresh(cities: City[]): Promise<boolean> {
   }
 }
 
-// Cities can share a tile at low zoom, so tiles are keyed globally and every city
-// touching one paints into the same buffer rather than overwriting it.
+// Cities can share a tile at low zoom, so tiles are keyed globally and every city touching
+// one paints into the same buffer rather than overwriting it.
 function planTiles(fields: Map<string, Field>): Map<string, Field[]> {
   const plan = new Map<string, Field[]>();
   for (const field of fields.values()) {
@@ -553,9 +522,8 @@ async function readFields(cities: City[]): Promise<Map<string, Field>> {
   return fields;
 }
 
-// One worker's share of the plan: it rebuilds the whole tile list and renders the slice
-// the main thread gave it. Directories are made as they are first needed — a recursive
-// mkdir is idempotent, so two workers meeting at a tile-row directory is not a race.
+// A recursive mkdir is idempotent, so two workers meeting at a tile-row directory is not a
+// race.
 async function render({ from, to }: Slice): Promise<number> {
   const plan = planTiles(await readFields(manifest.cities));
   const ramp = buildRamp();
@@ -625,8 +593,8 @@ async function build(): Promise<void> {
     chunkBytes += cityChunkBytes;
   }
 
-  // Contiguous slices, so the tiles a worker takes share their directories and their
-  // corner of the field rather than scattering across the city.
+  // Contiguous slices, so the tiles a worker takes share their corner of the field rather
+  // than scattering across the city.
   const tiles = planTiles(fields).size;
   const workers = Math.max(1, Math.min(availableParallelism(), tiles));
   const perWorker = Math.ceil(tiles / workers);

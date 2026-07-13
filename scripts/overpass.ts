@@ -1,7 +1,6 @@
-// Woodland polygons from OpenStreetMap, the second half of the canopy model: the
-// city's tree inventory is a street/managed-tree register and carries no woodland at
-// all, so the Ramble and Van Cortlandt's forest are 0 trees in it rather than sparse
-// ones. natural=wood and landuse=forest fill that hole.
+// Woodland polygons from OpenStreetMap, the second half of the canopy model — the city's
+// tree inventory is a street-tree register and carries no woodland at all. See
+// scripts/README.md.
 
 import { cached } from "./cache";
 import type { Coord } from "./socrata";
@@ -33,36 +32,29 @@ export interface Woodland {
   unclosed: number; // rings whose member ways did not chain back to their start
 }
 
-// No one mirror will serve a query this size reliably — each of these answers it, and each
-// also turns it away under load — so the attempts rotate between them. A busy Overpass
-// frees a slot only after a minute or so, hence a backoff in minutes rather than the
-// seconds a Socrata retry needs.
+// Attempts rotate: no one mirror serves a query this size reliably under load.
 const ENDPOINTS: readonly string[] = [
   "https://overpass.kumi.systems/api/interpreter",
   "https://overpass-api.de/api/interpreter",
   "https://overpass.private.coffee/api/interpreter",
 ];
-// Every mirror rate-limits an anonymous client on sight — they answer a request with no
-// User-Agent with a 429 that says so — so identifying the caller is not politeness here,
-// it is the difference between getting the data and getting nothing.
+// Required, not politeness: a mirror 429s an anonymous client on sight.
 const USER_AGENT =
   "scenic-route/0.1 (+https://github.com/erikbrinkman/scenic-route)";
 const MAX_ATTEMPTS = 6;
-const RETRY_DELAY_MS = 30_000;
-const QUERY_TIMEOUT_SECONDS = 300;
-// Above the server's own timeout, so a mirror that is merely slow is given the whole time
-// it asked for and only one that has actually hung is cut off.
-const REQUEST_TIMEOUT_MS = (QUERY_TIMEOUT_SECONDS + 60) * 1000;
+const RETRY_DELAY_MS = 30_000; // a busy Overpass frees a slot in minutes, not seconds
+const QUERY_TIMEOUT_SECONDS = 300; // the server's own budget, which it is given in full
+const REQUEST_TIMEOUT_MS = (QUERY_TIMEOUT_SECONDS + 60) * 1000; // only cuts off one that hung
 
-// leisure=park is deliberately absent: a park is not canopy. The Great Lawn, the
-// ballfields and the reservoir are all park, and none of them is a tree.
+// leisure=park is deliberately absent: a park is not canopy. The Great Lawn, the ballfields
+// and the Reservoir are all park, and none of them is a tree.
 const TAGS: readonly [string, string][] = [
   ["natural", "wood"],
   ["landuse", "forest"],
 ];
 
 // Relations as well as ways: the big woods — Van Cortlandt, the Greenbelt — are mapped as
-// multipolygons, and querying only ways would miss exactly the ones that matter most.
+// multipolygons, so querying only ways would miss exactly the ones that matter most.
 function query(
   south: number,
   west: number,
@@ -76,10 +68,10 @@ function query(
   return `[out:json][timeout:${QUERY_TIMEOUT_SECONDS}];(${clauses});out geom;`;
 }
 
-// Overpass hands back the geometry of each member way separately, and an outer ring is
-// routinely split across several of them, so the ways are chained end to end into rings
-// before anything can be filled. Endpoints come from the same OSM nodes, so they match
-// exactly and a string key is enough to find them.
+// Overpass returns each member way's geometry separately and an outer ring is routinely
+// split across several of them, so the ways are chained end to end before anything can be
+// filled. Shared endpoints are the same OSM node, so they match exactly and a string key
+// finds them.
 function stitchRings(ways: Coord[][]): { rings: Coord[][]; unclosed: number } {
   const keyOf = ({ lat, lng }: Coord): string => `${lng},${lat}`;
   const ends = new Map<string, number[]>();
@@ -163,12 +155,9 @@ function toPolygons(elements: OverpassElement[]): Woodland {
   return { polygons, ways, relations, unclosed };
 }
 
-// Overpass answers a busy dispatcher with an HTML error page under a 200, so the body has
-// to be checked rather than just the status. An empty element list is not one of those
-// failures: it is a box with no wood mapped in it, and it stands. There is no fallback for
-// the woodland — without it every park interior reads as bare — so exhausting the attempts
-// is fatal. The raw elements are cached under the query itself, which is what makes a
-// re-run cost nothing on the flakiest source in the pipeline.
+// Overpass answers a busy dispatcher with an HTML error page under a 200, so the body is
+// checked rather than just the status. An empty element list is not one of those failures:
+// it is a box with no wood mapped in it, and it stands.
 export async function fetchWoodland(
   south: number,
   west: number,

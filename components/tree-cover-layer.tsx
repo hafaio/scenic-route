@@ -4,17 +4,16 @@ import L from "leaflet";
 import { TileLayer } from "react-leaflet";
 import manifest from "../src/tree-cover/manifest.json";
 
-// Pre-rendered by scripts/build-street-tiles.ts: tree density per unit area, blurred at
-// the scale of a neighbourhood, so this shades whole blocks rather than streets. It has
-// no detail past that blur, so the pyramid stops at z15 and Leaflet upscales beyond it;
-// the crisp per-street detail is drawn on top by components/street-score-layer.tsx.
+// Pre-rendered by scripts/build-street-tiles.ts: density blurred at the scale of a
+// neighbourhood, so this shades whole blocks. The per-street detail is drawn on top by
+// components/street-score-layer.tsx.
 // Relative, so it picks up the basePath the deploy injects; the app is a single-route SPA.
 const TILE_URL = "tiles/tree-cover/{z}/{x}/{y}.png";
 const MIN_NATIVE_ZOOM = 9;
-const MAX_NATIVE_ZOOM = 15;
+const MAX_NATIVE_ZOOM = 15; // no detail past the blur; Leaflet upscales beyond it
 
-// Sits in the shared tile pane above the basemap, so the dark-mode pane filter in
-// globals.css inverts the overlay along with the map underneath it.
+// In the shared tile pane, so the dark-mode pane filter in globals.css inverts the overlay
+// along with the map under it.
 const Z_INDEX = 2;
 
 export default function TreeCoverLayer() {

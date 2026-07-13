@@ -1,28 +1,6 @@
-// Usage:
-//   bun run build-tree-data
-//
-// Builds the two inputs the map overlays are rendered from, and the manifest that
-// describes them.
-//
-// The model is one quantity — tree density per unit area — estimated at two scales off
-// the same points, so the background and the roads are directly comparable:
-//
-//   * every standing tree in the city inventory is splatted onto a 20 m grid, and that
-//     grid is Gaussian-blurred twice: once wide (BROAD_SIGMA_METERS) for the background
-//     field, once tight (TIGHT_SIGMA_METERS) for what a road itself is lined with.
-//   * the inventory is a street/managed-tree register, so it has no woodland in it at
-//     all — the Ramble is 0 trees in it, not sparse ones. OpenStreetMap wood/forest
-//     polygons are filled into a canopy mask, and inside that mask both fields are
-//     raised to WOODLAND_FLOOR.
-//   * both fields are divided by the SAME constant, the SATURATION percentile of the
-//     broad field over land, so a tree-lined street reads darker than its neighbourhood
-//     and a bare one reads as a pale gap through it.
-//
-// Writes data/tree-cover/<id>.bin (the field), data/streets/<id>.bin (the road geometry
-// carrying the tight field at every vertex) and src/tree-cover/manifest.json. The two
-// binaries are build inputs, committed via Git LFS and rendered into the map overlays by
-// scripts/build-street-tiles.ts, so this only needs re-running when the sources are
-// refreshed.
+// `bun run build-tree-data`: writes data/tree-cover/<id>.bin, data/streets/<id>.bin and
+// src/tree-cover/manifest.json. The model, the sources and the binary layouts are all
+// documented in scripts/README.md.
 
 import { createHash } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
@@ -40,9 +18,8 @@ import {
 import { fetchWoodland, type Polygon } from "./overpass";
 import { type Coord, fetchDataset, fetchNycTrees } from "./socrata";
 
-// CSCL road-way types that carry pedestrians: street, boardwalk, path/trail, step
-// street, alley. Highways, ramps, bridges, tunnels, driveways, ferry routes, u-turns
-// and non-physical segments are not part of the walkable network.
+// The CSCL road-way types that carry pedestrians: street, boardwalk, path, step street,
+// alley. Highways, ramps, tunnels, driveways and ferry routes are not walkable.
 type RoadType = 1 | 5 | 6 | 7 | 10;
 
 interface Segment {
@@ -100,23 +77,17 @@ const COORD_SCALE = 1e-6; // degrees per quantized coordinate unit, ~0.1 m
 const CELL_METERS = 20;
 const BROAD_SIGMA_METERS = 70; // neighbourhood leafiness
 const TIGHT_SIGMA_METERS = 20; // what this street is lined with
-// The canopy mask has no tree count to give, so it is combined at the normalized level:
-// woodland is simply treed, and the mask is feathered so a park edge is not a hard cut.
-const WOODLAND_FLOOR = 0.85;
-const WOODLAND_FEATHER_METERS = 30;
-// A blurred mask sags in the middle of anything narrower than the blur, and OSM maps a
-// wood like the Ramble as a scatter of small polygons around its paths and clearings, so
-// the blur is divided by this and clamped: a cell the blur says is at least half covered
-// is fully wooded, and only the outer half of the kernel is left to taper. That keeps the
-// soft edge and gives back the interior.
+const WOODLAND_FLOOR = 0.85; // normalized value the canopy mask raises both fields to
+const WOODLAND_FEATHER_METERS = 30; // soft park edge, rather than a hard cut
+// The feather is divided by this and clamped, so a cell it calls half covered is fully
+// wooded: a blurred mask otherwise sags in the middle of anything narrower than the blur,
+// and OSM maps a wood like the Ramble as a scatter of polygons around its clearings.
 const WOODLAND_PLATEAU = 0.5;
-// Both fields divide by this percentile of the broad field over land, so the top few
-// percent of the city's leafiest ground is where the ramp tops out.
-const SATURATION: Percentile = "p97";
+const SATURATION: Percentile = "p97"; // of the broad field over land; both fields divide by it
 const BLUR_RADII = 3; // kernel half-width, in sigmas
 const PAD_METERS = 3 * BROAD_SIGMA_METERS; // room for the widest kernel to run off the city
 
-const DENSIFY_METERS = 25; // road sampling step, close enough to the tight kernel to be smooth
+const DENSIFY_METERS = 25; // road sampling step, below the tight sigma so the colour varies
 const DROP_LENGTH_METERS = 1; // shorter than this the geometry is degenerate
 const EARTH_RADIUS_METERS = 6_371_008.8;
 const METERS_PER_DEGREE_LAT = 111_320;
@@ -159,7 +130,7 @@ function haversineMeters(from: Coord, to: Coord): number {
 }
 
 // Splits every piece longer than DENSIFY_METERS, so the field is sampled often enough
-// along a road for its colour to vary smoothly rather than in one flat block.
+// along a road for its colour to vary rather than come out in one flat block.
 function densify(points: Coord[]): { points: Coord[]; lengthMeters: number } {
   const dense: Coord[] = [points[0]];
   let total = 0;
@@ -235,9 +206,9 @@ async function fetchNycStreets(): Promise<Segment[]> {
   return toSegments(rows);
 }
 
-// The shoreline-clipped borough boundaries: land only, so the harbour is not part of the
-// distribution the ramp is normalized against, and so the OSM woodland that the city's
-// bounding box also catches in New Jersey and Westchester is cut away.
+// Shoreline-clipped, so the harbour is not part of the distribution the ramp normalizes
+// against, and so the OSM woodland the city's bounding box also catches in New Jersey and
+// Westchester is cut away.
 async function fetchNycLand(): Promise<Polygon[]> {
   const rows = await fetchDataset<BoroughRow>(
     "gthc-hcne",
@@ -317,9 +288,8 @@ function boundsOf(grid: Grid): Bounds {
   };
 }
 
-// Even-odd scanline fill: a cell is inside when its centre is between an odd and an even
-// crossing of the polygon's rings. Taking every ring of a multipolygon together is what
-// makes its inner rings cut holes rather than fill them.
+// Even-odd scanline fill. Taking every ring of a multipolygon together is what makes its
+// inner rings cut holes rather than fill them.
 function fill(mask: Uint8Array, grid: Grid, polygons: Polygon[]): number {
   const { cols, rows, west, north, degreesPerCol, degreesPerRow } = grid;
   const crossings: number[] = [];
@@ -376,9 +346,8 @@ function fill(mask: Uint8Array, grid: Grid, polygons: Polygon[]): number {
   return filled;
 }
 
-// Separable Gaussian, zero-padded at the edges — O(cells * sigma) rather than the
-// O(cells * sigma^2) a 2-D kernel would cost. The grid is padded by PAD_METERS, so the
-// truncation at the edges never reaches the city.
+// Separable Gaussian, zero-padded at the edges. The grid carries PAD_METERS of margin, so
+// the truncation at those edges never reaches the city.
 function blur(
   values: Float32Array,
   grid: Grid,
@@ -474,8 +443,8 @@ function buildFields(
   }
   onLand.sort();
   const saturation = percentileOf(onLand, Number(SATURATION.slice(1)) / 100);
-  // Both fields are divided by it, so a city with no trees under its land mask would come
-  // out entirely NaN rather than empty.
+  // Both fields divide by it, so a city with no trees under its land mask would otherwise
+  // come out entirely NaN rather than empty.
   if (!(saturation > 0)) {
     throw new Error(
       `the ${SATURATION} of the broad field over ${landCells} land cells is ${saturation}: there is nothing to normalize against`,
@@ -563,24 +532,7 @@ function writeVarint(bytes: Uint8Array, offset: number, value: number): number {
   return cursor + 1;
 }
 
-// Binary layout of data/tree-cover/<id>.bin, little-endian throughout: the normalized
-// broad field, one byte per cell, row-major from the grid's north-west corner. Cell
-// (col, row) covers [west + col * degreesPerCol, +1) by [north - row * degreesPerRow, -1)
-// and its centre is half a cell in from that corner.
-//
-//   header, FIELD_HEADER_BYTES
-//     0   u8[4]  magic "TFLD"
-//     4   u16    format version
-//     6   u16    header bytes
-//     8   u32    columns
-//     12  u32    rows
-//     16  f64    west, degrees
-//     24  f64    north, degrees
-//     32  f64    degrees per column
-//     40  f64    degrees per row
-//
-//   cells, columns * rows bytes: the normalized density, 0 for none and 255 for the
-//   saturation point the manifest records.
+// layout: scripts/README.md
 function encodeField(fields: Fields): Uint8Array {
   const { grid, broad } = fields;
   const bytes = new Uint8Array(FIELD_HEADER_BYTES + broad.length);
@@ -603,43 +555,7 @@ function encodeField(fields: Fields): Uint8Array {
   return bytes;
 }
 
-// Binary layout of data/streets/<id>.bin, little-endian throughout:
-//
-//   header, STREET_HEADER_BYTES
-//     0   u8[4]  magic "STRT"
-//     4   u16    format version
-//     6   u16    header bytes
-//     8   u16    record bytes
-//     10  u16    reserved
-//     12  u32    segment count
-//     16  f64    origin longitude, degrees
-//     24  f64    origin latitude, degrees
-//     32  f64    coordinate scale, degrees per quantized unit
-//     40  u32    coordinate blob offset, from the start of the file
-//     44  u32    coordinate blob length
-//     48  u32    density blob offset, from the start of the file
-//     52  u32    density blob length, one byte per vertex
-//
-//   segment records, one per segment, STREET_RECORD_BYTES each, starting at the header end
-//     0   u32    physicalid (CSCL id; repeated if a row contributed several parts)
-//     4   u32    offset of this segment's vertices within the coordinate blob
-//     8   u16    vertex count, at least 2
-//     10  u16    reserved
-//     12  f32    geodesic length, metres
-//     16  u32    index of this segment's first vertex within the density blob
-//     20  u8     rw_type: 1 street, 5 boardwalk, 6 path, 7 step street, 10 alley
-//     21  u8     street width, feet (0 unknown)
-//     22  u8     posted speed, mph (0 unknown)
-//     23  u8     reserved
-//
-//   coordinate blob
-//     per segment, `vertex count` (longitude, latitude) pairs, each the zigzag LEB128
-//     varint delta from the previous vertex — the first from the origin. Degrees are
-//     origin + unit * scale, quantized to about 0.1 m.
-//
-//   density blob
-//     the normalized tight field at each vertex, on the same 0..255 scale as the field
-//     grid, in the same order as the coordinate blob.
+// layout: scripts/README.md
 function encodeStreets(segments: Segment[], densities: Uint8Array): Uint8Array {
   let originLng = Number.POSITIVE_INFINITY;
   let originLat = Number.POSITIVE_INFINITY;
@@ -723,9 +639,8 @@ const CITY = {
 
 async function ingest(): Promise<void> {
   const started = performance.now();
-  // The woodland is fetched first, and over the land polygons' own box: it is the only
-  // source here that can be rate-limited away, everything outside the city is discarded
-  // anyway, and there is no point spending five minutes on the trees to find out.
+  // The woodland is fetched first: it is the only source that can be rate-limited away, and
+  // there is no point spending five minutes on the trees to find that out.
   console.error(`${CITY.id}: fetching borough boundaries`);
   const land = await fetchNycLand();
   const box = boxOf(land);
