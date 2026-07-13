@@ -10,6 +10,8 @@ import {
   useMap,
 } from "react-leaflet";
 import type { Pin, PinDraft } from "../src/pin";
+import StreetScoreLayer from "./street-score-layer";
+import TreeCoverLayer from "./tree-cover-layer";
 
 export interface MapTarget {
   lat: number;
@@ -23,6 +25,7 @@ interface MapViewProps {
   target: MapTarget | null;
   userLocation: { lat: number; lng: number } | null;
   following: boolean;
+  treeCover: boolean;
   onDisengageFollow: () => void;
   onPinSelect: (pin: Pin) => void;
 }
@@ -158,6 +161,7 @@ export default function MapView({
   target,
   userLocation,
   following,
+  treeCover,
   onDisengageFollow,
   onPinSelect,
 }: MapViewProps) {
@@ -198,6 +202,9 @@ export default function MapView({
         subdomains="abcd"
         maxZoom={20}
       />
+      {/* the smooth block-level fill, with the per-street lines drawn over it */}
+      {treeCover ? <TreeCoverLayer /> : null}
+      {treeCover ? <StreetScoreLayer /> : null}
       <MapController
         target={target}
         following={following}

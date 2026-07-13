@@ -4,11 +4,14 @@ import { useEffect, useRef, useState } from "react";
 import { FiLogOut, FiRefreshCw, FiUser } from "react-icons/fi";
 import type { AuthState } from "./map-app";
 import ThemeToggle from "./theme-toggle";
+import TreeToggle from "./tree-toggle";
 
 interface ToolbarProps {
   auth: AuthState;
   pinCount: number;
+  treeCover: boolean;
   refreshingClaims: boolean;
+  onToggleTreeCover: () => void;
   onSignIn: () => void;
   onSignOut: () => void | Promise<void>;
   onRefreshClaims: () => void | Promise<void>;
@@ -25,7 +28,9 @@ function initialFor(email: string | null): string {
 export default function Toolbar({
   auth,
   pinCount,
+  treeCover,
   refreshingClaims,
+  onToggleTreeCover,
   onSignIn,
   onSignOut,
   onRefreshClaims,
@@ -61,6 +66,7 @@ export default function Toolbar({
 
   return (
     <div className="absolute top-3 right-3 z-[1000] flex items-center gap-2">
+      <TreeToggle active={treeCover} onToggle={onToggleTreeCover} />
       <ThemeToggle />
       {auth.kind === "signedOut" ? (
         <button

@@ -54,6 +54,8 @@ export default function MapApp() {
   const [logging, setLogging] = useState<boolean>(false);
   const [refreshing, setRefreshing] = useState<boolean>(false);
   const [following, setFollowing] = useState<boolean>(true);
+  // the only content a signed-out visitor has, so it starts on
+  const [treeCover, setTreeCover] = useState<boolean>(true);
   const [signingIn, setSigningIn] = useState<boolean>(false);
   const [locationError, setLocationError] = useState<
     "denied" | "unavailable" | null
@@ -122,6 +124,10 @@ export default function MapApp() {
 
   const handleToggleFollow = useCallback(() => {
     setFollowing((on) => !on);
+  }, []);
+
+  const handleToggleTreeCover = useCallback(() => {
+    setTreeCover((on) => !on);
   }, []);
 
   // stable identity for a long-lived map listener; functional updater keeps disengage idempotent
@@ -264,13 +270,16 @@ export default function MapApp() {
         target={target}
         userLocation={userLocation}
         following={isAdmin && following}
+        treeCover={treeCover}
         onDisengageFollow={handleDisengageFollow}
         onPinSelect={handlePinSelect}
       />
       <Toolbar
         auth={auth}
         pinCount={pins.length}
+        treeCover={treeCover}
         refreshingClaims={refreshing}
+        onToggleTreeCover={handleToggleTreeCover}
         onSignIn={handleSignIn}
         onSignOut={handleSignOut}
         onRefreshClaims={handleRefreshClaims}
