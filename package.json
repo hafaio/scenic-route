@@ -11,7 +11,8 @@
     "dev": "next dev --turbopack",
     "export": "next build",
     "start": "next start",
-    "set-admin": "bun run scripts/set-admin.ts"
+    "set-admin": "bun run scripts/set-admin.ts",
+    "build-tree-data": "bun run scripts/build-tree-data.ts"
   },
   "dependencies": {
     "firebase": "^12.0.0",
