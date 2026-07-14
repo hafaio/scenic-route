@@ -1,2 +1,4 @@
+data/land/*.bin filter=lfs diff=lfs merge=lfs -text
 data/streets/*.bin filter=lfs diff=lfs merge=lfs -text
-data/tree-cover/*.bin filter=lfs diff=lfs merge=lfs -text
+data/trees/*.bin filter=lfs diff=lfs merge=lfs -text
+data/woodland/*.bin filter=lfs diff=lfs merge=lfs -text

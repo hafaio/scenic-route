@@ -1,10 +1,20 @@
-// `bun run build-tree-data`: writes data/tree-cover/<id>.bin, data/streets/<id>.bin and
-// src/tree-cover/manifest.json. The model, the sources and the binary layouts are all
-// documented in scripts/README.md.
+// `bun run build-tree-data`: writes data/{trees,woodland,land,streets}/<id>.bin and
+// src/tree-cover/manifest.json. Fetching, encoding and the manifest are here; the estimator that
+// fills the streets file's density blob and finds the saturation is crates/tiler. The model, the
+// sources and the binary layouts are all documented in scripts/README.md.
 
 import { createHash } from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
+import {
+  boxOf,
+  COORD_SCALE,
+  encodePoints,
+  encodePolygons,
+  writeVarint,
+  zigzag,
+} from "./geometry";
 import {
   type Bounds,
   type CityEntry,
@@ -12,11 +22,13 @@ import {
   type FieldLayer,
   type Percentile,
   readManifest,
+  type SourceFile,
   type StreetLayer,
   writeManifest,
 } from "./manifest";
 import { fetchWoodland, type Polygon } from "./overpass";
 import { type Coord, fetchDataset, fetchNycTrees } from "./socrata";
+import { runTiler } from "./tiler";
 
 // The CSCL road-way types that carry pedestrians: street, boardwalk, path, step street,
 // alley. Highways, ramps, tunnels, driveways and ferry routes are not walkable.
@@ -31,27 +43,6 @@ interface Segment {
   lengthMeters: number;
 }
 
-// A regular lat/lng grid. Column `col` spans [west + col * degreesPerCol, +1) and its
-// centre sits at col + 0.5; rows run south from `north` the same way.
-interface Grid {
-  cols: number;
-  rows: number;
-  west: number;
-  north: number;
-  degreesPerCol: number;
-  degreesPerRow: number;
-}
-
-interface Fields {
-  grid: Grid;
-  broad: Float32Array; // normalized 0..1, the background fill
-  tight: Float32Array; // normalized 0..1 on the same scale, sampled along the roads
-  landMask: Uint8Array; // 1 on city land; the population the saturation is taken over
-  saturation: number; // trees per cell that both fields divide by
-  landCells: number;
-  woodlandCells: number;
-}
-
 interface StreetRow {
   the_geom?: { type: string; coordinates: [number, number][][] };
   physicalid?: string;
@@ -64,17 +55,35 @@ interface BoroughRow {
   the_geom?: { type: string; coordinates: [number, number][][][] };
 }
 
-const STREET_DIR = join(import.meta.dirname, "..", "data", "streets");
-const FIELD_DIR = join(import.meta.dirname, "..", "data", "tree-cover");
+// What `tiler densities` reports back, once it has filled the streets file's density blob. The
+// cuts come back as a map, because the labels they are reported at are passed to it.
+interface RawDistribution {
+  min: number;
+  max: number;
+  mean: number;
+  median: number;
+  percentiles: Record<string, number>;
+}
+
+interface Estimate {
+  bounds: Bounds; // the sources, grown by the kernel's reach: what the pyramid covers
+  saturationTreesPerHectare: number;
+  woodlandSquareKm: number;
+  draws: number;
+  landDensity: RawDistribution;
+  streetDensity: RawDistribution;
+}
+
+const DATA_DIR = join(import.meta.dirname, "..", "data");
+const PARAMS_PATH = join(tmpdir(), "scenic-route-densities.json");
 
 const STREET_FORMAT = 2;
 const STREET_HEADER_BYTES = 56;
 const STREET_RECORD_BYTES = 24;
-const FIELD_FORMAT = 1;
-const FIELD_HEADER_BYTES = 48;
-const COORD_SCALE = 1e-6; // degrees per quantized coordinate unit, ~0.1 m
+const TREE_FORMAT = 1;
+const WOODLAND_FORMAT = 1;
+const LAND_FORMAT = 1;
 
-const CELL_METERS = 20;
 const BROAD_SIGMA_METERS = 70; // neighbourhood leafiness
 const TIGHT_SIGMA_METERS = 20; // what this street is lined with
 const WOODLAND_FLOOR = 0.85; // normalized value the canopy mask raises both fields to
@@ -83,15 +92,14 @@ const WOODLAND_FEATHER_METERS = 30; // soft park edge, rather than a hard cut
 // wooded: a blurred mask otherwise sags in the middle of anything narrower than the blur,
 // and OSM maps a wood like the Ramble as a scatter of polygons around its clearings.
 const WOODLAND_PLATEAU = 0.5;
+
 const SATURATION: Percentile = "p97"; // of the broad field over land; both fields divide by it
-const BLUR_RADII = 3; // kernel half-width, in sigmas
-const PAD_METERS = 3 * BROAD_SIGMA_METERS; // room for the widest kernel to run off the city
+const SATURATION_SAMPLES = 1_000_000;
+const SATURATION_SEED = 42; // fixed, so the constant the whole ramp hangs on does not churn
 
 const DENSIFY_METERS = 25; // road sampling step, below the tight sigma so the colour varies
 const DROP_LENGTH_METERS = 1; // shorter than this the geometry is degenerate
 const EARTH_RADIUS_METERS = 6_371_008.8;
-const METERS_PER_DEGREE_LAT = 111_320;
-const SQUARE_METERS_PER_HECTARE = 10_000;
 const PERCENTILES: readonly Percentile[] = [
   "p1",
   "p5",
@@ -226,25 +234,9 @@ async function fetchNycLand(): Promise<Polygon[]> {
   return polygons;
 }
 
-function boxOf(polygons: Polygon[]): Bounds {
-  let south = Number.POSITIVE_INFINITY;
-  let west = Number.POSITIVE_INFINITY;
-  let north = Number.NEGATIVE_INFINITY;
-  let east = Number.NEGATIVE_INFINITY;
-  for (const polygon of polygons) {
-    for (const ring of polygon) {
-      for (const { lat, lng } of ring) {
-        south = Math.min(south, lat);
-        north = Math.max(north, lat);
-        west = Math.min(west, lng);
-        east = Math.max(east, lng);
-      }
-    }
-  }
-  return { south, west, north, east };
-}
-
-function gridOf(segments: Segment[], trees: Coord[]): Grid {
+// The raw extent of the sources. The tiler grows it by the widest kernel's reach — it owns the
+// truncation radius — and hands back the bounds the pyramid is planned over.
+function sourceBoxOf(segments: Segment[], trees: Coord[]): Bounds {
   let south = Number.POSITIVE_INFINITY;
   let west = Number.POSITIVE_INFINITY;
   let north = Number.NEGATIVE_INFINITY;
@@ -263,300 +255,28 @@ function gridOf(segments: Segment[], trees: Coord[]): Grid {
   for (const tree of trees) {
     swallow(tree);
   }
-
-  const metersPerDegreeLng =
-    METERS_PER_DEGREE_LAT * Math.cos((((south + north) / 2) * Math.PI) / 180);
-  const degreesPerCol = CELL_METERS / metersPerDegreeLng;
-  const degreesPerRow = CELL_METERS / METERS_PER_DEGREE_LAT;
-  const padCols = Math.ceil(PAD_METERS / CELL_METERS);
-  return {
-    cols: Math.ceil((east - west) / degreesPerCol) + 2 * padCols,
-    rows: Math.ceil((north - south) / degreesPerRow) + 2 * padCols,
-    west: west - padCols * degreesPerCol,
-    north: north + padCols * degreesPerRow,
-    degreesPerCol,
-    degreesPerRow,
-  };
+  return { south, west, north, east };
 }
 
-function boundsOf(grid: Grid): Bounds {
-  return {
-    north: grid.north,
-    west: grid.west,
-    south: grid.north - grid.rows * grid.degreesPerRow,
-    east: grid.west + grid.cols * grid.degreesPerCol,
-  };
-}
-
-// Even-odd scanline fill. Taking every ring of a multipolygon together is what makes its
-// inner rings cut holes rather than fill them.
-function fill(mask: Uint8Array, grid: Grid, polygons: Polygon[]): number {
-  const { cols, rows, west, north, degreesPerCol, degreesPerRow } = grid;
-  const crossings: number[] = [];
-  for (const polygon of polygons) {
-    let lowRow = Number.POSITIVE_INFINITY;
-    let highRow = Number.NEGATIVE_INFINITY;
-    const rings = polygon.map((ring) => {
-      const xs = new Float64Array(ring.length);
-      const ys = new Float64Array(ring.length);
-      for (let point = 0; point < ring.length; point++) {
-        xs[point] = (ring[point].lng - west) / degreesPerCol;
-        ys[point] = (north - ring[point].lat) / degreesPerRow;
-        lowRow = Math.min(lowRow, ys[point]);
-        highRow = Math.max(highRow, ys[point]);
-      }
-      return { xs, ys };
-    });
-
-    const firstRow = Math.max(0, Math.floor(lowRow));
-    const lastRow = Math.min(rows - 1, Math.ceil(highRow));
-    for (let row = firstRow; row <= lastRow; row++) {
-      const line = row + 0.5;
-      crossings.length = 0;
-      for (const { xs, ys } of rings) {
-        for (
-          let point = 0, previous = xs.length - 1;
-          point < xs.length;
-          previous = point++
-        ) {
-          if (ys[point] > line !== ys[previous] > line) {
-            crossings.push(
-              xs[point] +
-                ((line - ys[point]) / (ys[previous] - ys[point])) *
-                  (xs[previous] - xs[point]),
-            );
-          }
-        }
-      }
-      crossings.sort((left, right) => left - right);
-      for (let pair = 0; pair + 1 < crossings.length; pair += 2) {
-        const from = Math.max(0, Math.ceil(crossings[pair] - 0.5));
-        const to = Math.min(cols - 1, Math.floor(crossings[pair + 1] - 0.5));
-        for (let col = from; col <= to; col++) {
-          mask[row * cols + col] = 1;
-        }
-      }
-    }
-  }
-
-  let filled = 0;
-  for (const cell of mask) {
-    filled += cell;
-  }
-  return filled;
-}
-
-// Separable Gaussian, zero-padded at the edges. The grid carries PAD_METERS of margin, so
-// the truncation at those edges never reaches the city.
-function blur(
-  values: Float32Array,
-  grid: Grid,
-  sigmaMeters: number,
-): Float32Array {
-  const { cols, rows } = grid;
-  const sigma = sigmaMeters / CELL_METERS;
-  const radius = Math.ceil(BLUR_RADII * sigma);
-  const kernel = new Float64Array(radius * 2 + 1);
-  let total = 0;
-  for (let offset = -radius; offset <= radius; offset++) {
-    const weight = Math.exp(-(offset * offset) / (2 * sigma * sigma));
-    kernel[offset + radius] = weight;
-    total += weight;
-  }
-  for (let index = 0; index < kernel.length; index++) {
-    kernel[index] /= total;
-  }
-
-  const scratch = new Float32Array(values.length);
-  for (let row = 0; row < rows; row++) {
-    const start = row * cols;
-    for (let col = 0; col < cols; col++) {
-      let sum = 0;
-      const low = Math.max(-radius, -col);
-      const high = Math.min(radius, cols - 1 - col);
-      for (let offset = low; offset <= high; offset++) {
-        sum += values[start + col + offset] * kernel[offset + radius];
-      }
-      scratch[start + col] = sum;
-    }
-  }
-  const blurred = new Float32Array(values.length);
-  for (let col = 0; col < cols; col++) {
-    for (let row = 0; row < rows; row++) {
-      let sum = 0;
-      const low = Math.max(-radius, -row);
-      const high = Math.min(radius, rows - 1 - row);
-      for (let offset = low; offset <= high; offset++) {
-        sum += scratch[(row + offset) * cols + col] * kernel[offset + radius];
-      }
-      blurred[row * cols + col] = sum;
-    }
-  }
-  return blurred;
-}
-
-function percentileOf(sorted: Float64Array, fraction: number): number {
-  const last = sorted.length - 1;
-  return sorted[Math.min(last, Math.max(0, Math.round(fraction * last)))];
-}
-
-function buildFields(
-  grid: Grid,
-  trees: Coord[],
-  land: Polygon[],
-  woodland: Polygon[],
-): Fields {
-  const { cols, rows, west, north, degreesPerCol, degreesPerRow } = grid;
-  const cells = cols * rows;
-
-  const counts = new Float32Array(cells);
-  for (const { lat, lng } of trees) {
-    const col = Math.floor((lng - west) / degreesPerCol);
-    const row = Math.floor((north - lat) / degreesPerRow);
-    if (col >= 0 && col < cols && row >= 0 && row < rows) {
-      counts[row * cols + col] += 1;
-    }
-  }
-  const broad = blur(counts, grid, BROAD_SIGMA_METERS);
-  const tight = blur(counts, grid, TIGHT_SIGMA_METERS);
-
-  const landMask = new Uint8Array(cells);
-  const landCells = fill(landMask, grid, land);
-  const woodlandMask = new Uint8Array(cells);
-  fill(woodlandMask, grid, woodland);
-  let woodlandCells = 0;
-  const canopy = new Float32Array(cells);
-  for (let cell = 0; cell < cells; cell++) {
-    const wooded = woodlandMask[cell] & landMask[cell];
-    canopy[cell] = wooded;
-    woodlandCells += wooded;
-  }
-  const feathered = blur(canopy, grid, WOODLAND_FEATHER_METERS);
-
-  const onLand = new Float64Array(landCells);
-  let index = 0;
-  for (let cell = 0; cell < cells; cell++) {
-    if (landMask[cell] === 1) {
-      onLand[index] = broad[cell];
-      index += 1;
-    }
-  }
-  onLand.sort();
-  const saturation = percentileOf(onLand, Number(SATURATION.slice(1)) / 100);
-  // Both fields divide by it, so a city with no trees under its land mask would otherwise
-  // come out entirely NaN rather than empty.
-  if (!(saturation > 0)) {
-    throw new Error(
-      `the ${SATURATION} of the broad field over ${landCells} land cells is ${saturation}: there is nothing to normalize against`,
-    );
-  }
-
-  for (let cell = 0; cell < cells; cell++) {
-    const floor =
-      WOODLAND_FLOOR * Math.min(1, feathered[cell] / WOODLAND_PLATEAU);
-    broad[cell] = Math.max(Math.min(1, broad[cell] / saturation), floor);
-    tight[cell] = Math.max(Math.min(1, tight[cell] / saturation), floor);
-  }
-  return {
-    grid,
-    broad,
-    tight,
-    landMask,
-    saturation,
-    landCells,
-    woodlandCells,
-  };
-}
-
-function sample(values: Float32Array, grid: Grid, { lat, lng }: Coord): number {
-  const { cols, rows, west, north, degreesPerCol, degreesPerRow } = grid;
-  const x = Math.min(
-    cols - 1.5,
-    Math.max(0, (lng - west) / degreesPerCol - 0.5),
-  );
-  const y = Math.min(
-    rows - 1.5,
-    Math.max(0, (north - lat) / degreesPerRow - 0.5),
-  );
-  const col = Math.floor(x);
-  const row = Math.floor(y);
-  const alongCol = x - col;
-  const alongRow = y - row;
-  const top = row * cols + col;
-  const bottom = top + cols;
-  return (
-    (values[top] * (1 - alongCol) + values[top + 1] * alongCol) *
-      (1 - alongRow) +
-    (values[bottom] * (1 - alongCol) + values[bottom + 1] * alongCol) * alongRow
-  );
-}
-
-function distributionOf(values: Float64Array): Distribution {
-  const sorted = values.slice().sort();
-  let sum = 0;
-  for (const value of sorted) {
-    sum += value;
-  }
+// The manifest's key order is the ingest's, not whatever a map iterated in.
+function distributionOf(raw: RawDistribution): Distribution {
   const percentiles = {} as Record<Percentile, number>;
   for (const percentile of PERCENTILES) {
-    percentiles[percentile] = round(
-      percentileOf(sorted, Number(percentile.slice(1)) / 100),
-    );
+    percentiles[percentile] = raw.percentiles[percentile];
   }
   return {
-    min: round(sorted[0]),
-    max: round(sorted[sorted.length - 1]),
-    mean: round(sum / sorted.length),
-    median: round(percentileOf(sorted, 0.5)),
+    min: raw.min,
+    max: raw.max,
+    mean: raw.mean,
+    median: raw.median,
     percentiles,
   };
 }
 
-function round(value: number): number {
-  return Math.round(value * 1000) / 1000;
-}
-
-function zigzag(value: number): number {
-  return ((value << 1) ^ (value >> 31)) >>> 0;
-}
-
-function writeVarint(bytes: Uint8Array, offset: number, value: number): number {
-  let cursor = offset;
-  let remaining = value;
-  while (remaining >= 0x80) {
-    bytes[cursor] = (remaining & 0x7f) | 0x80;
-    remaining >>>= 7;
-    cursor += 1;
-  }
-  bytes[cursor] = remaining;
-  return cursor + 1;
-}
-
+// The density blob is written zeroed and filled in place by `tiler densities`, so the
+// coordinates it samples the field at are the ones that ship rather than a parallel copy.
 // layout: scripts/README.md
-function encodeField(fields: Fields): Uint8Array {
-  const { grid, broad } = fields;
-  const bytes = new Uint8Array(FIELD_HEADER_BYTES + broad.length);
-  const view = new DataView(bytes.buffer);
-  bytes[0] = "T".charCodeAt(0);
-  bytes[1] = "F".charCodeAt(0);
-  bytes[2] = "L".charCodeAt(0);
-  bytes[3] = "D".charCodeAt(0);
-  view.setUint16(4, FIELD_FORMAT, true);
-  view.setUint16(6, FIELD_HEADER_BYTES, true);
-  view.setUint32(8, grid.cols, true);
-  view.setUint32(12, grid.rows, true);
-  view.setFloat64(16, grid.west, true);
-  view.setFloat64(24, grid.north, true);
-  view.setFloat64(32, grid.degreesPerCol, true);
-  view.setFloat64(40, grid.degreesPerRow, true);
-  for (let cell = 0; cell < broad.length; cell++) {
-    bytes[FIELD_HEADER_BYTES + cell] = Math.round(broad[cell] * 255);
-  }
-  return bytes;
-}
-
-// layout: scripts/README.md
-function encodeStreets(segments: Segment[], densities: Uint8Array): Uint8Array {
+function encodeStreets(segments: Segment[]): Uint8Array {
   let originLng = Number.POSITIVE_INFINITY;
   let originLat = Number.POSITIVE_INFINITY;
   let vertices = 0;
@@ -622,8 +342,26 @@ function encodeStreets(segments: Segment[], densities: Uint8Array): Uint8Array {
   const encoded = new Uint8Array(records.length + blobEnd + vertices);
   encoded.set(records);
   encoded.set(blob.subarray(0, blobEnd), records.length);
-  encoded.set(densities, records.length + blobEnd);
   return encoded;
+}
+
+async function writeSource(
+  directory: string,
+  file: string,
+  format: number,
+  count: number,
+  bytes: Uint8Array,
+): Promise<SourceFile> {
+  const path = join(DATA_DIR, directory);
+  await mkdir(path, { recursive: true });
+  await writeFile(join(path, file), bytes);
+  return {
+    file,
+    format,
+    count,
+    bytes: bytes.length,
+    sha256: createHash("sha256").update(bytes).digest("hex"),
+  };
 }
 
 const CITY = {
@@ -643,13 +381,13 @@ async function ingest(): Promise<void> {
   // there is no point spending five minutes on the trees to find that out.
   console.error(`${CITY.id}: fetching borough boundaries`);
   const land = await fetchNycLand();
-  const box = boxOf(land);
+  const landBox = boxOf(land);
   console.error(`${CITY.id}: fetching woodland polygons`);
   const woodland = await fetchWoodland(
-    box.south,
-    box.west,
-    box.north,
-    box.east,
+    landBox.south,
+    landBox.west,
+    landBox.north,
+    landBox.east,
   );
   console.error(
     `${CITY.id}: ${woodland.polygons.length} woodland polygons (${woodland.ways} ways, ${woodland.relations} relations, ${woodland.unclosed} unclosed rings dropped)`,
@@ -660,70 +398,77 @@ async function ingest(): Promise<void> {
   console.error(`${CITY.id}: fetching trees`);
   const trees = await fetchNycTrees();
 
-  const grid = gridOf(segments, trees);
-  const bounds = boundsOf(grid);
-  console.error(
-    `${CITY.id}: building a ${grid.cols}x${grid.rows} field at ${CELL_METERS} m from ${trees.length} trees`,
+  const file = `${CITY.id}.bin`;
+  const treeFile = await writeSource(
+    "trees",
+    file,
+    TREE_FORMAT,
+    trees.length,
+    encodePoints("TREE", TREE_FORMAT, trees),
   );
-  const fields = buildFields(grid, trees, land, woodland.polygons);
-  const cellHectares = CELL_METERS ** 2 / SQUARE_METERS_PER_HECTARE;
-  const saturationPerHectare = fields.saturation / cellHectares;
-  console.error(
-    `${CITY.id}: ${SATURATION} of the broad field over ${fields.landCells} land cells is ${fields.saturation.toFixed(3)} trees/cell (${saturationPerHectare.toFixed(1)} trees/ha)`,
+  const woodlandFile = await writeSource(
+    "woodland",
+    file,
+    WOODLAND_FORMAT,
+    woodland.polygons.length,
+    encodePolygons("WOOD", WOODLAND_FORMAT, woodland.polygons),
   );
-  console.error(
-    `${CITY.id}: canopy mask covers ${fields.woodlandCells} cells (${((fields.woodlandCells * CELL_METERS ** 2) / 1e6).toFixed(1)} km2)`,
+  const landFile = await writeSource(
+    "land",
+    file,
+    LAND_FORMAT,
+    land.length,
+    encodePolygons("LAND", LAND_FORMAT, land),
   );
+  const streetPath = join(DATA_DIR, "streets", file);
+  await mkdir(join(DATA_DIR, "streets"), { recursive: true });
+  await writeFile(streetPath, encodeStreets(segments));
 
   let vertices = 0;
   for (const segment of segments) {
     vertices += segment.points.length;
   }
-  const densities = new Uint8Array(vertices);
-  const streetDensities = new Float64Array(vertices);
-  let vertex = 0;
-  for (const segment of segments) {
-    for (const point of segment.points) {
-      const density = sample(fields.tight, grid, point);
-      densities[vertex] = Math.round(density * 255);
-      streetDensities[vertex] = density;
-      vertex += 1;
-    }
-  }
-
-  const landDensities = new Float64Array(fields.landCells);
-  let index = 0;
-  for (let cell = 0; cell < fields.landMask.length; cell++) {
-    if (fields.landMask[cell] === 1) {
-      landDensities[index] = fields.broad[cell];
-      index += 1;
-    }
-  }
-
-  const fieldBytes = encodeField(fields);
-  const streetBytes = encodeStreets(segments, densities);
-  await mkdir(FIELD_DIR, { recursive: true });
-  await mkdir(STREET_DIR, { recursive: true });
-  const file = `${CITY.id}.bin`;
-  await writeFile(join(FIELD_DIR, file), fieldBytes);
-  await writeFile(join(STREET_DIR, file), streetBytes);
+  await writeFile(
+    PARAMS_PATH,
+    JSON.stringify({
+      trees: join(DATA_DIR, "trees", file),
+      woodland: join(DATA_DIR, "woodland", file),
+      land: join(DATA_DIR, "land", file),
+      streets: streetPath,
+      sourceBox: sourceBoxOf(segments, trees),
+      landBox,
+      broadSigmaMeters: BROAD_SIGMA_METERS,
+      tightSigmaMeters: TIGHT_SIGMA_METERS,
+      woodlandFloor: WOODLAND_FLOOR,
+      woodlandFeatherMeters: WOODLAND_FEATHER_METERS,
+      woodlandPlateau: WOODLAND_PLATEAU,
+      saturationPercentile: Number(SATURATION.slice(1)),
+      saturationSamples: SATURATION_SAMPLES,
+      saturationSeed: SATURATION_SEED,
+      percentiles: PERCENTILES.map((percentile) => Number(percentile.slice(1))),
+    }),
+  );
+  const estimate: Estimate = JSON.parse(
+    runTiler(["densities", "--params", PARAMS_PATH], true),
+  );
+  // Rust filled the density blob in place, so the file on disk is no longer the one encoded.
+  const streetBytes = new Uint8Array(await readFile(streetPath));
 
   const updated = new Date().toISOString().slice(0, 10);
   const field: FieldLayer = {
-    file,
-    format: FIELD_FORMAT,
-    cols: grid.cols,
-    rows: grid.rows,
-    bytes: fieldBytes.length,
-    sha256: createHash("sha256").update(fieldBytes).digest("hex"),
-    cellMeters: CELL_METERS,
+    trees: treeFile,
+    woodland: woodlandFile,
+    land: landFile,
     broadSigmaMeters: BROAD_SIGMA_METERS,
     tightSigmaMeters: TIGHT_SIGMA_METERS,
-    saturationTreesPerHectare: round(saturationPerHectare),
-    woodlandPolygons: woodland.polygons.length,
-    woodlandSquareKm: round((fields.woodlandCells * CELL_METERS ** 2) / 1e6),
+    saturationTreesPerHectare: estimate.saturationTreesPerHectare,
+    saturationSamples: SATURATION_SAMPLES,
+    saturationSeed: SATURATION_SEED,
+    woodlandSquareKm: estimate.woodlandSquareKm,
     woodlandFloor: WOODLAND_FLOOR,
-    density: distributionOf(landDensities),
+    woodlandFeatherMeters: WOODLAND_FEATHER_METERS,
+    woodlandPlateau: WOODLAND_PLATEAU,
+    density: distributionOf(estimate.landDensity),
     updated,
     attribution: CITY.woodlandAttribution,
     sourceUrl: CITY.woodlandSourceUrl,
@@ -736,7 +481,7 @@ async function ingest(): Promise<void> {
     bytes: streetBytes.length,
     sha256: createHash("sha256").update(streetBytes).digest("hex"),
     densifyMeters: DENSIFY_METERS,
-    density: distributionOf(streetDensities),
+    density: distributionOf(estimate.streetDensity),
     updated,
     attribution: CITY.streetAttribution,
     sourceUrl: CITY.streetSourceUrl,
@@ -744,7 +489,7 @@ async function ingest(): Promise<void> {
   const entry: CityEntry = {
     id: CITY.id,
     name: CITY.name,
-    bounds,
+    bounds: estimate.bounds,
     trees: trees.length,
     updated,
     attribution: CITY.attribution,
@@ -762,9 +507,10 @@ async function ingest(): Promise<void> {
   }
   await writeManifest(manifest);
 
+  const megabytes = (bytes: number): string => (bytes / 1024 / 1024).toFixed(1);
   const seconds = ((performance.now() - started) / 1000).toFixed(1);
   console.error(
-    `${CITY.id}: wrote tree-cover/${file} (${(fieldBytes.length / 1024 / 1024).toFixed(1)} MiB) and streets/${file} (${segments.length} segments, ${vertices} vertices, ${(streetBytes.length / 1024 / 1024).toFixed(1)} MiB) in ${seconds}s`,
+    `${CITY.id}: wrote trees (${megabytes(treeFile.bytes)} MiB), woodland (${megabytes(woodlandFile.bytes)} MiB), land (${megabytes(landFile.bytes)} MiB) and streets (${segments.length} segments, ${vertices} vertices, ${megabytes(streetBytes.length)} MiB) in ${seconds}s`,
   );
 }
 

@@ -6,8 +6,8 @@
   "license": "MIT",
   "type": "module",
   "scripts": {
-    "fmt": "biome format --write && biome check --write",
-    "lint": "tsc && biome check",
+    "fmt": "biome format --write && biome check --write && cargo fmt",
+    "lint": "tsc && biome check && cargo fmt --check && cargo clippy -- -D warnings",
     "dev": "bun run build-tiles && next dev --turbopack",
     "export": "bun run build-tiles && next build",
     "start": "next start",
@@ -30,11 +30,9 @@
     "@tailwindcss/postcss": "^4.3.2",
     "@types/leaflet": "^1.9.21",
     "@types/node": "^26.1.1",
-    "@types/pngjs": "^6.0.5",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "firebase-admin": "^14.1.0",
-    "pngjs": "^7.0.0",
     "tailwindcss": "^4.3.2",
     "typescript": "^6.0.3"
   }
