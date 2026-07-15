@@ -35,23 +35,31 @@ export interface Distribution {
   percentiles: Record<Percentile, number>;
 }
 
-// data/tree-cover/<id>.bin: tree density per unit area on a regular grid, normalized to
-// 0..1. layout: scripts/README.md
-export interface FieldLayer {
+// One committed input the field is estimated from. layout: scripts/README.md
+export interface SourceFile {
   file: string;
   format: number;
-  cols: number;
-  rows: number;
+  count: number; // points, or polygons
   bytes: number;
   sha256: string;
-  cellMeters: number;
+}
+
+// The tree-density field: not a raster, but the points and masks it is computed from, plus
+// the constants that turn a kernel density estimate into the 0..1 the ramp reads.
+export interface FieldLayer {
+  trees: SourceFile; // data/trees/<id>.bin, the points the estimate sums over
+  woodland: SourceFile; // data/woodland/<id>.bin, the canopy the inventory does not carry
+  land: SourceFile; // data/land/<id>.bin, the population and the clip
   broadSigmaMeters: number; // kernel behind the background fill
   tightSigmaMeters: number; // kernel the roads are sampled from
   saturationTreesPerHectare: number; // the density both fields divide by; 1.0 here
-  woodlandPolygons: number;
+  saturationSamples: number; // land points the percentile was estimated from
+  saturationSeed: number; // and the seed they were drawn with, so it is reproducible
   woodlandSquareKm: number; // woodland inside the city, after clipping to land
   woodlandFloor: number; // normalized value the canopy mask raises both fields to
-  density: Distribution; // the normalized broad field, over land cells
+  woodlandFeatherMeters: number; // soft park edge, rather than a hard cut
+  woodlandPlateau: number; // coverage the feather is called complete at
+  density: Distribution; // the normalized broad field, over those same land points
   updated: string;
   attribution: string; // the woodland source; trees are credited on the city
   sourceUrl: string;
@@ -76,7 +84,7 @@ export interface StreetLayer {
 export interface CityEntry {
   id: string;
   name: string;
-  bounds: Bounds; // the field grid, which is what the overlays cover
+  bounds: Bounds; // where the field can be non-zero, which is what the overlays cover
   trees: number; // standing trees in the source inventory, all of which count
   updated: string;
   attribution: string; // the tree inventory
@@ -86,7 +94,7 @@ export interface CityEntry {
 }
 
 export interface Manifest {
-  version: 2;
+  version: 3;
   cities: CityEntry[];
 }
 
@@ -97,7 +105,7 @@ const MANIFEST_PATH = join(
   "tree-cover",
   "manifest.json",
 );
-const MANIFEST_VERSION = 2;
+const MANIFEST_VERSION = 3;
 
 export async function readManifest(): Promise<Manifest> {
   const existing = await readFile(MANIFEST_PATH, "utf-8").catch(() => null);
