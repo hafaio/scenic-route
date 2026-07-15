@@ -17,6 +17,9 @@
 # raw source reads cached by `bun run build-tree-data`; --refresh to go back to the network
 /.cache/
 
+# rust build output; crates/tiler is compiled by `bun run build-tiles`
+/target
+
 # production
 /build
 

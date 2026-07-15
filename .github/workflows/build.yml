@@ -17,6 +17,10 @@ jobs:
         with:
           lfs: true
       - uses: oven-sh/setup-bun@v2
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
       - run: bun install --frozen-lockfile
       - run: bun lint
       - if: inputs.upload-pages
