@@ -20,7 +20,7 @@ scripts fetch, encode and orchestrate; they compute nothing about trees.
 | | |
 | --- | --- |
 | `scripts/` | Socrata paging, the Overpass mirror rotation, the disk cache, the `.bin` encoders, the manifest, and the colour ramp |
-| `crates/tiler` | the kernel density estimate, the Monte-Carlo saturation, the street-vertex densities, the woodland mask and feather, the tile pyramid, the PNGs, the street chunks |
+| `crates/tiler` | the crown-weighted kernel density estimate, the cover transform, the Monte-Carlo cover distribution, the sidewalk offsets and their cover, the woodland mask and feather, the tile pyramid, the PNGs, the street chunks |
 
 ```sh
 tiler densities --params <file.json>   # fills the streets file's density blob, in place
@@ -36,10 +36,11 @@ they would live in two languages and have to be kept in step. One home.
 
 Two things cross the boundary in the other direction, and both are deliberate:
 
-- **The manifest is the single source of the model constants** (σ_broad, σ_tight, the woodland
-  floor, feather and plateau, the saturation). `tiler tiles` reads them with serde rather than
-  redeclaring them. `tiler densities` cannot — it is what *computes* the saturation the
-  manifest records — so the ingest passes it those constants as arguments.
+- **The manifest is the single source of the model constants** (σ_broad, σ_tight, the crown
+  allometry, the woodland floor, feather and plateau). `tiler tiles` reads them with serde
+  rather than redeclaring them. `tiler densities` runs before the manifest is finished — it is
+  what *reports* the cover distribution that goes into it — so the ingest passes it those
+  constants as arguments.
 - **The colour ramp stays in TypeScript** (`src/tree-cover/ramp.ts`), because the client's
   street layer imports the same module. That shared import is what guarantees the block fill
   and the street lines are one colour function. `build-tiles` evaluates it over the 256 density
@@ -47,45 +48,137 @@ Two things cross the boundary in the other direction, and both are deliberate:
   defines a ramp of its own.
 
 Because the estimator now sits *behind* the encoders, it reads the coordinates that actually
-ship: the tight field at a street vertex is sampled at the quantized position in
+ship: the cover at a street vertex is sampled at the quantized position in
 `data/streets/<id>.bin`, not at the raw source coordinate 0.05 m away, and the canopy mask is
 rasterized from the polygons in `data/woodland/<id>.bin` rather than from the floats they were
 rounded from.
 
 ## The model
 
-The map shows **one quantity: tree density per unit area** — not a score per road. Both
-overlays are that same quantity, estimated at two scales from the same points, which is
-what lets them be read against each other.
+The map shows **one quantity: the fraction of ground under tree canopy** — not a tree count and
+not a score per road. It lives in [0, 1] *by construction*, so there is nothing to clip and no
+saturation constant to fit. Both overlays are that same quantity, estimated at two scales from
+the same points, which is what lets them be read against each other.
 
-The estimate is a **kernel density estimate, evaluated exactly wherever it is wanted**:
-once per output pixel when a tile is painted, once per street vertex when a road is
-annotated. There is no field raster and no grid. Working in a local metre space with the
-city's bounding-box centre as the origin (one reference latitude for the whole city — across
-NYC's 0.42° of span that costs about 0.7% in the east-west scale), the field in trees per
-square metre is
+**Why cover, not count.** Street trees are a *line*, not a field. Estimate an areal density with
+a kernel of width σ on that line and the estimate scales like 1/σ — the tighter you look, the
+denser it reads (σ = 70 m fill: ~12–30 trees/ha; a 20 m centreline kernel: ~39; an 8 m kernel at
+the sidewalk: ~64). Any kernel tight enough to resolve two sidewalks 14 m apart reads 2–3× the
+fill, so a count normalized by one saturation constant pinned every leafy street at maximum
+green: p70, p80 and p90 of the street distribution were all exactly 1.0, and you could not tell a
+nice street from a spectacular one. Cover has no such constant to saturate against.
 
-    f_σ(p) = Σ_{i : d_i < 3σ}  exp(-d_i² / (2σ²))  /  (2πσ² · (1 - e^{-4.5}))
+**How.** Give every tree a crown disc of area `A_i = π·r_i²`, with `r_i` from its trunk diameter
+(the allometry, below). The **canopy-area index** at a point is the kernel density estimate with
+each tree weighted by its crown area instead of by 1 — crown area per unit ground area, which may
+exceed 1 where crowns overlap:
 
-over every tree *i* in the inventory, with `d_i` the distance in metres. The kernel is
-truncated at 3σ and renormalized by `1 - e^{-4.5}` so it still integrates to one — without
-that the field would read low by 1.1% and mean something slightly other than what it says.
+    CAI_σ(p) = Σ_{i : d_i < 3σ}  exp(-d_i² / (2σ²)) · A_i  /  (2πσ² · (1 - e^{-4.5}))
+
+and the covered fraction follows from the standard Boolean (Poisson) canopy model, which handles
+overlapping crowns without double-counting:
+
+    cover(p) = 1 − exp(−CAI(p))              // in [0, 1), monotone, never clips
+
+Working in a local metre space with the city's bounding-box centre as the origin (one reference
+latitude for the whole city — across NYC's 0.42° of span that costs about 0.7% in the east-west
+scale), `d_i` is the distance in metres. The kernel is truncated at 3σ and renormalized by
+`1 - e^{-4.5}` so it still integrates to one — so a tree's crown area is spread over the ground
+exactly, and the index is a true crown-per-ground fraction rather than one off by the truncated
+tail. The `1 − e^{−x}` is a plain `exp` once per pixel, not the tabulated kernel: a different
+domain, and cheap where it sits.
 
 Two scales, same points:
 
 - **broad** (σ = 70 m) — neighbourhood leafiness. This is the background fill.
-- **tight** (σ = 20 m) — what a given street is actually lined with. Evaluated at every
-  street vertex (streets are densified to ≤ 25 m first, so the colour varies along a road
-  rather than in one flat block).
+- **tight** — what a given *sidewalk* is actually lined with. Evaluated at both sidewalks of
+  every street vertex, from an oriented anisotropic kernel; see below.
 
-Both fields are then divided by the **same** constant: the p97 of the broad field over
-land. That shared normalization is the whole point. A tree-lined street reads as a darker
-line on the green it sits in; a bare street reads as a pale gap through it. If each field
-were normalized against its own distribution the two would be incomparable and the streets
-would say nothing the fill did not.
+Because both are the same cover fraction at different scales, they are comparable without any
+shared-constant argument: a tree-lined street reads as a darker line on the green it sits in, a
+bare one as a pale gap through it. **Whether a tree across the road counts is no longer a σ we
+invented — it is decided by how big that tree actually is.** A mature London plane reaches over
+the road; a sapling does not.
 
-The p97 is taken over the *land* mask (shoreline-clipped borough boundaries) so the harbour
-does not drag the distribution down. For NYC it lands at ~30 trees/ha.
+The mean cover over land is reported in the manifest (`meanCoverOverLand`), estimated over the
+same seeded million-point land sample that the fill's percentiles are drawn from. For NYC's
+street trees it lands at **~6–8%** — far below the ~22% all-sources canopy figure from LiDAR,
+exactly as it must, since ForMS is a street-tree register and carries no park or backyard trees.
+
+### The streets: two sidewalks, and a kernel that knows which way the road runs
+
+Nobody walks down the middle of the road, and a street has *two* sidewalks, which can differ
+completely: a block with a full canopy on the north side and bare pavement on the south is not
+one averaged line. So the street cover is sampled **twice per vertex**, once either side.
+
+The two sidewalks are only ~14 m apart, so telling them apart wants a kernel that is not too wide
+across the street; but a kernel tight in every direction makes the colour lurch from tree to tree
+along the road. The demands conflict only if the kernel is isotropic, so the street uses an
+**oriented anisotropic Gaussian**, aligned to the local street bearing θ:
+
+    u =  dx·cosθ + dy·sinθ                       // along the road,  σ = 15 m
+    v = -dx·sinθ + dy·cosθ                       // across it,       σ =  8 m
+    CAI(p) = Σ exp(-(u²/2σ_along² + v²/2σ_across²)) · A_i / (2π·σ_along·σ_across·(1 - e^-4.5))
+
+truncated at 3σ in the *rotated* metric (`u²/σ_along² + v²/σ_across² < 9`), whose unit ellipse
+holds exactly the mass a 3σ disc does — so the **same** renormalization applies and the street
+index lands on the very same scale as the broad one.
+
+The across-street σ is **deliberately loose** (8 m, not the old 5 m). With the crown discs doing
+the physical work of reaching over the road, the kernel no longer has to separate the sides by
+brute tightness, and it *should not*: a 5 m σ_across is a hard cut in disguise. At the real
+geometry (a ~6.5 m half-offset, so the far sidewalk is ~13 m across) a same-size tree on the far
+side now contributes `exp(-13.1²/(2·8²)) = 0.26` of a near one — a genuine reach-over — against
+0.03 at σ_across = 5 m. It is still clearly near-dominated, and a *large* far tree, carrying a
+far larger crown area, can now legitimately colour the near sidewalk, which is the whole point.
+
+The **bearing** at a vertex is the central difference of its neighbours (one-sided at the ends);
+the geometry is densified to ≤ 25 m, so that is a good local tangent.
+
+**Where the sidewalks are.** Derived by offsetting the centerline — *no usable sidewalk dataset
+exists*. NYC's "Sidewalk Centerline" layer is interior paths only (parks, NYCHA, campuses) and
+explicitly excludes the ones in the street ROW; the planimetric sidewalk polygons carry no street
+linkage and wrap around block corners. `streetwidth` (curb to curb, feet) is populated on 98% of
+streets and alleys, so
+
+    offsetMeters = streetwidth · 0.3048 / 2 + sidewalkInsetMeters      // inset 2 m, curb to sidewalk centre
+
+either side, falling back to the 30 ft median where the width is missing. **Boardwalks, paths and
+step streets are not offset**: they *are* the walking surface, so they are sampled once, on the
+line, and both their sides carry that one value. Left and right follow the digitization direction
+(left = 90° CCW), which is CSCL's own `l_`/`r_` convention.
+
+The two sidewalks are ~14 m apart, which at z13 is a single pixel — so the client draws the
+offset in **pixels**, floored at a stroke width and dissolving into the true geometry as the map
+zooms in. It is never baked into the data.
+
+### The allometry: trunk to crown
+
+ForMS carries `dbh` (trunk diameter at breast height, in whole inches) on 99.9% of standing
+trees. The crown radius each tree is weighted by comes from a **published** relation, not an
+invented one: **McPherson, van Doorn & Peper 2016, *Urban Tree Database and Allometric
+Equations*, USDA Forest Service GTR-PSW-253** (data archive RDS-2016-0005). Its "NoEast"
+reference city is Queens, so this is literally NYC street-tree data; the **London planetree**
+log-log curve — the city's most abundant street species, R² 0.94 — stands in for every species,
+since the ingest does not read species. With dbh in cm and diameter in metres,
+
+    crown_diameter = exp( -0.752 + 2.414·ln(ln(dbh_cm + 1)) + 0.00988 )
+    crown_radius   = crown_diameter / 2 ;  crown_area = π·crown_radius²
+
+At the NYC median dbh (~10 in) this is an ~8.4 m crown (~55 m²); at the mean (~11.7 in) ~9.4 m
+(~70 m²). The constant is **not** fitted to hit a canopy target — the mean cover it produces is
+reported and read against reality, not tuned to it.
+
+Two inputs are cleaned before the curve sees them, in `scripts/build-tree-data.ts`:
+
+- **Outliers.** `max(dbh)` is 2427 in, nonsense. Trunks past **60 in** (already a very large
+  street tree) are clamped there; ~200 rows are affected. The ingest logs the count.
+- **Missing dbh.** ~734 trees carry `dbh = 0`. They are given the **median (9 in)** rather than
+  a zero crown. The ingest logs that count too, and the manifest records both.
+
+The allometry lives only in the ingest: it writes a **crown-radius byte per tree** (decimetres,
+0–25.5 m) into the `TREE` file, and Rust reads the radius and squares it. So the model constants
+sit in one place, and the estimator does geometry, not botany.
 
 ### Anti-aliasing the fill
 
@@ -97,17 +190,18 @@ footprint, and a box of side *p* has variance `p²/12`, so the kernel is widened
 with `p` the ground metres per pixel at that tile's zoom and latitude. At z15 (`p` ≈ 3.6 m)
 this is nothing; at z9 (`p` ≈ 232 m) it is most of the kernel, and without it the tile would
 be point-sampling a 70 m field through a 232 m pixel and aliasing badly. This applies only to
-the fill — a street vertex is a point, and is evaluated at plain σ_tight.
+the fill — a sidewalk is sampled at a point, and gets the street kernel unwidened.
 
-### Saturation, by Monte Carlo
+### The cover distribution, by Monte Carlo
 
-With no grid there are no land cells to sort, so the p97 is estimated from a million points
-drawn uniformly over the city's *ground area*: longitude uniform, latitude uniform in
+There is no saturation constant to estimate anymore — cover is bounded by construction — but the
+manifest still records **what the cover actually is** over the city, so the ramp can be tuned
+against a real distribution and the mean can be sanity-checked. It is measured from a million
+points drawn uniformly over the city's *ground area*: longitude uniform, latitude uniform in
 `sin(lat)` (a degree of latitude at the top of the city is not worth more than one at the
-bottom), rejected against the land polygons, and the broad field evaluated exactly at each
-one that lands. The draw is seeded from a fixed constant, so the number the entire ramp hangs
-on is reproducible and does not churn between runs; the manifest records the sample count and
-the seed alongside it.
+bottom), rejected against the land polygons, and the broad cover evaluated exactly at each one
+that lands. The draw is seeded from a fixed constant, so the reported mean does not churn between
+runs; the manifest records the sample count, the seed, the mean and the full set of percentiles.
 
 Point-in-polygon against a shoreline of ~200k edges, a million times over, needs an index:
 every edge is bucketed into the horizontal bands it spans, and a query only tests the edges
@@ -117,9 +211,9 @@ in its own band.
 
 | what | source | notes |
 | --- | --- | --- |
-| trees | NYC ForMS "Forestry Tree Points", Socrata `hn5i-inap` | 898,618 rows at `tpstructure='Full'` — standing trees only, no stumps or empty pits |
+| trees | NYC ForMS "Forestry Tree Points", Socrata `hn5i-inap` | ~899k rows at `tpstructure='Full'` — standing trees only, no stumps or empty pits; `dbh` (trunk inches) is read to size each crown |
 | streets | NYC CSCL street centerline, Socrata `inkn-q76z` | `rw_type` in 1, 5, 6, 7, 10 = street, boardwalk, path/trail, step street, alley |
-| land | NYC borough boundaries (water areas excluded), Socrata `gthc-hcne` | the population the p97 is taken over, and the clip that drops New Jersey |
+| land | NYC borough boundaries (water areas excluded), Socrata `gthc-hcne` | the population the cover distribution is taken over, and the clip that drops New Jersey |
 | woodland | OSM `natural=wood` + `landuse=forest`, via Overpass | see below |
 
 Only walkable road types are kept. Highways, ramps, bridges, tunnels, driveways, ferry
@@ -131,18 +225,19 @@ routes, u-turns and non-physical segments are not part of the network a person w
 Park Ramble is *zero* trees in it, not sparse ones; Van Cortlandt's forest is the same.
 Ingesting only ForMS therefore paints exactly the leafiest ground in the city as bare.
 
-So OSM `natural=wood` and `landuse=forest` polygons are filled into a canopy mask, and
-inside that mask both fields are raised to a floor (0.85 normalized). The mask has no tree
-count to contribute, so it is combined *after* normalization: woodland is simply treed. Its
-edge is feathered (Gaussian, σ = 30 m) so a park boundary is not a hard cut, and because a
-blurred mask sags in the middle of anything narrower than the blur — OSM maps a wood like the
-Ramble as a scatter of small polygons around its paths and clearings — the feather is divided
-by a plateau constant (0.5) and clamped, so ground the blur calls half-covered is fully
+So OSM `natural=wood` and `landuse=forest` polygons are filled into a canopy mask, and inside
+that mask the cover is raised to a floor. A forest is simply **~90% canopy cover** — a
+measurement, not an arbitrary constant, and the old normalized-density hack is gone: the floor is
+a cover value now, applied after the `1 − e^{−CAI}` transform, because the mask carries no crowns
+of its own. Its edge is feathered (Gaussian, σ = 30 m) so a park boundary is not a hard cut, and
+because a blurred mask sags in the middle of anything narrower than the blur — OSM maps a wood
+like the Ramble as a scatter of small polygons around its paths and clearings — the feather is
+divided by a plateau constant (0.5) and clamped, so ground the blur calls half-covered is fully
 wooded and only the outer half of the kernel tapers:
 
     feather = gaussian_30m(woodland ∧ land)
-    floor   = 0.85 * min(1, feather / 0.5)
-    value   = max( min(1, f / saturation), floor )
+    floor   = 0.90 * min(1, feather / 0.5)
+    value   = max( 1 − e^{−CAI}, floor )
 
 The **woodland ∧ land** is what keeps New Jersey's forests and Westchester's out: the
 bounding box an Overpass query needs runs straight over both. This is the one place a raster
@@ -161,13 +256,22 @@ off in minutes rather than seconds, and must send a `User-Agent` (an anonymous c
 ## The colour scale
 
 `src/tree-cover/ramp.ts` — a single-hue emerald sequential ramp, monotonic in lightness, so
-more green always means more trees. Only the light ramp exists; dark mode inverts the whole
-tile pane in CSS.
+more green always means more canopy. Its input is the covered fraction, in [0, 1). Only the light
+ramp exists; dark mode inverts the whole tile pane in CSS.
 
-The low end is carried by **transparency, not by a pale green**. Half the city's land sits
-below 0.4 of saturation, so an alpha rising linearly with density would tint essentially
-everything and wash the map out. Alpha is therefore cubed: 0.4 density comes out at an alpha
-of ~0.04 — a haze — and the opacity is spent on ground that is genuinely leafy.
+Cover is a fraction, and most of the city lands low — mean cover over land is single digits, a
+leafy street ~30–60%. So the ramp is **stretched over the part of [0, 1] the city actually
+occupies** rather than the whole of it: at and above `COVER_FULL` (0.55) the green is fully
+saturated. Cover past ~55% is already a spectacular street, so pinning full green there keeps the
+gradient among leafy streets visible — which is the whole point of this phase — instead of
+spending it on cover nobody reaches. It is a *display* choice, tuned by eye against the reported
+cover distribution, and it is single-sourced: the client's street layer imports the same module,
+and `build-tiles` bakes its 256 steps into the LUT the tiler reads.
+
+The low end is carried by **transparency, not by a pale green**. Most of the city sits well below
+full cover, so an alpha rising linearly would tint essentially everything and wash the map out.
+Alpha is therefore cubed in the stretched value, holding the crowded low end down to a haze and
+spending the opacity on ground that is genuinely leafy.
 
 Street lines get a small opacity multiplier (`ROAD_OPACITY`, 1.2). Same colour function, same
 quantity — but a 2 px line has far less area to make its colour with than the field beneath
@@ -247,11 +351,16 @@ Header, 40 bytes:
 | 24 | f64 | origin latitude, degrees |
 | 32 | f64 | coordinate scale, degrees per quantized unit |
 
-### `data/trees/<id>.bin` — the points, magic `TREE`
+### `data/trees/<id>.bin` — the points and their crowns, magic `TREE` (v2)
 
 `count` (longitude, latitude) pairs, each a varint delta from the previous point — the first
 from the origin. The points are **sorted by quantized (latitude, longitude)** before they are
 written, so a delta carries a step along a row rather than a jump across the city.
+
+Then, as a fixed-size trailing region, `count` **crown bytes** in that same sorted order — byte
+*i* sizes point *i*. Each is the crown radius in **decimetres** (0–25.5 m; the allometry never
+approaches the ceiling), so the estimator reads a radius and squares it to a crown area. v1 was
+points only; the ingest bumps the format to v2 when it starts writing crowns.
 
 ### `data/woodland/<id>.bin` — the canopy mask, magic `WOOD`
 
@@ -266,8 +375,9 @@ a time, so two overlapping woods do not cancel each other out.
 
 ### `data/land/<id>.bin` — the land mask, magic `LAND`
 
-Identical layout to `WOOD`. Needed at ingest (the population the p97 is taken over) and at
-tile time (the AND against the woodland), so it is committed rather than fused into anything.
+Identical layout to `WOOD`. Needed at ingest (the population the cover distribution is taken
+over) and at tile time (the AND against the woodland), so it is committed rather than fused into
+anything.
 
 ### `data/streets/<id>.bin` — the network, magic `STRT`
 
@@ -287,7 +397,7 @@ Header, 56 bytes:
 | 40 | u32 | coordinate blob offset, from the start of the file |
 | 44 | u32 | coordinate blob length |
 | 48 | u32 | density blob offset, from the start of the file |
-| 52 | u32 | density blob length, one byte per vertex |
+| 52 | u32 | density blob length, two bytes per vertex |
 
 Then one 24-byte record per segment, starting at the end of the header:
 
@@ -300,18 +410,18 @@ Then one 24-byte record per segment, starting at the end of the header:
 | 12 | f32 | geodesic length, metres |
 | 16 | u32 | index of this segment's first vertex within the density blob |
 | 20 | u8 | rw_type: 1 street, 5 boardwalk, 6 path, 7 step street, 10 alley |
-| 21 | u8 | street width, feet (0 unknown) |
+| 21 | u8 | street width, feet, curb to curb (0 unknown) — the sidewalk offset comes from this |
 | 22 | u8 | posted speed, mph (0 unknown) |
 | 23 | u8 | reserved |
 
 Then the **coordinate blob**: per segment, `vertex count` (longitude, latitude) varint-delta
 pairs, the first from the origin.
 
-Then the **density blob**: the normalized tight field at each vertex, quantized to 0..255,
-in the same vertex order as the coordinate blob. It is a fixed-size trailing region, and the
-ingest is the only writer that leaves it empty: `build-tree-data` writes the file with the
-blob zeroed, then `tiler densities` samples the field at the coordinates it just read back
-and fills the blob in place.
+Then the **density blob**: the canopy cover at each vertex, a covered fraction of 0..1 quantized
+to 0..255 — **two bytes per vertex**, the left sidewalk then the right, in the vertex order of the
+coordinate blob. It is a fixed-size trailing region, and the ingest is the only writer that
+leaves it empty: `build-tree-data` writes the file with the blob zeroed, then `tiler densities`
+offsets the sidewalks from the coordinates it just read back and fills the blob in place.
 
 ### `public/streets/{x}/{y}.bin` — the chunks (derived, gitignored)
 
@@ -336,11 +446,14 @@ Header, 40 bytes:
 Then `segment count` segments, back to back, each:
 
 - `u16` vertex count, at least 2
+- `u8` half-offset to a sidewalk, in **decimetres** (0 = a path or a boardwalk, drawn as a
+  single line on its centreline). The client has no access to the records, so the offset it
+  draws the two lines either side of travels with the geometry.
 - `vertex count` (longitude, latitude) pairs, zigzag LEB128 varint deltas as above
-- `vertex count` density bytes, so the line is stroked as a gradient rather than one flat
-  colour
+- `2 · vertex count` density bytes, left sidewalk then right, so each line is stroked as a
+  gradient rather than one flat colour
 
-Decoded by `components/street-score-layer.tsx`.
+Decoded by `components/street-score-layer.tsx`, which applies the offset in *pixels*.
 
 ## Adding a city
 
@@ -352,15 +465,16 @@ overwriting each other.
 What has to change is the ingest in `scripts/build-tree-data.ts`, which is currently one
 hard-coded `CITY` constant plus three NYC-specific fetchers. A new city needs:
 
-1. **A tree inventory** — points, ideally with a standing/removed flag. This is the part with
-   no standard: every city publishes its own.
+1. **A tree inventory** — points, ideally with a standing/removed flag and a trunk diameter to
+   size the crowns (without one, a city would need its own way to a crown radius). This is the
+   part with no standard: every city publishes its own.
 2. **A street centerline** — line geometry plus some road classification, so the non-walkable
    types can be dropped.
-3. **A land mask** — a polygon to take the p97 over and to clip the OSM woodland against
-   (otherwise a bounding-box Overpass query pulls in the neighbouring state's forests).
+3. **A land mask** — a polygon to take the cover distribution over and to clip the OSM woodland
+   against (otherwise a bounding-box Overpass query pulls in the neighbouring state's forests).
 4. Its expected row counts, which the Socrata reader uses as a floor to catch a page the
    server quietly cut short.
 
 The **woodland source already works anywhere** — Overpass is queried by bounding box, not by
-city. The estimator, the normalization, the encoders and the tiler are all city-agnostic;
-only the three source fetchers and the `CITY` constant are not.
+city. The estimator, the cover transform, the encoders and the tiler are all city-agnostic; only
+the three source fetchers, the crown allometry and the `CITY` constant are not.

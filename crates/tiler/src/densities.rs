@@ -1,9 +1,11 @@
-//! `tiler densities`: the tight field at every street vertex, and the saturation the whole
-//! ramp hangs on. Run by scripts/build-tree-data.ts once the four `.bin`s are written — the
-//! street file arrives with a zeroed density blob and leaves with it filled, in place.
+//! `tiler densities`: the covered fraction at both sidewalks of every street vertex, and the
+//! cover distribution the manifest records. Run by scripts/build-tree-data.ts once the four
+//! `.bin`s are written — the street file arrives with a zeroed density blob and leaves with it
+//! filled, in place.
 //!
-//! The saturation is what the manifest's model constants are *derived from*, so unlike the
-//! tiler this cannot read them from the manifest: the ingest passes them in.
+//! Cover is `1 - exp(-CAI)`, the Boolean-canopy covered fraction of the crown-area index the KDE
+//! sums. It lives in [0, 1) by construction, so there is no saturation constant to fit — the
+//! model constants the ingest passes in are the kernels, the crown floor and the woodland floor.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -13,13 +15,13 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::Fallible;
-use crate::binfmt::{self, LAND_FORMAT, Polygon, TREE_FORMAT, WOODLAND_FORMAT};
+use crate::binfmt::{self, LAND_FORMAT, Polygon, WOODLAND_FORMAT};
 use crate::geometry::{self, PolygonIndex, PolygonSet, round_half_up};
-use crate::kde::{Projection, TreeIndex, reach_bounds, sample_land};
+use crate::kde::{Projection, TreeIndex, cover, reach_bounds, sample_land};
 use crate::manifest::{Bounds, Distribution};
+use crate::sidewalks;
 
 const CANOPY_METERS: f64 = 20.0; // the mask raster; a 30 m feather has no detail below this
-const SQUARE_METERS_PER_HECTARE: f64 = 10_000.0;
 
 /// Everything the ingest knows and the model needs. The paths are passed rather than derived
 /// so the binary has no opinion about where the repo's data lives.
@@ -31,15 +33,16 @@ pub struct Params {
     land: PathBuf,
     streets: PathBuf,
     source_box: Bounds, // the raw extent of the trees and the streets, before the kernel's reach
-    land_box: Bounds,   // the land polygons' own box, which the saturation samples are drawn over
+    land_box: Bounds,   // the land polygons' own box, which the cover distribution is drawn over
     broad_sigma_meters: f64,
-    tight_sigma_meters: f64,
-    woodland_floor: f64,
+    tight_sigma_along_meters: f64, // the street kernel, down the road: the colour stays smooth
+    tight_sigma_across_meters: f64, // and over it: the far sidewalk falls away, but only gently
+    sidewalk_inset_meters: f64,    // curb to the centre of the sidewalk
+    woodland_floor: f64,           // the cover a wood is treated as: a forest is ~90% canopy
     woodland_feather_meters: f64,
     woodland_plateau: f64,
-    saturation_percentile: u32, // 97, the cut of the broad field both fields divide by
-    saturation_samples: usize,
-    saturation_seed: u64,
+    cover_samples: usize, // land points the reported cover distribution is estimated from
+    cover_seed: u64,      // and the seed they are drawn with, so the mean does not churn
     percentiles: Vec<u32>, // the labels the reported distributions are cut at
 }
 
@@ -47,7 +50,6 @@ pub struct Params {
 #[serde(rename_all = "camelCase")]
 struct Report {
     bounds: Bounds,
-    saturation_trees_per_hectare: f64,
     woodland_square_km: f64,
     draws: usize,
     land_density: Distribution,
@@ -110,7 +112,9 @@ fn build_canopy(
     }
 }
 
-// The normalized value the canopy raises a point to, whatever the trees there say.
+// The cover the woodland mask raises a point to, whatever the street trees there say: a wood is
+// simply ~90% canopy, a measurement rather than a special case. The mask carries no crowns of
+// its own, so it is applied after the cover transform, as a floor.
 fn floor_at(canopy: &Canopy, params: &Params, x: f64, y: f64) -> f64 {
     let col = ((x - canopy.min_x) / CANOPY_METERS - 0.5)
         .max(0.0)
@@ -155,7 +159,7 @@ fn distribution_of(values: &[f64], percentiles: &[u32]) -> Distribution {
 
 pub fn run(params: &Path) -> Fallible<()> {
     let params: Params = serde_json::from_slice(&fs::read(params)?)?;
-    let trees = binfmt::read_points(&params.trees, "TREE", TREE_FORMAT)?;
+    let trees = binfmt::read_trees(&params.trees)?;
     let woodland = binfmt::read_polygons(&params.woodland, "WOOD", WOODLAND_FORMAT)?;
     let land = binfmt::read_polygons(&params.land, "LAND", LAND_FORMAT)?;
     let mut streets = binfmt::read_streets(&params.streets)?;
@@ -168,8 +172,8 @@ pub fn run(params: &Path) -> Fallible<()> {
     eprintln!("canopy mask covers {woodland_square_km:.1} km2 of land");
 
     eprintln!(
-        "estimating the p{} of the broad field from {} land samples",
-        params.saturation_percentile, params.saturation_samples
+        "estimating the cover distribution from {} land samples",
+        params.cover_samples
     );
     let samples = sample_land(
         &index,
@@ -177,33 +181,17 @@ pub fn run(params: &Path) -> Fallible<()> {
         &mut PolygonIndex::new(&land),
         &params.land_box,
         params.broad_sigma_meters,
-        params.saturation_samples,
-        params.saturation_seed,
+        params.cover_samples,
+        params.cover_seed,
     )?;
-    let mut sorted = samples.field.clone();
-    sorted.sort_by(|left, right| left.total_cmp(right));
-    let percentile = percentile_of(&sorted, params.saturation_percentile);
-    // Both fields divide by it, so a city with no trees under its land mask would otherwise
-    // come out entirely NaN rather than empty.
-    if !percentile.is_finite() || percentile <= 0.0 {
-        return Err(format!(
-            "the p{} of the broad field over {} land samples is {percentile}: there is nothing to normalize against",
-            params.saturation_percentile, params.saturation_samples
-        )
-        .into());
-    }
-    // The tiler reads the rounded figure out of the manifest, so the ingest normalizes by that
-    // same figure rather than by a constant only it can see.
-    let saturation_trees_per_hectare = round(percentile * SQUARE_METERS_PER_HECTARE);
-    let saturation = saturation_trees_per_hectare / SQUARE_METERS_PER_HECTARE;
-    eprintln!(
-        "saturation is {saturation_trees_per_hectare} trees/ha, from {} draws",
-        samples.draws
-    );
 
+    // The broad canopy-area index becomes a covered fraction, then the woodland floor raises the
+    // wooded points a street-tree register cannot see. This is the mean cover over land the
+    // sanity check reads against the ~22% all-sources figure: street trees alone must land well
+    // below it.
     let land_densities: Vec<f64> = (0..samples.field.len())
         .map(|sample| {
-            (samples.field[sample] / saturation).min(1.0).max(floor_at(
+            cover(samples.field[sample]).max(floor_at(
                 &canopy,
                 &params,
                 samples.xs[sample],
@@ -213,17 +201,59 @@ pub fn run(params: &Path) -> Fallible<()> {
         .collect();
 
     eprintln!(
-        "sampling the tight field at {} street vertices",
+        "sampling the tight field at both sidewalks of {} street vertices",
         streets.vertices()
     );
-    let street_densities: Vec<f64> = (0..streets.vertices())
+    let street_densities: Vec<f64> = (0..streets.segments())
         .into_par_iter()
-        .map(|vertex| {
-            let x = projection.x(streets.lngs[vertex]);
-            let y = projection.y(streets.lats[vertex]);
-            (index.evaluate(x, y, params.tight_sigma_meters) / saturation)
-                .min(1.0)
-                .max(floor_at(&canopy, &params, x, y))
+        .flat_map(|segment| {
+            let from = streets.starts[segment] as usize;
+            let to = streets.starts[segment + 1] as usize;
+            let xs: Vec<f64> = streets.lngs[from..to]
+                .iter()
+                .map(|lng| projection.x(*lng))
+                .collect();
+            let ys: Vec<f64> = streets.lats[from..to]
+                .iter()
+                .map(|lat| projection.y(*lat))
+                .collect();
+            let offset = sidewalks::half_offset_meters(
+                streets.road_types[segment],
+                streets.width_feet[segment],
+                params.sidewalk_inset_meters,
+            );
+
+            let mut sampled = Vec::with_capacity(binfmt::SIDES * (to - from));
+            for (vertex, bearing) in sidewalks::bearings(&xs, &ys).into_iter().enumerate() {
+                let at = |x: f64, y: f64| {
+                    cover(index.evaluate_oriented(
+                        x,
+                        y,
+                        bearing,
+                        params.tight_sigma_along_meters,
+                        params.tight_sigma_across_meters,
+                    ))
+                    .max(floor_at(&canopy, &params, x, y))
+                };
+                let (normal_x, normal_y) = sidewalks::left_normal(bearing);
+                let left = at(
+                    xs[vertex] + normal_x * offset,
+                    ys[vertex] + normal_y * offset,
+                );
+                // A boardwalk, a path or a step street *is* the walking surface: it has no
+                // offset, and the one sample taken on the line stands for both of its sides.
+                let right = if offset == 0.0 {
+                    left
+                } else {
+                    at(
+                        xs[vertex] - normal_x * offset,
+                        ys[vertex] - normal_y * offset,
+                    )
+                };
+                sampled.push(left);
+                sampled.push(right);
+            }
+            sampled
         })
         .collect();
     for (byte, density) in streets.densities_mut().iter_mut().zip(&street_densities) {
@@ -233,7 +263,6 @@ pub fn run(params: &Path) -> Fallible<()> {
 
     let report = Report {
         bounds,
-        saturation_trees_per_hectare,
         woodland_square_km: round(woodland_square_km),
         draws: samples.draws,
         land_density: distribution_of(&land_densities, &params.percentiles),

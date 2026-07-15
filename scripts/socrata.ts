@@ -7,6 +7,13 @@ export interface Coord {
   lng: number;
 }
 
+// A standing tree, with the trunk diameter its crown is sized from. ForMS records `dbh` in
+// whole inches; 734 of the 898,618 standing trees carry none, and the ingest is what decides
+// what to do about that.
+export interface Tree extends Coord {
+  dbhInches: number;
+}
+
 const PAGE_SIZE = 50_000;
 const MAX_ATTEMPTS = 3;
 const RETRY_DELAY_MS = 2_000;
@@ -95,19 +102,20 @@ export function parseWktPoint(wkt: string): Coord | null {
 }
 
 // Every standing tree in the NYC Parks forestry inventory; stumps and empty pits
-// are excluded by tpstructure.
-export async function fetchNycTrees(): Promise<Coord[]> {
-  const rows = await fetchDataset<{ geometry?: string }>(
+// are excluded by tpstructure. A missing dbh comes back as 0 — the ingest imputes it.
+export async function fetchNycTrees(): Promise<Tree[]> {
+  const rows = await fetchDataset<{ geometry?: string; dbh?: string }>(
     TREE_DATASET,
-    { $select: "geometry", $where: "tpstructure='Full'" },
+    { $select: "geometry,dbh", $where: "tpstructure='Full'" },
     TREE_COUNT,
   );
-  const coords: Coord[] = [];
+  const trees: Tree[] = [];
   for (const row of rows) {
     const coord = row.geometry ? parseWktPoint(row.geometry) : null;
     if (coord) {
-      coords.push(coord);
+      const dbh = Number.parseInt(row.dbh ?? "", 10);
+      trees.push({ ...coord, dbhInches: Number.isFinite(dbh) ? dbh : 0 });
     }
   }
-  return coords;
+  return trees;
 }

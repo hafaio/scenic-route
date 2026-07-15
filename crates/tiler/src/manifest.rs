@@ -26,15 +26,16 @@ pub struct FieldLayer {
     pub woodland: SourceFile,
     pub land: SourceFile,
     pub broad_sigma_meters: f64,
-    pub saturation_trees_per_hectare: f64,
     pub woodland_floor: f64,
     pub woodland_feather_meters: f64,
     pub woodland_plateau: f64,
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct StreetLayer {
     pub file: String,
+    pub sidewalk_inset_meters: f64, // curb to the centre of the sidewalk, either side
 }
 
 #[derive(Deserialize)]
