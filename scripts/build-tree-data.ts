@@ -1,7 +1,7 @@
 // `bun run build-tree-data`: writes data/{trees,woodland,land,streets}/<id>.bin and
 // src/tree-cover/manifest.json. Fetching, encoding and the manifest are here; the estimator that
-// fills the streets file's density blob and finds the saturation is crates/tiler. The model, the
-// sources and the binary layouts are all documented in scripts/README.md.
+// fills the streets file's density blob and reports the cover distribution is crates/tiler. The
+// model, the sources and the binary layouts are all documented in scripts/README.md.
 
 import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
@@ -10,8 +10,9 @@ import { join } from "node:path";
 import {
   boxOf,
   COORD_SCALE,
-  encodePoints,
+  type CrownedTree,
   encodePolygons,
+  encodeTrees,
   writeVarint,
   zigzag,
 } from "./geometry";
@@ -27,7 +28,7 @@ import {
   writeManifest,
 } from "./manifest";
 import { fetchWoodland, type Polygon } from "./overpass";
-import { type Coord, fetchDataset, fetchNycTrees } from "./socrata";
+import { type Coord, fetchDataset, fetchNycTrees, type Tree } from "./socrata";
 import { runTiler } from "./tiler";
 
 // The CSCL road-way types that carry pedestrians: street, boardwalk, path, step street,
@@ -67,35 +68,63 @@ interface RawDistribution {
 
 interface Estimate {
   bounds: Bounds; // the sources, grown by the kernel's reach: what the pyramid covers
-  saturationTreesPerHectare: number;
   woodlandSquareKm: number;
   draws: number;
-  landDensity: RawDistribution;
+  landDensity: RawDistribution; // the cover over land: its mean is the sanity-check figure
   streetDensity: RawDistribution;
 }
 
 const DATA_DIR = join(import.meta.dirname, "..", "data");
 const PARAMS_PATH = join(tmpdir(), "scenic-route-densities.json");
 
-const STREET_FORMAT = 2;
+const STREET_FORMAT = 3;
 const STREET_HEADER_BYTES = 56;
 const STREET_RECORD_BYTES = 24;
-const TREE_FORMAT = 1;
+const STREET_SIDES = 2; // the density blob carries both sidewalks of every vertex, left then right
+const TREE_FORMAT = 2; // v2 carries a crown-radius byte per tree; v1 was points only
 const WOODLAND_FORMAT = 1;
 const LAND_FORMAT = 1;
 
 const BROAD_SIGMA_METERS = 70; // neighbourhood leafiness
-const TIGHT_SIGMA_METERS = 20; // what this street is lined with
-const WOODLAND_FLOOR = 0.85; // normalized value the canopy mask raises both fields to
+// What a sidewalk is lined with. Broad along the road so the colour does not lurch from tree to
+// tree; loose across it, because the crown discs now do the physical work of reaching over the
+// road — a hard across-cut is exactly what this phase removes. At a 6.5 m half-offset the far
+// sidewalk is ~13 m across, where a same-size tree contributes exp(-13.1^2/(2*8^2)) = 0.26 of a
+// near one: a real reach-over, still clearly near-dominated (it was 0.03 at 5 m).
+const TIGHT_SIGMA_ALONG_METERS = 15;
+const TIGHT_SIGMA_ACROSS_METERS = 8;
+const SIDEWALK_INSET_METERS = 2; // curb to the centre of the sidewalk
+// A wood is simply ~90% canopy cover, a measurement rather than an arbitrary floor: this is a
+// cover value now, not a normalized density, and it is applied after the 1 - e^-CAI transform.
+const WOODLAND_FLOOR = 0.9;
 const WOODLAND_FEATHER_METERS = 30; // soft park edge, rather than a hard cut
 // The feather is divided by this and clamped, so a cell it calls half covered is fully
 // wooded: a blurred mask otherwise sags in the middle of anything narrower than the blur,
 // and OSM maps a wood like the Ramble as a scatter of polygons around its clearings.
 const WOODLAND_PLATEAU = 0.5;
 
-const SATURATION: Percentile = "p97"; // of the broad field over land; both fields divide by it
-const SATURATION_SAMPLES = 1_000_000;
-const SATURATION_SEED = 42; // fixed, so the constant the whole ramp hangs on does not churn
+// The crown each tree shades the ground with, from its trunk diameter. Published relation, not
+// invented: McPherson, van Doorn & Peper 2016, "Urban Tree Database and Allometric Equations"
+// (USDA Forest Service GTR-PSW-253, archive RDS-2016-0005). The "NoEast" reference city is
+// Queens, so this is literally NYC street-tree data; the London planetree log-log curve (the
+// city's most abundant street species, R^2 0.94) stands in for every species, since ForMS
+// carries no species here. crownDiameter[m] = exp(a + b*ln(ln(dbh_cm + 1)) + correction).
+const CROWN_ALLOMETRY = {
+  source:
+    "McPherson, van Doorn & Peper 2016 (USDA GTR-PSW-253), NoEast London planetree",
+  form: "crownDiameterMeters = exp(a + b*ln(ln(dbhInches*2.54 + 1)) + logBiasCorrection)",
+  a: -0.752,
+  b: 2.414,
+  logBiasCorrection: 0.00988,
+} as const;
+const CM_PER_INCH = 2.54;
+// max(dbh) is 2427 in, nonsense; a 60 in trunk is already a very large street tree, so anything
+// past it is clamped there. dbh = 0 (missing) is given the median rather than a zero crown.
+const MAX_DBH_INCHES = 60;
+const MEDIAN_DBH_INCHES = 9; // the ForMS median over standing trees, imputed for missing dbh
+
+const COVER_SAMPLES = 1_000_000;
+const COVER_SEED = 42; // fixed, so the reported mean cover does not churn between runs
 
 const DENSIFY_METERS = 25; // road sampling step, below the tight sigma so the colour varies
 const DROP_LENGTH_METERS = 1; // shorter than this the geometry is degenerate
@@ -124,6 +153,42 @@ const NYC_BOROUGH_COUNT = 5;
 function toInt(value: string | undefined): number {
   const parsed = Number.parseInt(value ?? "", 10);
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+// The crown radius the allometry predicts for one trunk, in metres. dbh is capped and a missing
+// dbh imputed *before* this, so the log-log curve is only ever asked about a plausible trunk.
+function crownRadiusMeters(dbhInches: number): number {
+  const dbhCm = dbhInches * CM_PER_INCH;
+  const diameter = Math.exp(
+    CROWN_ALLOMETRY.a +
+      CROWN_ALLOMETRY.b * Math.log(Math.log(dbhCm + 1)) +
+      CROWN_ALLOMETRY.logBiasCorrection,
+  );
+  return diameter / 2;
+}
+
+// Sizes every tree's crown from its dbh, clamping the nonsense outliers and imputing the median
+// for the trees that carry no dbh — reporting how many of each so the model's inputs are not
+// silent. The crown then rides with the point through the encoder.
+function crownTrees(trees: readonly Tree[]): {
+  crowned: CrownedTree[];
+  clamped: number;
+  imputed: number;
+} {
+  let clamped = 0;
+  let imputed = 0;
+  const crowned = trees.map(({ lat, lng, dbhInches }) => {
+    let dbh = dbhInches;
+    if (dbh <= 0) {
+      dbh = MEDIAN_DBH_INCHES;
+      imputed += 1;
+    } else if (dbh > MAX_DBH_INCHES) {
+      dbh = MAX_DBH_INCHES;
+      clamped += 1;
+    }
+    return { lat, lng, crownRadiusM: crownRadiusMeters(dbh) };
+  });
+  return { crowned, clamped, imputed };
 }
 
 function haversineMeters(from: Coord, to: Coord): number {
@@ -273,9 +338,9 @@ function distributionOf(raw: RawDistribution): Distribution {
   };
 }
 
-// The density blob is written zeroed and filled in place by `tiler densities`, so the
-// coordinates it samples the field at are the ones that ship rather than a parallel copy.
-// layout: scripts/README.md
+// The density blob is written zeroed — two bytes a vertex, one sidewalk each — and filled in
+// place by `tiler densities`, so the coordinates it offsets the sidewalks from are the ones that
+// ship rather than a parallel copy. layout: scripts/README.md
 function encodeStreets(segments: Segment[]): Uint8Array {
   let originLng = Number.POSITIVE_INFINITY;
   let originLat = Number.POSITIVE_INFINITY;
@@ -337,9 +402,11 @@ function encodeStreets(segments: Segment[]): Uint8Array {
   view.setUint32(40, records.length, true);
   view.setUint32(44, blobEnd, true);
   view.setUint32(48, records.length + blobEnd, true);
-  view.setUint32(52, vertices, true);
+  view.setUint32(52, STREET_SIDES * vertices, true);
 
-  const encoded = new Uint8Array(records.length + blobEnd + vertices);
+  const encoded = new Uint8Array(
+    records.length + blobEnd + STREET_SIDES * vertices,
+  );
   encoded.set(records);
   encoded.set(blob.subarray(0, blobEnd), records.length);
   return encoded;
@@ -397,14 +464,18 @@ async function ingest(): Promise<void> {
   const segments = await fetchNycStreets();
   console.error(`${CITY.id}: fetching trees`);
   const trees = await fetchNycTrees();
+  const { crowned, clamped, imputed } = crownTrees(trees);
+  console.error(
+    `${CITY.id}: sized ${crowned.length} crowns (clamped ${clamped} trunks past ${MAX_DBH_INCHES} in, imputed ${imputed} missing dbh at ${MEDIAN_DBH_INCHES} in)`,
+  );
 
   const file = `${CITY.id}.bin`;
   const treeFile = await writeSource(
     "trees",
     file,
     TREE_FORMAT,
-    trees.length,
-    encodePoints("TREE", TREE_FORMAT, trees),
+    crowned.length,
+    encodeTrees(TREE_FORMAT, crowned),
   );
   const woodlandFile = await writeSource(
     "woodland",
@@ -438,13 +509,14 @@ async function ingest(): Promise<void> {
       sourceBox: sourceBoxOf(segments, trees),
       landBox,
       broadSigmaMeters: BROAD_SIGMA_METERS,
-      tightSigmaMeters: TIGHT_SIGMA_METERS,
+      tightSigmaAlongMeters: TIGHT_SIGMA_ALONG_METERS,
+      tightSigmaAcrossMeters: TIGHT_SIGMA_ACROSS_METERS,
+      sidewalkInsetMeters: SIDEWALK_INSET_METERS,
       woodlandFloor: WOODLAND_FLOOR,
       woodlandFeatherMeters: WOODLAND_FEATHER_METERS,
       woodlandPlateau: WOODLAND_PLATEAU,
-      saturationPercentile: Number(SATURATION.slice(1)),
-      saturationSamples: SATURATION_SAMPLES,
-      saturationSeed: SATURATION_SEED,
+      coverSamples: COVER_SAMPLES,
+      coverSeed: COVER_SEED,
       percentiles: PERCENTILES.map((percentile) => Number(percentile.slice(1))),
     }),
   );
@@ -460,10 +532,16 @@ async function ingest(): Promise<void> {
     woodland: woodlandFile,
     land: landFile,
     broadSigmaMeters: BROAD_SIGMA_METERS,
-    tightSigmaMeters: TIGHT_SIGMA_METERS,
-    saturationTreesPerHectare: estimate.saturationTreesPerHectare,
-    saturationSamples: SATURATION_SAMPLES,
-    saturationSeed: SATURATION_SEED,
+    tightSigmaAlongMeters: TIGHT_SIGMA_ALONG_METERS,
+    tightSigmaAcrossMeters: TIGHT_SIGMA_ACROSS_METERS,
+    crownAllometry: CROWN_ALLOMETRY,
+    maxDbhInches: MAX_DBH_INCHES,
+    imputedDbhInches: MEDIAN_DBH_INCHES,
+    clampedTrees: clamped,
+    imputedTrees: imputed,
+    meanCoverOverLand: estimate.landDensity.mean,
+    coverSamples: COVER_SAMPLES,
+    coverSeed: COVER_SEED,
     woodlandSquareKm: estimate.woodlandSquareKm,
     woodlandFloor: WOODLAND_FLOOR,
     woodlandFeatherMeters: WOODLAND_FEATHER_METERS,
@@ -481,6 +559,7 @@ async function ingest(): Promise<void> {
     bytes: streetBytes.length,
     sha256: createHash("sha256").update(streetBytes).digest("hex"),
     densifyMeters: DENSIFY_METERS,
+    sidewalkInsetMeters: SIDEWALK_INSET_METERS,
     density: distributionOf(estimate.streetDensity),
     updated,
     attribution: CITY.streetAttribution,

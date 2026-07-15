@@ -7,15 +7,26 @@ use std::path::Path;
 
 use crate::Fallible;
 
-pub const TREE_FORMAT: u16 = 1;
+pub const TREE_FORMAT: u16 = 2; // v2 carries a crown-radius byte per tree; v1 was points only
 pub const WOODLAND_FORMAT: u16 = 1;
 pub const LAND_FORMAT: u16 = 1;
-pub const STREET_FORMAT: u16 = 2;
+pub const STREET_FORMAT: u16 = 3;
+
+pub const SIDES: usize = 2; // the two sidewalks a density blob carries per vertex, left then right
+pub const DECIMETERS_PER_METER: f64 = 10.0; // the crown byte's unit: a decimetre of crown radius
 
 #[derive(Clone, Copy)]
 pub struct Coord {
     pub lng: f64,
     pub lat: f64,
+}
+
+/// The tree inventory: a point per tree, and the radius of the crown disc it shades the ground
+/// with — decoded from the trailing crown byte, decimetres to metres. The crown is what the
+/// canopy-cover model weights each tree by; see scripts/README.md.
+pub struct Trees {
+    pub coords: Vec<Coord>,
+    pub crown_radii_m: Vec<f64>,
 }
 
 pub type Ring = Vec<Coord>;
@@ -100,27 +111,50 @@ fn header(bytes: &[u8]) -> Header {
     }
 }
 
-pub fn read_points(path: &Path, magic: &str, format: u16) -> Fallible<Vec<Coord>> {
+/// The points, then the `count` trailing crown bytes in the same order — one decimetre of crown
+/// radius per tree. The two arrays are parallel: the crown byte at index `i` sizes the tree at
+/// point `i`.
+pub fn read_trees(path: &Path) -> Fallible<Trees> {
     let bytes = fs::read(path)?;
-    check_magic(&bytes, magic, format, path)?;
+    check_magic(&bytes, "TREE", TREE_FORMAT, path)?;
     let head = header(&bytes);
     let mut cursor = Cursor {
         bytes: &bytes,
         offset: head.body,
     };
 
-    let mut points = Vec::with_capacity(head.count);
+    let mut coords = Vec::with_capacity(head.count);
     let mut x: i64 = 0;
     let mut y: i64 = 0;
     for _ in 0..head.count {
         x += i64::from(cursor.varint());
         y += i64::from(cursor.varint());
-        points.push(Coord {
+        coords.push(Coord {
             lng: head.origin_lng + x as f64 * head.scale,
             lat: head.origin_lat + y as f64 * head.scale,
         });
     }
-    Ok(points)
+    // The crown bytes are the fixed-size trailing region, one per point, written after the
+    // variable-length coordinate stream the cursor has just walked to the end of.
+    let crowns = cursor.offset;
+    if bytes.len() < crowns + head.count {
+        return Err(format!(
+            "{} is truncated: {} bytes, {} needed for {} crown bytes",
+            path.display(),
+            bytes.len(),
+            crowns + head.count,
+            head.count
+        )
+        .into());
+    }
+    let crown_radii_m = bytes[crowns..crowns + head.count]
+        .iter()
+        .map(|byte| f64::from(*byte) / DECIMETERS_PER_METER)
+        .collect();
+    Ok(Trees {
+        coords,
+        crown_radii_m,
+    })
 }
 
 pub fn read_polygons(path: &Path, magic: &str, format: u16) -> Fallible<Vec<Polygon>> {
@@ -165,6 +199,8 @@ pub struct Streets {
     pub lngs: Vec<f64>, // every vertex of every segment, concatenated
     pub lats: Vec<f64>,
     pub starts: Vec<u32>, // segments + 1 entries; segment i owns [starts[i], starts[i + 1])
+    pub road_types: Vec<u8>, // one per segment: 1 street, 5 boardwalk, 6 path, 7 step, 10 alley
+    pub width_feet: Vec<u8>, // curb to curb, 0 unknown — what the sidewalk offset is derived from
     density_offset: usize,
 }
 
@@ -177,12 +213,16 @@ impl Streets {
         self.lngs.len()
     }
 
+    /// The left and right densities of every vertex, interleaved.
     pub fn densities(&self) -> &[u8] {
-        &self.bytes[self.density_offset..self.density_offset + self.vertices()]
+        &self.bytes[self.density_offset..self.density_offset + SIDES * self.vertices()]
     }
 
     pub fn densities_mut(&mut self) -> &mut [u8] {
-        let (from, to) = (self.density_offset, self.density_offset + self.lngs.len());
+        let (from, to) = (
+            self.density_offset,
+            self.density_offset + SIDES * self.lngs.len(),
+        );
         &mut self.bytes[from..to]
     }
 }
@@ -198,21 +238,24 @@ pub fn read_streets(path: &Path) -> Fallible<Streets> {
     let scale = f64_at(&bytes, 32);
     let coord_offset = u32_at(&bytes, 40) as usize;
     let density_offset = u32_at(&bytes, 48) as usize;
-    let vertices = u32_at(&bytes, 52) as usize;
+    let density_bytes = u32_at(&bytes, 52) as usize;
     // The density blob is last, so this covers the records and the coordinates before it.
-    if bytes.len() < density_offset + vertices {
+    if bytes.len() < density_offset + density_bytes {
         return Err(format!(
             "{} is truncated: {} bytes, {} needed for {count} segments",
             path.display(),
             bytes.len(),
-            density_offset + vertices
+            density_offset + density_bytes
         )
         .into());
     }
 
+    let vertices = density_bytes / SIDES;
     let mut lngs = Vec::with_capacity(vertices);
     let mut lats = Vec::with_capacity(vertices);
     let mut starts = Vec::with_capacity(count + 1);
+    let mut road_types = Vec::with_capacity(count);
+    let mut width_feet = Vec::with_capacity(count);
     for segment in 0..count {
         let record = header_bytes + segment * record_bytes;
         let mut cursor = Cursor {
@@ -221,6 +264,8 @@ pub fn read_streets(path: &Path) -> Fallible<Streets> {
         };
         let length = usize::from(u16_at(&bytes, record + 8));
         starts.push(lngs.len() as u32);
+        road_types.push(bytes[record + 20]);
+        width_feet.push(bytes[record + 21]);
 
         let mut x: i64 = 0;
         let mut y: i64 = 0;
@@ -232,11 +277,24 @@ pub fn read_streets(path: &Path) -> Fallible<Streets> {
         }
     }
     starts.push(lngs.len() as u32);
+    // Two densities a vertex, and the blob is sized from the records the coordinates were just
+    // decoded against: a disagreement means the two halves of the file are not the same network.
+    if density_bytes != SIDES * lngs.len() {
+        return Err(format!(
+            "{} carries {density_bytes} density bytes for {} vertices, not {}",
+            path.display(),
+            lngs.len(),
+            SIDES * lngs.len()
+        )
+        .into());
+    }
     Ok(Streets {
         bytes,
         lngs,
         lats,
         starts,
+        road_types,
+        width_feet,
         density_offset,
     })
 }

@@ -11,17 +11,17 @@ use rayon::prelude::*;
 
 use crate::Fallible;
 use crate::binfmt::{
-    self, LAND_FORMAT, Polygon, Streets, TREE_FORMAT, WOODLAND_FORMAT, write_varint, zigzag,
+    self, LAND_FORMAT, Polygon, SIDES, Streets, WOODLAND_FORMAT, write_varint, zigzag,
 };
 use crate::geometry::{self, BLUR_RADII, PolygonSet, round_half_up};
-use crate::kde::{KERNEL_RADII, Projection, TreeIndex};
+use crate::kde::{KERNEL_RADII, Projection, TreeIndex, cover};
 use crate::manifest::{Bounds, City, Manifest};
+use crate::sidewalks;
 
 const TILE_SIZE: usize = 256;
 const MIN_ZOOM: u32 = 9;
 const MAX_ZOOM: u32 = 15; // past this the kernel has no detail left to show; Leaflet upscales
 const MIN_ALPHA: u8 = 2; // below this the fill is invisible, and the pixel costs more than it says
-const SQUARE_METERS_PER_HECTARE: f64 = 10_000.0;
 const EQUATOR_METERS_PER_PIXEL: f64 = 156_543.033_92; // web mercator, at the equator, at z0
 const MIN_FEATHER_PIXELS: f64 = 0.5; // below this the blur has nothing to say and is skipped
 // The shoreline clip, rasterized once. Only woodland within a cell of the water can care, and
@@ -30,10 +30,11 @@ const MIN_FEATHER_PIXELS: f64 = 0.5; // below this the blur has nothing to say a
 const LAND_METERS: f64 = 20.0;
 
 // layouts: scripts/README.md
-const CHUNK_FORMAT: u16 = 2;
+const CHUNK_FORMAT: u16 = 3;
 const CHUNK_HEADER_BYTES: usize = 40;
 const CHUNK_COORD_SCALE: f64 = 1e-6; // degrees per quantized unit, ~0.1 m
 const CHUNK_ZOOM: u32 = 12;
+const DECIMETERS_PER_METER: f64 = 10.0; // the chunk's unit for the sidewalk offset
 
 pub struct Args {
     pub manifest: PathBuf,
@@ -50,9 +51,8 @@ struct Layer {
     trees: TreeIndex,
     woodland: PolygonSet,
     land: LandMask,
-    saturation: f64, // trees per square metre the field divides by
     broad_sigma_meters: f64,
-    woodland_floor: f64,
+    woodland_floor: f64, // the cover a wood is treated as: a forest is ~90% canopy
     woodland_feather_meters: f64,
     woodland_plateau: f64,
 }
@@ -155,11 +155,7 @@ fn rasterize_land(land: &[Polygon], bounds: &Bounds, projection: &Projection) ->
 
 fn read_layer(city: &City, data: &Path) -> Fallible<Layer> {
     let source = |directory: &str, file: &str| data.join(directory).join(file);
-    let trees = binfmt::read_points(
-        &source("trees", &city.field.trees.file),
-        "TREE",
-        TREE_FORMAT,
-    )?;
+    let trees = binfmt::read_trees(&source("trees", &city.field.trees.file))?;
     let woodland = binfmt::read_polygons(
         &source("woodland", &city.field.woodland.file),
         "WOOD",
@@ -173,7 +169,6 @@ fn read_layer(city: &City, data: &Path) -> Fallible<Layer> {
         woodland: geometry::flatten(&woodland),
         land: rasterize_land(&land, &city.bounds, &projection),
         projection,
-        saturation: city.field.saturation_trees_per_hectare / SQUARE_METERS_PER_HECTARE,
         broad_sigma_meters: city.field.broad_sigma_meters,
         woodland_floor: city.field.woodland_floor,
         woodland_feather_meters: city.field.woodland_feather_meters,
@@ -308,13 +303,13 @@ fn paint(
     for (y, up) in ys.iter().enumerate() {
         for (x, across) in xs.iter().enumerate() {
             let pixel = y * TILE_SIZE + x;
-            let density = if trees {
-                layer.trees.evaluate(*across, *up, sigma) / layer.saturation
+            let covered = if trees {
+                cover(layer.trees.evaluate(*across, *up, sigma))
             } else {
                 0.0
             };
             let floored = floor.map_or(0.0, |floor| f64::from(floor[pixel]));
-            let stop = round_half_up(density.min(1.0).max(floored) * 255.0) as usize * 4;
+            let stop = round_half_up(covered.max(floored) * 255.0) as usize * 4;
             if ramp[stop + 3] < MIN_ALPHA {
                 continue;
             }
@@ -337,14 +332,28 @@ fn encode_png(pixels: &[u8]) -> Fallible<Vec<u8>> {
     Ok(bytes)
 }
 
-// layout: scripts/README.md
-fn encode_chunk(streets: &Streets, members: &[u32], origin_lng: f64, origin_lat: f64) -> Vec<u8> {
+// The client has no access to the records, so the sidewalk offset the two lines are drawn either
+// side of travels with the geometry. layout: scripts/README.md
+fn encode_chunk(
+    streets: &Streets,
+    members: &[u32],
+    inset_meters: f64,
+    origin_lng: f64,
+    origin_lat: f64,
+) -> Vec<u8> {
     let densities = streets.densities();
     let mut bytes = vec![0u8; CHUNK_HEADER_BYTES];
     for segment in members {
-        let from = streets.starts[*segment as usize] as usize;
-        let to = streets.starts[*segment as usize + 1] as usize;
+        let segment = *segment as usize;
+        let from = streets.starts[segment] as usize;
+        let to = streets.starts[segment + 1] as usize;
+        let offset = sidewalks::half_offset_meters(
+            streets.road_types[segment],
+            streets.width_feet[segment],
+            inset_meters,
+        );
         bytes.extend_from_slice(&((to - from) as u16).to_le_bytes());
+        bytes.push(round_half_up(offset * DECIMETERS_PER_METER) as u8);
         let mut previous_x = 0i64;
         let mut previous_y = 0i64;
         for vertex in from..to {
@@ -355,7 +364,7 @@ fn encode_chunk(streets: &Streets, members: &[u32], origin_lng: f64, origin_lat:
             previous_x = x;
             previous_y = y;
         }
-        bytes.extend_from_slice(&densities[from..to]);
+        bytes.extend_from_slice(&densities[SIDES * from..SIDES * to]);
     }
 
     bytes[0..4].copy_from_slice(b"STCK");
@@ -370,7 +379,7 @@ fn encode_chunk(streets: &Streets, members: &[u32], origin_lng: f64, origin_lat:
 
 /// A segment goes into every z12 tile its bounding box touches, which overshoots slightly but
 /// cannot leave a gap at a tile seam.
-fn write_chunks(streets: &Streets, chunks: &Path) -> Fallible<(usize, usize)> {
+fn write_chunks(streets: &Streets, inset_meters: f64, chunks: &Path) -> Fallible<(usize, usize)> {
     let mut buckets: HashMap<(u32, u32), Vec<u32>> = HashMap::new();
     for segment in 0..streets.segments() {
         let from = streets.starts[segment] as usize;
@@ -399,7 +408,7 @@ fn write_chunks(streets: &Streets, chunks: &Path) -> Fallible<(usize, usize)> {
     for ((tile_x, tile_y), members) in &buckets {
         let origin_lng = pixel_x_to_lng(f64::from(*tile_x) * TILE_SIZE as f64, CHUNK_ZOOM);
         let origin_lat = pixel_y_to_lat(f64::from(*tile_y) * TILE_SIZE as f64, CHUNK_ZOOM);
-        let encoded = encode_chunk(streets, members, origin_lng, origin_lat);
+        let encoded = encode_chunk(streets, members, inset_meters, origin_lng, origin_lat);
         let path = chunks
             .join(tile_x.to_string())
             .join(format!("{tile_y}.bin"));
@@ -546,14 +555,14 @@ pub fn run(args: &Args) -> Fallible<()> {
     for city in &manifest.cities {
         let streets = binfmt::read_streets(&args.data.join("streets").join(&city.streets.file))?;
         eprintln!(
-            "{}: {} trees, {} woodland polygons, {} segments, ramp saturates at {} trees/ha",
+            "{}: {} trees, {} woodland polygons, {} segments",
             city.id,
             city.field.trees.count,
             city.field.woodland.count,
             streets.segments(),
-            city.field.saturation_trees_per_hectare
         );
-        let (city_chunks, city_bytes) = write_chunks(&streets, &args.chunks)?;
+        let (city_chunks, city_bytes) =
+            write_chunks(&streets, city.streets.sidewalk_inset_meters, &args.chunks)?;
         chunks += city_chunks;
         chunk_bytes += city_bytes;
     }

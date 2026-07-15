@@ -67,30 +67,45 @@ function writeHeader(
   view.setFloat64(32, COORD_SCALE, true);
 }
 
-// Sorted by quantized (lat, lng), so a delta carries a step along a row rather than a jump
-// across the city and the whole inventory fits in about four bytes a tree.
+// A tree, with the crown disc it shades the ground with already sized from its dbh: the model
+// weights each tree by this crown, so it travels with the point.
+export interface CrownedTree extends Coord {
+  crownRadiusM: number;
+}
+
+export const DECIMETERS_PER_METER = 10; // the crown byte's unit: a decimetre of crown radius
+
+// Every point carries a crown-radius byte, written as a fixed-size trailing region after the
+// coordinate stream and in the very same sorted order, so byte i sizes point i. The points are
+// sorted by quantized (lat, lng), so a delta carries a step along a row rather than a jump
+// across the city and the whole inventory fits in about four bytes a tree. TREE v2.
 // layout: scripts/README.md
-export function encodePoints(
-  magic: string,
+export function encodeTrees(
   format: number,
-  points: readonly Coord[],
+  trees: readonly CrownedTree[],
 ): Uint8Array {
   let originLng = Number.POSITIVE_INFINITY;
   let originLat = Number.POSITIVE_INFINITY;
-  for (const { lat, lng } of points) {
+  for (const { lat, lng } of trees) {
     originLng = Math.min(originLng, lng);
     originLat = Math.min(originLat, lat);
   }
 
-  const quantized = points
-    .map(({ lat, lng }) => ({
+  const quantized = trees
+    .map(({ lat, lng, crownRadiusM }) => ({
       x: Math.round((lng - originLng) / COORD_SCALE),
       y: Math.round((lat - originLat) / COORD_SCALE),
+      // Clamped into the byte: a decimetre of radius, 0..25.5 m, which the allometry never
+      // approaches even at the largest trunk the ingest keeps.
+      crown: Math.min(
+        255,
+        Math.max(0, Math.round(crownRadiusM * DECIMETERS_PER_METER)),
+      ),
     }))
     .sort((left, right) => left.y - right.y || left.x - right.x);
 
-  // Two varints of at most five bytes each per point.
-  const bytes = new Uint8Array(HEADER_BYTES + points.length * 10);
+  // Two varints of at most five bytes each per point, then one crown byte each.
+  const bytes = new Uint8Array(HEADER_BYTES + trees.length * 11);
   const view = new DataView(bytes.buffer);
   let offset = HEADER_BYTES;
   let previousX = 0;
@@ -101,7 +116,11 @@ export function encodePoints(
     previousX = x;
     previousY = y;
   }
-  writeHeader(bytes, view, magic, format, points.length, originLng, originLat);
+  for (const { crown } of quantized) {
+    bytes[offset] = crown;
+    offset += 1;
+  }
+  writeHeader(bytes, view, "TREE", format, trees.length, originLng, originLat);
   return bytes.subarray(0, offset);
 }
 

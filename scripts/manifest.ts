@@ -44,29 +44,46 @@ export interface SourceFile {
   sha256: string;
 }
 
-// The tree-density field: not a raster, but the points and masks it is computed from, plus
-// the constants that turn a kernel density estimate into the 0..1 the ramp reads.
+// How a tree's trunk diameter becomes the crown disc the model shades the ground with. A
+// published relation, recorded so the model is legible from the manifest alone.
+export interface CrownAllometry {
+  source: string;
+  form: string;
+  a: number;
+  b: number;
+  logBiasCorrection: number;
+}
+
+// The canopy-cover field: not a raster, but the points and masks it is computed from, plus the
+// constants that turn a crown-weighted kernel density estimate into the covered fraction in
+// [0, 1) the ramp reads. There is no saturation constant — cover is bounded by construction.
 export interface FieldLayer {
-  trees: SourceFile; // data/trees/<id>.bin, the points the estimate sums over
+  trees: SourceFile; // data/trees/<id>.bin, the points and crowns the estimate sums over
   woodland: SourceFile; // data/woodland/<id>.bin, the canopy the inventory does not carry
   land: SourceFile; // data/land/<id>.bin, the population and the clip
   broadSigmaMeters: number; // kernel behind the background fill
-  tightSigmaMeters: number; // kernel the roads are sampled from
-  saturationTreesPerHectare: number; // the density both fields divide by; 1.0 here
-  saturationSamples: number; // land points the percentile was estimated from
-  saturationSeed: number; // and the seed they were drawn with, so it is reproducible
+  tightSigmaAlongMeters: number; // the street kernel, down the road: the colour stays smooth
+  tightSigmaAcrossMeters: number; // and over it, loosely: a big tree opposite reaches over
+  crownAllometry: CrownAllometry; // dbh -> crown radius, the weight each tree carries
+  maxDbhInches: number; // trunks past this are clamped: the source has nonsense outliers
+  imputedDbhInches: number; // the median, given to the trees carrying no dbh
+  clampedTrees: number; // how many trunks the clamp caught
+  imputedTrees: number; // how many trees had their dbh imputed
+  meanCoverOverLand: number; // the mean covered fraction; sanity-checked against ~22% all-sources
+  coverSamples: number; // land points the cover distribution was estimated from
+  coverSeed: number; // and the seed they were drawn with, so the mean is reproducible
   woodlandSquareKm: number; // woodland inside the city, after clipping to land
-  woodlandFloor: number; // normalized value the canopy mask raises both fields to
+  woodlandFloor: number; // the cover a wood is treated as: a forest is ~90% canopy
   woodlandFeatherMeters: number; // soft park edge, rather than a hard cut
   woodlandPlateau: number; // coverage the feather is called complete at
-  density: Distribution; // the normalized broad field, over those same land points
+  density: Distribution; // the covered fraction over the land points; its mean is the check
   updated: string;
   attribution: string; // the woodland source; trees are credited on the city
   sourceUrl: string;
 }
 
-// data/streets/<id>.bin: the street geometry, carrying the tight field sampled at every
-// vertex. layout: scripts/README.md
+// data/streets/<id>.bin: the street geometry, carrying the tight field sampled at both
+// sidewalks of every vertex. layout: scripts/README.md
 export interface StreetLayer {
   file: string;
   format: number;
@@ -75,7 +92,8 @@ export interface StreetLayer {
   bytes: number;
   sha256: string;
   densifyMeters: number; // longest gap between two sampled vertices
-  density: Distribution; // the normalized tight field, over street vertices
+  sidewalkInsetMeters: number; // curb to the centre of the sidewalk, either side
+  density: Distribution; // the normalized tight field, over both sidewalks of every vertex
   updated: string;
   attribution: string;
   sourceUrl: string;
@@ -94,7 +112,7 @@ export interface CityEntry {
 }
 
 export interface Manifest {
-  version: 3;
+  version: 5;
   cities: CityEntry[];
 }
 
@@ -105,7 +123,7 @@ const MANIFEST_PATH = join(
   "tree-cover",
   "manifest.json",
 );
-const MANIFEST_VERSION = 3;
+const MANIFEST_VERSION = 5;
 
 export async function readManifest(): Promise<Manifest> {
   const existing = await readFile(MANIFEST_PATH, "utf-8").catch(() => null);
