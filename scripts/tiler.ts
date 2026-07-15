@@ -1,6 +1,7 @@
-// crates/tiler is where the model math lives: the kernel density estimate, the Monte-Carlo
-// saturation, the woodland mask, the tile pyramid and the street chunks. These two scripts
-// fetch, encode and orchestrate; they call it for everything numeric.
+// crates/tiler is where the model math lives: the crown-weighted kernel density estimate, the
+// cover transform, the Monte-Carlo cover distribution, the woodland mask, the tile pyramid and
+// the street chunks. These two scripts fetch, encode and orchestrate; they call it for
+// everything numeric.
 
 import { spawnSync } from "node:child_process";
 import { readdir } from "node:fs/promises";

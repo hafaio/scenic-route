@@ -9,16 +9,24 @@ import { ROAD_OPACITY, rampCss } from "../src/tree-cover/ramp";
 interface Segment {
   lngs: Float64Array;
   lats: Float64Array;
-  densities: Uint8Array; // the tree density at each vertex, 0..255 on the field's scale
+  // The canopy cover at each vertex, 0..255 for a covered fraction of 0..1: both sidewalks,
+  // left then right, interleaved. A segment with no offset carries the same value in both.
+  densities: Uint8Array;
+  // Half the distance between the two sidewalks, in metres. Zero for a path or a boardwalk,
+  // which *is* the walking surface and is drawn as a single line on its centreline.
+  offsetMeters: number;
 }
 
 // One chunk per z12 tile, fetched lazily. layout: scripts/README.md
 // Relative, so it picks up the basePath the deploy injects; the app is a single-route SPA.
 const CHUNK_URL = "streets/{x}/{y}.bin";
-const CHUNK_FORMAT = 2;
+const CHUNK_FORMAT = 3;
 const CHUNK_ZOOM = 12;
+const SIDES = 2;
+const METERS_PER_DECIMETER = 0.1;
 
 const TILE_SIZE = 256;
+const EQUATOR_METERS_PER_PIXEL = 156_543.033_92; // web mercator, at the equator, at z0
 // Below this the lines would be hairlines, and a screen of them would pull in every chunk
 // in the city; the fill carries the map on its own.
 const MIN_ZOOM = 13;
@@ -45,6 +53,40 @@ const COLORS: readonly string[] = Array.from({ length: LEVELS }, (_, level) =>
 );
 
 const chunks = new Map<string, Promise<Segment[]>>();
+
+// The unit normal at each projected vertex, pointing at the *left* sidewalk. Left is 90 degrees
+// counter-clockwise of the direction of travel — CSCL's own l_/r_ convention, and the side the
+// first of a vertex's two density bytes carries — and canvas y runs south, so on screen that is
+// (ty, -tx): the left of an eastbound street points up. The tangent is the central difference of
+// the nearest *distinct* neighbours, one-sided at the ends, since two vertices of the source
+// geometry can sit closer together than the 0.1 m the coordinates are quantized to.
+function leftNormals(
+  xs: Float64Array,
+  ys: Float64Array,
+  count: number,
+  normalXs: Float64Array,
+  normalYs: Float64Array,
+): void {
+  const same = (left: number, right: number): boolean =>
+    xs[left] === xs[right] && ys[left] === ys[right];
+  for (let vertex = 0; vertex < count; vertex++) {
+    let back = vertex;
+    while (back > 0 && same(back, vertex)) {
+      back -= 1;
+    }
+    let ahead = vertex;
+    while (ahead + 1 < count && same(ahead, vertex)) {
+      ahead += 1;
+    }
+    const tangentX = xs[ahead] - xs[back];
+    const tangentY = ys[ahead] - ys[back];
+    // A vertex every neighbour has collapsed onto has no side to take: its two lines meet on the
+    // centreline, rather than carrying a NaN into the path.
+    const length = Math.hypot(tangentX, tangentY) || 1;
+    normalXs[vertex] = tangentY / length;
+    normalYs[vertex] = -tangentX / length;
+  }
+}
 
 function readVarint(bytes: Uint8Array, cursor: { offset: number }): number {
   let value = 0;
@@ -77,7 +119,8 @@ function decodeChunk(buffer: ArrayBuffer): Segment[] {
   const segments: Segment[] = [];
   for (let segment = 0; segment < count; segment++) {
     const vertices = view.getUint16(cursor.offset, true);
-    cursor.offset += 2;
+    const offsetMeters = bytes[cursor.offset + 2] * METERS_PER_DECIMETER;
+    cursor.offset += 3;
     const lngs = new Float64Array(vertices);
     const lats = new Float64Array(vertices);
     let quantizedX = 0;
@@ -88,9 +131,12 @@ function decodeChunk(buffer: ArrayBuffer): Segment[] {
       lngs[vertex] = originLng + quantizedX * scale;
       lats[vertex] = originLat + quantizedY * scale;
     }
-    const densities = bytes.slice(cursor.offset, cursor.offset + vertices);
-    cursor.offset += vertices;
-    segments.push({ lngs, lats, densities });
+    const densities = bytes.slice(
+      cursor.offset,
+      cursor.offset + SIDES * vertices,
+    );
+    cursor.offset += SIDES * vertices;
+    segments.push({ lngs, lats, densities, offsetMeters });
   }
   return segments;
 }
@@ -185,9 +231,10 @@ class StreetScoreGrid extends L.GridLayer {
   }
 
   // Projected at the tile's own zoom, so the lines stay crisp however far in the map goes.
-  // Each piece takes the level its two ends average to, and the pieces are gathered into
-  // one path per level, so a tile costs a stroke per level rather than per piece. Runs meet
-  // butt to butt: two translucent strokes overlapping would bead.
+  // A street is two lines, one per sidewalk, each quantized into its own level; each piece
+  // takes the level its two ends average to, and the pieces are gathered into one path per
+  // level, so a tile costs a stroke per level rather than per piece. Runs meet butt to butt:
+  // two translucent strokes overlapping would bead.
   private draw(
     context: CanvasRenderingContext2D,
     segments: Segment[],
@@ -197,7 +244,13 @@ class StreetScoreGrid extends L.GridLayer {
     const originX = coords.x * TILE_SIZE;
     const originY = coords.y * TILE_SIZE;
     const width = BASE_WIDTH * WIDTH_PER_ZOOM ** (coords.z - MIN_ZOOM);
-    const margin = width;
+    const center = map.unproject(
+      L.point(originX + TILE_SIZE / 2, originY + TILE_SIZE / 2),
+      coords.z,
+    );
+    const metersPerPixel =
+      (EQUATOR_METERS_PER_PIXEL * Math.cos((center.lat * Math.PI) / 180)) /
+      2 ** coords.z;
 
     context.lineCap = "butt";
     context.lineJoin = "round";
@@ -210,8 +263,18 @@ class StreetScoreGrid extends L.GridLayer {
     );
     const xs = new Float64Array(longest);
     const ys = new Float64Array(longest);
+    const normalXs = new Float64Array(longest);
+    const normalYs = new Float64Array(longest);
 
-    for (const { lngs, lats, densities } of segments) {
+    for (const { lngs, lats, densities, offsetMeters } of segments) {
+      // The two sidewalks of a street are ~14 m apart, which at z13 is one pixel: drawn true to
+      // the ground they would merge into the single line this layer exists to take apart. So the
+      // separation is a screen-space decision, never baked into the data — floored at a stroke
+      // width, which the true offset overtakes around z16, from where the exaggeration dissolves
+      // on its own as the map zooms in.
+      const offsetPx =
+        offsetMeters > 0 ? Math.max(offsetMeters / metersPerPixel, width) : 0;
+      const margin = width + offsetPx;
       let low = Number.POSITIVE_INFINITY;
       let left = Number.POSITIVE_INFINITY;
       let high = Number.NEGATIVE_INFINITY;
@@ -239,25 +302,40 @@ class StreetScoreGrid extends L.GridLayer {
       if (!overlaps) {
         continue;
       }
+      leftNormals(xs, ys, lngs.length, normalXs, normalYs);
 
-      let run = -1;
-      for (let piece = 0; piece + 1 < lngs.length; piece++) {
-        const level =
-          (densities[piece] + densities[piece + 1]) >> (LEVEL_BITS + 1);
-        if (level === 0) {
-          run = -1;
-          continue;
+      // A path or a boardwalk has no offset: it is drawn as the one line it is, and its two
+      // densities are the same sample anyway.
+      const sides = offsetMeters > 0 ? SIDES : 1;
+      for (let side = 0; side < sides; side++) {
+        const away = side === 0 ? offsetPx : -offsetPx;
+        let run = -1;
+        for (let piece = 0; piece + 1 < lngs.length; piece++) {
+          const level =
+            (densities[SIDES * piece + side] +
+              densities[SIDES * (piece + 1) + side]) >>
+            (LEVEL_BITS + 1);
+          if (level === 0) {
+            run = -1;
+            continue;
+          }
+          let path = paths[level];
+          if (!path) {
+            path = new Path2D();
+            paths[level] = path;
+          }
+          if (level !== run) {
+            path.moveTo(
+              xs[piece] + away * normalXs[piece],
+              ys[piece] + away * normalYs[piece],
+            );
+          }
+          path.lineTo(
+            xs[piece + 1] + away * normalXs[piece + 1],
+            ys[piece + 1] + away * normalYs[piece + 1],
+          );
+          run = level;
         }
-        let path = paths[level];
-        if (!path) {
-          path = new Path2D();
-          paths[level] = path;
-        }
-        if (level !== run) {
-          path.moveTo(xs[piece], ys[piece]);
-        }
-        path.lineTo(xs[piece + 1], ys[piece + 1]);
-        run = level;
       }
     }
 

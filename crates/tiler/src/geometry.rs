@@ -1,5 +1,5 @@
 //! Polygon rasterisation, the Gaussian feather over a mask, and the point-in-polygon index
-//! the saturation estimate queries a million times.
+//! the cover-distribution sampler queries a million times.
 
 use crate::binfmt::{Coord, Polygon};
 use crate::manifest::Bounds;
@@ -194,8 +194,8 @@ pub fn feather(mask: &[u8], width: usize, height: usize, sigma: f64) -> Vec<f32>
 }
 
 /// Every edge, bucketed into the horizontal bands it spans. A shoreline runs to ~200k edges
-/// and the saturation estimate throws a million points at it, so a query has to look at the
-/// handful of edges its own latitude can possibly cross, not all of them.
+/// and the cover-distribution sampler throws a million points at it, so a query has to look at
+/// the handful of edges its own latitude can possibly cross, not all of them.
 pub struct PolygonIndex {
     south: f64,
     north: f64,

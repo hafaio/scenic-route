@@ -1,7 +1,6 @@
-// The tree-density colour scale, shared by the tile builder and the street overlay so both
-// read as one ramp. Its input is the normalized density: 0 for no trees, 1 at the
-// saturation point the manifest records. Only the light ramp exists — dark mode inverts the
-// whole tile pane in CSS. See scripts/README.md.
+// The canopy-cover colour scale, shared by the tile builder and the street overlay so both
+// read as one ramp. Its input is the covered fraction of ground under canopy, in [0, 1). Only
+// the light ramp exists — dark mode inverts the whole tile pane in CSS. See scripts/README.md.
 
 export interface Rgb {
   red: number;
@@ -27,22 +26,33 @@ const STOPS: readonly Rgb[] = RAMP.map((hex) => ({
   blue: Number.parseInt(hex.slice(5, 7), 16),
 }));
 
+// Cover is a fraction, and most of the city lands low — mean cover over land is single digits,
+// leafy streets ~30-60% — so the ramp is stretched over the part of [0, 1] the city actually
+// occupies rather than the whole of it: at and above this cover the green is fully saturated.
+// Cover past ~55% is already a spectacular street, so pinning full green there keeps the
+// gradient among leafy streets visible instead of spending it on cover nobody reaches.
+const COVER_FULL = 0.55;
+
 const MAX_ALPHA = 0.62;
-// Transparency, not lightness, carries the low end. Half the city's land sits below 0.4 of
-// saturation, so a linear alpha would tint everything and wash the map out; cubing holds
-// that crowded middle down to a haze (0.4 -> alpha 0.04).
-const ALPHA_CURVE = 3;
+// Transparency, not lightness, carries the low end — but the useful signal *is* the low end:
+// a block that shades 15% of its ground reads as tree-lined, and telling that from bare ground
+// is most of what the map is for. So the curve is concave (a square root), spending the opacity
+// budget on the 0-30% range the city actually occupies rather than crushing it. Exactly-zero
+// cover stays fully transparent, so "no trees" is blank and any real canopy lifts clear of it.
+const ALPHA_CURVE = 0.5;
 
 // Same colour, same quantity — but a 2 px line has far less area to make its colour with
 // than the field under it, so it takes a little more opacity to hold its own against it.
 export const ROAD_OPACITY = 1.2;
 
-function clamp(density: number): number {
-  return Math.min(1, Math.max(0, density));
+// The covered fraction, stretched onto the [0, 1] the ramp is defined over: full green at
+// COVER_FULL, and everything the colour and alpha curves read is this stretched value.
+function normalize(cover: number): number {
+  return Math.min(1, Math.max(0, cover / COVER_FULL));
 }
 
-export function rampColor(density: number): Rgb {
-  const position = clamp(density) * (STOPS.length - 1);
+export function rampColor(cover: number): Rgb {
+  const position = normalize(cover) * (STOPS.length - 1);
   const low = Math.min(STOPS.length - 2, Math.floor(position));
   const fraction = position - low;
   const from = STOPS[low];
@@ -54,12 +64,12 @@ export function rampColor(density: number): Rgb {
   };
 }
 
-export function rampAlpha(density: number): number {
-  return MAX_ALPHA * clamp(density) ** ALPHA_CURVE;
+export function rampAlpha(cover: number): number {
+  return MAX_ALPHA * normalize(cover) ** ALPHA_CURVE;
 }
 
-export function rampCss(density: number, opacity = 1): string {
-  const { red, green, blue } = rampColor(density);
-  const alpha = Math.min(1, rampAlpha(density) * opacity);
+export function rampCss(cover: number, opacity = 1): string {
+  const { red, green, blue } = rampColor(cover);
+  const alpha = Math.min(1, rampAlpha(cover) * opacity);
   return `rgba(${Math.round(red)}, ${Math.round(green)}, ${Math.round(blue)}, ${alpha.toFixed(3)})`;
 }
