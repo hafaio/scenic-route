@@ -17,6 +17,7 @@ const DATA_DIR = join(import.meta.dirname, "..", "data");
 const PUBLIC_DIR = join(import.meta.dirname, "..", "public");
 const TILE_DIR = join(PUBLIC_DIR, "tiles", "tree-cover");
 const CHUNK_DIR = join(PUBLIC_DIR, "streets");
+const ROUTING_DIR = join(PUBLIC_DIR, "routing");
 const STAMP_PATH = join(TILE_DIR, ".stamp");
 const MANIFEST_PATH = join(
   import.meta.dirname,
@@ -78,6 +79,7 @@ async function isFresh(cities: City[]): Promise<boolean> {
   try {
     const stamp = await stat(STAMP_PATH);
     await stat(CHUNK_DIR);
+    await stat(ROUTING_DIR);
     return stamp.mtimeMs >= (await newestInputMtime(cities));
   } catch {
     return false;
@@ -93,8 +95,10 @@ async function build(): Promise<void> {
 
   await rm(TILE_DIR, { recursive: true, force: true });
   await rm(CHUNK_DIR, { recursive: true, force: true });
+  await rm(ROUTING_DIR, { recursive: true, force: true });
   await mkdir(TILE_DIR, { recursive: true });
   await mkdir(CHUNK_DIR, { recursive: true });
+  await mkdir(ROUTING_DIR, { recursive: true });
   await writeRamp();
 
   runTiler(
@@ -113,6 +117,21 @@ async function build(): Promise<void> {
     ],
     false,
   );
+
+  // The routing graph is derived from the same STRT the chunks are, one artifact per city; its
+  // one-line JSON stats go to stdout and land in the build log.
+  for (const city of cities) {
+    runTiler(
+      [
+        "graph",
+        "--streets",
+        sourcePath("streets", city.streets.file),
+        "--out",
+        join(ROUTING_DIR, `${city.id}.bin`),
+      ],
+      false,
+    );
+  }
   await writeFile(STAMP_PATH, "");
 }
 

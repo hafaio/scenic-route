@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { FiLogOut, FiRefreshCw, FiUser } from "react-icons/fi";
 import type { AuthState } from "./map-app";
+import RouteToggle from "./route-toggle";
 import ThemeToggle from "./theme-toggle";
 import TreeToggle from "./tree-toggle";
 
@@ -10,8 +11,10 @@ interface ToolbarProps {
   auth: AuthState;
   pinCount: number;
   treeCover: boolean;
+  routing: boolean;
   refreshingClaims: boolean;
   onToggleTreeCover: () => void;
+  onToggleRouting: () => void;
   onSignIn: () => void;
   onSignOut: () => void | Promise<void>;
   onRefreshClaims: () => void | Promise<void>;
@@ -29,8 +32,10 @@ export default function Toolbar({
   auth,
   pinCount,
   treeCover,
+  routing,
   refreshingClaims,
   onToggleTreeCover,
+  onToggleRouting,
   onSignIn,
   onSignOut,
   onRefreshClaims,
@@ -66,6 +71,7 @@ export default function Toolbar({
 
   return (
     <div className="absolute top-3 right-3 z-[1000] flex items-center gap-2">
+      <RouteToggle active={routing} onToggle={onToggleRouting} />
       <TreeToggle active={treeCover} onToggle={onToggleTreeCover} />
       <ThemeToggle />
       {auth.kind === "signedOut" ? (

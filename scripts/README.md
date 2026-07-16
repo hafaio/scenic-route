@@ -14,17 +14,18 @@ automatically whenever an input is newer than the last run.
 
 ## Who does what: TypeScript fetches, Rust computes
 
-**All of the model math lives in `crates/tiler`**, a Rust binary with two subcommands. The
+**All of the model math lives in `crates/tiler`**, a Rust binary with three subcommands. The
 scripts fetch, encode and orchestrate; they compute nothing about trees.
 
 | | |
 | --- | --- |
 | `scripts/` | Socrata paging, the Overpass mirror rotation, the disk cache, the `.bin` encoders, the manifest, and the colour ramp |
-| `crates/tiler` | the crown-weighted kernel density estimate, the cover transform, the Monte-Carlo cover distribution, the sidewalk offsets and their cover, the woodland mask and feather, the tile pyramid, the PNGs, the street chunks |
+| `crates/tiler` | the crown-weighted kernel density estimate, the cover transform, the Monte-Carlo cover distribution, the sidewalk offsets and their cover, the woodland mask and feather, the tile pyramid, the PNGs, the street chunks, and the routing graph |
 
 ```sh
 tiler densities --params <file.json>   # fills the streets file's density blob, in place
 tiler tiles --manifest … --ramp … --data … --tiles … --chunks …
+tiler graph --streets <in.bin> --out <out.bin>   # contracts STRT into the GRPH routing graph
 ```
 
 Both scripts shell out with `cargo run --release`, which no-ops once the binary is built, so
@@ -143,9 +144,11 @@ streets and alleys, so
 
     offsetMeters = streetwidth · 0.3048 / 2 + sidewalkInsetMeters      // inset 2 m, curb to sidewalk centre
 
-either side, falling back to the 30 ft median where the width is missing. **Boardwalks, paths and
-step streets are not offset**: they *are* the walking surface, so they are sampled once, on the
-line, and both their sides carry that one value. Left and right follow the digitization direction
+either side, falling back to the 30 ft median where the width is missing. **Boardwalks, paths,
+step streets and non-vehicular bridge/tunnel decks are not offset**: they *are* the walking
+surface, so they are sampled once, on the line, and both their sides carry that one value. A
+*vehicular* bridge or tunnel does have sidewalks, so it is offset by its width like a street.
+Left and right follow the digitization direction
 (left = 90° CCW), which is CSCL's own `l_`/`r_` convention.
 
 The two sidewalks are ~14 m apart, which at z13 is a single pixel — so the client draws the
@@ -212,12 +215,15 @@ in its own band.
 | what | source | notes |
 | --- | --- | --- |
 | trees | NYC ForMS "Forestry Tree Points", Socrata `hn5i-inap` | ~899k rows at `tpstructure='Full'` — standing trees only, no stumps or empty pits; `dbh` (trunk inches) is read to size each crown |
-| streets | NYC CSCL street centerline, Socrata `inkn-q76z` | `rw_type` in 1, 5, 6, 7, 10 = street, boardwalk, path/trail, step street, alley |
+| streets | NYC CSCL street centerline, Socrata `inkn-q76z` | `rw_type` in 1, 5, 6, 7, 10 = street, boardwalk, path/trail, step street, alley, plus pedestrian bridges/tunnels (3, 4) where `nonped != 'V'` |
 | land | NYC borough boundaries (water areas excluded), Socrata `gthc-hcne` | the population the cover distribution is taken over, and the clip that drops New Jersey |
 | woodland | OSM `natural=wood` + `landuse=forest`, via Overpass | see below |
 
-Only walkable road types are kept. Highways, ramps, bridges, tunnels, driveways, ferry
-routes, u-turns and non-physical segments are not part of the network a person walks.
+Only walkable road types are kept. Highways, ramps, driveways, ferry routes, u-turns and
+non-physical segments are not part of the network a person walks. Bridges and tunnels come in
+only when they carry pedestrians (`rw_type` 3/4 with `nonped != 'V'`) — that is what restores the
+East River crossings — and every kept row is flagged (record byte 23) so a router can drop the
+vehicular-only streets the overlay still draws.
 
 ### Why woodland is a separate source
 
@@ -379,7 +385,7 @@ Identical layout to `WOOD`. Needed at ingest (the population the cover distribut
 over) and at tile time (the AND against the woodland), so it is committed rather than fused into
 anything.
 
-### `data/streets/<id>.bin` — the network, magic `STRT`
+### `data/streets/<id>.bin` — the network, magic `STRT` (v4)
 
 Header, 56 bytes:
 
@@ -409,10 +415,18 @@ Then one 24-byte record per segment, starting at the end of the header:
 | 10 | u16 | reserved |
 | 12 | f32 | geodesic length, metres |
 | 16 | u32 | index of this segment's first vertex within the density blob |
-| 20 | u8 | rw_type: 1 street, 5 boardwalk, 6 path, 7 step street, 10 alley |
+| 20 | u8 | rw_type: 1 street, 3 bridge, 4 tunnel, 5 boardwalk, 6 path, 7 step street, 10 alley |
 | 21 | u8 | street width, feet, curb to curb (0 unknown) — the sidewalk offset comes from this |
 | 22 | u8 | posted speed, mph (0 unknown) |
-| 23 | u8 | reserved |
+| 23 | u8 | flags: bit0 vehicular-only (`nonped='V'`), bit1 non-vehicular deck (`trafdir='NV'`), bit2 structure (a bridge or tunnel) |
+
+`nonped='V'` streets are drawn by the overlay but a router must never walk them, so the router
+drops any segment with bit0 set. **Bridges and tunnels (rw_type 3/4) are included only when they
+carry pedestrians** — the ingest's `$where` keeps `rw_type in (3,4)` rows only where `nonped` is
+null or not `'V'`, so the Brooklyn Bridge promenade and the six other walkable East River decks
+come in while the vehicular-only spans stay out. A non-vehicular deck (bit1) is itself the walking
+surface and gets no sidewalk offset; a vehicular bridge or tunnel has sidewalks like a street and
+is offset by its width.
 
 Then the **coordinate blob**: per segment, `vertex count` (longitude, latitude) varint-delta
 pairs, the first from the origin.
@@ -454,6 +468,68 @@ Then `segment count` segments, back to back, each:
   gradient rather than one flat colour
 
 Decoded by `components/street-score-layer.tsx`, which applies the offset in *pixels*.
+
+### `public/routing/{id}.bin` — the routing graph, magic `GRPH` (v1, derived, gitignored)
+
+`tiler graph` contracts STRT into the graph the client routes on: intersection nodes (the
+degree-2 shape joints collapsed away), edges carrying a geodesic length, per-side aggregated
+cover and their full pruned polyline for drawing. Vehicular-only segments (`nonped='V'`, flag
+bit 0) are dropped — a router must never walk a parkway mainline. Endpoints are noded by exact
+quantized equality, then near-misses within 1 m are union-found together; degree-2 nodes are
+contracted where the two edges share a half-offset byte and GRPH flags; the polylines are pruned
+of collinear vertices (endpoints kept); components are labelled by size descending (0 = largest).
+The edge length is the sum of the constituent records' f32 lengths, never recomputed. Everything
+little-endian.
+
+Header, 64 bytes:
+
+| offset | type | field |
+| --- | --- | --- |
+| 0 | u8[4] | magic `GRPH` |
+| 4 | u16 | format version = 1 |
+| 6 | u16 | header bytes = 64 |
+| 8 | u32 | node count N |
+| 12 | u32 | edge count E |
+| 16 | f64 | origin longitude, degrees |
+| 24 | f64 | origin latitude, degrees |
+| 32 | f64 | coordinate scale, degrees per quantized unit (1e-6) |
+| 40 | u32 | component count |
+| 44 | u32 | geometry blob offset, from the start of the file |
+| 48 | u32 | geometry blob length |
+| 52 | u32[3] | reserved (zero) |
+
+Then five fixed-width sections, back to back, each starting 4-byte aligned (zero-padded as needed
+so the client can view them as typed arrays without copying):
+
+1. **Node longitudes**: N × i32, quantized.
+2. **Node latitudes**: N × i32, quantized.
+3. **Node components**: N × u16 (+2 pad bytes when N is odd).
+4. **CSR offsets**: (N+1) × u32 — node n owns half-edges `[csr[n], csr[n+1])`.
+5. **Adjacency**: 2E × u32 — each entry an **edge id** (the neighbour is the edge's other
+   endpoint, one indirection).
+6. **Edge records**: E × 24 bytes:
+
+| offset | type | field |
+| --- | --- | --- |
+| 0 | u32 | node a |
+| 4 | u32 | node b |
+| 8 | f32 | geodesic length, metres |
+| 12 | u32 | geometry offset, bytes, within the geometry blob |
+| 16 | u16 | geometry vertex count, ≥ 2 |
+| 18 | u8 | cover, left side of a→b travel, 0–255 |
+| 19 | u8 | cover, right side, 0–255 |
+| 20 | u8 | half-offset to a sidewalk, decimetres (0 = path-like, drawn/walked on the line) |
+| 21 | u8 | flags: bit0 structure, bit1 steps, bit2 path-like |
+| 22 | u16 | reserved (zero) |
+
+Then the **geometry blob**: per edge, `vertex count` (longitude, latitude) zigzag-LEB128 varint
+delta pairs, the first delta taken from node a's quantized position (so it is always (0, 0)) and
+the rest from the previous vertex. Geometry runs a→b.
+
+Nodes are sorted by (component, quantized latitude, longitude) and renumbered; edges by
+(component, min node id). A pure degree-2 cycle is emitted as a self-loop on the one node it
+retains. GRPH flags are distinct from the STRT record flags: a step street is bit1, and bit2
+"path-like" means offset 0 (boardwalk, path, steps, or a non-vehicular deck).
 
 ## Adding a city
 

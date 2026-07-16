@@ -7,6 +7,7 @@
 mod binfmt;
 mod densities;
 mod geometry;
+mod graph;
 mod kde;
 mod manifest;
 mod sidewalks;
@@ -22,6 +23,7 @@ pub type Fallible<T> = Result<T, Box<dyn Error + Send + Sync>>;
 const USAGE: &str = "usage:
   tiler densities --params <file.json>
   tiler tiles --manifest <file.json> --ramp <file.bin> --data <dir> --tiles <dir> --chunks <dir>
+  tiler graph --streets <file.bin> --out <file.bin>
 ";
 
 fn flags(mut args: impl Iterator<Item = String>) -> Fallible<HashMap<String, String>> {
@@ -57,6 +59,10 @@ fn run() -> Fallible<()> {
             data: path(&flags, "data")?,
             tiles: path(&flags, "tiles")?,
             chunks: path(&flags, "chunks")?,
+        }),
+        "graph" => graph::run(&graph::Args {
+            streets: path(&flags, "streets")?,
+            out: path(&flags, "out")?,
         }),
         _ => Err(format!("unknown command \"{command}\"\n{USAGE}").into()),
     }

@@ -31,15 +31,23 @@ import { fetchWoodland, type Polygon } from "./overpass";
 import { type Coord, fetchDataset, fetchNycTrees, type Tree } from "./socrata";
 import { runTiler } from "./tiler";
 
-// The CSCL road-way types that carry pedestrians: street, boardwalk, path, step street,
-// alley. Highways, ramps, tunnels, driveways and ferry routes are not walkable.
-type RoadType = 1 | 5 | 6 | 7 | 10;
+// The CSCL road-way types that carry pedestrians: street, bridge, tunnel, boardwalk, path,
+// step street, alley. Bridges (3) and tunnels (4) are walkable only when not vehicular-only
+// (nonped != 'V'); the $where excludes those. Highways, ramps, driveways and ferry routes are
+// never walkable.
+type RoadType = 1 | 3 | 4 | 5 | 6 | 7 | 10;
+
+// STRT record byte 23. A router reads these; the overlay ignores them.
+const FLAG_VEHICULAR_ONLY = 1 << 0; // nonped === "V" — drawn, never routed
+const FLAG_NON_VEHICULAR = 1 << 1; // trafdir === "NV" — a dedicated ped/bike deck, offset 0
+const FLAG_STRUCTURE = 1 << 2; // rw_type 3 or 4 — a bridge or tunnel deck
 
 interface Segment {
   physicalId: number;
   roadType: RoadType;
   streetWidth: number; // feet, 0 unknown
   postedSpeed: number; // mph, 0 unknown
+  flags: number; // FLAG_* bits, from the row's nonped/trafdir/rw_type
   points: Coord[]; // densified, so the field is sampled at least every DENSIFY_METERS
   lengthMeters: number;
 }
@@ -50,6 +58,8 @@ interface StreetRow {
   rw_type?: string;
   streetwidth?: string;
   posted_speed?: string;
+  nonped?: string; // 'V' vehicular-only, 'D' dedicated deck, else null
+  trafdir?: string; // 'NV' non-vehicular (a ped/bike deck)
 }
 
 interface BoroughRow {
@@ -77,7 +87,7 @@ interface Estimate {
 const DATA_DIR = join(import.meta.dirname, "..", "data");
 const PARAMS_PATH = join(tmpdir(), "scenic-route-densities.json");
 
-const STREET_FORMAT = 3;
+const STREET_FORMAT = 4;
 const STREET_HEADER_BYTES = 56;
 const STREET_RECORD_BYTES = 24;
 const STREET_SIDES = 2; // the density blob carries both sidewalks of every vertex, left then right
@@ -146,8 +156,11 @@ const PERCENTILES: readonly Percentile[] = [
   "p99",
 ];
 
-const ROAD_TYPES: readonly RoadType[] = [1, 5, 6, 7, 10];
-const NYC_SEGMENT_COUNT = 109_463;
+const ROAD_TYPES: readonly RoadType[] = [1, 3, 4, 5, 6, 7, 10];
+// The walkable-row total the paged fetch is checked against — a floor, so it sits a little below
+// the current Socrata count (111,675 rows for the $where below: 99,361 street + 2,205 bridge +
+// 7 tunnel + 101 boardwalk + 5,918 path + 248 step + 3,835 alley) rather than tracking it exactly.
+const NYC_SEGMENT_COUNT = 111_000;
 const NYC_BOROUGH_COUNT = 5;
 
 function toInt(value: string | undefined): number {
@@ -234,6 +247,16 @@ function toSegments(rows: StreetRow[]): Segment[] {
     if (!row.the_geom || !ROAD_TYPES.includes(roadType)) {
       continue;
     }
+    let flags = 0;
+    if (row.nonped === "V") {
+      flags |= FLAG_VEHICULAR_ONLY;
+    }
+    if (row.trafdir === "NV") {
+      flags |= FLAG_NON_VEHICULAR;
+    }
+    if (roadType === 3 || roadType === 4) {
+      flags |= FLAG_STRUCTURE;
+    }
     for (const part of row.the_geom.coordinates) {
       const points: Coord[] = [];
       for (const [lng, lat] of part) {
@@ -256,6 +279,7 @@ function toSegments(rows: StreetRow[]): Segment[] {
         roadType,
         streetWidth: Math.min(255, toInt(row.streetwidth)),
         postedSpeed: Math.min(255, toInt(row.posted_speed)),
+        flags,
         points: dense.points,
         lengthMeters: dense.lengthMeters,
       });
@@ -271,8 +295,10 @@ async function fetchNycStreets(): Promise<Segment[]> {
   const rows = await fetchDataset<StreetRow>(
     "inkn-q76z",
     {
-      $select: "the_geom,physicalid,rw_type,streetwidth,posted_speed",
-      $where: `rw_type in (${ROAD_TYPES.map((type) => `'${type}'`).join(",")})`,
+      $select:
+        "the_geom,physicalid,rw_type,streetwidth,posted_speed,nonped,trafdir",
+      $where:
+        "rw_type in ('1','5','6','7','10') OR (rw_type in ('3','4') AND (nonped IS NULL OR nonped != 'V'))",
     },
     NYC_SEGMENT_COUNT,
   );
@@ -385,6 +411,7 @@ function encodeStreets(segments: Segment[]): Uint8Array {
     records[record + 20] = segment.roadType;
     records[record + 21] = segment.streetWidth;
     records[record + 22] = segment.postedSpeed;
+    records[record + 23] = segment.flags;
     vertex += segment.points.length;
   }
 

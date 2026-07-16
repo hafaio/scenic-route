@@ -349,6 +349,7 @@ fn encode_chunk(
         let to = streets.starts[segment + 1] as usize;
         let offset = sidewalks::half_offset_meters(
             streets.road_types[segment],
+            streets.flags[segment],
             streets.width_feet[segment],
             inset_meters,
         );
