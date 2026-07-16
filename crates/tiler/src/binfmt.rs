@@ -10,7 +10,7 @@ use crate::Fallible;
 pub const TREE_FORMAT: u16 = 2; // v2 carries a crown-radius byte per tree; v1 was points only
 pub const WOODLAND_FORMAT: u16 = 1;
 pub const LAND_FORMAT: u16 = 1;
-pub const STREET_FORMAT: u16 = 3;
+pub const STREET_FORMAT: u16 = 4;
 
 pub const SIDES: usize = 2; // the two sidewalks a density blob carries per vertex, left then right
 pub const DECIMETERS_PER_METER: f64 = 10.0; // the crown byte's unit: a decimetre of crown radius
@@ -199,8 +199,13 @@ pub struct Streets {
     pub lngs: Vec<f64>, // every vertex of every segment, concatenated
     pub lats: Vec<f64>,
     pub starts: Vec<u32>, // segments + 1 entries; segment i owns [starts[i], starts[i + 1])
-    pub road_types: Vec<u8>, // one per segment: 1 street, 5 boardwalk, 6 path, 7 step, 10 alley
+    pub road_types: Vec<u8>, // per segment: 1 street, 3 bridge, 4 tunnel, 5 boardwalk, 6 path, 7 step, 10 alley
     pub width_feet: Vec<u8>, // curb to curb, 0 unknown — what the sidewalk offset is derived from
+    pub flags: Vec<u8>, // per segment: bit0 vehicular-only, bit1 non-vehicular deck, bit2 structure
+    pub lengths_m: Vec<f32>, // per segment: the stored geodesic length; the graph sums, never recomputes
+    pub origin_lng: f64, // the quantized deltas' reference, so `tiler graph` can recover the ints
+    pub origin_lat: f64,
+    pub scale: f64, // degrees per quantized unit (1e-6)
     density_offset: usize,
 }
 
@@ -256,6 +261,8 @@ pub fn read_streets(path: &Path) -> Fallible<Streets> {
     let mut starts = Vec::with_capacity(count + 1);
     let mut road_types = Vec::with_capacity(count);
     let mut width_feet = Vec::with_capacity(count);
+    let mut flags = Vec::with_capacity(count);
+    let mut lengths_m = Vec::with_capacity(count);
     for segment in 0..count {
         let record = header_bytes + segment * record_bytes;
         let mut cursor = Cursor {
@@ -266,6 +273,10 @@ pub fn read_streets(path: &Path) -> Fallible<Streets> {
         starts.push(lngs.len() as u32);
         road_types.push(bytes[record + 20]);
         width_feet.push(bytes[record + 21]);
+        flags.push(bytes[record + 23]);
+        lengths_m.push(f32::from_le_bytes(
+            bytes[record + 12..record + 16].try_into().expect("4 bytes"),
+        ));
 
         let mut x: i64 = 0;
         let mut y: i64 = 0;
@@ -295,6 +306,11 @@ pub fn read_streets(path: &Path) -> Fallible<Streets> {
         starts,
         road_types,
         width_feet,
+        flags,
+        lengths_m,
+        origin_lng,
+        origin_lat,
+        scale,
         density_offset,
     })
 }

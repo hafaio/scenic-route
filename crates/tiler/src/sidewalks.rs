@@ -7,17 +7,27 @@ use crate::kde::Bearing;
 const METERS_PER_FOOT: f64 = 0.3048;
 const MEDIAN_WIDTH_FEET: f64 = 30.0; // what the 2% of streets carrying no width fall back to
 const STREET: u8 = 1;
+const BRIDGE: u8 = 3;
+const TUNNEL: u8 = 4;
 const ALLEY: u8 = 10;
 // The chunk carries the offset in a byte of decimetres, so a wider roadway than this could not
 // be drawn where it was sampled. Four CSCL segments in the city claim one.
 const MAX_OFFSET_METERS: f64 = 25.5;
 
+// STRT record byte 23, bit 1: a dedicated pedestrian/bike deck, sampled on its own line rather
+// than offset to a sidewalk. The vehicular-only (bit 0) and structure (bit 2) bits the ingest
+// also writes are for the router (Phase 2) and are read there, not here.
+pub const FLAG_NON_VEHICULAR: u8 = 1 << 1;
+
 /// Half the roadway plus the curb-to-sidewalk inset: where the two sidewalk lines sit, in metres
 /// either side of the centreline. Zero for the road types that *are* the walking surface — a
-/// boardwalk, a path, a step street — which carry no width and are sampled once, on the line
-/// itself.
-pub fn half_offset_meters(road_type: u8, width_feet: u8, inset_meters: f64) -> f64 {
-    if road_type == STREET || road_type == ALLEY {
+/// boardwalk, a path, a step street — and for any non-vehicular deck (the Brooklyn Bridge
+/// promenade is itself the walking surface), which carry no width and are sampled once, on the
+/// line. A vehicular bridge or tunnel has sidewalks like a street does, so it is offset by width.
+pub fn half_offset_meters(road_type: u8, flags: u8, width_feet: u8, inset_meters: f64) -> f64 {
+    let width_based =
+        road_type == STREET || road_type == ALLEY || road_type == BRIDGE || road_type == TUNNEL;
+    if width_based && flags & FLAG_NON_VEHICULAR == 0 {
         let feet = if width_feet == 0 {
             MEDIAN_WIDTH_FEET
         } else {

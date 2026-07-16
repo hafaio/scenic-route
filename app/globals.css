@@ -87,6 +87,13 @@
   background: #222222;
 }
 
+/* While a route field has armed map-pick, the whole map reads as a target. */
+.leaflet-container.scenic-picking,
+.leaflet-container.scenic-picking .leaflet-grab,
+.leaflet-container.scenic-picking .leaflet-interactive {
+  cursor: crosshair;
+}
+
 .scenic-tooltip.leaflet-tooltip {
   background: rgb(15 23 42 / 0.92);
   color: #f8fafc;

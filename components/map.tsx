@@ -8,8 +8,12 @@ import {
   TileLayer,
   Tooltip,
   useMap,
+  useMapEvents,
 } from "react-leaflet";
 import type { Pin, PinDraft } from "../src/pin";
+import type { RouteResult } from "../src/routing/search";
+import { savedIcon, userIcon } from "./map-icons";
+import RouteLayer from "./route-layer";
 import StreetScoreLayer from "./street-score-layer";
 import TreeCoverLayer from "./tree-cover-layer";
 
@@ -26,34 +30,17 @@ interface MapViewProps {
   userLocation: { lat: number; lng: number } | null;
   following: boolean;
   treeCover: boolean;
+  routeResult: RouteResult | null;
+  routeDest: { lat: number; lng: number } | null;
+  routeStart: { lat: number; lng: number } | null;
+  picking: boolean;
+  onMapPick: (lat: number, lng: number) => void;
   onDisengageFollow: () => void;
   onPinSelect: (pin: Pin) => void;
 }
 
 const DEFAULT_CENTER: [number, number] = [40.7128, -74.006];
 const DEFAULT_ZOOM = 13;
-
-const savedPinSvg = `
-<svg xmlns="http://www.w3.org/2000/svg" width="30" height="40" viewBox="0 0 30 40">
-  <defs>
-    <linearGradient id="scenicPinGrad" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%" stop-color="#34d399"/>
-      <stop offset="100%" stop-color="#059669"/>
-    </linearGradient>
-  </defs>
-  <path d="M15 1C7.82 1 2 6.82 2 14c0 9.5 13 24 13 24s13-14.5 13-24C28 6.82 22.18 1 15 1z"
-        fill="url(#scenicPinGrad)" stroke="#ffffff" stroke-width="2"/>
-  <circle cx="15" cy="14" r="4.5" fill="#ffffff"/>
-</svg>`.trim();
-
-const savedIcon = L.divIcon({
-  className: "scenic-saved-pin",
-  html: savedPinSvg,
-  iconSize: [30, 40],
-  iconAnchor: [15, 39],
-  popupAnchor: [0, -34],
-  tooltipAnchor: [0, -34],
-});
 
 const draftIcon = L.divIcon({
   className: "",
@@ -62,12 +49,20 @@ const draftIcon = L.divIcon({
   iconAnchor: [14, 14],
 });
 
-const userIcon = L.divIcon({
-  className: "",
-  html: '<div class="scenic-user-pin"><div class="scenic-user-pin-ring"></div><div class="scenic-user-pin-dot"></div></div>',
-  iconSize: [28, 28],
-  iconAnchor: [14, 14],
-});
+// A map click sets the armed field's location. Mounted only while a field has armed pick mode, so
+// ordinary browsing never intercepts clicks; pin markers stop propagation, so they still select.
+function PickCatcher({
+  onMapPick,
+}: {
+  onMapPick: (lat: number, lng: number) => void;
+}) {
+  useMapEvents({
+    click: (event) => {
+      onMapPick(event.latlng.lat, event.latlng.lng);
+    },
+  });
+  return null;
+}
 
 interface MapControllerProps {
   target: MapTarget | null;
@@ -162,6 +157,11 @@ export default function MapView({
   userLocation,
   following,
   treeCover,
+  routeResult,
+  routeDest,
+  routeStart,
+  picking,
+  onMapPick,
   onDisengageFollow,
   onPinSelect,
 }: MapViewProps) {
@@ -193,7 +193,7 @@ export default function MapView({
     <MapContainer
       center={DEFAULT_CENTER}
       zoom={DEFAULT_ZOOM}
-      className="h-dvh w-full"
+      className={picking ? "h-dvh w-full scenic-picking" : "h-dvh w-full"}
       zoomControl={false}
     >
       <TileLayer
@@ -211,6 +211,13 @@ export default function MapView({
         userLocation={userLocation}
         onDisengageFollow={onDisengageFollow}
       />
+      <RouteLayer
+        result={routeResult}
+        dest={routeDest}
+        start={routeStart}
+        onDisengageFollow={onDisengageFollow}
+      />
+      {picking ? <PickCatcher onMapPick={onMapPick} /> : null}
       {markers}
       {userLocation ? (
         <Marker
