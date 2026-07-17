@@ -218,6 +218,7 @@ in its own band.
 | streets | NYC CSCL street centerline, Socrata `inkn-q76z` | `rw_type` in 1, 5, 6, 7, 10 = street, boardwalk, path/trail, step street, alley, plus pedestrian bridges/tunnels (3, 4) where `nonped != 'V'` |
 | land | NYC borough boundaries (water areas excluded), Socrata `gthc-hcne` | the population the cover distribution is taken over, and the clip that drops New Jersey |
 | woodland | OSM `natural=wood` + `landuse=forest`, via Overpass | see below |
+| paths | OSM pedestrian/park ways (`highway` footway/path/pedestrian/steps/cycleway/bridleway/track), via Overpass | the park and greenway network CSCL lacks; a separate committed source, magic `PATH` — see below and "Binary layouts" |
 
 Only walkable road types are kept. Highways, ramps, driveways, ferry routes, u-turns and
 non-physical segments are not part of the network a person walks. Bridges and tunnels come in
@@ -258,6 +259,39 @@ ballfields and the Reservoir are all `leisure=park` and none of them is a tree.
 Overpass is the flakiest thing in the pipeline — the query rotates over three mirrors, backs
 off in minutes rather than seconds, and must send a `User-Agent` (an anonymous client gets a
 429 on sight). Everything is cached, so this is a one-time cost.
+
+### The pedestrian and park paths (`PATH` v1)
+
+CSCL is a *street* centerline: it carries almost none of the interior of a park. Central Park is
+21 km of CSCL path against 89 km in OSM; Prospect Park is 1.3 km against 51 km — the router
+cannot enter their interiors at all. So OSM's pedestrian and park ways are ingested as a second
+committed network, `data/paths/nyc.bin`, magic `PATH`. Its byte layout is **STRT v5's exactly**,
+so `binfmt.rs` reads it with the same code (`read_paths`) and `tiler densities` samples it with
+the same loop; only a few record fields are reinterpreted (see "Binary layouts").
+
+The Overpass filter (decision 1 of the park-paths plan) keeps the walking net and nothing else:
+
+    way["highway"~"^(footway|path|pedestrian|steps|cycleway|bridleway|track)$"]
+       ["footway"!~"^(sidewalk|crossing|traffic_island)$"]
+       ["area"!="yes"]["access"!~"^(no|private)$"]["foot"!~"^(no|private)$"]["indoor"!="yes"]
+
+`footway`/`path`/`pedestrian`/`steps` are the core; `cycleway` brings the greenways (a bike-only
+segment carries `foot=no` and drops out); `bridleway` is the Central Park bridle path; `track` is
+park maintenance road. **`footway=sidewalk`/`crossing`/`traffic_island` are excluded** — GRPH
+already derives sidewalks and crossings from CSCL, and ingesting OSM's would double the network;
+`area=yes` (plazas) is not an edge; `access`/`foot` `no`/`private` and `indoor=yes` are not
+walkable. `highway=service` is left out wholesale (driveways and parking aisles; CSCL's rw_type 10
+already carries the walkable alleys). The ways are land-clipped against the borough polygons — a
+way is kept if its midpoint or either endpoint is on land, which drops the New Jersey and
+Westchester spill the bounding box reaches — densified to 25 m, degenerate ways under a metre
+dropped, and their names **uppercased** so the client's prettifier renders "BOW BRIDGE" as "Bow
+Bridge". `tiler densities` fills their density blob from the same tree field the streets use: a
+path is its own walking surface, so it is sampled once on its line and that one value stands for
+both sides.
+
+This is **Phase 1** of the park-paths plan: the source exists and carries honest cover, but it is
+not yet in the routing graph or the tiles (`tiler graph` and `tiler tiles` do not read `PATH`
+this phase, so their output is unchanged). Conflation into GRPH is Phase 2.
 
 ## The colour scale
 
@@ -445,12 +479,43 @@ ST"), trimmed, deduped and sorted; a segment's record points at one by index (re
 or carries `0xFFFF` where the row had no label. Read once, sequentially — a build input for the
 graph, not shipped to the client, so an offsets table would be ceremony.
 
+### `data/paths/<id>.bin` — the OSM pedestrian/park network, magic `PATH` (v1)
+
+**Byte-for-byte the STRT v5 layout above** — the same 64-byte header, 24-byte records, coordinate
+blob, zeroed density blob (filled in place by `tiler densities`) and trailing name blob — so one
+reader and one sampler serve both files. Only the magic (`PATH`), the format version (1) and the
+meaning of a few record fields differ. Per 24-byte record:
+
+| offset | type | STRT meaning | PATH meaning |
+| --- | --- | --- | --- |
+| 0 | u32 | physicalid | **OSM way id** (the ingest drops any way whose id exceeds a u32) |
+| 4 | u32 | coordinate blob offset | same |
+| 8 | u16 | vertex count | same |
+| 10 | u16 | name id | index into PATH's own name blob (`0xFFFF` unnamed) |
+| 12 | f32 | geodesic length, metres | same |
+| 16 | u32 | first vertex in the density blob | same |
+| 20 | u8 | rw_type | **kind: 6 = path, 7 = steps** (the two the model distinguishes) |
+| 21 | u8 | street width | **0** — a path has no roadway, so it is sampled once on its line |
+| 22 | u8 | posted speed | **0** |
+| 23 | u8 | flags | **bit2 structure** only (a bridge/tunnel deck or a non-zero `layer`); bits 0/1 are zero |
+
+Kind 6/7 both drive `half_offset_meters` to 0, so — exactly like a boardwalk or a CSCL path — the
+one sample taken on the centerline fills both density bytes of the vertex. The name blob holds the
+ways' **uppercased** `name` tags, deduped and sorted, in PATH's own index space (the graph will
+concatenate it after the street names in Phase 2). This is a committed **ODbL** source: it is an
+extract of OSM geometry, so its share-alike terms follow it (see `data/README.md`).
+
 ### `public/streets/{x}/{y}.bin` — the chunks (derived, gitignored)
 
 The segments touching one z12 tile. A segment goes into every z12 tile its bounding box
 touches; segments are short, so the few tiles it lands in beyond the ones it truly crosses
 cost nothing and cannot leave a gap at a seam. Each chunk's origin is its own tile's
 north-west corner, which keeps the first delta of every segment small.
+
+When a city carries a PATH layer, `tiler tiles --paths …` appends the OSM path segments to the
+same chunks, back to back with the streets. A path is a single centreline, so it lands with
+**half-offset 0** and its own sampled cover — the client draws an offset-0 segment as the one
+line it is, so no client change is needed and park paths appear as cover-coloured lines.
 
 Header, 40 bytes:
 

@@ -32,6 +32,7 @@ pub struct Params {
     woodland: PathBuf,
     land: PathBuf,
     streets: PathBuf,
+    paths: Option<PathBuf>, // the OSM path network, sampled with the same loop when present
     source_box: Bounds, // the raw extent of the trees and the streets, before the kernel's reach
     land_box: Bounds,   // the land polygons' own box, which the cover distribution is drawn over
     broad_sigma_meters: f64,
@@ -54,6 +55,8 @@ struct Report {
     draws: usize,
     land_density: Distribution,
     street_density: Distribution,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path_density: Option<Distribution>, // only when the params carried a paths file
 }
 
 /// The canopy mask, rasterized in the local metre space and Gaussian-feathered. This is a
@@ -157,6 +160,78 @@ fn distribution_of(values: &[f64], percentiles: &[u32]) -> Distribution {
     }
 }
 
+// The covered fraction at both sidewalks of every vertex of one network, in the vertex order of
+// its coordinate blob (left then right). A street is offset to its two sidewalks; a path, a
+// boardwalk or a step street has offset 0, so `half_offset_meters` returns 0 and the single
+// sample on the line stands for both of its sides. Shared by the street and path passes.
+fn cover_at_vertices(
+    network: &binfmt::Streets,
+    projection: &Projection,
+    index: &TreeIndex,
+    canopy: &Canopy,
+    params: &Params,
+) -> Vec<f64> {
+    (0..network.segments())
+        .into_par_iter()
+        .flat_map(|segment| {
+            let from = network.starts[segment] as usize;
+            let to = network.starts[segment + 1] as usize;
+            let xs: Vec<f64> = network.lngs[from..to]
+                .iter()
+                .map(|lng| projection.x(*lng))
+                .collect();
+            let ys: Vec<f64> = network.lats[from..to]
+                .iter()
+                .map(|lat| projection.y(*lat))
+                .collect();
+            let offset = sidewalks::half_offset_meters(
+                network.road_types[segment],
+                network.flags[segment],
+                network.width_feet[segment],
+                params.sidewalk_inset_meters,
+            );
+
+            let mut sampled = Vec::with_capacity(binfmt::SIDES * (to - from));
+            for (vertex, bearing) in sidewalks::bearings(&xs, &ys).into_iter().enumerate() {
+                let at = |x: f64, y: f64| {
+                    cover(index.evaluate_oriented(
+                        x,
+                        y,
+                        bearing,
+                        params.tight_sigma_along_meters,
+                        params.tight_sigma_across_meters,
+                    ))
+                    .max(floor_at(canopy, params, x, y))
+                };
+                let (normal_x, normal_y) = sidewalks::left_normal(bearing);
+                let left = at(
+                    xs[vertex] + normal_x * offset,
+                    ys[vertex] + normal_y * offset,
+                );
+                let right = if offset == 0.0 {
+                    left
+                } else {
+                    at(
+                        xs[vertex] - normal_x * offset,
+                        ys[vertex] - normal_y * offset,
+                    )
+                };
+                sampled.push(left);
+                sampled.push(right);
+            }
+            sampled
+        })
+        .collect()
+}
+
+// Quantizes the sampled fractions into the file's density blob, in place: a covered fraction of
+// 0..1 to a byte of 0..255, left then right per vertex.
+fn fill_densities(network: &mut binfmt::Streets, densities: &[f64]) {
+    for (byte, density) in network.densities_mut().iter_mut().zip(densities) {
+        *byte = round_half_up(density * 255.0) as u8;
+    }
+}
+
 pub fn run(params: &Path) -> Fallible<()> {
     let params: Params = serde_json::from_slice(&fs::read(params)?)?;
     let trees = binfmt::read_trees(&params.trees)?;
@@ -204,63 +279,27 @@ pub fn run(params: &Path) -> Fallible<()> {
         "sampling the tight field at both sidewalks of {} street vertices",
         streets.vertices()
     );
-    let street_densities: Vec<f64> = (0..streets.segments())
-        .into_par_iter()
-        .flat_map(|segment| {
-            let from = streets.starts[segment] as usize;
-            let to = streets.starts[segment + 1] as usize;
-            let xs: Vec<f64> = streets.lngs[from..to]
-                .iter()
-                .map(|lng| projection.x(*lng))
-                .collect();
-            let ys: Vec<f64> = streets.lats[from..to]
-                .iter()
-                .map(|lat| projection.y(*lat))
-                .collect();
-            let offset = sidewalks::half_offset_meters(
-                streets.road_types[segment],
-                streets.flags[segment],
-                streets.width_feet[segment],
-                params.sidewalk_inset_meters,
-            );
-
-            let mut sampled = Vec::with_capacity(binfmt::SIDES * (to - from));
-            for (vertex, bearing) in sidewalks::bearings(&xs, &ys).into_iter().enumerate() {
-                let at = |x: f64, y: f64| {
-                    cover(index.evaluate_oriented(
-                        x,
-                        y,
-                        bearing,
-                        params.tight_sigma_along_meters,
-                        params.tight_sigma_across_meters,
-                    ))
-                    .max(floor_at(&canopy, &params, x, y))
-                };
-                let (normal_x, normal_y) = sidewalks::left_normal(bearing);
-                let left = at(
-                    xs[vertex] + normal_x * offset,
-                    ys[vertex] + normal_y * offset,
-                );
-                // A boardwalk, a path or a step street *is* the walking surface: it has no
-                // offset, and the one sample taken on the line stands for both of its sides.
-                let right = if offset == 0.0 {
-                    left
-                } else {
-                    at(
-                        xs[vertex] - normal_x * offset,
-                        ys[vertex] - normal_y * offset,
-                    )
-                };
-                sampled.push(left);
-                sampled.push(right);
-            }
-            sampled
-        })
-        .collect();
-    for (byte, density) in streets.densities_mut().iter_mut().zip(&street_densities) {
-        *byte = round_half_up(density * 255.0) as u8;
-    }
+    let street_densities = cover_at_vertices(&streets, &projection, &index, &canopy, &params);
+    fill_densities(&mut streets, &street_densities);
     fs::write(&params.streets, &streets.bytes)?;
+
+    // The OSM path network, when the ingest committed one: sampled with the identical loop (its
+    // records carry offset 0, so one line sample stands for both sides) and its own zeroed
+    // density blob filled in place, exactly as the streets file's was.
+    let path_density = match &params.paths {
+        Some(path) => {
+            let mut paths = binfmt::read_paths(path)?;
+            eprintln!(
+                "sampling the tight field on {} path vertices",
+                paths.vertices()
+            );
+            let path_densities = cover_at_vertices(&paths, &projection, &index, &canopy, &params);
+            fill_densities(&mut paths, &path_densities);
+            fs::write(path, &paths.bytes)?;
+            Some(distribution_of(&path_densities, &params.percentiles))
+        }
+        None => None,
+    };
 
     let report = Report {
         bounds,
@@ -268,6 +307,7 @@ pub fn run(params: &Path) -> Fallible<()> {
         draws: samples.draws,
         land_density: distribution_of(&land_densities, &params.percentiles),
         street_density: distribution_of(&street_densities, &params.percentiles),
+        path_density,
     };
     println!("{}", serde_json::to_string(&report)?);
     Ok(())

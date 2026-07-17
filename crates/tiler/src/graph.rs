@@ -12,6 +12,7 @@ use std::path::PathBuf;
 
 use crate::Fallible;
 use crate::binfmt::{self, SIDES, write_varint, zigzag};
+use crate::conflate::{self, ProtoEdge};
 use crate::corners::{self, EdgeEnd};
 use crate::geometry::round_half_up;
 use crate::kde::METERS_PER_DEGREE_LAT;
@@ -28,6 +29,10 @@ pub const FLAG_STRUCTURE: u8 = 1 << 2;
 const GRPH_STRUCTURE: u8 = 1 << 0; // on a bridge or tunnel deck
 const GRPH_STEPS: u8 = 1 << 1; // a step street (rw_type 7)
 const GRPH_PATHLIKE: u8 = 1 << 2; // offset 0: boardwalk, path, steps, or a non-vehicular deck
+// Written into the final edge record's flags byte (byte 23, bit 3): an OSM-sourced path edge, as
+// against a CSCL-derived one. The client masks the bits it reads; the verification harness reads
+// this. Provenance rides in `Edge::osm` through construction and only lands in the byte at write.
+const GRPH_OSM: u8 = 1 << 3;
 
 // v2 edge kinds (record byte 22, bits 0-1) and side labels (bits 2-4). A crossing carries no
 // geometry and no side; a sidewalk is the only kind with a half-offset and a geometry-right flag.
@@ -71,6 +76,7 @@ const MAX_EDGE_VERTICES: usize = u16::MAX as usize; // a guard on the merged pol
 
 pub struct Args {
     pub streets: PathBuf,
+    pub paths: Option<PathBuf>,
     pub out: PathBuf,
 }
 
@@ -88,6 +94,7 @@ struct Edge {
     offset: u8,
     flags: u8,
     name_id: u16,
+    osm: bool, // OSM-sourced (a conflated path); keeps contraction and island-drop from blending provenance
 }
 
 /// One finished v2 edge: a sidewalk, a crossing, a link, or a path. `geom` indexes the shared
@@ -372,6 +379,7 @@ fn contractible(edges: &[Edge], incidence: &[Vec<u32>], node: u32) -> bool {
         && edges[incident[0] as usize].offset == edges[incident[1] as usize].offset
         && edges[incident[0] as usize].flags == edges[incident[1] as usize].flags
         && edges[incident[0] as usize].name_id == edges[incident[1] as usize].name_id
+        && edges[incident[0] as usize].osm == edges[incident[1] as usize].osm
 }
 
 /// Walk the chain of degree-2 nodes out of `start` along `first_edge`, merging edges as long as
@@ -389,6 +397,7 @@ fn trace_chain(
     let offset = edges[first_edge as usize].offset;
     let flags = edges[first_edge as usize].flags;
     let name_id = edges[first_edge as usize].name_id;
+    let osm = edges[first_edge as usize].osm;
     let mut poly_x: Vec<i32> = Vec::new();
     let mut poly_y: Vec<i32> = Vec::new();
     let mut length = 0.0f32;
@@ -474,6 +483,7 @@ fn trace_chain(
         offset,
         flags,
         name_id,
+        osm,
     }
 }
 
@@ -540,28 +550,22 @@ pub fn run(args: &Args) -> Fallible<()> {
     // for the whole city, as the estimator uses.
     let meters_per_unit_lat = METERS_PER_DEGREE_LAT * scale;
     let meters_per_unit_lng = METERS_PER_DEGREE_LAT * origin_lat.to_radians().cos() * scale;
+    let meters_per_unit = (meters_per_unit_lng, meters_per_unit_lat);
 
-    // The stored deltas were quantized ints; f64 is exact at this magnitude, so rounding recovers
-    // them exactly.
-    let quantized_x: Vec<i32> = streets
-        .lngs
-        .iter()
-        .map(|lng| ((lng - origin_lng) / scale).round() as i32)
-        .collect();
-    let quantized_y: Vec<i32> = streets
-        .lats
-        .iter()
-        .map(|lat| ((lat - origin_lat) / scale).round() as i32)
-        .collect();
+    // Everything is quantized in the streets frame, so the paths (whose PATH file carries its own
+    // origin) are re-quantized against the streets origin too — a fraction-of-a-unit rounding, well
+    // under the 1 m node merge — and the two networks share one integer grid the conflation compares.
+    let quantize_x = |lng: f64| ((lng - origin_lng) / scale).round() as i32;
+    let quantize_y = |lat: f64| ((lat - origin_lat) / scale).round() as i32;
+    let quantized_x: Vec<i32> = streets.lngs.iter().map(|lng| quantize_x(*lng)).collect();
+    let quantized_y: Vec<i32> = streets.lats.iter().map(|lat| quantize_y(*lat)).collect();
     let densities = streets.densities();
 
-    // Node the endpoints of every kept segment by exact quantized equality; drop the vehicular-only
-    // segments the overlay still draws.
-    let mut node_index: HashMap<(i32, i32), u32> = HashMap::new();
-    let mut node_x: Vec<i32> = Vec::new();
-    let mut node_y: Vec<i32> = Vec::new();
-    let mut segment_ends: Vec<(usize, u32, u32)> = Vec::new(); // (segment, node a, node b), raw ids
+    // Street protos: one per walkable (non-vehicular-only) CSCL segment, raw polyline, the per-side
+    // cover trapezoid over its original vertex range, and the sidewalk offset/flags — exactly the
+    // Edge the pipeline built before, minus the endpoint pinning conflation does after.
     let mut dropped_vehicular = 0usize;
+    let mut street_protos: Vec<ProtoEdge> = Vec::new();
     for segment in 0..streets.segments() {
         if streets.flags[segment] & FLAG_VEHICULAR_ONLY != 0 {
             dropped_vehicular += 1;
@@ -569,6 +573,116 @@ pub fn run(args: &Args) -> Fallible<()> {
         }
         let from = streets.starts[segment] as usize;
         let to = streets.starts[segment + 1] as usize;
+        let (cover_left, cover_right) = segment_cover(
+            densities,
+            &quantized_x,
+            &quantized_y,
+            from,
+            to,
+            meters_per_unit_lng,
+            meters_per_unit_lat,
+        );
+        let offset_meters = sidewalks::half_offset_meters(
+            streets.road_types[segment],
+            streets.flags[segment],
+            streets.width_feet[segment],
+            SIDEWALK_INSET_METERS,
+        );
+        let offset = round_half_up(offset_meters * DECIMETERS_PER_METER) as u8;
+        let mut flags = 0u8;
+        if streets.flags[segment] & FLAG_STRUCTURE != 0 {
+            flags |= GRPH_STRUCTURE;
+        }
+        if streets.road_types[segment] == STEP_STREET {
+            flags |= GRPH_STEPS;
+        }
+        if offset == 0 {
+            flags |= GRPH_PATHLIKE;
+        }
+        street_protos.push(ProtoEdge {
+            poly_x: quantized_x[from..to].to_vec(),
+            poly_y: quantized_y[from..to].to_vec(),
+            length: streets.lengths_m[segment],
+            cover_left,
+            cover_right,
+            offset,
+            flags,
+            name_id: streets.name_ids[segment],
+            osm: false,
+        });
+    }
+    // FLAG_NON_VEHICULAR rides in the STRT flags byte and is consumed inside half_offset_meters
+    // (an NV deck is drawn on its own line), so the offset byte already carries it; the reference
+    // keeps that dependency legible where the router reads the same flags byte.
+    let _ = FLAG_NON_VEHICULAR;
+
+    // The merged name table is the streets' names followed by the paths' (its ids offset past the
+    // street count); path protos carry offset 0 (PATHLIKE), cover from their own density blob, and
+    // the OSM provenance bit. When no PATH file is given the graph is byte-identical to before.
+    let mut all_names: Vec<String> = streets.names.clone();
+    let street_name_count = all_names.len();
+    let mut path_protos: Vec<ProtoEdge> = Vec::new();
+    if let Some(paths_file) = &args.paths {
+        let paths = binfmt::read_paths(paths_file)?;
+        if street_name_count + paths.names.len() > UNNAMED as usize {
+            return Err(format!(
+                "{} street + path names overflow a u16 id",
+                street_name_count + paths.names.len()
+            )
+            .into());
+        }
+        let path_x: Vec<i32> = paths.lngs.iter().map(|lng| quantize_x(*lng)).collect();
+        let path_y: Vec<i32> = paths.lats.iter().map(|lat| quantize_y(*lat)).collect();
+        let path_densities = paths.densities();
+        for segment in 0..paths.segments() {
+            let from = paths.starts[segment] as usize;
+            let to = paths.starts[segment + 1] as usize;
+            let (cover_left, cover_right) = segment_cover(
+                path_densities,
+                &path_x,
+                &path_y,
+                from,
+                to,
+                meters_per_unit_lng,
+                meters_per_unit_lat,
+            );
+            let mut flags = GRPH_PATHLIKE;
+            if paths.flags[segment] & FLAG_STRUCTURE != 0 {
+                flags |= GRPH_STRUCTURE;
+            }
+            if paths.road_types[segment] == STEP_STREET {
+                flags |= GRPH_STEPS;
+            }
+            let name_id = if paths.name_ids[segment] == UNNAMED {
+                UNNAMED
+            } else {
+                paths.name_ids[segment] + street_name_count as u16
+            };
+            path_protos.push(ProtoEdge {
+                poly_x: path_x[from..to].to_vec(),
+                poly_y: path_y[from..to].to_vec(),
+                length: paths.lengths_m[segment],
+                cover_left,
+                cover_right,
+                offset: 0,
+                flags,
+                name_id,
+                osm: true,
+            });
+        }
+        all_names.extend(paths.names);
+    }
+
+    // Conflate the two sources into one segment list, then node it exactly as before.
+    let (protos, conflate_stats) = conflate::conflate(street_protos, path_protos, meters_per_unit);
+
+    // Node the endpoints of every proto by exact quantized equality.
+    let mut node_index: HashMap<(i32, i32), u32> = HashMap::new();
+    let mut node_x: Vec<i32> = Vec::new();
+    let mut node_y: Vec<i32> = Vec::new();
+    let mut proto_ends: Vec<(u32, u32)> = Vec::with_capacity(protos.len()); // (node a, node b), raw ids
+    for proto in &protos {
+        let last = proto.poly_x.len() - 1;
         let mut intern = |key_x: i32, key_y: i32| {
             let next = node_x.len() as u32;
             *node_index.entry((key_x, key_y)).or_insert_with(|| {
@@ -577,9 +691,9 @@ pub fn run(args: &Args) -> Fallible<()> {
                 next
             })
         };
-        let node_a = intern(quantized_x[from], quantized_y[from]);
-        let node_b = intern(quantized_x[to - 1], quantized_y[to - 1]);
-        segment_ends.push((segment, node_a, node_b));
+        let node_a = intern(proto.poly_x[0], proto.poly_y[0]);
+        let node_b = intern(proto.poly_x[last], proto.poly_y[last]);
+        proto_ends.push((node_a, node_b));
     }
     let raw_node_count = node_x.len();
 
@@ -635,63 +749,34 @@ pub fn run(args: &Args) -> Fallible<()> {
     let merged_count = merged_x.len();
     let merged_near_nodes = raw_node_count - merged_count;
 
-    // One edge per kept segment, endpoints pinned to the merged node coordinates.
-    let mut edges: Vec<Edge> = Vec::with_capacity(segment_ends.len());
-    for &(segment, raw_a, raw_b) in &segment_ends {
-        let from = streets.starts[segment] as usize;
-        let to = streets.starts[segment + 1] as usize;
+    // One edge per proto, endpoints pinned to the merged node coordinates; all other fields (cover,
+    // offset, flags, name, provenance) come straight from the conflated proto.
+    let mut edges: Vec<Edge> = Vec::with_capacity(protos.len());
+    for (proto_index, &(raw_a, raw_b)) in proto_ends.iter().enumerate() {
+        let proto = &protos[proto_index];
         let node_a = merged_id[raw_a as usize];
         let node_b = merged_id[raw_b as usize];
-        let mut poly_x: Vec<i32> = quantized_x[from..to].to_vec();
-        let mut poly_y: Vec<i32> = quantized_y[from..to].to_vec();
+        let mut poly_x = proto.poly_x.clone();
+        let mut poly_y = proto.poly_y.clone();
         let last = poly_x.len() - 1;
         poly_x[0] = merged_x[node_a as usize];
         poly_y[0] = merged_y[node_a as usize];
         poly_x[last] = merged_x[node_b as usize];
         poly_y[last] = merged_y[node_b as usize];
-        let (cover_left, cover_right) = segment_cover(
-            densities,
-            &quantized_x,
-            &quantized_y,
-            from,
-            to,
-            meters_per_unit_lng,
-            meters_per_unit_lat,
-        );
-        let offset_meters = sidewalks::half_offset_meters(
-            streets.road_types[segment],
-            streets.flags[segment],
-            streets.width_feet[segment],
-            SIDEWALK_INSET_METERS,
-        );
-        let offset = round_half_up(offset_meters * DECIMETERS_PER_METER) as u8;
-        let mut flags = 0u8;
-        if streets.flags[segment] & FLAG_STRUCTURE != 0 {
-            flags |= GRPH_STRUCTURE;
-        }
-        if streets.road_types[segment] == STEP_STREET {
-            flags |= GRPH_STEPS;
-        }
-        if offset == 0 {
-            flags |= GRPH_PATHLIKE;
-        }
         edges.push(Edge {
             a: node_a,
             b: node_b,
             poly_x,
             poly_y,
-            length: streets.lengths_m[segment],
-            cover_left,
-            cover_right,
-            offset,
-            flags,
-            name_id: streets.name_ids[segment],
+            length: proto.length,
+            cover_left: proto.cover_left,
+            cover_right: proto.cover_right,
+            offset: proto.offset,
+            flags: proto.flags,
+            name_id: proto.name_id,
+            osm: proto.osm,
         });
     }
-    // FLAG_NON_VEHICULAR rides in the STRT flags byte and is consumed inside half_offset_meters
-    // (an NV deck is drawn on its own line), so the offset byte already carries it; the reference
-    // keeps that dependency legible where the router reads the same flags byte.
-    let _ = FLAG_NON_VEHICULAR;
 
     let mut incidence: Vec<Vec<u32>> = vec![Vec::new(); merged_count];
     for (edge_id, edge) in edges.iter().enumerate() {
@@ -707,6 +792,7 @@ pub fn run(args: &Args) -> Fallible<()> {
             && incident[0] != incident[1]
             && edges[incident[0] as usize].offset == edges[incident[1] as usize].offset
             && edges[incident[0] as usize].flags == edges[incident[1] as usize].flags
+            && edges[incident[0] as usize].osm == edges[incident[1] as usize].osm
             && edges[incident[0] as usize].name_id != edges[incident[1] as usize].name_id
         {
             name_break_joints += 1;
@@ -756,15 +842,60 @@ pub fn run(args: &Args) -> Fallible<()> {
         edge.poly_y = pruned_y;
     }
 
+    // Island drop (decision-3 step 7): a contracted component with no CSCL-sourced edge is an
+    // unanchored OSM path net (a playground stub the entrance snap could not reach, or NJ/Westchester
+    // leakage the land clip missed) — unreachable in the model and a trap for snaps into dead ends.
+    // Remove such components whole, before the base component count, so the v1/v2 parity assertion
+    // still measures a partition the downstream construction preserves.
+    let mut island_parent: Vec<u32> = (0..merged_count as u32).collect();
+    for edge in &final_edges {
+        union(&mut island_parent, edge.a, edge.b);
+    }
+    let mut component_has_cscl: HashMap<u32, bool> = HashMap::new();
+    for edge in &final_edges {
+        let root = find(&mut island_parent, edge.a);
+        let entry = component_has_cscl.entry(root).or_insert(false);
+        *entry = *entry || !edge.osm;
+    }
+    let mut dropped_osm_island_roots: HashSet<u32> = HashSet::new();
+    let mut dropped_osm_island_km = 0.0f64;
+    let keep_edge: Vec<bool> = final_edges
+        .iter()
+        .map(|edge| {
+            let root = find(&mut island_parent, edge.a);
+            if component_has_cscl[&root] {
+                true
+            } else {
+                dropped_osm_island_roots.insert(root);
+                dropped_osm_island_km += f64::from(edge.length) / 1000.0;
+                false
+            }
+        })
+        .collect();
+    let dropped_osm_islands = dropped_osm_island_roots.len();
+    let mut kept_edges: Vec<Edge> = Vec::with_capacity(final_edges.len());
+    for (edge, keep) in final_edges.into_iter().zip(keep_edge) {
+        if keep {
+            kept_edges.push(edge);
+        }
+    }
+    let final_edges = kept_edges;
+
     // The contracted graph's connected components are the v1 partition: every construction step
     // below stays inside one, and the finished v2 graph is asserted to have exactly this many
-    // components before writing (decision 6).
+    // components before writing (decision 6). A node still counts only if a surviving edge touches
+    // it, so the dropped islands leave the count.
+    let mut base_kept = vec![false; merged_count];
+    for edge in &final_edges {
+        base_kept[edge.a as usize] = true;
+        base_kept[edge.b as usize] = true;
+    }
     let mut component_parent: Vec<u32> = (0..merged_count as u32).collect();
     for edge in &final_edges {
         union(&mut component_parent, edge.a, edge.b);
     }
     let mut base_component: HashSet<u32> = HashSet::new();
-    for (node, &kept) in kept_node.iter().enumerate() {
+    for (node, &kept) in base_kept.iter().enumerate() {
         if kept {
             base_component.insert(find(&mut component_parent, node as u32));
         }
@@ -954,6 +1085,8 @@ pub fn run(args: &Args) -> Fallible<()> {
     let mut geometry_polys: Vec<(Vec<i32>, Vec<i32>)> = Vec::new();
     let mut sidewalk_count = 0usize;
     let mut path_edge_count = 0usize;
+    let mut osm_path_edges = 0usize;
+    let mut osm_path_km = 0.0f64;
     let mut length_clamped = 0usize;
     let clamp_length = |from: u32, to: u32, straight: f32, counter: &mut usize| -> f32 {
         let distance = node_distance(&v2_x, &v2_y, from, to, origin_lng, origin_lat, scale) as f32;
@@ -978,6 +1111,11 @@ pub fn run(args: &Args) -> Fallible<()> {
             // pinned endpoints, so a near-straight path can end a metre or two under the node
             // distance; clamp it up like a sidewalk to keep the heuristic admissible.
             let length = clamp_length(node_a, node_b, edge.length, &mut length_clamped);
+            let path_flags = if edge.osm {
+                base_flags | GRPH_OSM
+            } else {
+                base_flags
+            };
             v2_edges.push(V2Edge {
                 a: node_a,
                 b: node_b,
@@ -988,9 +1126,13 @@ pub fn run(args: &Args) -> Fallible<()> {
                 name_id: edge.name_id,
                 kind: KIND_PATH,
                 side: SIDE_NONE,
-                flags: base_flags,
+                flags: path_flags,
             });
             path_edge_count += 1;
+            if edge.osm {
+                osm_path_edges += 1;
+                osm_path_km += f64::from(length) / 1000.0;
+            }
         } else {
             let left_a = left_at_a[edge_id];
             let right_a = right_at_a[edge_id];
@@ -1268,7 +1410,7 @@ pub fn run(args: &Args) -> Fallible<()> {
     let mut name_offsets: Vec<u32> = Vec::with_capacity(used_names.len() + 1);
     for &original in &used_names {
         name_offsets.push(name_blob.len() as u32);
-        name_blob.extend_from_slice(streets.names[original as usize].as_bytes());
+        name_blob.extend_from_slice(all_names[original as usize].as_bytes());
     }
     name_offsets.push(name_blob.len() as u32);
     let name_table_bytes = 4 + 4 * name_offsets.len() + name_blob.len();
@@ -1314,6 +1456,10 @@ pub fn run(args: &Args) -> Fallible<()> {
     for (index, &value) in adjacency.iter().enumerate() {
         put_u32(&mut bytes, adjacency_offset + 4 * index, value);
     }
+    // The cover byte is clamped to 254 so the client's maxCover stays < 1: cost.ts's admissible
+    // heuristic collapses (the greenest edge goes free at w = 1) if any edge reads a full 255, which
+    // the denser OSM tree field can now reach.
+    let mut cover_clamped = 0usize;
     for (edge_id, edge) in v2_edges.iter().enumerate() {
         let record = edges_offset + EDGE_RECORD_BYTES * edge_id;
         let (geom_offset, vertex_count) = if edge.geom == NO_GEOMETRY {
@@ -1328,13 +1474,19 @@ pub fn run(args: &Args) -> Fallible<()> {
             Some(&index) => index,
             None => UNNAMED,
         };
+        let cover = if edge.cover > 254 {
+            cover_clamped += 1;
+            254
+        } else {
+            edge.cover
+        };
         put_u32(&mut bytes, record, edge.a);
         put_u32(&mut bytes, record + 4, edge.b);
         put_f32(&mut bytes, record + 8, edge.length);
         put_u32(&mut bytes, record + 12, geom_offset);
         put_u16(&mut bytes, record + 16, vertex_count);
         put_u16(&mut bytes, record + 18, name);
-        bytes[record + 20] = edge.cover;
+        bytes[record + 20] = cover;
         bytes[record + 21] = edge.half_offset;
         bytes[record + 22] = (edge.kind & 0b11) | (edge.side << 2);
         bytes[record + 23] = edge.flags;
@@ -1381,6 +1533,20 @@ pub fn run(args: &Args) -> Fallible<()> {
         "nameBreakJoints": name_break_joints,
         "mopupCrossings": mopup_crossings,
         "lengthClamped": length_clamped,
+        "coverClamped": cover_clamped,
+        "dedupedWays": conflate_stats.deduped_ways,
+        "dedupedKm": conflate_stats.deduped_km,
+        "osmTSplits": conflate_stats.osm_t_splits,
+        "weldedVertices": conflate_stats.welded_vertices,
+        "entranceSnaps": conflate_stats.entrance_snaps,
+        "danglingEnds": conflate_stats.dangling_ends,
+        "csclSplits": conflate_stats.cscl_splits,
+        "osmWays": conflate_stats.osm_ways,
+        "osmKm": conflate_stats.osm_km,
+        "droppedOsmIslands": dropped_osm_islands,
+        "droppedOsmIslandKm": dropped_osm_island_km,
+        "osmPathEdges": osm_path_edges,
+        "osmPathKm": osm_path_km,
         "names": used_names.len(),
         "totalKm": total_km,
         "bytes": bytes.len(),
