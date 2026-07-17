@@ -16,8 +16,6 @@ interface RouteLayerProps {
 }
 
 const TILE_SIZE = 256;
-const EQUATOR_METERS_PER_PIXEL = 156_543.033_92; // web mercator, at the equator, at z0
-const METERS_PER_DECIMETER = 0.1;
 const PANE_NAME = "route";
 const PANE_Z_INDEX = 450; // above tiles (~200), below markers (~600)
 const MIN_ZOOM = 3;
@@ -55,41 +53,12 @@ function haversineMeters(
   return 2 * EARTH_RADIUS_METERS * Math.asin(Math.min(1, Math.sqrt(inner)));
 }
 
-// The unit normal at each projected vertex, pointing at the *left* of travel — 90 degrees
-// counter-clockwise of the direction, which on a south-running canvas y is (ty, -tx). Borrowed
-// from street-score-layer, one-sided at the ends and skipping coincident neighbours.
-function leftNormals(
-  xs: Float64Array,
-  ys: Float64Array,
-  count: number,
-  normalXs: Float64Array,
-  normalYs: Float64Array,
-): void {
-  const same = (left: number, right: number): boolean =>
-    xs[left] === xs[right] && ys[left] === ys[right];
-  for (let vertex = 0; vertex < count; vertex++) {
-    let back = vertex;
-    while (back > 0 && same(back, vertex)) {
-      back -= 1;
-    }
-    let ahead = vertex;
-    while (ahead + 1 < count && same(ahead, vertex)) {
-      ahead += 1;
-    }
-    const tangentX = xs[ahead] - xs[back];
-    const tangentY = ys[ahead] - ys[back];
-    const length = Math.hypot(tangentX, tangentY) || 1;
-    normalXs[vertex] = tangentY / length;
-    normalYs[vertex] = -tangentX / length;
-  }
-}
-
-// A per-step polyline already in travel order, with the side it should hug baked into a sign.
+// A per-step polyline in travel order. Every kind now draws its stored geometry as-is: a sidewalk's
+// baked offset already runs corner-to-corner on its own side, and a crossing or link is the straight
+// corner-to-corner line edgePath synthesizes, so there is no draw-time offset to apply.
 interface DrawStep {
   lngs: Float64Array;
   lats: Float64Array;
-  offsetSign: number; // +1 left of travel, -1 right, 0 centred (either / path-like)
-  halfOffsetMeters: number; // the true sidewalk half-offset when offsetSign is non-zero
 }
 
 // The a -> b along-distance bounds this step actually walked, so the end edges are trimmed at the
@@ -176,8 +145,6 @@ function clipEdge(
   return { lngs: outLngs, lats: outLats };
 }
 
-const PATHLIKE_FLAG = 4;
-
 function buildDrawSteps(graph: RoutingGraph, result: RouteResult): DrawStep[] {
   const draw: DrawStep[] = [];
   const stepCount = result.steps.length;
@@ -192,23 +159,15 @@ function buildDrawSteps(graph: RoutingGraph, result: RouteResult): DrawStep[] {
       result.dest,
     );
     const clipped = clipEdge(graph, step.edge, fromMeters, toMeters);
-    // The clip runs a -> b; reverse it into travel order so leftNormals reads the walker's left.
+    // The clip runs a -> b; reverse it into travel order so the ribbon flows the way it is walked.
     const lngs = step.forward ? clipped.lngs : [...clipped.lngs].reverse();
     const lats = step.forward ? clipped.lats : [...clipped.lats].reverse();
     if (lngs.length < 2) {
       continue;
     }
-    const pathlike =
-      (graph.edgeFlags[step.edge] & PATHLIKE_FLAG) !== 0 ||
-      graph.edgeHalfOffsetDm[step.edge] === 0;
-    const offsetSign =
-      step.side === "either" || pathlike ? 0 : step.side === "left" ? 1 : -1;
     draw.push({
       lngs: Float64Array.from(lngs),
       lats: Float64Array.from(lats),
-      offsetSign,
-      halfOffsetMeters:
-        graph.edgeHalfOffsetDm[step.edge] * METERS_PER_DECIMETER,
     });
   }
   return draw;
@@ -245,14 +204,6 @@ class RouteGrid extends L.GridLayer {
       MIN_WIDTH,
       WIDTH_AT_Z16 * WIDTH_PER_ZOOM ** (coords.z - 16),
     );
-    const center = map.unproject(
-      L.point(originX + TILE_SIZE / 2, originY + TILE_SIZE / 2),
-      coords.z,
-    );
-    const metersPerPixel =
-      (EQUATOR_METERS_PER_PIXEL * Math.cos((center.lat * Math.PI) / 180)) /
-      2 ** coords.z;
-
     const path = new Path2D();
     let longest = 0;
     for (const step of this.drawSteps) {
@@ -260,17 +211,10 @@ class RouteGrid extends L.GridLayer {
     }
     const xs = new Float64Array(longest);
     const ys = new Float64Array(longest);
-    const normalXs = new Float64Array(longest);
-    const normalYs = new Float64Array(longest);
 
     for (const step of this.drawSteps) {
       const count = step.lngs.length;
-      const offsetPx =
-        step.offsetSign === 0
-          ? 0
-          : step.offsetSign *
-            Math.max(step.halfOffsetMeters / metersPerPixel, width);
-      const margin = width + Math.abs(offsetPx);
+      const margin = width;
       let low = Number.POSITIVE_INFINITY;
       let left = Number.POSITIVE_INFINITY;
       let high = Number.NEGATIVE_INFINITY;
@@ -295,16 +239,9 @@ class RouteGrid extends L.GridLayer {
       if (!overlaps) {
         continue;
       }
-      leftNormals(xs, ys, count, normalXs, normalYs);
-      path.moveTo(
-        xs[0] + offsetPx * normalXs[0],
-        ys[0] + offsetPx * normalYs[0],
-      );
+      path.moveTo(xs[0], ys[0]);
       for (let vertex = 1; vertex < count; vertex++) {
-        path.lineTo(
-          xs[vertex] + offsetPx * normalXs[vertex],
-          ys[vertex] + offsetPx * normalYs[vertex],
-        );
+        path.lineTo(xs[vertex], ys[vertex]);
       }
     }
 

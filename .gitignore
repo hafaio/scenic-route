@@ -50,3 +50,6 @@ firebase.json
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# throwaway analysis harnesses (belong in the session scratchpad, never the repo)
+/scratchpad/

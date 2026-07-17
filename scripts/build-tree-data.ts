@@ -48,6 +48,8 @@ interface Segment {
   streetWidth: number; // feet, 0 unknown
   postedSpeed: number; // mph, 0 unknown
   flags: number; // FLAG_* bits, from the row's nonped/trafdir/rw_type
+  name: string; // the trimmed stname_label, "" when the row carries none
+  nameId: number; // index into the name table, UNNAMED_ID when the row carries no label
   points: Coord[]; // densified, so the field is sampled at least every DENSIFY_METERS
   lengthMeters: number;
 }
@@ -60,6 +62,7 @@ interface StreetRow {
   posted_speed?: string;
   nonped?: string; // 'V' vehicular-only, 'D' dedicated deck, else null
   trafdir?: string; // 'NV' non-vehicular (a ped/bike deck)
+  stname_label?: string; // CSCL's normalized street name, e.g. "W 60 ST"
 }
 
 interface BoroughRow {
@@ -87,10 +90,11 @@ interface Estimate {
 const DATA_DIR = join(import.meta.dirname, "..", "data");
 const PARAMS_PATH = join(tmpdir(), "scenic-route-densities.json");
 
-const STREET_FORMAT = 4;
-const STREET_HEADER_BYTES = 56;
+const STREET_FORMAT = 5;
+const STREET_HEADER_BYTES = 64;
 const STREET_RECORD_BYTES = 24;
 const STREET_SIDES = 2; // the density blob carries both sidewalks of every vertex, left then right
+const UNNAMED_ID = 0xffff; // the segment's name id when CSCL carries no label — measured zero for NYC
 const TREE_FORMAT = 2; // v2 carries a crown-radius byte per tree; v1 was points only
 const WOODLAND_FORMAT = 1;
 const LAND_FORMAT = 1;
@@ -257,6 +261,7 @@ function toSegments(rows: StreetRow[]): Segment[] {
     if (roadType === 3 || roadType === 4) {
       flags |= FLAG_STRUCTURE;
     }
+    const name = (row.stname_label ?? "").trim();
     for (const part of row.the_geom.coordinates) {
       const points: Coord[] = [];
       for (const [lng, lat] of part) {
@@ -280,6 +285,8 @@ function toSegments(rows: StreetRow[]): Segment[] {
         streetWidth: Math.min(255, toInt(row.streetwidth)),
         postedSpeed: Math.min(255, toInt(row.posted_speed)),
         flags,
+        name,
+        nameId: UNNAMED_ID, // assigned once the whole distinct set is known, in buildNameTable
         points: dense.points,
         lengthMeters: dense.lengthMeters,
       });
@@ -291,12 +298,32 @@ function toSegments(rows: StreetRow[]): Segment[] {
   return segments;
 }
 
+// Collects the distinct trimmed street names, sorts them, and stamps each segment with its
+// index into that sorted table; a segment with no label keeps UNNAMED_ID. Returns the table,
+// which the encoder writes once as the trailing name blob.
+function buildNameTable(segments: Segment[]): string[] {
+  const distinct = new Set<string>();
+  for (const segment of segments) {
+    if (segment.name) {
+      distinct.add(segment.name);
+    }
+  }
+  const names = [...distinct].sort();
+  const idOf = new Map(names.map((name, index) => [name, index]));
+  for (const segment of segments) {
+    segment.nameId = segment.name
+      ? (idOf.get(segment.name) ?? UNNAMED_ID)
+      : UNNAMED_ID;
+  }
+  return names;
+}
+
 async function fetchNycStreets(): Promise<Segment[]> {
   const rows = await fetchDataset<StreetRow>(
     "inkn-q76z",
     {
       $select:
-        "the_geom,physicalid,rw_type,streetwidth,posted_speed,nonped,trafdir",
+        "the_geom,physicalid,rw_type,streetwidth,posted_speed,nonped,trafdir,stname_label",
       $where:
         "rw_type in ('1','5','6','7','10') OR (rw_type in ('3','4') AND (nonped IS NULL OR nonped != 'V'))",
     },
@@ -367,7 +394,7 @@ function distributionOf(raw: RawDistribution): Distribution {
 // The density blob is written zeroed — two bytes a vertex, one sidewalk each — and filled in
 // place by `tiler densities`, so the coordinates it offsets the sidewalks from are the ones that
 // ship rather than a parallel copy. layout: scripts/README.md
-function encodeStreets(segments: Segment[]): Uint8Array {
+function encodeStreets(segments: Segment[], names: string[]): Uint8Array {
   let originLng = Number.POSITIVE_INFINITY;
   let originLat = Number.POSITIVE_INFINITY;
   let vertices = 0;
@@ -406,6 +433,7 @@ function encodeStreets(segments: Segment[]): Uint8Array {
     view.setUint32(record, segment.physicalId, true);
     view.setUint32(record + 4, start, true);
     view.setUint16(record + 8, segment.points.length, true);
+    view.setUint16(record + 10, segment.nameId, true);
     view.setFloat32(record + 12, segment.lengthMeters, true);
     view.setUint32(record + 16, vertex, true);
     records[record + 20] = segment.roadType;
@@ -426,16 +454,38 @@ function encodeStreets(segments: Segment[]): Uint8Array {
   view.setFloat64(16, originLng, true);
   view.setFloat64(24, originLat, true);
   view.setFloat64(32, COORD_SCALE, true);
+  // The name blob is the file's final region: a u32 count, then each name as a u16 byte length
+  // and its UTF-8 bytes, back to back. Read once, sequentially, by the one Rust reader.
+  const encoder = new TextEncoder();
+  const nameBytes = names.map((name) => encoder.encode(name));
+  let nameBlobLength = 4;
+  for (const bytes of nameBytes) {
+    nameBlobLength += 2 + bytes.length;
+  }
+  const nameBlob = new Uint8Array(nameBlobLength);
+  const nameView = new DataView(nameBlob.buffer);
+  nameView.setUint32(0, names.length, true);
+  let nameCursor = 4;
+  for (const bytes of nameBytes) {
+    nameView.setUint16(nameCursor, bytes.length, true);
+    nameCursor += 2;
+    nameBlob.set(bytes, nameCursor);
+    nameCursor += bytes.length;
+  }
+
+  const densityBytes = STREET_SIDES * vertices;
+  const nameBlobOffset = records.length + blobEnd + densityBytes;
   view.setUint32(40, records.length, true);
   view.setUint32(44, blobEnd, true);
   view.setUint32(48, records.length + blobEnd, true);
-  view.setUint32(52, STREET_SIDES * vertices, true);
+  view.setUint32(52, densityBytes, true);
+  view.setUint32(56, nameBlobOffset, true);
+  view.setUint32(60, nameBlobLength, true);
 
-  const encoded = new Uint8Array(
-    records.length + blobEnd + STREET_SIDES * vertices,
-  );
+  const encoded = new Uint8Array(nameBlobOffset + nameBlobLength);
   encoded.set(records);
   encoded.set(blob.subarray(0, blobEnd), records.length);
+  encoded.set(nameBlob, nameBlobOffset);
   return encoded;
 }
 
@@ -489,6 +539,13 @@ async function ingest(): Promise<void> {
 
   console.error(`${CITY.id}: fetching street segments`);
   const segments = await fetchNycStreets();
+  const names = buildNameTable(segments);
+  const unnamed = segments.filter(
+    (segment) => segment.nameId === UNNAMED_ID,
+  ).length;
+  console.error(
+    `${CITY.id}: ${names.length} distinct street names, ${unnamed} unnamed segments`,
+  );
   console.error(`${CITY.id}: fetching trees`);
   const trees = await fetchNycTrees();
   const { crowned, clamped, imputed } = crownTrees(trees);
@@ -520,7 +577,7 @@ async function ingest(): Promise<void> {
   );
   const streetPath = join(DATA_DIR, "streets", file);
   await mkdir(join(DATA_DIR, "streets"), { recursive: true });
-  await writeFile(streetPath, encodeStreets(segments));
+  await writeFile(streetPath, encodeStreets(segments, names));
 
   let vertices = 0;
   for (const segment of segments) {

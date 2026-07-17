@@ -385,9 +385,9 @@ Identical layout to `WOOD`. Needed at ingest (the population the cover distribut
 over) and at tile time (the AND against the woodland), so it is committed rather than fused into
 anything.
 
-### `data/streets/<id>.bin` — the network, magic `STRT` (v4)
+### `data/streets/<id>.bin` — the network, magic `STRT` (v5)
 
-Header, 56 bytes:
+Header, 64 bytes:
 
 | offset | type | field |
 | --- | --- | --- |
@@ -404,6 +404,8 @@ Header, 56 bytes:
 | 44 | u32 | coordinate blob length |
 | 48 | u32 | density blob offset, from the start of the file |
 | 52 | u32 | density blob length, two bytes per vertex |
+| 56 | u32 | name blob offset, from the start of the file |
+| 60 | u32 | name blob length |
 
 Then one 24-byte record per segment, starting at the end of the header:
 
@@ -412,7 +414,7 @@ Then one 24-byte record per segment, starting at the end of the header:
 | 0 | u32 | physicalid (CSCL id; repeated if one row contributed several parts) |
 | 4 | u32 | offset of this segment's vertices within the coordinate blob |
 | 8 | u16 | vertex count, at least 2 |
-| 10 | u16 | reserved |
+| 10 | u16 | street name id, an index into the name blob (`0xFFFF` = unnamed) |
 | 12 | f32 | geodesic length, metres |
 | 16 | u32 | index of this segment's first vertex within the density blob |
 | 20 | u8 | rw_type: 1 street, 3 bridge, 4 tunnel, 5 boardwalk, 6 path, 7 step street, 10 alley |
@@ -436,6 +438,12 @@ to 0..255 — **two bytes per vertex**, the left sidewalk then the right, in the
 coordinate blob. It is a fixed-size trailing region, and the ingest is the only writer that
 leaves it empty: `build-tree-data` writes the file with the blob zeroed, then `tiler densities`
 offsets the sidewalks from the coordinates it just read back and fills the blob in place.
+
+Finally the **name blob**: a `u32` count of distinct names, then each name as a `u16` byte length
+and that many UTF-8 bytes, back to back. The names are CSCL's normalized `stname_label` ("W 60
+ST"), trimmed, deduped and sorted; a segment's record points at one by index (record offset 10),
+or carries `0xFFFF` where the row had no label. Read once, sequentially — a build input for the
+graph, not shipped to the client, so an offsets table would be ceremony.
 
 ### `public/streets/{x}/{y}.bin` — the chunks (derived, gitignored)
 
@@ -469,16 +477,34 @@ Then `segment count` segments, back to back, each:
 
 Decoded by `components/street-score-layer.tsx`, which applies the offset in *pixels*.
 
-### `public/routing/{id}.bin` — the routing graph, magic `GRPH` (v1, derived, gitignored)
+### `public/routing/{id}.bin` — the routing graph, magic `GRPH` (v2, derived, gitignored)
 
-`tiler graph` contracts STRT into the graph the client routes on: intersection nodes (the
-degree-2 shape joints collapsed away), edges carrying a geodesic length, per-side aggregated
-cover and their full pruned polyline for drawing. Vehicular-only segments (`nonped='V'`, flag
-bit 0) are dropped — a router must never walk a parkway mainline. Endpoints are noded by exact
-quantized equality, then near-misses within 1 m are union-found together; degree-2 nodes are
-contracted where the two edges share a half-offset byte and GRPH flags; the polylines are pruned
-of collinear vertices (endpoints kept); components are labelled by size descending (0 = largest).
-The edge length is the sum of the constituent records' f32 lengths, never recomputed. Everything
+`tiler graph` contracts STRT into the graph the client routes on, then expands it into the edges a
+walker actually uses. Steps 1–7 are the v1 contraction: vehicular-only segments (`nonped='V'`, flag
+bit 0) are dropped; endpoints are noded by exact quantized equality then near-misses within 1 m are
+union-found together; degree-2 shape joints are contracted where the two edges share a half-offset
+byte, GRPH flags **and street name** (a name change mid-block is kept, so a sidewalk edge never
+spans two names — reported as `nameBreakJoints`); polylines are pruned of collinear vertices
+(endpoints kept). Then every street becomes the things a walker uses:
+
+- At each node the incident street-ends are ordered by departure bearing; between consecutive ends
+  sits a **corner node** on the gap bisector, one half-offset out (radius clamped to [1, 30] m).
+- A street becomes **two sidewalk edges** (left and right of the centreline), each with its **own
+  baked geometry** — the centreline offset perpendicular to its side by the half-offset, with the two
+  end vertices replaced by the corner nodes so it runs corner-to-corner with no overshoot into the
+  intersection — carrying opposite N/S/E/W side labels, each its own side's cover byte. Its length is
+  that offset polyline's geodesic sum.
+- A node with total degree ≥ 3 and ≥ 2 street-ends emits one **crossing edge** per street, joining
+  the two corners that flank it — no geometry, length the corner-to-corner great-circle distance,
+  cover the mean of the crossed street's two side bytes, the crossed street's name.
+- Path surfaces (boardwalks, paths, step streets, non-vehicular decks) stay single **path edges** on
+  their own geometry, tied into a corner fan by geometry-less **link edges**.
+
+A final mop-up adds a crossing at any isolated deg-2 ring whose two sidewalk sides would otherwise
+be separate components (`mopupCrossings`), and the build asserts the v2 component count equals the
+v1 count. Nodes are sorted by (component, latitude, longitude) and renumbered, edges by (component,
+min node id); components are labelled by size descending (0 = largest). Every edge length is at
+least its straight-line node distance (clamped up if not; `lengthClamped`). Everything
 little-endian.
 
 Header, 64 bytes:
@@ -486,7 +512,7 @@ Header, 64 bytes:
 | offset | type | field |
 | --- | --- | --- |
 | 0 | u8[4] | magic `GRPH` |
-| 4 | u16 | format version = 1 |
+| 4 | u16 | format version = 2 |
 | 6 | u16 | header bytes = 64 |
 | 8 | u32 | node count N |
 | 12 | u32 | edge count E |
@@ -494,12 +520,14 @@ Header, 64 bytes:
 | 24 | f64 | origin latitude, degrees |
 | 32 | f64 | coordinate scale, degrees per quantized unit (1e-6) |
 | 40 | u32 | component count |
-| 44 | u32 | geometry blob offset, from the start of the file |
-| 48 | u32 | geometry blob length |
-| 52 | u32[3] | reserved (zero) |
+| 44 | u32 | name table offset, from the start of the file |
+| 48 | u32 | name table length |
+| 52 | u32 | geometry blob offset, from the start of the file |
+| 56 | u32 | geometry blob length |
+| 60 | u32 | reserved (zero) |
 
-Then five fixed-width sections, back to back, each starting 4-byte aligned (zero-padded as needed
-so the client can view them as typed arrays without copying):
+Then the sections, back to back, each starting 4-byte aligned (zero-padded as needed so the client
+can view them as typed arrays without copying):
 
 1. **Node longitudes**: N × i32, quantized.
 2. **Node latitudes**: N × i32, quantized.
@@ -513,23 +541,26 @@ so the client can view them as typed arrays without copying):
 | --- | --- | --- |
 | 0 | u32 | node a |
 | 4 | u32 | node b |
-| 8 | f32 | geodesic length, metres |
-| 12 | u32 | geometry offset, bytes, within the geometry blob |
-| 16 | u16 | geometry vertex count, ≥ 2 |
-| 18 | u8 | cover, left side of a→b travel, 0–255 |
-| 19 | u8 | cover, right side, 0–255 |
-| 20 | u8 | half-offset to a sidewalk, decimetres (0 = path-like, drawn/walked on the line) |
-| 21 | u8 | flags: bit0 structure, bit1 steps, bit2 path-like |
-| 22 | u16 | reserved (zero) |
+| 8 | f32 | length, metres (≥ the straight-line node distance) |
+| 12 | u32 | geometry offset within the blob; **0xFFFFFFFF = no geometry** (straight a→b) |
+| 16 | u16 | geometry vertex count (0 when no geometry) |
+| 18 | u16 | street name id into the name table (0xFFFF = unnamed) |
+| 20 | u8 | cover, 0–255, this edge's own single value |
+| 21 | u8 | half-offset to the sidewalk, decimetres (sidewalk kind only; else 0) |
+| 22 | u8 | kind and side: bits 0–1 kind (0 sidewalk, 1 crossing, 2 link, 3 path); bits 2–4 side (0 none, 1 N, 2 E, 3 S, 4 W) |
+| 23 | u8 | flags: bit0 structure, bit1 steps, bit2 **geometry-right** (this sidewalk lies right of its stored geometry direction; clear = left) |
 
-Then the **geometry blob**: per edge, `vertex count` (longitude, latitude) zigzag-LEB128 varint
-delta pairs, the first delta taken from node a's quantized position (so it is always (0, 0)) and
-the rest from the previous vertex. Geometry runs a→b.
+7. **Name table**: `u32 count`, then (count+1) × u32 byte offsets into the following UTF-8 blob,
+   then the blob. Only the names the kept edges reference, re-indexed; offsets make client access
+   O(1).
+8. **Geometry blob**: one entry per sidewalk edge (its own baked corner-to-corner offset) and per
+   path edge — `vertex count` (longitude, latitude) zigzag-LEB128 varint delta pairs. The **first
+   pair is the absolute quantized position** (delta from the graph origin); the rest are from the
+   previous vertex. Crossings and links carry none.
 
-Nodes are sorted by (component, quantized latitude, longitude) and renumbered; edges by
-(component, min node id). A pure degree-2 cycle is emitted as a self-loop on the one node it
-retains. GRPH flags are distinct from the STRT record flags: a step street is bit1, and bit2
-"path-like" means offset 0 (boardwalk, path, steps, or a non-vehicular deck).
+A pure degree-2 cycle is emitted as a self-loop on the one node it retains. GRPH edge flags are
+distinct from the STRT record flags: a step street is bit1, and bit2 on a **sidewalk** marks the
+geometry-right side (v1's "path-like" bit is gone — the kind field carries that now).
 
 ## Adding a city
 

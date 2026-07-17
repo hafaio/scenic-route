@@ -6,18 +6,28 @@
 import {
   edgeCover,
   edgeMultiplier,
-  edgeSide,
   minMultiplier,
   WALK_METERS_PER_SECOND,
 } from "./cost";
-import { edgePath, otherEnd, type RoutingGraph } from "./graph";
+import {
+  type EdgeKind,
+  edgeKind,
+  edgeName,
+  edgePath,
+  edgeSideLabel,
+  otherEnd,
+  type RoutingGraph,
+  type SideLabel,
+} from "./graph";
 import { haversineMeters, type Snap } from "./snap";
 
 export interface RouteStep {
   edge: number;
   forward: boolean; // travelled a -> b?
-  side: "left" | "right" | "either";
-  cover: number; // 0..1, the chosen (greener) side
+  kind: EdgeKind;
+  side: SideLabel; // the stored side of the sidewalk (null for crossings/links/paths), not travel-flipped
+  name: string | null; // the edge's street name, unprettified, or null
+  cover: number; // 0..1, this edge's cover
   lengthMeters: number; // walked length; partial on the end edges
 }
 
@@ -195,7 +205,9 @@ function makeStep(
   return {
     edge,
     forward,
-    side: edgeSide(graph, edge, forward),
+    kind: edgeKind(graph, edge),
+    side: edgeSideLabel(graph, edge),
+    name: edgeName(graph, edge),
     cover: edgeCover(graph, edge),
     lengthMeters,
   };
