@@ -1,7 +1,7 @@
 "use client";
 
 import dynamic from "next/dynamic";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { FiX } from "react-icons/fi";
 import {
   type AuthInfo,
@@ -16,6 +16,7 @@ import {
 import { type GeocodeResult, reverseGeocode } from "../src/geocode";
 import type { Pin, PinDraft } from "../src/pin";
 import { DEFAULT_TREE_WEIGHT, MAX_TREE_WEIGHT } from "../src/routing/cost";
+import { buildDirections } from "../src/routing/directions";
 import { loadGraph, type RoutingGraph } from "../src/routing/graph";
 import { RouteCache } from "../src/routing/route-cache";
 import type { RouteResult } from "../src/routing/search";
@@ -131,6 +132,14 @@ export default function MapApp() {
   // which field, if any, has armed a map tap to set its location
   const [pickTarget, setPickTarget] = useState<"start" | "dest" | null>(null);
   const [treeWeight, setTreeWeight] = useState<number>(DEFAULT_TREE_WEIGHT);
+  // The decoded graph, kept so directions can be rebuilt from a route without a re-fetch.
+  const [routingGraph, setRoutingGraph] = useState<RoutingGraph | null>(null);
+  // The maneuver list toggles open below the summary; it collapses whenever the destination changes.
+  const [directionsOpen, setDirectionsOpen] = useState<boolean>(false);
+  // Hide linear street crossings ("Cross E 22 St" at every block) by default; the panel can reveal them.
+  const [collapseCrossings, setCollapseCrossings] = useState<boolean>(true);
+  // The panel can shrink to a slim peek bar so the map stays usable while navigating.
+  const [panelMinimized, setPanelMinimized] = useState<boolean>(false);
   // The start point routing actually uses: the manual start when set, else the live location snapped
   // through the resnap threshold so a followed GPS stream doesn't rerun the search on every fix.
   const [resolvedStart, setResolvedStart] = useState<{
@@ -288,6 +297,7 @@ export default function MapApp() {
           if (cancelled) {
             return;
           }
+          setRoutingGraph((current) => current ?? graph);
           routedForRef.current = request;
           const pair = snapPair(graph, index, request.start, request.dest);
           if (!pair.ok) {
@@ -328,6 +338,25 @@ export default function MapApp() {
       cancelAnimationFrame(frame);
     };
   }, [resolvedStart, dest, treeWeight]);
+
+  // A new destination collapses any open maneuver list; keyed on the coordinates so a reverse-geocode
+  // label patch (same point, new object identity) doesn't snap it shut.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: reset on the destination point, not the object identity
+  useEffect(() => {
+    setDirectionsOpen(false);
+  }, [dest?.lat, dest?.lng]);
+
+  const handleToggleDirections = useCallback(() => {
+    setDirectionsOpen((open) => !open);
+  }, []);
+
+  const handleToggleCollapse = useCallback(() => {
+    setCollapseCrossings((on) => !on);
+  }, []);
+
+  const handleToggleMinimize = useCallback(() => {
+    setPanelMinimized((on) => !on);
+  }, []);
 
   const handleToggleRouting = useCallback(() => {
     setRoutingOpen((open) => {
@@ -555,6 +584,15 @@ export default function MapApp() {
   const draft = editing?.mode === "create" ? editing.draft : null;
 
   const routeResult = routeState.kind === "ready" ? routeState.result : null;
+  const directions = useMemo(
+    () =>
+      routingGraph && routeResult
+        ? buildDirections(routingGraph, routeResult, {
+            collapseLinearCrossings: collapseCrossings,
+          })
+        : null,
+    [routingGraph, routeResult, collapseCrossings],
+  );
   const routeStart = routeResult ? routeResult.start.point : null;
   // The destination marker appears the moment a destination exists; the line follows live once both
   // endpoints resolve and the search lands.
@@ -638,6 +676,10 @@ export default function MapApp() {
               : null
           }
           treeWeight={treeWeight}
+          directions={directions}
+          directionsOpen={directionsOpen}
+          collapseCrossings={collapseCrossings}
+          minimized={panelMinimized}
           onTreeWeight={handleTreeWeight}
           onStartSelect={handleStartSelect}
           onDestSelect={handleDestSelect}
@@ -646,6 +688,9 @@ export default function MapApp() {
           onUseCurrentLocation={handleClearStart}
           onArmStart={handleArmStart}
           onArmDest={handleArmDest}
+          onToggleDirections={handleToggleDirections}
+          onToggleCollapse={handleToggleCollapse}
+          onToggleMinimize={handleToggleMinimize}
           onClose={handleToggleRouting}
         />
       ) : null}
