@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useRef } from "react";
 import {
   FiChevronDown,
   FiChevronUp,
@@ -24,6 +25,7 @@ import { PiTreeEvergreenFill } from "react-icons/pi";
 import type { GeocodeResult } from "../src/geocode";
 import { MAX_TREE_WEIGHT } from "../src/routing/cost";
 import { formatDistance, type Maneuver } from "../src/routing/directions";
+import type { NavProgress } from "../src/routing/nav-progress";
 import LocationField from "./location-field";
 
 interface RoutePanelProps {
@@ -43,6 +45,7 @@ interface RoutePanelProps {
   } | null;
   treeWeight: number;
   directions: Maneuver[] | null;
+  progress: NavProgress | null; // live position along the route, or null when off-route/unlocated
   directionsOpen: boolean;
   collapseCrossings: boolean; // hide linear street crossings in the maneuver list
   minimized: boolean; // shrunk to the slim peek bar
@@ -116,6 +119,7 @@ export default function RoutePanel({
   summary,
   treeWeight,
   directions,
+  progress,
   directionsOpen,
   collapseCrossings,
   minimized,
@@ -132,6 +136,15 @@ export default function RoutePanel({
   onToggleMinimize,
   onClose,
 }: RoutePanelProps) {
+  // The highlighted maneuver row is scrolled into view whenever the next maneuver advances.
+  const highlightRef = useRef<HTMLLIElement | null>(null);
+  const nextIndex = progress ? progress.nextManeuver : null;
+  useEffect(() => {
+    if (nextIndex !== null) {
+      highlightRef.current?.scrollIntoView({ block: "nearest" });
+    }
+  }, [nextIndex]);
+
   // The slider is a 0..100 track over the [0, MAX_TREE_WEIGHT] weight range.
   const slider = Math.round((treeWeight / MAX_TREE_WEIGHT) * 100);
   const pickHint =
@@ -144,10 +157,16 @@ export default function RoutePanel({
   const wrapper =
     "fixed bottom-0 left-1/2 z-[1000] w-full max-w-md -translate-x-1/2 px-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]";
 
-  // Minimized: a slim peek bar that keeps the route summary visible while freeing the map.
+  // Minimized: a slim peek bar. While navigating (progress on a ready route) it shows the next
+  // maneuver and the distance to it; otherwise it falls back to the route summary.
   if (minimized) {
-    const peekLabel =
-      status === "ready" && summary ? summarize(summary) : "Walking directions";
+    const peekNext =
+      status === "ready" && progress && directions
+        ? {
+            maneuver: directions[progress.nextManeuver],
+            distanceMeters: progress.distanceToNextMeters,
+          }
+        : null;
     return (
       <div className={wrapper}>
         <button
@@ -156,9 +175,27 @@ export default function RoutePanel({
           aria-label="Expand directions"
           className="flex w-full items-center justify-between gap-2 rounded-2xl bg-white/85 px-4 py-3 text-left shadow-lg ring-1 ring-black/5 backdrop-blur-md dark:bg-slate-800/80 dark:ring-white/10"
         >
-          <span className="min-w-0 flex-1 truncate text-sm font-semibold text-slate-800 dark:text-slate-100">
-            {peekLabel}
-          </span>
+          {peekNext ? (
+            <span className="flex min-w-0 flex-1 items-center gap-3">
+              <span className="grid h-7 w-7 shrink-0 place-items-center rounded-full bg-brand-50 text-brand-600 dark:bg-brand-500/15 dark:text-brand-300">
+                {maneuverIcon(peekNext.maneuver)}
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="block truncate text-sm font-semibold text-slate-800 dark:text-slate-100">
+                  {peekNext.maneuver.text}
+                </span>
+                <span className="block text-xs font-medium text-slate-400 dark:text-slate-500">
+                  in {formatDistance(peekNext.distanceMeters)}
+                </span>
+              </span>
+            </span>
+          ) : (
+            <span className="min-w-0 flex-1 truncate text-sm font-semibold text-slate-800 dark:text-slate-100">
+              {status === "ready" && summary
+                ? summarize(summary)
+                : "Walking directions"}
+            </span>
+          )}
           <FiChevronUp
             className="h-5 w-5 shrink-0 text-slate-400"
             aria-hidden="true"
@@ -304,24 +341,35 @@ export default function RoutePanel({
                     : "Hide street crossings"}
                 </button>
                 <ol className="mt-2 max-h-[45vh] space-y-1 overflow-y-auto pb-[env(safe-area-inset-bottom)]">
-                  {directions.map((maneuver) => (
-                    <li
-                      key={`${maneuver.kind}-${maneuver.stepRange[0]}-${maneuver.stepRange[1]}`}
-                      className="flex items-start gap-3 rounded-lg px-2 py-1.5"
-                    >
-                      <span className="mt-0.5 grid h-7 w-7 shrink-0 place-items-center rounded-full bg-brand-50 text-brand-600 dark:bg-brand-500/15 dark:text-brand-300">
-                        {maneuverIcon(maneuver)}
-                      </span>
-                      <span className="min-w-0 flex-1 text-sm text-slate-700 dark:text-slate-200">
-                        {maneuver.text}
-                      </span>
-                      {maneuver.lengthMeters > 0 ? (
-                        <span className="mt-0.5 shrink-0 text-xs font-medium text-slate-400 dark:text-slate-500">
-                          {formatDistance(maneuver.lengthMeters)}
+                  {directions.map((maneuver, index) => {
+                    const isNext =
+                      progress !== null && index === progress.nextManeuver;
+                    const isPassed =
+                      progress !== null && index < progress.currentManeuver;
+                    return (
+                      <li
+                        key={`${maneuver.kind}-${maneuver.stepRange[0]}-${maneuver.stepRange[1]}`}
+                        ref={isNext ? highlightRef : null}
+                        className={`flex items-start gap-3 rounded-lg px-2 py-1.5 ${
+                          isNext
+                            ? "bg-brand-50 font-medium ring-1 ring-brand-200 dark:bg-brand-500/15 dark:ring-brand-500/30"
+                            : ""
+                        } ${isPassed ? "opacity-50" : ""}`}
+                      >
+                        <span className="mt-0.5 grid h-7 w-7 shrink-0 place-items-center rounded-full bg-brand-50 text-brand-600 dark:bg-brand-500/15 dark:text-brand-300">
+                          {maneuverIcon(maneuver)}
                         </span>
-                      ) : null}
-                    </li>
-                  ))}
+                        <span className="min-w-0 flex-1 text-sm text-slate-700 dark:text-slate-200">
+                          {maneuver.text}
+                        </span>
+                        {maneuver.lengthMeters > 0 ? (
+                          <span className="mt-0.5 shrink-0 text-xs font-medium text-slate-400 dark:text-slate-500">
+                            {formatDistance(maneuver.lengthMeters)}
+                          </span>
+                        ) : null}
+                      </li>
+                    );
+                  })}
                 </ol>
               </>
             ) : null}

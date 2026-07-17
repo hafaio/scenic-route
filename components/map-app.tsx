@@ -18,6 +18,7 @@ import type { Pin, PinDraft } from "../src/pin";
 import { DEFAULT_TREE_WEIGHT, MAX_TREE_WEIGHT } from "../src/routing/cost";
 import { buildDirections } from "../src/routing/directions";
 import { loadGraph, type RoutingGraph } from "../src/routing/graph";
+import { navProgress } from "../src/routing/nav-progress";
 import { RouteCache } from "../src/routing/route-cache";
 import type { RouteResult } from "../src/routing/search";
 import { buildSnapIndex, type SnapIndex, snapPair } from "../src/routing/snap";
@@ -593,6 +594,15 @@ export default function MapApp() {
         : null,
     [routingGraph, routeResult, collapseCrossings],
   );
+  // Live progress along the ready route from the current fix; null when off-route or unlocated, which
+  // makes the panel fall back to the route summary. Recomputes as watchPosition updates userLocation.
+  const progress = useMemo(
+    () =>
+      routeResult && directions && userLocation
+        ? navProgress(routeResult, directions, userLocation)
+        : null,
+    [routeResult, directions, userLocation],
+  );
   const routeStart = routeResult ? routeResult.start.point : null;
   // The destination marker appears the moment a destination exists; the line follows live once both
   // endpoints resolve and the search lands.
@@ -677,6 +687,7 @@ export default function MapApp() {
           }
           treeWeight={treeWeight}
           directions={directions}
+          progress={progress}
           directionsOpen={directionsOpen}
           collapseCrossings={collapseCrossings}
           minimized={panelMinimized}
