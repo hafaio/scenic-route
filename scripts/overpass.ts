@@ -15,6 +15,8 @@ interface OverpassPoint {
 
 interface OverpassWay {
   type: "way";
+  id?: number;
+  tags?: Record<string, string>;
   geometry?: OverpassPoint[];
 }
 
@@ -155,17 +157,15 @@ function toPolygons(elements: OverpassElement[]): Woodland {
   return { polygons, ways, relations, unclosed };
 }
 
+// One Overpass request, cached under `cacheKey` by its exact QL, over the rotating mirrors.
 // Overpass answers a busy dispatcher with an HTML error page under a 200, so the body is
 // checked rather than just the status. An empty element list is not one of those failures:
-// it is a box with no wood mapped in it, and it stands.
-export async function fetchWoodland(
-  south: number,
-  west: number,
-  north: number,
-  east: number,
-): Promise<Woodland> {
-  const overpassQl = query(south, west, north, east);
-  const elements = await cached("overpass-woodland", overpassQl, async () => {
+// it is a box with nothing mapped in it, and it stands.
+export async function overpassQuery(
+  cacheKey: string,
+  overpassQl: string,
+): Promise<OverpassElement[]> {
+  return cached(cacheKey, overpassQl, async () => {
     let lastError: unknown;
     for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
       const endpoint = ENDPOINTS[attempt % ENDPOINTS.length];
@@ -203,7 +203,91 @@ export async function fetchWoodland(
         }
       }
     }
-    throw new Error(`failed to fetch woodland: ${lastError}`);
+    throw new Error(`Overpass query "${cacheKey}" failed: ${lastError}`);
   });
+}
+
+export async function fetchWoodland(
+  south: number,
+  west: number,
+  north: number,
+  east: number,
+): Promise<Woodland> {
+  const elements = await overpassQuery(
+    "overpass-woodland",
+    query(south, west, north, east),
+  );
   return toPolygons(elements);
+}
+
+// One OSM pedestrian/park way: the geometry, its uppercase-later name, and the two record flags
+// the model reads — `steps` (highway=steps, kind 7) and `structure` (a bridge/tunnel deck or a
+// non-zero layer, which suppresses false conflation welds in Phase 2).
+export interface PathWay {
+  id: number;
+  name?: string;
+  steps: boolean;
+  structure: boolean;
+  points: Coord[];
+}
+
+// Decision 1 of the park-paths plan (scripts/README.md, "PATH v1"). footway/path/pedestrian/
+// steps are the core walking net; cycleway brings the greenways (a bike-only segment carries
+// foot=no and drops out); bridleway is the Central Park bridle path; track is park maintenance
+// roads. footway=sidewalk|crossing|traffic_island are excluded — GRPH derives those from CSCL,
+// and ingesting OSM's would double the sidewalk network. area=yes (plazas) is not an edge;
+// access/foot no|private and indoor=yes are not walkable.
+const PATH_FILTER =
+  'way["highway"~"^(footway|path|pedestrian|steps|cycleway|bridleway|track)$"]' +
+  '["footway"!~"^(sidewalk|crossing|traffic_island)$"]' +
+  '["area"!="yes"]["access"!~"^(no|private)$"]["foot"!~"^(no|private)$"]["indoor"!="yes"]';
+
+function pathsQuery(
+  south: number,
+  west: number,
+  north: number,
+  east: number,
+): string {
+  const box = `${south},${west},${north},${east}`;
+  return `[out:json][timeout:${QUERY_TIMEOUT_SECONDS}];(${PATH_FILTER}(${box}););out geom;`;
+}
+
+// present-and-not-"no": a bridge/tunnel tag is a structure unless it explicitly says "no".
+function tagged(value: string | undefined): boolean {
+  return value !== undefined && value !== "no";
+}
+
+export async function fetchPaths(
+  south: number,
+  west: number,
+  north: number,
+  east: number,
+): Promise<PathWay[]> {
+  const elements = await overpassQuery(
+    "overpass-paths",
+    pathsQuery(south, west, north, east),
+  );
+  const ways: PathWay[] = [];
+  for (const element of elements) {
+    if (element.type !== "way" || element.id === undefined) {
+      continue;
+    }
+    const geometry = element.geometry ?? [];
+    if (geometry.length < 2) {
+      continue;
+    }
+    const tags = element.tags ?? {};
+    const layer = Number.parseInt(tags.layer ?? "", 10);
+    ways.push({
+      id: element.id,
+      name: tags.name,
+      steps: tags.highway === "steps",
+      structure:
+        tagged(tags.bridge) ||
+        tagged(tags.tunnel) ||
+        (tags.layer !== undefined && layer !== 0),
+      points: toCoords(geometry),
+    });
+  }
+  return ways;
 }

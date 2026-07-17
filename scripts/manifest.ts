@@ -99,6 +99,24 @@ export interface StreetLayer {
   sourceUrl: string;
 }
 
+// data/paths/<id>.bin: the OSM pedestrian/park network, magic `PATH`. STRT v5's byte layout,
+// reinterpreted per record (offset 0 = OSM way id, 20 = kind 6 path / 7 steps); it carries the
+// same tree density at every vertex, filled by `tiler densities`. layout: scripts/README.md
+export interface PathLayer {
+  file: string;
+  format: number;
+  ways: number; // OSM ways encoded, one record each
+  segments: number; // records in the file (equal to ways: one way is one polyline)
+  vertices: number;
+  bytes: number;
+  sha256: string;
+  km: number; // total densified length on land
+  density: Distribution; // the tight field on the path line, one sample standing for both sides
+  updated: string;
+  attribution: string; // OpenStreetMap contributors (ODbL)
+  sourceUrl: string;
+}
+
 export interface CityEntry {
   id: string;
   name: string;
@@ -109,6 +127,7 @@ export interface CityEntry {
   sourceUrl: string;
   field: FieldLayer;
   streets: StreetLayer;
+  paths: PathLayer;
 }
 
 export interface Manifest {

@@ -5,6 +5,7 @@
 //! See scripts/README.md.
 
 mod binfmt;
+mod conflate;
 mod corners;
 mod densities;
 mod geometry;
@@ -23,8 +24,8 @@ pub type Fallible<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
 const USAGE: &str = "usage:
   tiler densities --params <file.json>
-  tiler tiles --manifest <file.json> --ramp <file.bin> --data <dir> --tiles <dir> --chunks <dir>
-  tiler graph --streets <file.bin> --out <file.bin>
+  tiler tiles --manifest <file.json> --ramp <file.bin> --data <dir> --tiles <dir> --chunks <dir> [--paths <file.bin>]
+  tiler graph --streets <file.bin> [--paths <file.bin>] --out <file.bin>
 ";
 
 fn flags(mut args: impl Iterator<Item = String>) -> Fallible<HashMap<String, String>> {
@@ -60,9 +61,11 @@ fn run() -> Fallible<()> {
             data: path(&flags, "data")?,
             tiles: path(&flags, "tiles")?,
             chunks: path(&flags, "chunks")?,
+            paths: flags.get("paths").map(PathBuf::from),
         }),
         "graph" => graph::run(&graph::Args {
             streets: path(&flags, "streets")?,
+            paths: flags.get("paths").map(PathBuf::from),
             out: path(&flags, "out")?,
         }),
         _ => Err(format!("unknown command \"{command}\"\n{USAGE}").into()),

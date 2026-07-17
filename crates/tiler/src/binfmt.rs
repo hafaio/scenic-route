@@ -11,6 +11,7 @@ pub const TREE_FORMAT: u16 = 2; // v2 carries a crown-radius byte per tree; v1 w
 pub const WOODLAND_FORMAT: u16 = 1;
 pub const LAND_FORMAT: u16 = 1;
 pub const STREET_FORMAT: u16 = 5;
+pub const PATH_FORMAT: u16 = 1; // OSM pedestrian/park ways: STRT v5's layout, magic "PATH"
 
 pub const SIDES: usize = 2; // the two sidewalks a density blob carries per vertex, left then right
 pub const DECIMETERS_PER_METER: f64 = 10.0; // the crown byte's unit: a decimetre of crown radius
@@ -234,9 +235,25 @@ impl Streets {
     }
 }
 
+/// STRT v5: the CSCL street network. `road_types` is rw_type, `width_feet` the curb-to-curb
+/// width, `flags` the vehicular/deck/structure bits.
 pub fn read_streets(path: &Path) -> Fallible<Streets> {
+    read_network(path, "STRT", STREET_FORMAT)
+}
+
+/// PATH v1: the OSM pedestrian/park network. Same byte layout, reinterpreted per the PATH table
+/// (scripts/README.md) — `road_types` is the kind (6 path, 7 steps), `width_feet` is 0 (a path
+/// has no roadway, so `half_offset_meters` returns 0 and one sample stands for both sides), and
+/// `flags` carries only bit2 structure.
+pub fn read_paths(path: &Path) -> Fallible<Streets> {
+    read_network(path, "PATH", PATH_FORMAT)
+}
+
+// STRT v5's reader, shared by both networks: the two files are byte-identical in shape, so only
+// the magic and format version differ. The field meanings above are the caller's to know.
+fn read_network(path: &Path, magic: &str, format: u16) -> Fallible<Streets> {
     let bytes = fs::read(path)?;
-    check_magic(&bytes, "STRT", STREET_FORMAT, path)?;
+    check_magic(&bytes, magic, format, path)?;
     let header_bytes = usize::from(u16_at(&bytes, 6));
     let record_bytes = usize::from(u16_at(&bytes, 8));
     let count = u32_at(&bytes, 12) as usize;

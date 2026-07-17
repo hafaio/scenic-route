@@ -11,7 +11,7 @@
         "east": -73.6955944236991
       },
       "trees": 899394,
-      "updated": "2026-07-16",
+      "updated": "2026-07-17",
       "attribution": "NYC Parks Forestry (ForMS) via NYC Open Data",
       "sourceUrl": "https://data.cityofnewyork.us/d/hn5i-inap",
       "field": {
@@ -79,8 +79,8 @@
             "p99": 0.9
           }
         },
-        "updated": "2026-07-16",
-        "attribution": "OpenStreetMap contributors",
+        "updated": "2026-07-17",
+        "attribution": "woodland, path & tree data © OpenStreetMap contributors",
         "sourceUrl": "https://www.openstreetmap.org/copyright"
       },
       "streets": {
@@ -114,9 +114,44 @@
             "p99": 0.9
           }
         },
-        "updated": "2026-07-16",
+        "updated": "2026-07-17",
         "attribution": "NYC DoITT Street Centerline (CSCL) via NYC Open Data",
         "sourceUrl": "https://data.cityofnewyork.us/d/inkn-q76z"
+      },
+      "paths": {
+        "file": "nyc.bin",
+        "format": 1,
+        "ways": 50181,
+        "segments": 50181,
+        "vertices": 320779,
+        "bytes": 2920944,
+        "sha256": "5932b4d68620274c25077981541fd09fff713327fcd01366897dd71e6ee665cd",
+        "km": 2727.2,
+        "density": {
+          "min": 0,
+          "max": 0.994,
+          "mean": 0.224,
+          "median": 0.043,
+          "percentiles": {
+            "p1": 0,
+            "p5": 0,
+            "p10": 0,
+            "p20": 0,
+            "p30": 0,
+            "p40": 0.005,
+            "p50": 0.043,
+            "p60": 0.141,
+            "p70": 0.294,
+            "p80": 0.495,
+            "p90": 0.836,
+            "p95": 0.9,
+            "p97": 0.9,
+            "p99": 0.9
+          }
+        },
+        "updated": "2026-07-17",
+        "attribution": "OpenStreetMap contributors",
+        "sourceUrl": "https://www.openstreetmap.org/copyright"
       }
     }
   ]
