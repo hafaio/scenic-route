@@ -69,6 +69,7 @@ async function newestInputMtime(cities: City[]): Promise<number> {
       sourcePath("trees", city.field.trees.file),
       sourcePath("woodland", city.field.woodland.file),
       sourcePath("land", city.field.land.file),
+      ...(city.paths ? [sourcePath("paths", city.paths.file)] : []),
     ]),
   ];
   const stats = await Promise.all(paths.map((path) => stat(path)));
@@ -101,36 +102,41 @@ async function build(): Promise<void> {
   await mkdir(ROUTING_DIR, { recursive: true });
   await writeRamp();
 
-  runTiler(
-    [
-      "tiles",
-      "--manifest",
-      MANIFEST_PATH,
-      "--ramp",
-      RAMP_LUT_PATH,
-      "--data",
-      DATA_DIR,
-      "--tiles",
-      TILE_DIR,
-      "--chunks",
-      CHUNK_DIR,
-    ],
-    false,
-  );
+  const tilesArgs = [
+    "tiles",
+    "--manifest",
+    MANIFEST_PATH,
+    "--ramp",
+    RAMP_LUT_PATH,
+    "--data",
+    DATA_DIR,
+    "--tiles",
+    TILE_DIR,
+    "--chunks",
+    CHUNK_DIR,
+  ];
+  // The OSM paths are drawn into the same z12 street chunks, coloured by their own cover; the
+  // single-city manifest carries one paths layer, so it rides along here as it does for the graph.
+  const withPaths = cities.find((city) => city.paths);
+  if (withPaths?.paths) {
+    tilesArgs.push("--paths", sourcePath("paths", withPaths.paths.file));
+  }
+  runTiler(tilesArgs, false);
 
   // The routing graph is derived from the same STRT the chunks are, one artifact per city; its
   // one-line JSON stats go to stdout and land in the build log.
   for (const city of cities) {
-    runTiler(
-      [
-        "graph",
-        "--streets",
-        sourcePath("streets", city.streets.file),
-        "--out",
-        join(ROUTING_DIR, `${city.id}.bin`),
-      ],
-      false,
-    );
+    const graphArgs = [
+      "graph",
+      "--streets",
+      sourcePath("streets", city.streets.file),
+      "--out",
+      join(ROUTING_DIR, `${city.id}.bin`),
+    ];
+    if (city.paths) {
+      graphArgs.push("--paths", sourcePath("paths", city.paths.file));
+    }
+    runTiler(graphArgs, false);
   }
   await writeFile(STAMP_PATH, "");
 }

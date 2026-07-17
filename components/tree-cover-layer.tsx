@@ -29,7 +29,7 @@ export default function TreeCoverLayer() {
         maxNativeZoom={MAX_NATIVE_ZOOM}
         maxZoom={20}
         zIndex={Z_INDEX}
-        attribution={`<a href="${city.sourceUrl}" target="_blank" rel="noreferrer">${city.attribution}</a>`}
+        attribution={`<a href="${city.sourceUrl}" target="_blank" rel="noreferrer">${city.attribution}</a>, <a href="${city.field.sourceUrl}" target="_blank" rel="noreferrer">${city.field.attribution}</a>`}
       />
     );
   });

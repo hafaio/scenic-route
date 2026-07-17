@@ -16,18 +16,25 @@ import {
   writeVarint,
   zigzag,
 } from "./geometry";
+import { buildLandTest } from "./land-filter";
 import {
   type Bounds,
   type CityEntry,
   type Distribution,
   type FieldLayer,
+  type PathLayer,
   type Percentile,
   readManifest,
   type SourceFile,
   type StreetLayer,
   writeManifest,
 } from "./manifest";
-import { fetchWoodland, type Polygon } from "./overpass";
+import {
+  fetchPaths,
+  fetchWoodland,
+  type PathWay,
+  type Polygon,
+} from "./overpass";
 import { type Coord, fetchDataset, fetchNycTrees, type Tree } from "./socrata";
 import { runTiler } from "./tiler";
 
@@ -50,6 +57,18 @@ interface Segment {
   flags: number; // FLAG_* bits, from the row's nonped/trafdir/rw_type
   name: string; // the trimmed stname_label, "" when the row carries none
   nameId: number; // index into the name table, UNNAMED_ID when the row carries no label
+  points: Coord[]; // densified, so the field is sampled at least every DENSIFY_METERS
+  lengthMeters: number;
+}
+
+// One OSM pedestrian/park way, land-clipped and densified, ready to encode as a PATH record. The
+// name is uppercased once here so the client's prettifier renders "BOW BRIDGE" as "Bow Bridge".
+interface PathSegment {
+  osmId: number; // record offset 0; guarded to fit a u32
+  kind: number; // PATH_KIND_PATH or PATH_KIND_STEPS, record byte 20
+  structure: boolean; // record byte 23 bit2: a bridge/tunnel deck or a non-zero layer
+  name: string; // uppercased, "" when the way carries none
+  nameId: number; // index into the PATH name table, UNNAMED_ID when unnamed
   points: Coord[]; // densified, so the field is sampled at least every DENSIFY_METERS
   lengthMeters: number;
 }
@@ -85,12 +104,16 @@ interface Estimate {
   draws: number;
   landDensity: RawDistribution; // the cover over land: its mean is the sanity-check figure
   streetDensity: RawDistribution;
+  pathDensity?: RawDistribution; // present only when a paths file was passed
 }
 
 const DATA_DIR = join(import.meta.dirname, "..", "data");
 const PARAMS_PATH = join(tmpdir(), "scenic-route-densities.json");
 
 const STREET_FORMAT = 5;
+const PATH_FORMAT = 1; // OSM pedestrian/park ways, STRT v5's byte layout with the PATH reinterpretations
+const PATH_KIND_PATH = 6; // record byte 20: an ordinary path, sampled and offset like rw_type 6
+const PATH_KIND_STEPS = 7; // record byte 20: a step street (highway=steps), like rw_type 7
 const STREET_HEADER_BYTES = 64;
 const STREET_RECORD_BYTES = 24;
 const STREET_SIDES = 2; // the density blob carries both sidewalks of every vertex, left then right
@@ -298,21 +321,28 @@ function toSegments(rows: StreetRow[]): Segment[] {
   return segments;
 }
 
-// Collects the distinct trimmed street names, sorts them, and stamps each segment with its
-// index into that sorted table; a segment with no label keeps UNNAMED_ID. Returns the table,
-// which the encoder writes once as the trailing name blob.
-function buildNameTable(segments: Segment[]): string[] {
+// Anything the encoder names: a street segment or a path way. Its `nameId` is stamped in place
+// by buildNameTable from its (already trimmed and, for paths, uppercased) `name`.
+interface Named {
+  name: string;
+  nameId: number;
+}
+
+// Collects the distinct names, sorts them, and stamps each record with its index into that
+// sorted table; a record with no label keeps UNNAMED_ID. Returns the table, which the encoder
+// writes once as the trailing name blob. Streets and paths each build their own.
+function buildNameTable(records: Named[]): string[] {
   const distinct = new Set<string>();
-  for (const segment of segments) {
-    if (segment.name) {
-      distinct.add(segment.name);
+  for (const record of records) {
+    if (record.name) {
+      distinct.add(record.name);
     }
   }
   const names = [...distinct].sort();
   const idOf = new Map(names.map((name, index) => [name, index]));
-  for (const segment of segments) {
-    segment.nameId = segment.name
-      ? (idOf.get(segment.name) ?? UNNAMED_ID)
+  for (const record of records) {
+    record.nameId = record.name
+      ? (idOf.get(record.name) ?? UNNAMED_ID)
       : UNNAMED_ID;
   }
   return names;
@@ -330,6 +360,56 @@ async function fetchNycStreets(): Promise<Segment[]> {
     NYC_SEGMENT_COUNT,
   );
   return toSegments(rows);
+}
+
+const U32_MAX = 0xffffffff; // record offset 0 is a u32; an OSM id past this cannot be stored
+
+// Land-clips, densifies and uppercases the OSM ways. A way is kept if its midpoint or either
+// endpoint is on land — enough to drop the New Jersey and Westchester spill the city bounding box
+// reaches, without clipping a way that only grazes the shoreline. Reports the counts the ingest
+// logs (fetched / on land / encoded).
+function toPathSegments(
+  ways: PathWay[],
+  onLand: (coord: Coord) => boolean,
+): { segments: PathSegment[]; onLandCount: number } {
+  const segments: PathSegment[] = [];
+  let onLandCount = 0;
+  let overflow = 0;
+  let degenerate = 0;
+  for (const way of ways) {
+    const midpoint = way.points[Math.floor(way.points.length / 2)];
+    const first = way.points[0];
+    const last = way.points[way.points.length - 1];
+    if (!onLand(midpoint) && !onLand(first) && !onLand(last)) {
+      continue;
+    }
+    onLandCount += 1;
+    if (way.id > U32_MAX) {
+      overflow += 1;
+      continue;
+    }
+    const dense = densify(way.points);
+    if (dense.lengthMeters < DROP_LENGTH_METERS) {
+      degenerate += 1;
+      continue;
+    }
+    segments.push({
+      osmId: way.id,
+      kind: way.steps ? PATH_KIND_STEPS : PATH_KIND_PATH,
+      structure: way.structure,
+      name: (way.name ?? "").trim().toUpperCase(),
+      nameId: UNNAMED_ID,
+      points: dense.points,
+      lengthMeters: dense.lengthMeters,
+    });
+  }
+  if (overflow > 0) {
+    console.error(`  dropped ${overflow} paths whose OSM id exceeds u32`);
+  }
+  if (degenerate > 0) {
+    console.error(`  dropped ${degenerate} degenerate paths`);
+  }
+  return { segments, onLandCount };
 }
 
 // Shoreline-clipped, so the harbour is not part of the distribution the ramp normalizes
@@ -354,6 +434,11 @@ async function fetchNycLand(): Promise<Polygon[]> {
 
 // The raw extent of the sources. The tiler grows it by the widest kernel's reach — it owns the
 // truncation radius — and hands back the bounds the pyramid is planned over.
+// The path vertices are deliberately NOT swallowed here: the box is grown by the broad kernel's
+// 3σ reach (reach_bounds), ~210 m, and every land-clipped path vertex sits within that margin of
+// the street/tree extent — so the tree index and canopy mask already cover them, and the street
+// projection, tiles and graph stay byte-identical to the streets-only build. Widening the box to
+// the paths would shift the projection reference and perturb every street cover byte for no gain.
 function sourceBoxOf(segments: Segment[], trees: Coord[]): Bounds {
   let south = Number.POSITIVE_INFINITY;
   let west = Number.POSITIVE_INFINITY;
@@ -391,36 +476,56 @@ function distributionOf(raw: RawDistribution): Distribution {
   };
 }
 
-// The density blob is written zeroed — two bytes a vertex, one sidewalk each — and filled in
-// place by `tiler densities`, so the coordinates it offsets the sidewalks from are the ones that
-// ship rather than a parallel copy. layout: scripts/README.md
-function encodeStreets(segments: Segment[], names: string[]): Uint8Array {
+// One record of either network, mapped to the shared byte layout: the id at offset 0, the kind
+// at 20, and the width/speed/flags bytes. STRT fills all three; PATH leaves width and speed 0 and
+// uses only the structure flag.
+interface NetworkRecord {
+  id: number; // record offset 0 (u32): CSCL physicalid, or an OSM way id
+  nameId: number; // record offset 10
+  lengthMeters: number; // record offset 12 (f32)
+  kind: number; // record byte 20: rw_type, or the PATH kind
+  width: number; // record byte 21
+  speed: number; // record byte 22
+  flags: number; // record byte 23
+  points: Coord[];
+}
+
+// The one encoder both networks share: STRT v5's layout, parameterized by magic and format. The
+// density blob is written zeroed — two bytes a vertex, one sidewalk each — and filled in place by
+// `tiler densities`, so the coordinates it offsets the sidewalks from are the ones that ship
+// rather than a parallel copy. layout: scripts/README.md
+function encodeNetwork(
+  magic: string,
+  format: number,
+  records: NetworkRecord[],
+  names: string[],
+): Uint8Array {
   let originLng = Number.POSITIVE_INFINITY;
   let originLat = Number.POSITIVE_INFINITY;
   let vertices = 0;
-  for (const segment of segments) {
-    vertices += segment.points.length;
-    for (const { lat, lng } of segment.points) {
+  for (const record of records) {
+    vertices += record.points.length;
+    for (const { lat, lng } of record.points) {
       originLng = Math.min(originLng, lng);
       originLat = Math.min(originLat, lat);
     }
   }
 
-  const records = new Uint8Array(
-    STREET_HEADER_BYTES + segments.length * STREET_RECORD_BYTES,
+  const table = new Uint8Array(
+    STREET_HEADER_BYTES + records.length * STREET_RECORD_BYTES,
   );
-  const view = new DataView(records.buffer);
+  const view = new DataView(table.buffer);
   // Two varints of at most five bytes each per vertex.
   const blob = new Uint8Array(vertices * 10);
   let blobEnd = 0;
   let vertex = 0;
 
-  for (let index = 0; index < segments.length; index++) {
-    const segment = segments[index];
+  for (let index = 0; index < records.length; index++) {
+    const entry = records[index];
     const start = blobEnd;
     let previousX = 0;
     let previousY = 0;
-    for (const { lat, lng } of segment.points) {
+    for (const { lat, lng } of entry.points) {
       const quantizedX = Math.round((lng - originLng) / COORD_SCALE);
       const quantizedY = Math.round((lat - originLat) / COORD_SCALE);
       blobEnd = writeVarint(blob, blobEnd, zigzag(quantizedX - previousX));
@@ -430,27 +535,26 @@ function encodeStreets(segments: Segment[], names: string[]): Uint8Array {
     }
 
     const record = STREET_HEADER_BYTES + index * STREET_RECORD_BYTES;
-    view.setUint32(record, segment.physicalId, true);
+    view.setUint32(record, entry.id, true);
     view.setUint32(record + 4, start, true);
-    view.setUint16(record + 8, segment.points.length, true);
-    view.setUint16(record + 10, segment.nameId, true);
-    view.setFloat32(record + 12, segment.lengthMeters, true);
+    view.setUint16(record + 8, entry.points.length, true);
+    view.setUint16(record + 10, entry.nameId, true);
+    view.setFloat32(record + 12, entry.lengthMeters, true);
     view.setUint32(record + 16, vertex, true);
-    records[record + 20] = segment.roadType;
-    records[record + 21] = segment.streetWidth;
-    records[record + 22] = segment.postedSpeed;
-    records[record + 23] = segment.flags;
-    vertex += segment.points.length;
+    table[record + 20] = entry.kind;
+    table[record + 21] = entry.width;
+    table[record + 22] = entry.speed;
+    table[record + 23] = entry.flags;
+    vertex += entry.points.length;
   }
 
-  records[0] = "S".charCodeAt(0);
-  records[1] = "T".charCodeAt(0);
-  records[2] = "R".charCodeAt(0);
-  records[3] = "T".charCodeAt(0);
-  view.setUint16(4, STREET_FORMAT, true);
+  for (let index = 0; index < 4; index++) {
+    table[index] = magic.charCodeAt(index);
+  }
+  view.setUint16(4, format, true);
   view.setUint16(6, STREET_HEADER_BYTES, true);
   view.setUint16(8, STREET_RECORD_BYTES, true);
-  view.setUint32(12, segments.length, true);
+  view.setUint32(12, records.length, true);
   view.setFloat64(16, originLng, true);
   view.setFloat64(24, originLat, true);
   view.setFloat64(32, COORD_SCALE, true);
@@ -474,19 +578,60 @@ function encodeStreets(segments: Segment[], names: string[]): Uint8Array {
   }
 
   const densityBytes = STREET_SIDES * vertices;
-  const nameBlobOffset = records.length + blobEnd + densityBytes;
-  view.setUint32(40, records.length, true);
+  const nameBlobOffset = table.length + blobEnd + densityBytes;
+  view.setUint32(40, table.length, true);
   view.setUint32(44, blobEnd, true);
-  view.setUint32(48, records.length + blobEnd, true);
+  view.setUint32(48, table.length + blobEnd, true);
   view.setUint32(52, densityBytes, true);
   view.setUint32(56, nameBlobOffset, true);
   view.setUint32(60, nameBlobLength, true);
 
   const encoded = new Uint8Array(nameBlobOffset + nameBlobLength);
-  encoded.set(records);
-  encoded.set(blob.subarray(0, blobEnd), records.length);
+  encoded.set(table);
+  encoded.set(blob.subarray(0, blobEnd), table.length);
   encoded.set(nameBlob, nameBlobOffset);
   return encoded;
+}
+
+// STRT v5: the CSCL street network. The record id is the physicalid; kind is rw_type; the
+// width/speed/flags bytes are all populated.
+function encodeStreets(segments: Segment[], names: string[]): Uint8Array {
+  return encodeNetwork(
+    "STRT",
+    STREET_FORMAT,
+    segments.map((segment) => ({
+      id: segment.physicalId,
+      nameId: segment.nameId,
+      lengthMeters: segment.lengthMeters,
+      kind: segment.roadType,
+      width: segment.streetWidth,
+      speed: segment.postedSpeed,
+      flags: segment.flags,
+      points: segment.points,
+    })),
+    names,
+  );
+}
+
+// PATH v1: the OSM pedestrian/park network. The record id is the OSM way id; kind is 6 (path) or
+// 7 (steps); a path has no roadway, so width and speed are 0 and byte 23 carries only the
+// structure flag. layout: scripts/README.md
+function encodePaths(segments: PathSegment[], names: string[]): Uint8Array {
+  return encodeNetwork(
+    "PATH",
+    PATH_FORMAT,
+    segments.map((segment) => ({
+      id: segment.osmId,
+      nameId: segment.nameId,
+      lengthMeters: segment.lengthMeters,
+      kind: segment.kind,
+      width: 0,
+      speed: 0,
+      flags: segment.structure ? FLAG_STRUCTURE : 0,
+      points: segment.points,
+    })),
+    names,
+  );
 }
 
 async function writeSource(
@@ -517,6 +662,8 @@ const CITY = {
   streetSourceUrl: "https://data.cityofnewyork.us/d/inkn-q76z",
   woodlandAttribution: "OpenStreetMap contributors",
   woodlandSourceUrl: "https://www.openstreetmap.org/copyright",
+  pathAttribution: "OpenStreetMap contributors",
+  pathSourceUrl: "https://www.openstreetmap.org/copyright",
 } as const;
 
 async function ingest(): Promise<void> {
@@ -535,6 +682,32 @@ async function ingest(): Promise<void> {
   );
   console.error(
     `${CITY.id}: ${woodland.polygons.length} woodland polygons (${woodland.ways} ways, ${woodland.relations} relations, ${woodland.unclosed} unclosed rings dropped)`,
+  );
+
+  // Paths are the other Overpass query, so they are fetched next while a mirror is warm — and
+  // land-clipped here, against the borough polygons, to drop the New Jersey and Westchester
+  // spill the city bounding box reaches.
+  console.error(`${CITY.id}: fetching pedestrian and park paths`);
+  const pathWays = await fetchPaths(
+    landBox.south,
+    landBox.west,
+    landBox.north,
+    landBox.east,
+  );
+  const { segments: pathSegments, onLandCount } = toPathSegments(
+    pathWays,
+    buildLandTest(land),
+  );
+  const pathNames = buildNameTable(pathSegments);
+  let pathVertices = 0;
+  let pathKm = 0;
+  for (const path of pathSegments) {
+    pathVertices += path.points.length;
+    pathKm += path.lengthMeters;
+  }
+  pathKm /= 1000;
+  console.error(
+    `${CITY.id}: paths ${pathWays.length} fetched, ${onLandCount} on land, ${pathSegments.length} encoded (${pathKm.toFixed(1)} km, ${pathNames.length} distinct names)`,
   );
 
   console.error(`${CITY.id}: fetching street segments`);
@@ -579,6 +752,10 @@ async function ingest(): Promise<void> {
   await mkdir(join(DATA_DIR, "streets"), { recursive: true });
   await writeFile(streetPath, encodeStreets(segments, names));
 
+  const pathPath = join(DATA_DIR, "paths", file);
+  await mkdir(join(DATA_DIR, "paths"), { recursive: true });
+  await writeFile(pathPath, encodePaths(pathSegments, pathNames));
+
   let vertices = 0;
   for (const segment of segments) {
     vertices += segment.points.length;
@@ -590,6 +767,7 @@ async function ingest(): Promise<void> {
       woodland: join(DATA_DIR, "woodland", file),
       land: join(DATA_DIR, "land", file),
       streets: streetPath,
+      paths: pathPath,
       sourceBox: sourceBoxOf(segments, trees),
       landBox,
       broadSigmaMeters: BROAD_SIGMA_METERS,
@@ -607,8 +785,14 @@ async function ingest(): Promise<void> {
   const estimate: Estimate = JSON.parse(
     runTiler(["densities", "--params", PARAMS_PATH], true),
   );
-  // Rust filled the density blob in place, so the file on disk is no longer the one encoded.
+  // Rust filled the density blob in place, so the files on disk are no longer the ones encoded.
   const streetBytes = new Uint8Array(await readFile(streetPath));
+  const pathBytes = new Uint8Array(await readFile(pathPath));
+  if (!estimate.pathDensity) {
+    throw new Error(
+      "tiler densities was passed paths but reported no pathDensity",
+    );
+  }
 
   const updated = new Date().toISOString().slice(0, 10);
   const field: FieldLayer = {
@@ -649,6 +833,20 @@ async function ingest(): Promise<void> {
     attribution: CITY.streetAttribution,
     sourceUrl: CITY.streetSourceUrl,
   };
+  const paths: PathLayer = {
+    file,
+    format: PATH_FORMAT,
+    ways: pathSegments.length,
+    segments: pathSegments.length,
+    vertices: pathVertices,
+    bytes: pathBytes.length,
+    sha256: createHash("sha256").update(pathBytes).digest("hex"),
+    km: Math.round(pathKm * 10) / 10,
+    density: distributionOf(estimate.pathDensity),
+    updated,
+    attribution: CITY.pathAttribution,
+    sourceUrl: CITY.pathSourceUrl,
+  };
   const entry: CityEntry = {
     id: CITY.id,
     name: CITY.name,
@@ -659,6 +857,7 @@ async function ingest(): Promise<void> {
     sourceUrl: CITY.sourceUrl,
     field,
     streets,
+    paths,
   };
 
   const manifest = await readManifest();
@@ -673,7 +872,7 @@ async function ingest(): Promise<void> {
   const megabytes = (bytes: number): string => (bytes / 1024 / 1024).toFixed(1);
   const seconds = ((performance.now() - started) / 1000).toFixed(1);
   console.error(
-    `${CITY.id}: wrote trees (${megabytes(treeFile.bytes)} MiB), woodland (${megabytes(woodlandFile.bytes)} MiB), land (${megabytes(landFile.bytes)} MiB) and streets (${segments.length} segments, ${vertices} vertices, ${megabytes(streetBytes.length)} MiB) in ${seconds}s`,
+    `${CITY.id}: wrote trees (${megabytes(treeFile.bytes)} MiB), woodland (${megabytes(woodlandFile.bytes)} MiB), land (${megabytes(landFile.bytes)} MiB), streets (${segments.length} segments, ${vertices} vertices, ${megabytes(streetBytes.length)} MiB) and paths (${pathSegments.length} ways, ${pathVertices} vertices, ${megabytes(pathBytes.length)} MiB) in ${seconds}s`,
   );
 }
 

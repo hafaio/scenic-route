@@ -42,6 +42,15 @@ pub struct Args {
     pub data: PathBuf,
     pub tiles: PathBuf,
     pub chunks: PathBuf,
+    pub paths: Option<PathBuf>, // the OSM path network, drawn into the same z12 street chunks
+}
+
+/// A chunk member: which network it came from and its segment index there. Streets and paths
+/// share a z12 chunk, so they are bucketed and encoded together; a path is a single centreline,
+/// so it lands with sidewalk offset 0 and the client draws it as the one line it is.
+enum Member {
+    Street(u32),
+    Path(u32),
 }
 
 /// Everything one city's overlays are computed from. The field is not stored anywhere: it is
@@ -333,33 +342,45 @@ fn encode_png(pixels: &[u8]) -> Fallible<Vec<u8>> {
 }
 
 // The client has no access to the records, so the sidewalk offset the two lines are drawn either
-// side of travels with the geometry. layout: scripts/README.md
+// side of travels with the geometry. A path member points into `paths` and always carries offset
+// 0 — it is one centreline, not a curb-to-curb road. layout: scripts/README.md
 fn encode_chunk(
     streets: &Streets,
-    members: &[u32],
+    paths: Option<&Streets>,
+    members: &[Member],
     inset_meters: f64,
     origin_lng: f64,
     origin_lat: f64,
 ) -> Vec<u8> {
-    let densities = streets.densities();
     let mut bytes = vec![0u8; CHUNK_HEADER_BYTES];
-    for segment in members {
-        let segment = *segment as usize;
-        let from = streets.starts[segment] as usize;
-        let to = streets.starts[segment + 1] as usize;
-        let offset = sidewalks::half_offset_meters(
-            streets.road_types[segment],
-            streets.flags[segment],
-            streets.width_feet[segment],
-            inset_meters,
-        );
+    for member in members {
+        let (network, segment, offset) = match member {
+            Member::Street(segment) => {
+                let segment = *segment as usize;
+                let offset = sidewalks::half_offset_meters(
+                    streets.road_types[segment],
+                    streets.flags[segment],
+                    streets.width_feet[segment],
+                    inset_meters,
+                );
+                (streets, segment, offset)
+            }
+            Member::Path(segment) => (
+                paths.expect("a paths network for a path member"),
+                *segment as usize,
+                0.0,
+            ),
+        };
+        let densities = network.densities();
+        let from = network.starts[segment] as usize;
+        let to = network.starts[segment + 1] as usize;
         bytes.extend_from_slice(&((to - from) as u16).to_le_bytes());
         bytes.push(round_half_up(offset * DECIMETERS_PER_METER) as u8);
         let mut previous_x = 0i64;
         let mut previous_y = 0i64;
         for vertex in from..to {
-            let x = round_half_up((streets.lngs[vertex] - origin_lng) / CHUNK_COORD_SCALE) as i64;
-            let y = round_half_up((streets.lats[vertex] - origin_lat) / CHUNK_COORD_SCALE) as i64;
+            let x = round_half_up((network.lngs[vertex] - origin_lng) / CHUNK_COORD_SCALE) as i64;
+            let y = round_half_up((network.lats[vertex] - origin_lat) / CHUNK_COORD_SCALE) as i64;
             write_varint(&mut bytes, zigzag(x - previous_x));
             write_varint(&mut bytes, zigzag(y - previous_y));
             previous_x = x;
@@ -378,15 +399,19 @@ fn encode_chunk(
     bytes
 }
 
-/// A segment goes into every z12 tile its bounding box touches, which overshoots slightly but
-/// cannot leave a gap at a tile seam.
-fn write_chunks(streets: &Streets, inset_meters: f64, chunks: &Path) -> Fallible<(usize, usize)> {
-    let mut buckets: HashMap<(u32, u32), Vec<u32>> = HashMap::new();
-    for segment in 0..streets.segments() {
-        let from = streets.starts[segment] as usize;
-        let to = streets.starts[segment + 1] as usize;
-        let lngs = &streets.lngs[from..to];
-        let lats = &streets.lats[from..to];
+/// Buckets one network's segments into every z12 tile their bounding box touches, tagging each
+/// with `tag` so a chunk can carry both streets and paths. Bounding-box membership overshoots
+/// slightly but cannot leave a gap at a tile seam.
+fn bucket_network(
+    network: &Streets,
+    tag: fn(u32) -> Member,
+    buckets: &mut HashMap<(u32, u32), Vec<Member>>,
+) {
+    for segment in 0..network.segments() {
+        let from = network.starts[segment] as usize;
+        let to = network.starts[segment + 1] as usize;
+        let lngs = &network.lngs[from..to];
+        let lats = &network.lats[from..to];
         let west = lngs.iter().copied().fold(f64::INFINITY, f64::min);
         let east = lngs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
         let south = lats.iter().copied().fold(f64::INFINITY, f64::min);
@@ -400,16 +425,38 @@ fn write_chunks(streets: &Streets, inset_meters: f64, chunks: &Path) -> Fallible
                 buckets
                     .entry((tile_x, tile_y))
                     .or_default()
-                    .push(segment as u32);
+                    .push(tag(segment as u32));
             }
         }
+    }
+}
+
+/// Streets, then the OSM paths when present, into per-z12-tile chunks. Both networks land in the
+/// same chunk file so a tile the client fetches carries everything drawn over it.
+fn write_chunks(
+    streets: &Streets,
+    paths: Option<&Streets>,
+    inset_meters: f64,
+    chunks: &Path,
+) -> Fallible<(usize, usize)> {
+    let mut buckets: HashMap<(u32, u32), Vec<Member>> = HashMap::new();
+    bucket_network(streets, Member::Street, &mut buckets);
+    if let Some(paths) = paths {
+        bucket_network(paths, Member::Path, &mut buckets);
     }
 
     let mut bytes = 0;
     for ((tile_x, tile_y), members) in &buckets {
         let origin_lng = pixel_x_to_lng(f64::from(*tile_x) * TILE_SIZE as f64, CHUNK_ZOOM);
         let origin_lat = pixel_y_to_lat(f64::from(*tile_y) * TILE_SIZE as f64, CHUNK_ZOOM);
-        let encoded = encode_chunk(streets, members, inset_meters, origin_lng, origin_lat);
+        let encoded = encode_chunk(
+            streets,
+            paths,
+            members,
+            inset_meters,
+            origin_lng,
+            origin_lat,
+        );
         let path = chunks
             .join(tile_x.to_string())
             .join(format!("{tile_y}.bin"));
@@ -551,19 +598,31 @@ pub fn run(args: &Args) -> Fallible<()> {
         .into());
     }
 
+    // One optional paths file rides along with the single-city manifest. Cities write disjoint
+    // z12 tiles, so the paths land in whichever tiles their bbox touches without contending.
+    let paths = match &args.paths {
+        Some(file) => Some(binfmt::read_paths(file)?),
+        None => None,
+    };
+
     let mut chunks = 0;
     let mut chunk_bytes = 0;
     for city in &manifest.cities {
         let streets = binfmt::read_streets(&args.data.join("streets").join(&city.streets.file))?;
         eprintln!(
-            "{}: {} trees, {} woodland polygons, {} segments",
+            "{}: {} trees, {} woodland polygons, {} segments, {} path segments",
             city.id,
             city.field.trees.count,
             city.field.woodland.count,
             streets.segments(),
+            paths.as_ref().map_or(0, Streets::segments),
         );
-        let (city_chunks, city_bytes) =
-            write_chunks(&streets, city.streets.sidewalk_inset_meters, &args.chunks)?;
+        let (city_chunks, city_bytes) = write_chunks(
+            &streets,
+            paths.as_ref(),
+            city.streets.sidewalk_inset_meters,
+            &args.chunks,
+        )?;
         chunks += city_chunks;
         chunk_bytes += city_bytes;
     }
