@@ -1,16 +1,18 @@
-//! `tiler graph`: contracts STRT v4 into the pedestrian routing graph the client searches —
-//! intersection nodes, edges carrying a geodesic length, per-side aggregated cover and a pruned
-//! polyline — and writes it as GRPH v1 to public/routing/<id>.bin. The tile pyramid and the
-//! street chunks draw every walkable segment; this drops the vehicular-only ones and collapses
-//! the shape joints, so a router settles a cross-borough query in tens of milliseconds. See
-//! scripts/README.md.
+//! `tiler graph`: contracts STRT v5 into the pedestrian routing graph the client searches, then
+//! expands every street into the two sidewalks a walker uses, joined at corner nodes, with derived
+//! crossings at real intersections and paths stitched in by links — and writes it as GRPH v2 to
+//! public/routing/<id>.bin. The tile pyramid and the street chunks draw every walkable segment;
+//! this drops the vehicular-only ones, collapses the shape joints, and turns "which side" from a
+//! display choice into topology, so a router settles a cross-borough query in tens of
+//! milliseconds. See scripts/README.md.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
 
 use crate::Fallible;
 use crate::binfmt::{self, SIDES, write_varint, zigzag};
+use crate::corners::{self, EdgeEnd};
 use crate::geometry::round_half_up;
 use crate::kde::METERS_PER_DEGREE_LAT;
 use crate::sidewalks::{self, FLAG_NON_VEHICULAR};
@@ -27,10 +29,35 @@ const GRPH_STRUCTURE: u8 = 1 << 0; // on a bridge or tunnel deck
 const GRPH_STEPS: u8 = 1 << 1; // a step street (rw_type 7)
 const GRPH_PATHLIKE: u8 = 1 << 2; // offset 0: boardwalk, path, steps, or a non-vehicular deck
 
-const GRAPH_FORMAT: u16 = 1;
+// v2 edge kinds (record byte 22, bits 0-1) and side labels (bits 2-4). A crossing carries no
+// geometry and no side; a sidewalk is the only kind with a half-offset and a geometry-right flag.
+const KIND_SIDEWALK: u8 = 0;
+const KIND_CROSSING: u8 = 1;
+const KIND_LINK: u8 = 2;
+const KIND_PATH: u8 = 3;
+const SIDE_NONE: u8 = 0;
+const SIDE_NORTH: u8 = 1;
+const SIDE_EAST: u8 = 2;
+const SIDE_SOUTH: u8 = 3;
+const SIDE_WEST: u8 = 4;
+const FLAG_GEOMETRY_RIGHT: u8 = 1 << 2; // this sidewalk lies right of its stored geometry direction
+
+const GRAPH_FORMAT: u16 = 2;
 const GRAPH_HEADER_BYTES: usize = 64;
+const EDGE_RECORD_BYTES: usize = 24;
+const NO_GEOMETRY: u32 = 0xFFFF_FFFF; // edge record byte 12 sentinel: straight a->b, no blob entry
+const UNNAMED: u16 = 0xFFFF;
 const DECIMETERS_PER_METER: f64 = 10.0; // the half-offset byte's unit, as the chunk uses
 const STEP_STREET: u8 = 7;
+// A sidewalk's baked geometry runs corner-to-corner (the centreline offset to its side, with the
+// two end vertices replaced by the corner nodes), so its length is the geodesic sum of that
+// polyline; it is clamped up to the straight corner-to-corner distance only if quantization ever
+// leaves it a hair short, keeping the A* heuristic admissible. The chord that decides the N/S/E/W
+// label degenerates on a tight loop; below this it falls back to the first geometry segment's
+// bearing.
+const SHORT_CHORD_METERS: f64 = 10.0;
+const LENGTH_SLACK_METERS: f32 = 0.5; // f32 length vs great-circle node distance rounding
+const EARTH_RADIUS_METERS: f64 = 6_371_000.0; // matches the client's haversineMeters
 // The chunk offset uses the manifest's sidewalkInsetMeters; graph.rs takes only --streets/--out,
 // so it mirrors that value here. It never turns a width-based offset into 0, and the path-like
 // road types return 0 regardless, so the PATHLIKE classification does not depend on it — only the
@@ -60,6 +87,219 @@ struct Edge {
     cover_right: u8,
     offset: u8,
     flags: u8,
+    name_id: u16,
+}
+
+/// One finished v2 edge: a sidewalk, a crossing, a link, or a path. `geom` indexes the shared
+/// geometry entries (`NO_GEOMETRY` for the geometry-less crossings and links); `name_id` is still
+/// the original STRT id here and is remapped to the compact table at write time.
+struct V2Edge {
+    a: u32,
+    b: u32,
+    length: f32,
+    geom: u32,
+    cover: u8,
+    half_offset: u8,
+    name_id: u16,
+    kind: u8,
+    side: u8,
+    flags: u8,
+}
+
+/// The departure bearing of one edge end: `atan2(north, east)` to the first geometry vertex
+/// distinct from the node, in the local metre frame. Ties on a collapsed segment fall back to 0.
+fn departure_bearing(
+    poly_x: &[i32],
+    poly_y: &[i32],
+    at_a: bool,
+    meters_per_unit_lng: f64,
+    meters_per_unit_lat: f64,
+) -> f64 {
+    let count = poly_x.len();
+    let bearing_to = |origin_x: i32, origin_y: i32, other_x: i32, other_y: i32| {
+        let east = f64::from(other_x - origin_x) * meters_per_unit_lng;
+        let north = f64::from(other_y - origin_y) * meters_per_unit_lat;
+        north.atan2(east)
+    };
+    if at_a {
+        let (origin_x, origin_y) = (poly_x[0], poly_y[0]);
+        for vertex in 1..count {
+            if poly_x[vertex] != origin_x || poly_y[vertex] != origin_y {
+                return bearing_to(origin_x, origin_y, poly_x[vertex], poly_y[vertex]);
+            }
+        }
+    } else {
+        let (origin_x, origin_y) = (poly_x[count - 1], poly_y[count - 1]);
+        for vertex in (0..count - 1).rev() {
+            if poly_x[vertex] != origin_x || poly_y[vertex] != origin_y {
+                return bearing_to(origin_x, origin_y, poly_x[vertex], poly_y[vertex]);
+            }
+        }
+    }
+    0.0
+}
+
+/// The N/S/E/W wind a normal points into: nearest cardinal, exact diagonals resolved to N/S, as
+/// decision 3 spells out.
+fn side_label(normal_x: f64, normal_y: f64) -> u8 {
+    if normal_y >= normal_x.abs() {
+        SIDE_NORTH
+    } else if normal_y <= -normal_x.abs() {
+        SIDE_SOUTH
+    } else if normal_x > 0.0 {
+        SIDE_EAST
+    } else {
+        SIDE_WEST
+    }
+}
+
+/// The side labels of a street's two sidewalks, geometry-left then geometry-right. The direction is
+/// the whole-edge chord (first to last centreline vertex); a chord that degenerates on a tight loop
+/// falls back to the first geometry segment's bearing. The right label is always the opposite wind.
+fn side_labels(
+    poly_x: &[i32],
+    poly_y: &[i32],
+    meters_per_unit_lng: f64,
+    meters_per_unit_lat: f64,
+) -> (u8, u8) {
+    let last = poly_x.len() - 1;
+    let mut chord_x = f64::from(poly_x[last] - poly_x[0]) * meters_per_unit_lng;
+    let mut chord_y = f64::from(poly_y[last] - poly_y[0]) * meters_per_unit_lat;
+    if chord_x.hypot(chord_y) < SHORT_CHORD_METERS {
+        let bearing = departure_bearing(
+            poly_x,
+            poly_y,
+            true,
+            meters_per_unit_lng,
+            meters_per_unit_lat,
+        );
+        chord_x = bearing.cos();
+        chord_y = bearing.sin();
+    }
+    // The geometry-left normal is the travel direction turned 90 degrees counter-clockwise.
+    let left = side_label(-chord_y, chord_x);
+    let right = side_label(chord_y, -chord_x);
+    (left, right)
+}
+
+/// Great-circle metres between two quantized nodes, matching the client's `haversineMeters` (same
+/// mean earth radius) so a crossing or link length is exactly the A* heuristic between its ends and
+/// the length-vs-node-distance invariant is admissible by construction — the equirectangular metre
+/// frame the corners and labels live in overestimates east-west far from the reference latitude.
+fn great_circle(
+    from_x: i32,
+    from_y: i32,
+    to_x: i32,
+    to_y: i32,
+    origin_lng: f64,
+    origin_lat: f64,
+    scale: f64,
+) -> f64 {
+    let lng_from = (origin_lng + f64::from(from_x) * scale).to_radians();
+    let lng_to = (origin_lng + f64::from(to_x) * scale).to_radians();
+    let lat_from = (origin_lat + f64::from(from_y) * scale).to_radians();
+    let lat_to = (origin_lat + f64::from(to_y) * scale).to_radians();
+    let sin_lat = ((lat_to - lat_from) / 2.0).sin();
+    let sin_lng = ((lng_to - lng_from) / 2.0).sin();
+    let inner = sin_lat * sin_lat + lat_from.cos() * lat_to.cos() * sin_lng * sin_lng;
+    2.0 * EARTH_RADIUS_METERS * inner.sqrt().min(1.0).asin()
+}
+
+fn node_distance(
+    node_x: &[i32],
+    node_y: &[i32],
+    left: u32,
+    right: u32,
+    origin_lng: f64,
+    origin_lat: f64,
+    scale: f64,
+) -> f64 {
+    great_circle(
+        node_x[left as usize],
+        node_y[left as usize],
+        node_x[right as usize],
+        node_y[right as usize],
+        origin_lng,
+        origin_lat,
+        scale,
+    )
+}
+
+/// The geodesic length of a quantized polyline, summed segment by segment with the same mean earth
+/// radius as `node_distance`, so a sidewalk's baked length and the corner-to-corner distance the
+/// admissibility check compares it against are measured on one metric.
+fn polyline_length(
+    poly_x: &[i32],
+    poly_y: &[i32],
+    origin_lng: f64,
+    origin_lat: f64,
+    scale: f64,
+) -> f64 {
+    let mut total = 0.0;
+    for vertex in 1..poly_x.len() {
+        total += great_circle(
+            poly_x[vertex - 1],
+            poly_y[vertex - 1],
+            poly_x[vertex],
+            poly_y[vertex],
+            origin_lng,
+            origin_lat,
+            scale,
+        );
+    }
+    total
+}
+
+/// The baked geometry of one sidewalk: every interior centreline vertex shifted perpendicular to
+/// the local direction by `half_offset_m` to the given side (`sign` +1 geometry-left, -1
+/// geometry-right), with the first and last vertices replaced by the sidewalk's two corner nodes so
+/// it runs corner-to-corner with no overshoot into the intersection. A straight two-vertex street
+/// yields exactly `[corner_a, corner_b]`.
+fn offset_polyline(
+    poly_x: &[i32],
+    poly_y: &[i32],
+    half_offset_m: f64,
+    sign: f64,
+    corner_a: (i32, i32),
+    corner_b: (i32, i32),
+    meters_per_unit: (f64, f64),
+) -> (Vec<i32>, Vec<i32>) {
+    let (meters_per_unit_lng, meters_per_unit_lat) = meters_per_unit;
+    let count = poly_x.len();
+    let mut out_x = Vec::with_capacity(count);
+    let mut out_y = Vec::with_capacity(count);
+    out_x.push(corner_a.0);
+    out_y.push(corner_a.1);
+    let same =
+        |left: usize, right: usize| poly_x[left] == poly_x[right] && poly_y[left] == poly_y[right];
+    for vertex in 1..count - 1 {
+        // The tangent runs between the neighbouring distinct vertices, so a coincident vertex does
+        // not collapse the normal.
+        let mut back = vertex;
+        while back > 0 && same(back, vertex) {
+            back -= 1;
+        }
+        let mut ahead = vertex;
+        while ahead + 1 < count && same(ahead, vertex) {
+            ahead += 1;
+        }
+        let tangent_east = f64::from(poly_x[ahead] - poly_x[back]) * meters_per_unit_lng;
+        let tangent_north = f64::from(poly_y[ahead] - poly_y[back]) * meters_per_unit_lat;
+        let length = tangent_east.hypot(tangent_north);
+        // The geometry-left normal is the tangent turned 90 degrees counter-clockwise.
+        let (normal_east, normal_north) = if length > 0.0 {
+            (-tangent_north / length, tangent_east / length)
+        } else {
+            (0.0, 0.0)
+        };
+        let east = sign * half_offset_m * normal_east;
+        let north = sign * half_offset_m * normal_north;
+        out_x.push(poly_x[vertex] + round_half_up(east / meters_per_unit_lng) as i32);
+        out_y.push(poly_y[vertex] + round_half_up(north / meters_per_unit_lat) as i32);
+    }
+    out_x.push(corner_b.0);
+    out_y.push(corner_b.1);
+    (out_x, out_y)
 }
 
 fn find(parent: &mut [u32], start: u32) -> u32 {
@@ -122,14 +362,16 @@ fn segment_cover(
     }
 }
 
-// Exactly two incident half-edges on two distinct edges, matching in both the half-offset byte and
-// the GRPH flags: a shape joint the router does not need to see.
+// Exactly two incident half-edges on two distinct edges, matching in the half-offset byte, the
+// GRPH flags, and the street name: a shape joint the router does not need to see. A name change
+// mid-block is kept — a sidewalk edge that spanned two names would label a lie.
 fn contractible(edges: &[Edge], incidence: &[Vec<u32>], node: u32) -> bool {
     let incident = &incidence[node as usize];
     incident.len() == 2
         && incident[0] != incident[1]
         && edges[incident[0] as usize].offset == edges[incident[1] as usize].offset
         && edges[incident[0] as usize].flags == edges[incident[1] as usize].flags
+        && edges[incident[0] as usize].name_id == edges[incident[1] as usize].name_id
 }
 
 /// Walk the chain of degree-2 nodes out of `start` along `first_edge`, merging edges as long as
@@ -146,6 +388,7 @@ fn trace_chain(
 ) -> Edge {
     let offset = edges[first_edge as usize].offset;
     let flags = edges[first_edge as usize].flags;
+    let name_id = edges[first_edge as usize].name_id;
     let mut poly_x: Vec<i32> = Vec::new();
     let mut poly_y: Vec<i32> = Vec::new();
     let mut length = 0.0f32;
@@ -230,6 +473,7 @@ fn trace_chain(
         cover_right,
         offset,
         flags,
+        name_id,
     }
 }
 
@@ -441,6 +685,7 @@ pub fn run(args: &Args) -> Fallible<()> {
             cover_right,
             offset,
             flags,
+            name_id: streets.name_ids[segment],
         });
     }
     // FLAG_NON_VEHICULAR rides in the STRT flags byte and is consumed inside half_offset_meters
@@ -452,6 +697,20 @@ pub fn run(args: &Args) -> Fallible<()> {
     for (edge_id, edge) in edges.iter().enumerate() {
         incidence[edge.a as usize].push(edge_id as u32);
         incidence[edge.b as usize].push(edge_id as u32);
+    }
+
+    // A degree-2 joint that matches in offset and flags but not name is the one shape joint
+    // contraction now keeps; count it, since it is the only source of extra edges over v1's graph.
+    let mut name_break_joints = 0usize;
+    for incident in &incidence {
+        if incident.len() == 2
+            && incident[0] != incident[1]
+            && edges[incident[0] as usize].offset == edges[incident[1] as usize].offset
+            && edges[incident[0] as usize].flags == edges[incident[1] as usize].flags
+            && edges[incident[0] as usize].name_id != edges[incident[1] as usize].name_id
+        {
+            name_break_joints += 1;
+        }
     }
 
     // Contract the degree-2 chains. A chain starts at every non-contractible node; whatever edges
@@ -497,79 +756,450 @@ pub fn run(args: &Args) -> Fallible<()> {
         edge.poly_y = pruned_y;
     }
 
-    // Components over the contracted graph, relabelled by size descending (0 = largest).
+    // The contracted graph's connected components are the v1 partition: every construction step
+    // below stays inside one, and the finished v2 graph is asserted to have exactly this many
+    // components before writing (decision 6).
     let mut component_parent: Vec<u32> = (0..merged_count as u32).collect();
     for edge in &final_edges {
         union(&mut component_parent, edge.a, edge.b);
     }
-    let mut component_size: HashMap<u32, usize> = HashMap::new();
+    let mut base_component: HashSet<u32> = HashSet::new();
     for (node, &kept) in kept_node.iter().enumerate() {
         if kept {
-            let root = find(&mut component_parent, node as u32);
-            *component_size.entry(root).or_insert(0) += 1;
+            base_component.insert(find(&mut component_parent, node as u32));
         }
     }
-    let mut roots: Vec<(u32, usize)> = component_size.into_iter().collect();
-    roots.sort_by(|left, right| right.1.cmp(&left.1).then(left.0.cmp(&right.0)));
-    let component_count = roots.len();
+    let v1_component_count = base_component.len();
+
+    // Incidence over the contracted edges, each entry an (edge, is-a-end) pair; a self-loop lists
+    // both of its ends on the one node it retains.
+    let mut incidence2: Vec<Vec<(u32, bool)>> = vec![Vec::new(); merged_count];
+    for (edge_id, edge) in final_edges.iter().enumerate() {
+        incidence2[edge.a as usize].push((edge_id as u32, true));
+        incidence2[edge.b as usize].push((edge_id as u32, false));
+    }
+
+    // The v2 nodes (corners, then any path node, per base node) and edges are built here. A street
+    // edge's two sidewalk endpoints are the corners its fan assigns at each end, so the fans are
+    // built for every base node first (crossings and links, being local to one node, are emitted
+    // as they go); the sidewalk and path edges follow once both ends' corners are known.
+    let mut v2_x: Vec<i32> = Vec::new();
+    let mut v2_y: Vec<i32> = Vec::new();
+    let mut v2_edges: Vec<V2Edge> = Vec::new();
+    // Per base street edge, the four corner nodes its sidewalks attach to, filled by the fans.
+    let mut left_at_a = vec![u32::MAX; final_edges.len()];
+    let mut right_at_a = vec![u32::MAX; final_edges.len()];
+    let mut left_at_b = vec![u32::MAX; final_edges.len()];
+    let mut right_at_b = vec![u32::MAX; final_edges.len()];
+    let mut path_node = vec![u32::MAX; merged_count];
+    let mut link_pairs: HashMap<(u32, u32), u8> = HashMap::new();
+    // (corner a, corner b, crossed edge): a deg-2 street joint's latent crossing, added only if the
+    // mop-up finds its two sides in different components.
+    let mut mopup_candidates: Vec<(u32, u32, u32)> = Vec::new();
+    let mut corner_node_count = 0usize;
+    let mut path_node_count = 0usize;
+    let mut crossing_count = 0usize;
+
+    let crossing_cover = |edge: &Edge| -> u8 {
+        round_half_up((f64::from(edge.cover_left) + f64::from(edge.cover_right)) / 2.0) as u8
+    };
+
+    for base in 0..merged_count {
+        if incidence2[base].is_empty() {
+            continue;
+        }
+        // Split the incident ends into streets (ordered CCW by bearing) and paths, and gather each
+        // street's half-offset in metres for the fan's corner radii.
+        let mut street_ends: Vec<(EdgeEnd, f64)> = Vec::new();
+        let mut path_ends: Vec<EdgeEnd> = Vec::new();
+        for &(edge_id, at_a) in &incidence2[base] {
+            let edge = &final_edges[edge_id as usize];
+            let bearing = departure_bearing(
+                &edge.poly_x,
+                &edge.poly_y,
+                at_a,
+                meters_per_unit_lng,
+                meters_per_unit_lat,
+            );
+            let end = EdgeEnd {
+                edge: edge_id,
+                at_a,
+                bearing,
+                pathlike: edge.flags & GRPH_PATHLIKE != 0,
+            };
+            if end.pathlike {
+                path_ends.push(end);
+            } else {
+                street_ends.push((end, f64::from(edge.offset) / DECIMETERS_PER_METER));
+            }
+        }
+        street_ends.sort_by(|left, right| {
+            left.0
+                .bearing
+                .total_cmp(&right.0.bearing)
+                .then(left.0.edge.cmp(&right.0.edge))
+                .then(left.0.at_a.cmp(&right.0.at_a))
+        });
+        path_ends
+            .sort_by(|left, right| left.edge.cmp(&right.edge).then(left.at_a.cmp(&right.at_a)));
+
+        let street_count = street_ends.len();
+        let degree = incidence2[base].len();
+        let mut ends: Vec<EdgeEnd> = Vec::with_capacity(degree);
+        let mut half_offsets: Vec<f64> = Vec::with_capacity(degree);
+        for &(ref end, offset) in &street_ends {
+            ends.push(EdgeEnd {
+                edge: end.edge,
+                at_a: end.at_a,
+                bearing: end.bearing,
+                pathlike: false,
+            });
+            half_offsets.push(offset);
+        }
+        for end in &path_ends {
+            ends.push(EdgeEnd {
+                edge: end.edge,
+                at_a: end.at_a,
+                bearing: end.bearing,
+                pathlike: true,
+            });
+            half_offsets.push(0.0);
+        }
+
+        let fan = corners::build_fan(
+            merged_x[base],
+            merged_y[base],
+            &ends,
+            &half_offsets,
+            meters_per_unit_lng,
+            meters_per_unit_lat,
+        );
+
+        // The fan's corner slots become v2 nodes; record their ids so the sidewalks, crossings and
+        // links can reference them.
+        let mut corner_ids: Vec<u32> = Vec::with_capacity(street_count);
+        for slot in 0..street_count {
+            corner_ids.push(v2_x.len() as u32);
+            v2_x.push(fan.corner_x[slot]);
+            v2_y.push(fan.corner_y[slot]);
+        }
+        corner_node_count += street_count;
+
+        for slot in 0..street_count {
+            let end = &ends[slot];
+            let left = corner_ids[fan.corner_left[slot] as usize];
+            let right = corner_ids[fan.corner_right[slot] as usize];
+            if end.at_a {
+                left_at_a[end.edge as usize] = left;
+                right_at_a[end.edge as usize] = right;
+            } else {
+                left_at_b[end.edge as usize] = left;
+                right_at_b[end.edge as usize] = right;
+            }
+        }
+
+        // Crossings at a real intersection (degree >= 3, at least two streets): one per street,
+        // joining the two corners that flank it, carrying its name, cover and structure/steps.
+        if street_count >= 2 && degree >= 3 {
+            for slot in 0..street_count {
+                let crossed = &final_edges[ends[slot].edge as usize];
+                let corner_a = corner_ids[fan.corner_right[slot] as usize];
+                let corner_b = corner_ids[fan.corner_left[slot] as usize];
+                let length = node_distance(
+                    &v2_x, &v2_y, corner_a, corner_b, origin_lng, origin_lat, scale,
+                );
+                v2_edges.push(V2Edge {
+                    a: corner_a,
+                    b: corner_b,
+                    length: length as f32,
+                    geom: NO_GEOMETRY,
+                    cover: crossing_cover(crossed),
+                    half_offset: 0,
+                    name_id: crossed.name_id,
+                    kind: KIND_CROSSING,
+                    side: SIDE_NONE,
+                    flags: crossed.flags & (GRPH_STRUCTURE | GRPH_STEPS),
+                });
+                crossing_count += 1;
+            }
+        } else if street_count == 2 && degree == 2 {
+            // A deg-2 through joint gets no crossing, but an isolated ring of them would split its
+            // two sidewalk sides into two components; remember the latent crossing for the mop-up.
+            mopup_candidates.push((corner_ids[0], corner_ids[1], ends[0].edge));
+        }
+
+        // A base node touched by any path becomes a path node at the old intersection position;
+        // links tie it to the corner whose angular gap each path departs into.
+        if !path_ends.is_empty() {
+            let node = v2_x.len() as u32;
+            v2_x.push(merged_x[base]);
+            v2_y.push(merged_y[base]);
+            path_node[base] = node;
+            path_node_count += 1;
+            for (path_slot, end) in path_ends.iter().enumerate() {
+                if street_count == 0 {
+                    continue;
+                }
+                let corner = corner_ids[fan.path_corner[path_slot] as usize];
+                let cover = final_edges[end.edge as usize]
+                    .cover_left
+                    .max(final_edges[end.edge as usize].cover_right);
+                link_pairs.entry((node, corner)).or_insert(cover);
+            }
+        }
+    }
+
+    // Two sidewalks per street edge (each its own baked corner-to-corner geometry, opposite side
+    // labels) and one edge per path (its own centreline geometry). Crossings and links carry none.
+    let mut geometry_polys: Vec<(Vec<i32>, Vec<i32>)> = Vec::new();
+    let mut sidewalk_count = 0usize;
+    let mut path_edge_count = 0usize;
+    let mut length_clamped = 0usize;
+    let clamp_length = |from: u32, to: u32, straight: f32, counter: &mut usize| -> f32 {
+        let distance = node_distance(&v2_x, &v2_y, from, to, origin_lng, origin_lat, scale) as f32;
+        if distance > straight {
+            *counter += 1;
+            distance
+        } else {
+            straight
+        }
+    };
+    for (edge_id, edge) in final_edges.iter().enumerate() {
+        let base_flags = edge.flags & (GRPH_STRUCTURE | GRPH_STEPS);
+        if edge.flags & GRPH_PATHLIKE != 0 {
+            let node_a = path_node[edge.a as usize];
+            let node_b = path_node[edge.b as usize];
+            if node_a == u32::MAX || node_b == u32::MAX {
+                return Err("a path edge is missing a path node".into());
+            }
+            let geom = geometry_polys.len() as u32;
+            geometry_polys.push((edge.poly_x.clone(), edge.poly_y.clone()));
+            // The stored length is the ingest's geodesic sum, but the 1 m node merge nudged the
+            // pinned endpoints, so a near-straight path can end a metre or two under the node
+            // distance; clamp it up like a sidewalk to keep the heuristic admissible.
+            let length = clamp_length(node_a, node_b, edge.length, &mut length_clamped);
+            v2_edges.push(V2Edge {
+                a: node_a,
+                b: node_b,
+                length,
+                geom,
+                cover: edge.cover_left.max(edge.cover_right),
+                half_offset: 0,
+                name_id: edge.name_id,
+                kind: KIND_PATH,
+                side: SIDE_NONE,
+                flags: base_flags,
+            });
+            path_edge_count += 1;
+        } else {
+            let left_a = left_at_a[edge_id];
+            let right_a = right_at_a[edge_id];
+            let left_b = left_at_b[edge_id];
+            let right_b = right_at_b[edge_id];
+            if left_a == u32::MAX
+                || right_a == u32::MAX
+                || left_b == u32::MAX
+                || right_b == u32::MAX
+            {
+                return Err("a street edge is missing a corner assignment".into());
+            }
+            let (left_side, right_side) = side_labels(
+                &edge.poly_x,
+                &edge.poly_y,
+                meters_per_unit_lng,
+                meters_per_unit_lat,
+            );
+            let half_offset_m = f64::from(edge.offset) / DECIMETERS_PER_METER;
+            let meters_per_unit = (meters_per_unit_lng, meters_per_unit_lat);
+            // The left sidewalk runs cornerLeft(a) -> cornerRight(b), the centreline offset to its
+            // geometry-left; the right runs cornerRight(a) -> cornerLeft(b), offset geometry-right.
+            // Each bakes its own corners into its geometry so it reaches them without overshoot, and
+            // its length is that offset polyline's geodesic sum. Both keep base node a first.
+            let left_geom = offset_polyline(
+                &edge.poly_x,
+                &edge.poly_y,
+                half_offset_m,
+                1.0,
+                (v2_x[left_a as usize], v2_y[left_a as usize]),
+                (v2_x[right_b as usize], v2_y[right_b as usize]),
+                meters_per_unit,
+            );
+            let left_baked =
+                polyline_length(&left_geom.0, &left_geom.1, origin_lng, origin_lat, scale) as f32;
+            let left_length = clamp_length(left_a, right_b, left_baked, &mut length_clamped);
+            let left_geom_index = geometry_polys.len() as u32;
+            geometry_polys.push(left_geom);
+            v2_edges.push(V2Edge {
+                a: left_a,
+                b: right_b,
+                length: left_length,
+                geom: left_geom_index,
+                cover: edge.cover_left,
+                half_offset: edge.offset,
+                name_id: edge.name_id,
+                kind: KIND_SIDEWALK,
+                side: left_side,
+                flags: base_flags,
+            });
+            let right_geom = offset_polyline(
+                &edge.poly_x,
+                &edge.poly_y,
+                half_offset_m,
+                -1.0,
+                (v2_x[right_a as usize], v2_y[right_a as usize]),
+                (v2_x[left_b as usize], v2_y[left_b as usize]),
+                meters_per_unit,
+            );
+            let right_baked =
+                polyline_length(&right_geom.0, &right_geom.1, origin_lng, origin_lat, scale) as f32;
+            let right_length = clamp_length(right_a, left_b, right_baked, &mut length_clamped);
+            let right_geom_index = geometry_polys.len() as u32;
+            geometry_polys.push(right_geom);
+            v2_edges.push(V2Edge {
+                a: right_a,
+                b: left_b,
+                length: right_length,
+                geom: right_geom_index,
+                cover: edge.cover_right,
+                half_offset: edge.offset,
+                name_id: edge.name_id,
+                kind: KIND_SIDEWALK,
+                side: right_side,
+                flags: base_flags | FLAG_GEOMETRY_RIGHT,
+            });
+            sidewalk_count += 2;
+        }
+    }
+
+    // Links, one per deduped (path node, corner) pair.
+    let link_count = link_pairs.len();
+    for (&(node, corner), &cover) in &link_pairs {
+        let length = node_distance(&v2_x, &v2_y, node, corner, origin_lng, origin_lat, scale);
+        v2_edges.push(V2Edge {
+            a: node,
+            b: corner,
+            length: length as f32,
+            geom: NO_GEOMETRY,
+            cover,
+            half_offset: 0,
+            name_id: UNNAMED,
+            kind: KIND_LINK,
+            side: SIDE_NONE,
+            flags: 0,
+        });
+    }
+
+    // Connectivity mop-up: union-find over the v2 graph, then add a latent crossing at any deg-2
+    // joint whose two sides are still separated, until every v1 component's image is whole.
+    let v2_node_count = v2_x.len();
+    let mut v2_parent: Vec<u32> = (0..v2_node_count as u32).collect();
+    for edge in &v2_edges {
+        union(&mut v2_parent, edge.a, edge.b);
+    }
+    let mut mopup_crossings = 0usize;
+    for &(corner_a, corner_b, crossed_edge) in &mopup_candidates {
+        if find(&mut v2_parent, corner_a) != find(&mut v2_parent, corner_b) {
+            let crossed = &final_edges[crossed_edge as usize];
+            let length = node_distance(
+                &v2_x, &v2_y, corner_a, corner_b, origin_lng, origin_lat, scale,
+            );
+            v2_edges.push(V2Edge {
+                a: corner_a,
+                b: corner_b,
+                length: length as f32,
+                geom: NO_GEOMETRY,
+                cover: crossing_cover(crossed),
+                half_offset: 0,
+                name_id: crossed.name_id,
+                kind: KIND_CROSSING,
+                side: SIDE_NONE,
+                flags: crossed.flags & (GRPH_STRUCTURE | GRPH_STEPS),
+            });
+            union(&mut v2_parent, corner_a, corner_b);
+            mopup_crossings += 1;
+        }
+    }
+
+    // Components of the finished v2 graph, relabelled by size descending (0 = largest). Parity with
+    // the v1 partition is the "fully connected" gate.
+    let mut component_size: HashMap<u32, usize> = HashMap::new();
+    let mut node_root = vec![0u32; v2_node_count];
+    for (node, root_slot) in node_root.iter_mut().enumerate() {
+        let root = find(&mut v2_parent, node as u32);
+        *root_slot = root;
+        *component_size.entry(root).or_insert(0) += 1;
+    }
+    let component_count = component_size.len();
+    if component_count != v1_component_count {
+        return Err(format!(
+            "v2 has {component_count} components, v1 had {v1_component_count}: the image split"
+        )
+        .into());
+    }
     if component_count > u16::MAX as usize + 1 {
         return Err(format!("{component_count} components do not fit a u16 label").into());
     }
+    let mut roots: Vec<(u32, usize)> = component_size.into_iter().collect();
+    roots.sort_by(|left, right| right.1.cmp(&left.1).then(left.0.cmp(&right.0)));
     let largest_component = roots.first().map_or(0, |&(_, size)| size);
     let mut component_label: HashMap<u32, u16> = HashMap::with_capacity(component_count);
     for (label, &(root, _)) in roots.iter().enumerate() {
         component_label.insert(root, label as u16);
     }
-    let mut node_component_of_merged = vec![0u16; merged_count];
-    for (node, &kept) in kept_node.iter().enumerate() {
-        if kept {
-            let root = find(&mut component_parent, node as u32);
-            node_component_of_merged[node] = component_label[&root];
-        }
-    }
+    let node_component_of_v2: Vec<u16> =
+        node_root.iter().map(|root| component_label[root]).collect();
 
-    // Sort the kept nodes by (component, lat, lng), renumber, and remap the edges onto the new ids.
-    let mut node_order: Vec<u32> = (0..merged_count as u32)
-        .filter(|&node| kept_node[node as usize])
-        .collect();
+    // Sort the nodes by (component, lat, lng), renumber, and remap the edges onto the new ids.
+    let mut node_order: Vec<u32> = (0..v2_node_count as u32).collect();
     node_order.sort_by(|&left, &right| {
-        node_component_of_merged[left as usize]
-            .cmp(&node_component_of_merged[right as usize])
-            .then(merged_y[left as usize].cmp(&merged_y[right as usize]))
-            .then(merged_x[left as usize].cmp(&merged_x[right as usize]))
+        node_component_of_v2[left as usize]
+            .cmp(&node_component_of_v2[right as usize])
+            .then(v2_y[left as usize].cmp(&v2_y[right as usize]))
+            .then(v2_x[left as usize].cmp(&v2_x[right as usize]))
     });
     let node_count = node_order.len();
-    let mut new_id = vec![u32::MAX; merged_count];
+    let mut new_id = vec![u32::MAX; v2_node_count];
     for (index, &old) in node_order.iter().enumerate() {
         new_id[old as usize] = index as u32;
     }
-    let node_lng: Vec<i32> = node_order
-        .iter()
-        .map(|&old| merged_x[old as usize])
-        .collect();
-    let node_lat: Vec<i32> = node_order
-        .iter()
-        .map(|&old| merged_y[old as usize])
-        .collect();
+    let node_lng: Vec<i32> = node_order.iter().map(|&old| v2_x[old as usize]).collect();
+    let node_lat: Vec<i32> = node_order.iter().map(|&old| v2_y[old as usize]).collect();
     let node_component: Vec<u16> = node_order
         .iter()
-        .map(|&old| node_component_of_merged[old as usize])
+        .map(|&old| node_component_of_v2[old as usize])
         .collect();
-    for edge in &mut final_edges {
+    for edge in &mut v2_edges {
         edge.a = new_id[edge.a as usize];
         edge.b = new_id[edge.b as usize];
     }
-    final_edges.sort_by(|left, right| {
+    v2_edges.sort_by(|left, right| {
         node_component[left.a as usize]
             .cmp(&node_component[right.a as usize])
             .then(left.a.min(left.b).cmp(&right.a.min(right.b)))
     });
-    let edge_count = final_edges.len();
+    let edge_count = v2_edges.len();
+
+    // The compact name table: only the names the kept edges reference, re-indexed, sorted by their
+    // original id for a stable layout. 0xFFFF stays unnamed.
+    let mut used_names: Vec<u16> = v2_edges
+        .iter()
+        .map(|edge| edge.name_id)
+        .filter(|&id| id != UNNAMED)
+        .collect();
+    used_names.sort_unstable();
+    used_names.dedup();
+    if used_names.len() > UNNAMED as usize {
+        return Err(format!("{} names do not fit a u16 id", used_names.len()).into());
+    }
+    let mut name_remap: HashMap<u16, u16> = HashMap::with_capacity(used_names.len());
+    for (index, &original) in used_names.iter().enumerate() {
+        name_remap.insert(original, index as u16);
+    }
 
     // CSR adjacency of edge ids: node n owns [csr[n], csr[n + 1]); a self-loop lists its edge twice
     // on its node, so the half-edge total is 2E.
     let mut degree = vec![0u32; node_count];
-    for edge in &final_edges {
+    for edge in &v2_edges {
         degree[edge.a as usize] += 1;
         degree[edge.b as usize] += 1;
     }
@@ -579,22 +1209,34 @@ pub fn run(args: &Args) -> Fallible<()> {
     }
     let mut cursor = csr.clone();
     let mut adjacency = vec![0u32; 2 * edge_count];
-    for (edge_id, edge) in final_edges.iter().enumerate() {
+    for (edge_id, edge) in v2_edges.iter().enumerate() {
         adjacency[cursor[edge.a as usize] as usize] = edge_id as u32;
         cursor[edge.a as usize] += 1;
         adjacency[cursor[edge.b as usize] as usize] = edge_id as u32;
         cursor[edge.b as usize] += 1;
     }
 
-    // The ten pre-write invariants.
-    for edge in &final_edges {
-        let last = edge.poly_x.len() - 1;
-        if edge.poly_x[0] != node_lng[edge.a as usize]
-            || edge.poly_y[0] != node_lat[edge.a as usize]
-            || edge.poly_x[last] != node_lng[edge.b as usize]
-            || edge.poly_y[last] != node_lat[edge.b as usize]
-        {
-            return Err("an edge polyline does not start and end on its nodes".into());
+    // Pre-write invariants: a stored-geometry edge begins and ends exactly on its node coordinates
+    // (a sidewalk is baked corner-to-corner, a path keeps its pinned endpoints), so no geometry
+    // overshoots the intersection; every edge is at least as long as its straight-line node
+    // distance; no edge joins two components; the CSR total is 2E.
+    for edge in &v2_edges {
+        if edge.geom != NO_GEOMETRY {
+            let (poly_x, poly_y) = &geometry_polys[edge.geom as usize];
+            let last = poly_x.len() - 1;
+            if poly_x[0] != node_lng[edge.a as usize]
+                || poly_y[0] != node_lat[edge.a as usize]
+                || poly_x[last] != node_lng[edge.b as usize]
+                || poly_y[last] != node_lat[edge.b as usize]
+            {
+                return Err("an edge geometry does not start and end on its nodes".into());
+            }
+        }
+        let straight = node_distance(
+            &node_lng, &node_lat, edge.a, edge.b, origin_lng, origin_lat, scale,
+        ) as f32;
+        if edge.length + LENGTH_SLACK_METERS < straight {
+            return Err("an edge is shorter than its node distance".into());
         }
         if node_component[edge.a as usize] != node_component[edge.b as usize] {
             return Err("an edge joins two components".into());
@@ -604,15 +1246,16 @@ pub fn run(args: &Args) -> Fallible<()> {
         return Err("the CSR half-edge count is not 2E".into());
     }
 
-    // The geometry blob, then the file. The first delta of every edge is taken from node a's
-    // position, so it is (0, 0); the rest are from the previous vertex.
+    // The geometry blob: one entry per sidewalk and per path edge, its first vertex absolute (delta
+    // from the graph origin — kept origin-anchored so the client decoder is unchanged), the rest
+    // from the previous vertex.
     let mut geometry: Vec<u8> = Vec::new();
-    let mut geometry_offsets: Vec<u32> = Vec::with_capacity(edge_count);
-    for edge in &final_edges {
+    let mut geometry_offsets: Vec<u32> = Vec::with_capacity(geometry_polys.len());
+    for (poly_x, poly_y) in &geometry_polys {
         geometry_offsets.push(geometry.len() as u32);
-        let mut previous_x = i64::from(node_lng[edge.a as usize]);
-        let mut previous_y = i64::from(node_lat[edge.a as usize]);
-        for (&vertex_x, &vertex_y) in edge.poly_x.iter().zip(&edge.poly_y) {
+        let mut previous_x = 0i64;
+        let mut previous_y = 0i64;
+        for (&vertex_x, &vertex_y) in poly_x.iter().zip(poly_y) {
             write_varint(&mut geometry, zigzag(i64::from(vertex_x) - previous_x));
             write_varint(&mut geometry, zigzag(i64::from(vertex_y) - previous_y));
             previous_x = i64::from(vertex_x);
@@ -620,6 +1263,17 @@ pub fn run(args: &Args) -> Fallible<()> {
         }
     }
 
+    // The name table blob: (count + 1) byte offsets, then the UTF-8 names back to back.
+    let mut name_blob: Vec<u8> = Vec::new();
+    let mut name_offsets: Vec<u32> = Vec::with_capacity(used_names.len() + 1);
+    for &original in &used_names {
+        name_offsets.push(name_blob.len() as u32);
+        name_blob.extend_from_slice(streets.names[original as usize].as_bytes());
+    }
+    name_offsets.push(name_blob.len() as u32);
+    let name_table_bytes = 4 + 4 * name_offsets.len() + name_blob.len();
+
+    let align4 = |offset: usize| offset.div_ceil(4) * 4;
     let component_pad = if node_count % 2 == 1 { 2 } else { 0 };
     let node_lng_offset = GRAPH_HEADER_BYTES;
     let node_lat_offset = node_lng_offset + 4 * node_count;
@@ -627,7 +1281,8 @@ pub fn run(args: &Args) -> Fallible<()> {
     let csr_offset = node_component_offset + 2 * node_count + component_pad;
     let adjacency_offset = csr_offset + 4 * (node_count + 1);
     let edges_offset = adjacency_offset + 8 * edge_count;
-    let geometry_offset = edges_offset + 24 * edge_count;
+    let name_offset = edges_offset + EDGE_RECORD_BYTES * edge_count;
+    let geometry_offset = align4(name_offset + name_table_bytes);
 
     let mut bytes = vec![0u8; geometry_offset];
     bytes[0..4].copy_from_slice(b"GRPH");
@@ -639,8 +1294,10 @@ pub fn run(args: &Args) -> Fallible<()> {
     put_f64(&mut bytes, 24, origin_lat);
     put_f64(&mut bytes, 32, scale);
     put_u32(&mut bytes, 40, component_count as u32);
-    put_u32(&mut bytes, 44, geometry_offset as u32);
-    put_u32(&mut bytes, 48, geometry.len() as u32);
+    put_u32(&mut bytes, 44, name_offset as u32);
+    put_u32(&mut bytes, 48, name_table_bytes as u32);
+    put_u32(&mut bytes, 52, geometry_offset as u32);
+    put_u32(&mut bytes, 56, geometry.len() as u32);
 
     for (index, &value) in node_lng.iter().enumerate() {
         put_i32(&mut bytes, node_lng_offset + 4 * index, value);
@@ -657,18 +1314,38 @@ pub fn run(args: &Args) -> Fallible<()> {
     for (index, &value) in adjacency.iter().enumerate() {
         put_u32(&mut bytes, adjacency_offset + 4 * index, value);
     }
-    for (edge_id, edge) in final_edges.iter().enumerate() {
-        let record = edges_offset + 24 * edge_id;
+    for (edge_id, edge) in v2_edges.iter().enumerate() {
+        let record = edges_offset + EDGE_RECORD_BYTES * edge_id;
+        let (geom_offset, vertex_count) = if edge.geom == NO_GEOMETRY {
+            (NO_GEOMETRY, 0u16)
+        } else {
+            (
+                geometry_offsets[edge.geom as usize],
+                geometry_polys[edge.geom as usize].0.len() as u16,
+            )
+        };
+        let name = match name_remap.get(&edge.name_id) {
+            Some(&index) => index,
+            None => UNNAMED,
+        };
         put_u32(&mut bytes, record, edge.a);
         put_u32(&mut bytes, record + 4, edge.b);
         put_f32(&mut bytes, record + 8, edge.length);
-        put_u32(&mut bytes, record + 12, geometry_offsets[edge_id]);
-        put_u16(&mut bytes, record + 16, edge.poly_x.len() as u16);
-        bytes[record + 18] = edge.cover_left;
-        bytes[record + 19] = edge.cover_right;
-        bytes[record + 20] = edge.offset;
-        bytes[record + 21] = edge.flags;
+        put_u32(&mut bytes, record + 12, geom_offset);
+        put_u16(&mut bytes, record + 16, vertex_count);
+        put_u16(&mut bytes, record + 18, name);
+        bytes[record + 20] = edge.cover;
+        bytes[record + 21] = edge.half_offset;
+        bytes[record + 22] = (edge.kind & 0b11) | (edge.side << 2);
+        bytes[record + 23] = edge.flags;
     }
+
+    put_u32(&mut bytes, name_offset, used_names.len() as u32);
+    for (index, &value) in name_offsets.iter().enumerate() {
+        put_u32(&mut bytes, name_offset + 4 + 4 * index, value);
+    }
+    let name_blob_offset = name_offset + 4 + 4 * name_offsets.len();
+    bytes[name_blob_offset..name_blob_offset + name_blob.len()].copy_from_slice(&name_blob);
     bytes.extend_from_slice(&geometry);
 
     if let Some(parent) = args.out.parent() {
@@ -676,7 +1353,7 @@ pub fn run(args: &Args) -> Fallible<()> {
     }
     fs::write(&args.out, &bytes)?;
 
-    let total_km: f64 = final_edges
+    let total_km: f64 = v2_edges
         .iter()
         .map(|edge| f64::from(edge.length))
         .sum::<f64>()
@@ -695,6 +1372,16 @@ pub fn run(args: &Args) -> Fallible<()> {
         "mergedNearNodes": merged_near_nodes,
         "contractedNodes": contracted_nodes,
         "prunedVertices": pruned_vertices,
+        "sidewalkEdges": sidewalk_count,
+        "crossingEdges": crossing_count,
+        "linkEdges": link_count,
+        "pathEdges": path_edge_count,
+        "cornerNodes": corner_node_count,
+        "pathNodes": path_node_count,
+        "nameBreakJoints": name_break_joints,
+        "mopupCrossings": mopup_crossings,
+        "lengthClamped": length_clamped,
+        "names": used_names.len(),
         "totalKm": total_km,
         "bytes": bytes.len(),
     });

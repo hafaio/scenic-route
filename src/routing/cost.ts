@@ -21,13 +21,13 @@ export const WALK_METERS_PER_SECOND = 1.4;
 export const MAX_TREE_WEIGHT = 1;
 export const DEFAULT_TREE_WEIGHT = 1;
 
-// |left - right| at or under this reads "either" (~5% cover): the sides are too close to bother
-// telling the walker which one to take.
+// A cover gap (0..255) at or under this reads as "too close to call" (~5% cover) — the threshold
+// Phase 3 directions use before bothering to name a greener side.
 export const SIDE_TIE_BYTES = 12;
 
-// The greener side's cover, 0..1 — the side the cost rewards and the walker should hug.
+// This edge's own cover, 0..1. In v2 the side is topology, so an edge carries a single value.
 export function edgeCover(graph: RoutingGraph, edge: number): number {
-  return Math.max(graph.edgeCoverLeft[edge], graph.edgeCoverRight[edge]) / 255;
+  return graph.edgeCover[edge] / 255;
 }
 
 export function edgeMultiplier(
@@ -46,24 +46,4 @@ export function edgeMultiplier(
 // the graph's true minimum, it is also the tightest such coefficient.
 export function minMultiplier(graph: RoutingGraph, treeWeight: number): number {
   return 1 - treeWeight * graph.maxCover;
-}
-
-// The greener side in the *travel* direction. The stored sides are defined for a -> b travel, so
-// they swap when the edge is walked b -> a.
-export function edgeSide(
-  graph: RoutingGraph,
-  edge: number,
-  forward: boolean,
-): "left" | "right" | "either" {
-  const left = graph.edgeCoverLeft[edge];
-  const right = graph.edgeCoverRight[edge];
-  if (Math.abs(left - right) <= SIDE_TIE_BYTES) {
-    return "either";
-  }
-  const greenerStored = left > right ? "left" : "right";
-  if (forward) {
-    return greenerStored;
-  } else {
-    return greenerStored === "left" ? "right" : "left";
-  }
 }

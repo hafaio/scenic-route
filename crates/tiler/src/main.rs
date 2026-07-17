@@ -5,6 +5,7 @@
 //! See scripts/README.md.
 
 mod binfmt;
+mod corners;
 mod densities;
 mod geometry;
 mod graph;

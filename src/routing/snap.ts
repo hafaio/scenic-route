@@ -4,7 +4,7 @@
 // back to the surrounding street component together) and makes a cross-harbour query fail
 // honestly rather than snapping across the water.
 
-import { edgePath, type RoutingGraph } from "./graph";
+import { edgeKind, edgePath, type RoutingGraph } from "./graph";
 
 export const SNAP_RADIUS_METERS = 300;
 
@@ -54,13 +54,20 @@ export function buildSnapIndex(graph: RoutingGraph): SnapIndex {
   const buckets = new Map<number, number[]>();
   const cursor = { offset: 0 };
   for (let edge = 0; edge < graph.edgeCount; edge++) {
+    // You never start a walk mid-crosswalk or on a corner link, so those kinds — the only ones
+    // without geometry — are left out of the index entirely.
+    const kind = edgeKind(graph, edge);
+    if (kind === "crossing" || kind === "link") {
+      continue;
+    }
     cursor.offset = graph.edgeGeomOffset[edge];
-    let quantizedX = graph.nodeQx[graph.edgeNodeA[edge]];
-    let quantizedY = graph.nodeQy[graph.edgeNodeA[edge]];
-    let minX = quantizedX;
-    let maxX = quantizedX;
-    let minY = quantizedY;
-    let maxY = quantizedY;
+    // Geometry is origin-anchored: the first delta is the absolute quantized position.
+    let quantizedX = 0;
+    let quantizedY = 0;
+    let minX = Number.POSITIVE_INFINITY;
+    let maxX = Number.NEGATIVE_INFINITY;
+    let minY = Number.POSITIVE_INFINITY;
+    let maxY = Number.NEGATIVE_INFINITY;
     const count = graph.edgeGeomCount[edge];
     for (let vertex = 0; vertex < count; vertex++) {
       quantizedX += readVarint(graph.geometry, cursor);
@@ -240,6 +247,9 @@ export function snapCandidates(
           if (projection.distanceMeters > SNAP_RADIUS_METERS) {
             continue;
           }
+          // A street's two sidewalks now carry their own baked, offset geometry ~13 m apart, so the
+          // nearest edge already is the physically nearer side — no cross-product side filter, just
+          // the least-distance candidate per component (crossing and link kinds are not indexed).
           const component = graph.nodeComponent[graph.edgeNodeA[edge]];
           const incumbent = best.get(component);
           if (

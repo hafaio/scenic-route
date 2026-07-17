@@ -10,7 +10,7 @@ use crate::Fallible;
 pub const TREE_FORMAT: u16 = 2; // v2 carries a crown-radius byte per tree; v1 was points only
 pub const WOODLAND_FORMAT: u16 = 1;
 pub const LAND_FORMAT: u16 = 1;
-pub const STREET_FORMAT: u16 = 4;
+pub const STREET_FORMAT: u16 = 5;
 
 pub const SIDES: usize = 2; // the two sidewalks a density blob carries per vertex, left then right
 pub const DECIMETERS_PER_METER: f64 = 10.0; // the crown byte's unit: a decimetre of crown radius
@@ -202,6 +202,8 @@ pub struct Streets {
     pub road_types: Vec<u8>, // per segment: 1 street, 3 bridge, 4 tunnel, 5 boardwalk, 6 path, 7 step, 10 alley
     pub width_feet: Vec<u8>, // curb to curb, 0 unknown — what the sidewalk offset is derived from
     pub flags: Vec<u8>, // per segment: bit0 vehicular-only, bit1 non-vehicular deck, bit2 structure
+    pub name_ids: Vec<u16>, // per segment: index into `names`, 0xFFFF when the row carried no label
+    pub names: Vec<String>, // the distinct street names, decoded from the trailing name blob
     pub lengths_m: Vec<f32>, // per segment: the stored geodesic length; the graph sums, never recomputes
     pub origin_lng: f64, // the quantized deltas' reference, so `tiler graph` can recover the ints
     pub origin_lat: f64,
@@ -244,13 +246,16 @@ pub fn read_streets(path: &Path) -> Fallible<Streets> {
     let coord_offset = u32_at(&bytes, 40) as usize;
     let density_offset = u32_at(&bytes, 48) as usize;
     let density_bytes = u32_at(&bytes, 52) as usize;
-    // The density blob is last, so this covers the records and the coordinates before it.
-    if bytes.len() < density_offset + density_bytes {
+    let name_offset = u32_at(&bytes, 56) as usize;
+    let name_bytes = u32_at(&bytes, 60) as usize;
+    // The name blob is the final region, so this covers the records, coordinates and densities
+    // before it too.
+    if bytes.len() < name_offset + name_bytes {
         return Err(format!(
             "{} is truncated: {} bytes, {} needed for {count} segments",
             path.display(),
             bytes.len(),
-            density_offset + density_bytes
+            name_offset + name_bytes
         )
         .into());
     }
@@ -262,6 +267,7 @@ pub fn read_streets(path: &Path) -> Fallible<Streets> {
     let mut road_types = Vec::with_capacity(count);
     let mut width_feet = Vec::with_capacity(count);
     let mut flags = Vec::with_capacity(count);
+    let mut name_ids = Vec::with_capacity(count);
     let mut lengths_m = Vec::with_capacity(count);
     for segment in 0..count {
         let record = header_bytes + segment * record_bytes;
@@ -274,6 +280,7 @@ pub fn read_streets(path: &Path) -> Fallible<Streets> {
         road_types.push(bytes[record + 20]);
         width_feet.push(bytes[record + 21]);
         flags.push(bytes[record + 23]);
+        name_ids.push(u16_at(&bytes, record + 10));
         lengths_m.push(f32::from_le_bytes(
             bytes[record + 12..record + 16].try_into().expect("4 bytes"),
         ));
@@ -299,6 +306,19 @@ pub fn read_streets(path: &Path) -> Fallible<Streets> {
         )
         .into());
     }
+    // The name blob: a u32 count, then each name as a u16 byte length and its UTF-8 bytes.
+    let mut names = Vec::new();
+    let mut name_cursor = name_offset;
+    let name_count = u32_at(&bytes, name_cursor) as usize;
+    name_cursor += 4;
+    names.reserve(name_count);
+    for _ in 0..name_count {
+        let len = usize::from(u16_at(&bytes, name_cursor));
+        name_cursor += 2;
+        names.push(String::from_utf8_lossy(&bytes[name_cursor..name_cursor + len]).into_owned());
+        name_cursor += len;
+    }
+
     Ok(Streets {
         bytes,
         lngs,
@@ -307,6 +327,8 @@ pub fn read_streets(path: &Path) -> Fallible<Streets> {
         road_types,
         width_feet,
         flags,
+        name_ids,
+        names,
         lengths_m,
         origin_lng,
         origin_lat,

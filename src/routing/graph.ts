@@ -1,7 +1,35 @@
 // The client's view of the routing graph baked by `tiler graph`. Layout: scripts/README.md
-// (magic GRPH, v1). Fixed sections are viewed in place over the fetched buffer; the strided
-// edge records are copied once into parallel typed arrays so the search loop touches only flat
-// arrays.
+// (magic GRPH, v2 — the sidewalk graph). Fixed sections are viewed in place over the fetched
+// buffer; the strided edge records are copied once into parallel typed arrays so the search loop
+// touches only flat arrays.
+
+// A no-geometry edge (a crossing or a link) stores this sentinel in its geometry offset; its
+// polyline is the straight line between its two node coordinates.
+export const NO_GEOMETRY = 0xffffffff;
+const NAME_NONE = 0xffff;
+// Edge kind lives in bits 0-1 of the kind+side byte; the side in bits 2-4.
+const KIND_MASK = 0x3;
+const SIDE_SHIFT = 2;
+const SIDE_MASK = 0x7;
+// flags byte bit 2 marks a sidewalk that lies to the right of its stored geometry direction.
+const GEOMETRY_RIGHT_FLAG = 0x4;
+
+export type EdgeKind = "sidewalk" | "crossing" | "link" | "path";
+export type SideLabel = "north" | "east" | "south" | "west" | null;
+
+const EDGE_KINDS: readonly EdgeKind[] = [
+  "sidewalk",
+  "crossing",
+  "link",
+  "path",
+];
+const SIDE_LABELS: readonly SideLabel[] = [
+  null,
+  "north",
+  "east",
+  "south",
+  "west",
+];
 
 export interface RoutingGraph {
   nodeCount: number;
@@ -17,19 +45,21 @@ export interface RoutingGraph {
   edgeNodeA: Uint32Array;
   edgeNodeB: Uint32Array;
   edgeLength: Float32Array; // geodesic metres
-  edgeGeomOffset: Uint32Array; // byte offset into the geometry blob
-  edgeGeomCount: Uint16Array; // vertices, >= 2
-  edgeCoverLeft: Uint8Array; // 0..255, left side of a -> b travel
-  edgeCoverRight: Uint8Array;
+  edgeGeomOffset: Uint32Array; // byte offset into the geometry blob; NO_GEOMETRY = straight a -> b
+  edgeGeomCount: Uint16Array; // geometry vertices, 0 when no geometry
+  edgeCover: Uint8Array; // 0..255, this edge's own single value
+  edgeNameId: Uint16Array; // index into names, or NAME_NONE
+  edgeKindSide: Uint8Array; // bits 0-1 kind, bits 2-4 side
   maxCover: number; // the greatest per-edge cover in the graph, 0..1; sets the cost clip floor
 
-  edgeHalfOffsetDm: Uint8Array; // decimetres to a sidewalk; 0 = drawn/walked on the line
-  edgeFlags: Uint8Array; // 1 structure, 2 steps, 4 path-like
+  edgeHalfOffsetDm: Uint8Array; // decimetres to a sidewalk; 0 for crossings/links/paths
+  edgeFlags: Uint8Array; // bit0 structure, bit1 steps, bit2 geometry-right (sidewalks)
+  names: string[];
   geometry: Uint8Array;
 }
 
 const MAGIC = "GRPH";
-const FORMAT_VERSION = 1;
+const FORMAT_VERSION = 2;
 const HEADER_BYTES = 64;
 const EDGE_RECORD_BYTES = 24;
 const GRAPH_URL = "routing/nyc.bin"; // relative, so it picks up the deploy basePath
@@ -53,8 +83,9 @@ export function decodeGraph(buffer: ArrayBuffer): RoutingGraph {
   const originLng = view.getFloat64(16, true);
   const originLat = view.getFloat64(24, true);
   const scale = view.getFloat64(32, true);
-  const geometryOffset = view.getUint32(44, true);
-  const geometryLength = view.getUint32(48, true);
+  const nameTableOffset = view.getUint32(44, true);
+  const geometryOffset = view.getUint32(52, true);
+  const geometryLength = view.getUint32(56, true);
 
   // Fixed sections run back to back after the header, each starting 4-byte aligned. They are
   // viewed in place; the quantized coordinates, components, and CSR need no copy.
@@ -75,8 +106,9 @@ export function decodeGraph(buffer: ArrayBuffer): RoutingGraph {
   const edgeLength = new Float32Array(edgeCount);
   const edgeGeomOffset = new Uint32Array(edgeCount);
   const edgeGeomCount = new Uint16Array(edgeCount);
-  const edgeCoverLeft = new Uint8Array(edgeCount);
-  const edgeCoverRight = new Uint8Array(edgeCount);
+  const edgeCover = new Uint8Array(edgeCount);
+  const edgeNameId = new Uint16Array(edgeCount);
+  const edgeKindSide = new Uint8Array(edgeCount);
   const edgeHalfOffsetDm = new Uint8Array(edgeCount);
   const edgeFlags = new Uint8Array(edgeCount);
   let maxCoverByte = 0;
@@ -87,18 +119,16 @@ export function decodeGraph(buffer: ArrayBuffer): RoutingGraph {
     edgeLength[edge] = view.getFloat32(record + 8, true);
     edgeGeomOffset[edge] = view.getUint32(record + 12, true);
     edgeGeomCount[edge] = view.getUint16(record + 16, true);
-    edgeCoverLeft[edge] = bytes[record + 18];
-    edgeCoverRight[edge] = bytes[record + 19];
-    edgeHalfOffsetDm[edge] = bytes[record + 20];
-    edgeFlags[edge] = bytes[record + 21];
-    maxCoverByte = Math.max(
-      maxCoverByte,
-      edgeCoverLeft[edge],
-      edgeCoverRight[edge],
-    );
+    edgeNameId[edge] = view.getUint16(record + 18, true);
+    edgeCover[edge] = bytes[record + 20];
+    edgeHalfOffsetDm[edge] = bytes[record + 21];
+    edgeKindSide[edge] = bytes[record + 22];
+    edgeFlags[edge] = bytes[record + 23];
+    maxCoverByte = Math.max(maxCoverByte, edgeCover[edge]);
   }
   const maxCover = maxCoverByte / 255;
 
+  const names = decodeNames(buffer, nameTableOffset);
   const geometry = new Uint8Array(buffer, geometryOffset, geometryLength);
 
   return {
@@ -117,13 +147,52 @@ export function decodeGraph(buffer: ArrayBuffer): RoutingGraph {
     edgeLength,
     edgeGeomOffset,
     edgeGeomCount,
-    edgeCoverLeft,
-    edgeCoverRight,
+    edgeCover,
+    edgeNameId,
+    edgeKindSide,
     maxCover,
     edgeHalfOffsetDm,
     edgeFlags,
+    names,
     geometry,
   };
+}
+
+// The name table: a u32 count, (count + 1) u32 byte offsets into the trailing UTF-8 blob, then
+// the blob. The offsets bracket each name, so access is O(1) and the strings are decoded once.
+function decodeNames(buffer: ArrayBuffer, tableOffset: number): string[] {
+  const view = new DataView(buffer);
+  const count = view.getUint32(tableOffset, true);
+  const offsetsAt = tableOffset + 4;
+  const blobAt = offsetsAt + (count + 1) * 4;
+  const decoder = new TextDecoder();
+  const names: string[] = new Array(count);
+  for (let index = 0; index < count; index++) {
+    const start = view.getUint32(offsetsAt + index * 4, true);
+    const end = view.getUint32(offsetsAt + (index + 1) * 4, true);
+    names[index] = decoder.decode(
+      new Uint8Array(buffer, blobAt + start, end - start),
+    );
+  }
+  return names;
+}
+
+export function edgeKind(graph: RoutingGraph, edge: number): EdgeKind {
+  return EDGE_KINDS[graph.edgeKindSide[edge] & KIND_MASK];
+}
+
+export function edgeSideLabel(graph: RoutingGraph, edge: number): SideLabel {
+  return SIDE_LABELS[(graph.edgeKindSide[edge] >> SIDE_SHIFT) & SIDE_MASK];
+}
+
+export function edgeName(graph: RoutingGraph, edge: number): string | null {
+  const nameId = graph.edgeNameId[edge];
+  return nameId === NAME_NONE ? null : graph.names[nameId];
+}
+
+// True when this sidewalk lies to the right of its stored geometry direction (flags bit 2).
+export function edgeGeometryRight(graph: RoutingGraph, edge: number): boolean {
+  return (graph.edgeFlags[edge] & GEOMETRY_RIGHT_FLAG) !== 0;
 }
 
 let graphPromise: Promise<RoutingGraph> | null = null;
@@ -177,21 +246,40 @@ export function edgePath(graph: RoutingGraph, edge: number): EdgePath {
     return cached;
   }
 
-  const count = graph.edgeGeomCount[edge];
-  const lngs = new Float64Array(count);
-  const lats = new Float64Array(count);
-  const cursor = { offset: graph.edgeGeomOffset[edge] };
-  // The first delta is taken from node a's quantized position, so it is always (0, 0).
-  let quantizedX = graph.nodeQx[graph.edgeNodeA[edge]];
-  let quantizedY = graph.nodeQy[graph.edgeNodeA[edge]];
-  for (let vertex = 0; vertex < count; vertex++) {
-    quantizedX += readVarint(graph.geometry, cursor);
-    quantizedY += readVarint(graph.geometry, cursor);
-    lngs[vertex] = graph.originLng + quantizedX * graph.scale;
-    lats[vertex] = graph.originLat + quantizedY * graph.scale;
+  let path: EdgePath;
+  if (graph.edgeGeomOffset[edge] === NO_GEOMETRY) {
+    // Crossings and links carry no geometry: the polyline is the straight line between the two
+    // node coordinates, in a -> b order.
+    const nodeA = graph.edgeNodeA[edge];
+    const nodeB = graph.edgeNodeB[edge];
+    path = {
+      lngs: Float64Array.of(
+        graph.originLng + graph.nodeQx[nodeA] * graph.scale,
+        graph.originLng + graph.nodeQx[nodeB] * graph.scale,
+      ),
+      lats: Float64Array.of(
+        graph.originLat + graph.nodeQy[nodeA] * graph.scale,
+        graph.originLat + graph.nodeQy[nodeB] * graph.scale,
+      ),
+    };
+  } else {
+    const count = graph.edgeGeomCount[edge];
+    const lngs = new Float64Array(count);
+    const lats = new Float64Array(count);
+    const cursor = { offset: graph.edgeGeomOffset[edge] };
+    // Geometry entries are origin-anchored: the first pair is the absolute quantized position (a
+    // delta from the graph origin) and the rest are previous-vertex deltas.
+    let quantizedX = 0;
+    let quantizedY = 0;
+    for (let vertex = 0; vertex < count; vertex++) {
+      quantizedX += readVarint(graph.geometry, cursor);
+      quantizedY += readVarint(graph.geometry, cursor);
+      lngs[vertex] = graph.originLng + quantizedX * graph.scale;
+      lats[vertex] = graph.originLat + quantizedY * graph.scale;
+    }
+    path = { lngs, lats };
   }
 
-  const path: EdgePath = { lngs, lats };
   pathCache.set(edge, path);
   if (pathCache.size > PATH_CACHE_LIMIT) {
     const oldest = pathCache.keys().next().value;

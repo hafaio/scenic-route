@@ -11,7 +11,7 @@
         "east": -73.6955944236991
       },
       "trees": 899394,
-      "updated": "2026-07-15",
+      "updated": "2026-07-16",
       "attribution": "NYC Parks Forestry (ForMS) via NYC Open Data",
       "sourceUrl": "https://data.cityofnewyork.us/d/hn5i-inap",
       "field": {
@@ -79,17 +79,17 @@
             "p99": 0.9
           }
         },
-        "updated": "2026-07-15",
+        "updated": "2026-07-16",
         "attribution": "OpenStreetMap contributors",
         "sourceUrl": "https://www.openstreetmap.org/copyright"
       },
       "streets": {
         "file": "nyc.bin",
-        "format": 4,
+        "format": 5,
         "segments": 122652,
         "vertices": 745883,
-        "bytes": 7258387,
-        "sha256": "eea18ed670cc3aa216bfa65cb29485a9e479e05cb34c6fc1b9b69b00dd9ef97d",
+        "bytes": 7379200,
+        "sha256": "323679d268a7894db8eef03f05320437223605e2a1f7b58390a03d70db510842",
         "densifyMeters": 25,
         "sidewalkInsetMeters": 2,
         "density": {
@@ -114,7 +114,7 @@
             "p99": 0.9
           }
         },
-        "updated": "2026-07-15",
+        "updated": "2026-07-16",
         "attribution": "NYC DoITT Street Centerline (CSCL) via NYC Open Data",
         "sourceUrl": "https://data.cityofnewyork.us/d/inkn-q76z"
       }
