@@ -23,8 +23,8 @@ import { navProgress } from "../src/routing/nav-progress";
 import { RouteCache } from "../src/routing/route-cache";
 import type { RouteResult } from "../src/routing/search";
 import { buildSnapIndex, type SnapIndex, snapPair } from "../src/routing/snap";
+import AboutDialog from "./about-dialog";
 import FollowToggle from "./follow-toggle";
-import LogHereButton from "./log-here-button";
 import type { MapTarget } from "./map";
 import PinEditor from "./pin-editor";
 import RoutePanel from "./route-panel";
@@ -121,6 +121,7 @@ export default function MapApp() {
     "canopy",
   );
   const [signingIn, setSigningIn] = useState<boolean>(false);
+  const [aboutOpen, setAboutOpen] = useState<boolean>(false);
   const [locationError, setLocationError] = useState<
     "denied" | "unavailable" | null
   >(null);
@@ -207,6 +208,13 @@ export default function MapApp() {
     });
     return unsubscribe;
   }, []);
+
+  const locationHint =
+    locationError === "denied"
+      ? "Location access is blocked — enable it in your browser settings."
+      : locationError === "unavailable"
+        ? "Couldn't get your location. Make sure location services are on."
+        : null;
 
   const uid = auth.kind === "signedIn" ? auth.info.user.uid : null;
   const isAdmin = auth.kind === "signedIn" && auth.info.admin;
@@ -594,13 +602,6 @@ export default function MapApp() {
     }
   }, []);
 
-  const locationHint =
-    locationError === "denied"
-      ? "Location access is blocked — enable it in your browser settings."
-      : locationError === "unavailable"
-        ? "Couldn't get your location. Make sure location services are on."
-        : null;
-
   const draft = editing?.mode === "create" ? editing.draft : null;
 
   const routeResult = routeState.kind === "ready" ? routeState.result : null;
@@ -655,6 +656,11 @@ export default function MapApp() {
         onSignIn={handleSignIn}
         onSignOut={handleSignOut}
         onRefreshClaims={handleRefreshClaims}
+        onAbout={() => setAboutOpen(true)}
+        onLogHere={handleLogHere}
+        logHereDisabled={userLocation === null}
+        logHereBusy={logging}
+        logHereHint={locationHint}
       />
       <FollowToggle active={following} onToggle={handleToggleFollow} />
       {banner ? (
@@ -669,14 +675,6 @@ export default function MapApp() {
             <FiX />
           </button>
         </div>
-      ) : null}
-      {isAdmin && !editing && !routingOpen ? (
-        <LogHereButton
-          onClick={handleLogHere}
-          disabled={userLocation === null}
-          busy={logging}
-          hint={locationHint}
-        />
       ) : null}
       {routingOpen ? (
         <RoutePanel
@@ -734,6 +732,7 @@ export default function MapApp() {
         />
       ) : null}
       {signingIn ? <SignInDialog onClose={handleCloseSignIn} /> : null}
+      {aboutOpen ? <AboutDialog onClose={() => setAboutOpen(false)} /> : null}
     </main>
   );
 }
