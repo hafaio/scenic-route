@@ -30,8 +30,10 @@ import {
   writeManifest,
 } from "./manifest";
 import {
+  fetchOsmTrees,
   fetchPaths,
   fetchWoodland,
+  type OsmTree,
   type PathWay,
   type Polygon,
 } from "./overpass";
@@ -160,6 +162,13 @@ const CM_PER_INCH = 2.54;
 const MAX_DBH_INCHES = 60;
 const MEDIAN_DBH_INCHES = 9; // the ForMS median over standing trees, imputed for missing dbh
 
+// An OSM natural=tree point this close to a ForMS trunk is the same tree; ForMS wins the duplicate
+// because it carries a dbh the crown is sized from, where OSM usually carries none.
+const OSM_TREE_DEDUP_METERS = 5;
+// The crown byte is a decimetre of radius, 0..255, so radius saturates at 25.5 m; a recorded
+// diameter_crown/2 is clamped here so the count of clamps is honest rather than silent in the byte.
+const CROWN_RADIUS_CEILING_METERS = 25.5;
+
 const COVER_SAMPLES = 1_000_000;
 const COVER_SEED = 42; // fixed, so the reported mean cover does not churn between runs
 
@@ -240,6 +249,88 @@ function haversineMeters(from: Coord, to: Coord): number {
     Math.sin(deltaLat / 2) ** 2 +
     Math.cos(fromLat) * Math.cos(toLat) * Math.sin(deltaLng / 2) ** 2;
   return 2 * EARTH_RADIUS_METERS * Math.asin(Math.min(1, Math.sqrt(chord)));
+}
+
+const METERS_PER_DEGREE_LAT = (EARTH_RADIUS_METERS * Math.PI) / 180;
+
+interface OsmCrowns {
+  crowned: CrownedTree[]; // the survivors, sized and ready to append to the ForMS crowns
+  onLandCount: number; // OSM trees inside a borough polygon
+  deduped: number; // OSM trees dropped as within OSM_TREE_DEDUP_METERS of a ForMS trunk
+  imputedCrowns: number; // survivors with no diameter_crown, given the imputed-median crown
+}
+
+// Supplements the ForMS census with the OSM natural=tree points: clips them to land, drops any
+// within OSM_TREE_DEDUP_METERS of a ForMS trunk (ForMS carries dbh, so it wins the duplicate), and
+// sizes each survivor's crown — from a recorded diameter_crown when present (clamped to the byte
+// ceiling), else the imputed-median crown, exactly as a ForMS tree with no dbh. The ForMS trunks
+// are bucketed into a grid whose cell spans the dedup radius in each axis, so a 3x3 sweep around an
+// OSM tree sees every trunk that could be within it. Reports the counts the ingest logs.
+function crownOsmTrees(
+  osmTrees: readonly OsmTree[],
+  forms: readonly Coord[],
+  onLand: (coord: Coord) => boolean,
+  centerLat: number,
+): OsmCrowns {
+  const cellLat = OSM_TREE_DEDUP_METERS / METERS_PER_DEGREE_LAT;
+  const cellLng =
+    OSM_TREE_DEDUP_METERS /
+    (METERS_PER_DEGREE_LAT * Math.cos(centerLat * (Math.PI / 180)));
+  const cellOf = (lat: number, lng: number): [number, number] => [
+    Math.floor(lat / cellLat),
+    Math.floor(lng / cellLng),
+  ];
+  const buckets = new Map<string, Coord[]>();
+  for (const trunk of forms) {
+    const [cellY, cellX] = cellOf(trunk.lat, trunk.lng);
+    const key = `${cellY},${cellX}`;
+    const bucket = buckets.get(key);
+    if (bucket) {
+      bucket.push(trunk);
+    } else {
+      buckets.set(key, [trunk]);
+    }
+  }
+
+  const imputedCrownRadiusM = crownRadiusMeters(MEDIAN_DBH_INCHES);
+  const crowned: CrownedTree[] = [];
+  let onLandCount = 0;
+  let deduped = 0;
+  let imputedCrowns = 0;
+  for (const tree of osmTrees) {
+    if (!onLand(tree)) {
+      continue;
+    }
+    onLandCount += 1;
+    const [cellY, cellX] = cellOf(tree.lat, tree.lng);
+    let duplicate = false;
+    for (let dy = -1; dy <= 1 && !duplicate; dy++) {
+      for (let dx = -1; dx <= 1 && !duplicate; dx++) {
+        for (const trunk of buckets.get(`${cellY + dy},${cellX + dx}`) ?? []) {
+          if (haversineMeters(tree, trunk) <= OSM_TREE_DEDUP_METERS) {
+            duplicate = true;
+            break;
+          }
+        }
+      }
+    }
+    if (duplicate) {
+      deduped += 1;
+      continue;
+    }
+    let crownRadiusM: number;
+    if (tree.crownDiameterMeters !== undefined) {
+      crownRadiusM = Math.min(
+        CROWN_RADIUS_CEILING_METERS,
+        tree.crownDiameterMeters / 2,
+      );
+    } else {
+      crownRadiusM = imputedCrownRadiusM;
+      imputedCrowns += 1;
+    }
+    crowned.push({ lat: tree.lat, lng: tree.lng, crownRadiusM });
+  }
+  return { crowned, onLandCount, deduped, imputedCrowns };
 }
 
 // Splits every piece longer than DENSIFY_METERS, so the field is sampled often enough
@@ -660,7 +751,9 @@ const CITY = {
   sourceUrl: "https://data.cityofnewyork.us/d/hn5i-inap",
   streetAttribution: "NYC DoITT Street Centerline (CSCL) via NYC Open Data",
   streetSourceUrl: "https://data.cityofnewyork.us/d/inkn-q76z",
-  woodlandAttribution: "OpenStreetMap contributors",
+  // The field's ODbL credit: it now mixes OSM woodland polygons, OSM natural=tree points (Phase 3)
+  // and the OSM path network whose cover the same field feeds. ForMS is credited on the city.
+  fieldAttribution: "woodland, path & tree data © OpenStreetMap contributors",
   woodlandSourceUrl: "https://www.openstreetmap.org/copyright",
   pathAttribution: "OpenStreetMap contributors",
   pathSourceUrl: "https://www.openstreetmap.org/copyright",
@@ -684,6 +777,10 @@ async function ingest(): Promise<void> {
     `${CITY.id}: ${woodland.polygons.length} woodland polygons (${woodland.ways} ways, ${woodland.relations} relations, ${woodland.unclosed} unclosed rings dropped)`,
   );
 
+  // The land test is built once from the borough polygons and reused: the paths ask it up to
+  // three times each, and the OSM trees once each.
+  const onLand = buildLandTest(land);
+
   // Paths are the other Overpass query, so they are fetched next while a mirror is warm — and
   // land-clipped here, against the borough polygons, to drop the New Jersey and Westchester
   // spill the city bounding box reaches.
@@ -696,7 +793,7 @@ async function ingest(): Promise<void> {
   );
   const { segments: pathSegments, onLandCount } = toPathSegments(
     pathWays,
-    buildLandTest(land),
+    onLand,
   );
   const pathNames = buildNameTable(pathSegments);
   let pathVertices = 0;
@@ -708,6 +805,17 @@ async function ingest(): Promise<void> {
   pathKm /= 1000;
   console.error(
     `${CITY.id}: paths ${pathWays.length} fetched, ${onLandCount} on land, ${pathSegments.length} encoded (${pathKm.toFixed(1)} km, ${pathNames.length} distinct names)`,
+  );
+
+  // The third Overpass query, fetched while a mirror is still warm: the natural=tree points that
+  // supplement the ForMS census. They are deduped and crowned below, once the ForMS trunks the
+  // dedup needs are in hand.
+  console.error(`${CITY.id}: fetching OSM trees`);
+  const osmTreesRaw = await fetchOsmTrees(
+    landBox.south,
+    landBox.west,
+    landBox.north,
+    landBox.east,
   );
 
   console.error(`${CITY.id}: fetching street segments`);
@@ -726,13 +834,27 @@ async function ingest(): Promise<void> {
     `${CITY.id}: sized ${crowned.length} crowns (clamped ${clamped} trunks past ${MAX_DBH_INCHES} in, imputed ${imputed} missing dbh at ${MEDIAN_DBH_INCHES} in)`,
   );
 
+  // Supplement the ForMS census with the OSM trees: land-clipped, deduped against ForMS, crowned,
+  // and appended to the crowned list before encoding, so TREE v2 is unchanged — just more points,
+  // still sorted by quantized (lat, lng) inside encodeTrees.
+  const osm = crownOsmTrees(
+    osmTreesRaw,
+    trees,
+    onLand,
+    (landBox.south + landBox.north) / 2,
+  );
+  console.error(
+    `${CITY.id}: OSM trees ${osmTreesRaw.length} fetched, ${osm.onLandCount} on land, ${osm.deduped} deduped against ForMS, ${osm.crowned.length} kept (${osm.imputedCrowns} imputed crown)`,
+  );
+  const allCrowned = [...crowned, ...osm.crowned];
+
   const file = `${CITY.id}.bin`;
   const treeFile = await writeSource(
     "trees",
     file,
     TREE_FORMAT,
-    crowned.length,
-    encodeTrees(TREE_FORMAT, crowned),
+    allCrowned.length,
+    encodeTrees(TREE_FORMAT, allCrowned),
   );
   const woodlandFile = await writeSource(
     "woodland",
@@ -807,6 +929,9 @@ async function ingest(): Promise<void> {
     imputedDbhInches: MEDIAN_DBH_INCHES,
     clampedTrees: clamped,
     imputedTrees: imputed,
+    osmTrees: osm.crowned.length,
+    osmTreeDedup: osm.deduped,
+    osmImputedCrowns: osm.imputedCrowns,
     meanCoverOverLand: estimate.landDensity.mean,
     coverSamples: COVER_SAMPLES,
     coverSeed: COVER_SEED,
@@ -816,7 +941,7 @@ async function ingest(): Promise<void> {
     woodlandPlateau: WOODLAND_PLATEAU,
     density: distributionOf(estimate.landDensity),
     updated,
-    attribution: CITY.woodlandAttribution,
+    attribution: CITY.fieldAttribution,
     sourceUrl: CITY.woodlandSourceUrl,
   };
   const streets: StreetLayer = {

@@ -69,6 +69,9 @@ export interface FieldLayer {
   imputedDbhInches: number; // the median, given to the trees carrying no dbh
   clampedTrees: number; // how many trunks the clamp caught
   imputedTrees: number; // how many trees had their dbh imputed
+  osmTrees: number; // OSM natural=tree points kept, supplementing ForMS where it is a hole
+  osmTreeDedup: number; // OSM trees dropped as within 5 m of a ForMS trunk (ForMS wins on dbh)
+  osmImputedCrowns: number; // kept OSM trees with no diameter_crown, given the imputed crown
   meanCoverOverLand: number; // the mean covered fraction; sanity-checked against ~22% all-sources
   coverSamples: number; // land points the cover distribution was estimated from
   coverSeed: number; // and the seed they were drawn with, so the mean is reproducible
