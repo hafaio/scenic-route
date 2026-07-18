@@ -4,7 +4,7 @@
 // (for bearings and the maneuver anchor). Grouping collapses steps into runs, then emission turns
 // runs into human maneuvers.
 
-import { edgePath, type RoutingGraph, type SideLabel } from "./graph";
+import { edgeName, edgePath, type RoutingGraph, type SideLabel } from "./graph";
 import type { RouteResult, RouteStep } from "./search";
 import { prettifyStreetName } from "./street-names";
 
@@ -17,12 +17,13 @@ export type Turn =
   | null;
 
 export interface Maneuver {
-  kind: "start" | "continue" | "turn" | "cross" | "path" | "arrive";
+  kind: "start" | "continue" | "turn" | "cross" | "path" | "ferry" | "arrive";
   text: string; // assembled, prettified, ready to render
   name: string | null; // prettified street name
   side: SideLabel;
   turn: Turn;
   lengthMeters: number; // walked length this maneuver covers
+  durationSeconds?: number; // a ferry leg's crossing time, shown where a walk shows its distance
   stepRange: [number, number]; // half-open indexes into RouteResult.steps
   at: { lat: number; lng: number };
 }
@@ -41,6 +42,11 @@ export function formatDistance(meters: number): string {
   const feet =
     Math.round(meters / METERS_PER_FOOT / FEET_ROUNDING) * FEET_ROUNDING;
   return `${Math.max(FEET_ROUNDING, feet)} ft`;
+}
+
+// A ferry leg's crossing time, shown in the same slot a walking leg shows its distance.
+export function formatDuration(seconds: number): string {
+  return `${Math.max(1, Math.round(seconds / 60))} min`;
 }
 
 const COMPASS_8: readonly string[] = [
@@ -95,14 +101,32 @@ function stepTravelPoints(
 // One run: a maximal group of same-labeled steps, with its travel polyline retained for bearings and
 // the maneuver anchor.
 interface Run {
-  kind: "sidewalk" | "crossing" | "path";
+  kind: "sidewalk" | "crossing" | "path" | "ferry";
   name: string | null; // raw, unprettified
   side: SideLabel;
   stepStart: number;
   stepEnd: number; // half-open
   lengthMeters: number;
+  durationSeconds: number; // summed ferry crossing seconds; 0 for walking runs
+  ferryRoute: string | null; // a ferry run's route display name (its first edge's), else null
+  ferryDest: string | null; // a ferry run's destination terminal (its final edge's), else null
   lngs: number[];
   lats: number[];
+}
+
+// A ferry step's destination terminal: node b when travelled a -> b, else node a.
+function ferryDestName(graph: RoutingGraph, step: RouteStep): string | null {
+  const ends = graph.ferryEndpointNames.get(step.edge);
+  if (!ends) {
+    return null;
+  }
+  return step.forward ? ends.b : ends.a;
+}
+
+// Strip a trailing " Ferry Terminal" or " Ferry" from a terminal name for the maneuver destination:
+// "St. George Ferry Terminal" -> "St. George", while "Wall St/Pier 11" is left alone.
+function stripTerminalSuffix(name: string): string {
+  return name.replace(/\s+Ferry Terminal$/i, "").replace(/\s+Ferry$/i, "");
 }
 
 function sameRunKey(run: Run, step: RouteStep): boolean {
@@ -139,6 +163,41 @@ function buildRuns(graph: RoutingGraph, steps: RouteStep[]): Run[] {
   let pendingLinkMeters = 0;
   for (let index = 0; index < steps.length; index++) {
     const step = steps[index];
+    // A ferry is its own run: flush any open walk run, then start (or extend) a ferry run. Its
+    // crossing seconds sum onto the run so the maneuver can report the ride time.
+    if (step.kind === "ferry") {
+      if (current) {
+        runs.push(current);
+        current = null;
+      }
+      const last = runs[runs.length - 1];
+      const points = stepTravelPoints(graph, step);
+      if (last && last.kind === "ferry") {
+        last.lengthMeters += step.lengthMeters;
+        last.durationSeconds += graph.edgeDurationSeconds[step.edge];
+        last.stepEnd = index + 1;
+        // The run keeps its first edge's route; the destination advances to this edge's terminal.
+        last.ferryDest = ferryDestName(graph, step);
+        appendPoints(last, points);
+      } else {
+        const ferryRun: Run = {
+          kind: "ferry",
+          name: null,
+          side: null,
+          stepStart: index,
+          stepEnd: index + 1,
+          lengthMeters: step.lengthMeters,
+          durationSeconds: graph.edgeDurationSeconds[step.edge],
+          ferryRoute: edgeName(graph, step.edge),
+          ferryDest: ferryDestName(graph, step),
+          lngs: [],
+          lats: [],
+        };
+        appendPoints(ferryRun, points);
+        runs.push(ferryRun);
+      }
+      continue;
+    }
     if (step.kind === "link") {
       if (current) {
         current.lengthMeters += step.lengthMeters;
@@ -162,6 +221,9 @@ function buildRuns(graph: RoutingGraph, steps: RouteStep[]): Run[] {
         stepStart: index,
         stepEnd: index + 1,
         lengthMeters: step.lengthMeters + pendingLinkMeters,
+        durationSeconds: 0,
+        ferryRoute: null,
+        ferryDest: null,
         lngs: [],
         lats: [],
       };
@@ -282,6 +344,40 @@ export function buildDirections(
   for (let runIndex = 0; runIndex < runs.length; runIndex++) {
     const run = runs[runIndex];
     const prettyName = run.name ? prettifyStreetName(run.name) : null;
+
+    // A ferry leg is a standalone maneuver reporting the crossing time; it carries no turn and its
+    // span isn't a walked distance, so the walk-tracking state resets and the leg after it starts a
+    // fresh "Walk ..." rather than turning off the ferry's bearing.
+    if (run.kind === "ferry") {
+      const dest = run.ferryDest ? stripTerminalSuffix(run.ferryDest) : null;
+      // "Take the {route} ferry to {dest}", or "Take the {route} to {dest}" when the route name
+      // already ends in "Ferry"; falls back to the generic phrasing if the data lacks the names. The
+      // crossing time rides in durationSeconds, rendered where a walking maneuver shows its distance.
+      let text: string;
+      if (run.ferryRoute && dest) {
+        const lead = /ferry$/i.test(run.ferryRoute)
+          ? `Take the ${run.ferryRoute}`
+          : `Take the ${run.ferryRoute} ferry`;
+        text = `${lead} to ${dest}`;
+      } else {
+        text = "Take the ferry";
+      }
+      maneuvers.push({
+        kind: "ferry",
+        text,
+        name: null,
+        side: null,
+        turn: null,
+        lengthMeters: run.lengthMeters,
+        durationSeconds: run.durationSeconds,
+        stepRange: [run.stepStart, run.stepEnd],
+        at: runStart(run),
+      });
+      lastWalk = null;
+      walkManeuverIndex = -1;
+      lastCrossIndex = -1;
+      continue;
+    }
 
     if (run.kind === "crossing") {
       // A linear crossing carries no action: when collapsing, fold its length into the current walk

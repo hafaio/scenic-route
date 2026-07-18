@@ -97,6 +97,15 @@ function sourcePath(directory: string, file: string): string {
   return join(DATA_DIR, directory, file);
 }
 
+async function fileExists(path: string): Promise<boolean> {
+  try {
+    await stat(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function newestInputMtime(cities: City[]): Promise<number> {
   const paths = [
     MANIFEST_PATH,
@@ -230,6 +239,13 @@ async function build(): Promise<void> {
     ];
     if (city.paths) {
       graphArgs.push("--paths", sourcePath("paths", city.paths.file));
+    }
+    // The ferry graph is referenced by convention (data/ferries/<id>.bin), not the manifest — its
+    // versioned CityEntry schema would throw for existing cities if bumped — so it is passed only
+    // when the committed file is present.
+    const ferryFile = sourcePath("ferries", `${city.id}.bin`);
+    if (await fileExists(ferryFile)) {
+      graphArgs.push("--ferries", ferryFile);
     }
     runTiler(graphArgs, false);
   }

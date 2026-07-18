@@ -1,13 +1,19 @@
 // A* over the routing graph with virtual start/dest points sitting partway along their snapped
-// edges. A shaded edge can cost less than its length at high weight, so the straight-line heuristic
-// is scaled by the least possible multiplier (minMultiplier) — a lower bound on remaining cost that
-// keeps the search admissible and consistent, and so optimal.
+// edges. Cost is effective seconds (raw travel time times a clipped discount): a shaded metre costs
+// less at high tree weight, and a ferry costs its discounted crossing time. The straight-line
+// heuristic scales distance by the least seconds a walked metre can cost, then subtracts a bounded
+// ferry credit (the two best ferry shortcuts) — a lower bound on remaining cost that keeps the
+// search admissible. The heap allows node reopening (no closed set), so admissible suffices for
+// optimality even though the ferry credit makes the heuristic inconsistent.
 
 import {
   edgeCover,
   edgeMultiplier,
-  minMultiplier,
+  effSeconds,
+  ferryCredit,
+  rawSeconds,
   WALK_METERS_PER_SECOND,
+  walkSecondsCoeff,
 } from "./cost";
 import {
   type EdgeKind,
@@ -34,9 +40,10 @@ export interface RouteStep {
 export interface RouteResult {
   path: { lats: Float64Array; lngs: Float64Array }; // stitched, end-edge partials trimmed at the snaps
   steps: RouteStep[];
-  lengthMeters: number;
-  walkSeconds: number;
-  coverFraction: number; // length-weighted mean of the chosen-side cover
+  lengthMeters: number; // total trip distance, walking plus ferry spans (nav-progress and the path rely on it)
+  walkMeters: number; // walking-only distance, ferry spans excluded — the mileage the summary shows
+  travelSeconds: number; // reported ETA: sum of undiscounted raw seconds over the chosen steps
+  coverFraction: number; // length-weighted mean cover, over the walked length only (ferries excluded)
   start: Snap;
   dest: Snap;
 }
@@ -218,35 +225,45 @@ export function findRoute(
   start: Snap,
   dest: Snap,
   treeWeight: number,
+  ferryWeight: number,
+  allowFerries: boolean,
 ): RouteResult | null {
   const nodeCount = graph.nodeCount;
   const distance = new Float64Array(nodeCount).fill(Number.POSITIVE_INFINITY);
   const parentEdge = new Int32Array(nodeCount).fill(-1);
   const heuristic = new Float64Array(nodeCount).fill(-1);
 
-  const minMult = minMultiplier(graph, treeWeight);
+  // The walking floor (seconds per straight-line metre) and the bounded ferry credit both depend on
+  // the two weights, so they are computed once here and reused for every node's estimate.
+  const walkCoeff = walkSecondsCoeff(graph, treeWeight);
+  const credit = ferryCredit(graph, treeWeight, ferryWeight, allowFerries);
   const heuristicOf = (node: number): number => {
     if (heuristic[node] < 0) {
-      heuristic[node] =
-        minMult *
+      const straight =
+        walkCoeff *
         haversineMeters(
           graph.originLat + graph.nodeQy[node] * graph.scale,
           graph.originLng + graph.nodeQx[node] * graph.scale,
           dest.point.lat,
           dest.point.lng,
         );
+      heuristic[node] = Math.max(0, straight - credit);
     }
     return heuristic[node];
   };
 
+  // The snap edges are always walking edges (ferries are excluded from the snap index), so their
+  // per-metre cost is the walking multiplier over speed — effective seconds, matching the interior.
   const startA = graph.edgeNodeA[start.edge];
   const startB = graph.edgeNodeB[start.edge];
-  const startMultiplier = edgeMultiplier(graph, start.edge, treeWeight);
+  const startPerMeter =
+    edgeMultiplier(graph, start.edge, treeWeight) / WALK_METERS_PER_SECOND;
   const startLength = graph.edgeLength[start.edge];
 
   const destA = graph.edgeNodeA[dest.edge];
   const destB = graph.edgeNodeB[dest.edge];
-  const destMultiplier = edgeMultiplier(graph, dest.edge, treeWeight);
+  const destPerMeter =
+    edgeMultiplier(graph, dest.edge, treeWeight) / WALK_METERS_PER_SECOND;
   const destLength = graph.edgeLength[dest.edge];
 
   let bestTotal = Number.POSITIVE_INFINITY;
@@ -264,15 +281,15 @@ export function findRoute(
   // on the same edge.
   if (start.edge === dest.edge) {
     consider(
-      Math.abs(dest.metersFromA - start.metersFromA) * startMultiplier,
+      Math.abs(dest.metersFromA - start.metersFromA) * startPerMeter,
       -1,
       true,
     );
   }
 
   const heap = new NodeHeap(1024);
-  distance[startA] = start.metersFromA * startMultiplier;
-  distance[startB] = (startLength - start.metersFromA) * startMultiplier;
+  distance[startA] = start.metersFromA * startPerMeter;
+  distance[startB] = (startLength - start.metersFromA) * startPerMeter;
   heap.push(distance[startA] + heuristicOf(startA), startA);
   heap.push(distance[startB] + heuristicOf(startB), startB);
 
@@ -290,15 +307,11 @@ export function findRoute(
     settled += 1;
 
     if (node === destA) {
-      consider(
-        distance[destA] + dest.metersFromA * destMultiplier,
-        destA,
-        false,
-      );
+      consider(distance[destA] + dest.metersFromA * destPerMeter, destA, false);
     }
     if (node === destB) {
       consider(
-        distance[destB] + (destLength - dest.metersFromA) * destMultiplier,
+        distance[destB] + (destLength - dest.metersFromA) * destPerMeter,
         destB,
         false,
       );
@@ -306,10 +319,14 @@ export function findRoute(
 
     for (let slot = graph.csr[node]; slot < graph.csr[node + 1]; slot++) {
       const edge = graph.adjacency[slot];
+      // A ferry is boardable only when ferries are allowed; otherwise skip it so no route uses one.
+      if (!allowFerries && edgeKind(graph, edge) === "ferry") {
+        continue;
+      }
       const neighbour = otherEnd(graph, edge, node);
       const relaxed =
         distance[node] +
-        graph.edgeLength[edge] * edgeMultiplier(graph, edge, treeWeight);
+        effSeconds(graph, edge, treeWeight, ferryWeight, allowFerries);
       if (relaxed < distance[neighbour]) {
         distance[neighbour] = relaxed;
         parentEdge[neighbour] = edge;
@@ -397,10 +414,18 @@ export function findRoute(
   }
 
   let lengthMeters = 0;
+  let walkLengthMeters = 0; // ferry spans excluded, so shade % is over the walked route only
   let coverLengthMeters = 0;
+  let travelSeconds = 0; // undiscounted ETA: walked time by span, ferry time by its baked duration
   for (const step of steps) {
     lengthMeters += step.lengthMeters;
-    coverLengthMeters += step.cover * step.lengthMeters;
+    if (step.kind === "ferry") {
+      travelSeconds += rawSeconds(graph, step.edge);
+    } else {
+      walkLengthMeters += step.lengthMeters;
+      coverLengthMeters += step.cover * step.lengthMeters;
+      travelSeconds += step.lengthMeters / WALK_METERS_PER_SECOND;
+    }
   }
 
   return {
@@ -410,8 +435,10 @@ export function findRoute(
     },
     steps,
     lengthMeters,
-    walkSeconds: lengthMeters / WALK_METERS_PER_SECOND,
-    coverFraction: lengthMeters > 0 ? coverLengthMeters / lengthMeters : 0,
+    walkMeters: walkLengthMeters,
+    travelSeconds,
+    coverFraction:
+      walkLengthMeters > 0 ? coverLengthMeters / walkLengthMeters : 0,
     start,
     dest,
   };

@@ -55,14 +55,26 @@ export class RouteCache {
     start: Snap,
     dest: Snap,
     weight: number,
+    ferryWeight: number,
+    allowFerries: boolean,
   ): CachedRoute {
-    const key = `${start.edge}:${start.metersFromA.toFixed(2)}|${dest.edge}:${dest.metersFromA.toFixed(2)}`;
+    // The endpoints and both ferry parameters fix the key; the tree weight varies within it, where
+    // the path stays piecewise-linear so the interval bracketing below still holds. Changing a ferry
+    // parameter is a new key and clears the samples, which is the exact-hit memo the triple needs.
+    const key = `${start.edge}:${start.metersFromA.toFixed(2)}|${dest.edge}:${dest.metersFromA.toFixed(2)}|${quantize(ferryWeight)}|${allowFerries ? 1 : 0}`;
     if (key !== this.key) {
       this.key = key;
       this.samples = [];
       this.lastSignature = null;
     }
-    const sample = this.sampleFor(graph, start, dest, quantize(weight));
+    const sample = this.sampleFor(
+      graph,
+      start,
+      dest,
+      quantize(weight),
+      ferryWeight,
+      allowFerries,
+    );
     const changed = sample.signature !== this.lastSignature;
     this.lastSignature = sample.signature;
     return { result: sample.result, changed };
@@ -73,6 +85,8 @@ export class RouteCache {
     start: Snap,
     dest: Snap,
     weight: number,
+    ferryWeight: number,
+    allowFerries: boolean,
   ): Sample {
     let below: Sample | null = null;
     let above: Sample | null = null;
@@ -92,7 +106,14 @@ export class RouteCache {
     if (below && above && below.signature === above.signature) {
       return below; // the same path is optimal across the whole [below, above] interval
     }
-    const result = findRoute(graph, start, dest, weight);
+    const result = findRoute(
+      graph,
+      start,
+      dest,
+      weight,
+      ferryWeight,
+      allowFerries,
+    );
     const sample: Sample = {
       weight,
       signature: pathSignature(result),

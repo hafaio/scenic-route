@@ -8,6 +8,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fetchCanopyPolygons } from "./canopy";
+import { ingestFerries } from "./ferries";
 import {
   boxOf,
   COORD_SCALE,
@@ -848,6 +849,16 @@ const CITY = {
 
 async function ingest(): Promise<void> {
   const started = performance.now();
+
+  // The ferry network is OSM- and canopy-independent: it is consolidated from the two NYC ferry
+  // GTFS feeds into data/ferries/<id>.bin (magic FERR), a committed build input a later phase reads
+  // into the routing graph. It does not enter the tree-cover manifest, so it is produced up front,
+  // apart from the cover pipeline below.
+  const ferries = await ingestFerries(CITY.id);
+  console.error(
+    `${CITY.id}: ferries ${ferries.stops} stops, ${ferries.segments} segments (${ferries.bytes} bytes)`,
+  );
+
   console.error(`${CITY.id}: fetching borough boundaries`);
   const land = await fetchNycLand();
   const landBox = boxOf(land);

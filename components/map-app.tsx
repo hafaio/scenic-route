@@ -20,7 +20,12 @@ import {
   type OverlayId,
 } from "../src/overlays/registry";
 import type { Pin, PinDraft } from "../src/pin";
-import { DEFAULT_TREE_WEIGHT, MAX_TREE_WEIGHT } from "../src/routing/cost";
+import {
+  DEFAULT_FERRY_WEIGHT,
+  DEFAULT_TREE_WEIGHT,
+  MAX_FERRY_WEIGHT,
+  MAX_TREE_WEIGHT,
+} from "../src/routing/cost";
 import { buildDirections } from "../src/routing/directions";
 import { loadGraph, type RoutingGraph } from "../src/routing/graph";
 import { navProgress } from "../src/routing/nav-progress";
@@ -57,6 +62,8 @@ type RouteState =
   | { kind: "error"; message: string };
 
 const TREE_WEIGHT_KEY = "scenic-route:tree-weight";
+const FERRY_WEIGHT_KEY = "scenic-route:ferry-weight";
+const FERRY_ALLOW_KEY = "scenic-route:allow-ferries";
 const OVERLAY_KEY = "scenic-route:overlay";
 const OVERLAY_OFF = "none"; // sentinel persisted for the "Off" (null) overlay choice
 const RESNAP_METERS = 25; // a followed location must drift this far before the route recomputes
@@ -144,6 +151,10 @@ export default function MapApp() {
   // which field, if any, has armed a map tap to set its location
   const [pickTarget, setPickTarget] = useState<"start" | "dest" | null>(null);
   const [treeWeight, setTreeWeight] = useState<number>(DEFAULT_TREE_WEIGHT);
+  // Ferry preference and gate, driven by the route panel's slider and toggle. Both restore from
+  // localStorage below so a reload keeps the setting.
+  const [ferryWeight, setFerryWeight] = useState<number>(DEFAULT_FERRY_WEIGHT);
+  const [allowFerries, setAllowFerries] = useState<boolean>(true);
   // The decoded graph, kept so directions can be rebuilt from a route without a re-fetch.
   const [routingGraph, setRoutingGraph] = useState<RoutingGraph | null>(null);
   // The maneuver list toggles open below the summary; it collapses whenever the destination changes.
@@ -178,6 +189,20 @@ export default function MapApp() {
       if (Number.isFinite(parsed)) {
         setTreeWeight(Math.min(MAX_TREE_WEIGHT, Math.max(0, parsed)));
       }
+    }
+  }, []);
+
+  useEffect(() => {
+    const storedWeight = window.localStorage.getItem(FERRY_WEIGHT_KEY);
+    if (storedWeight !== null) {
+      const parsed = Number.parseFloat(storedWeight);
+      if (Number.isFinite(parsed)) {
+        setFerryWeight(Math.min(MAX_FERRY_WEIGHT, Math.max(0, parsed)));
+      }
+    }
+    const storedAllow = window.localStorage.getItem(FERRY_ALLOW_KEY);
+    if (storedAllow !== null) {
+      setAllowFerries(storedAllow === "true");
     }
   }, []);
 
@@ -341,6 +366,8 @@ export default function MapApp() {
               pair.start,
               pair.dest,
               treeWeight,
+              ferryWeight,
+              allowFerries,
             );
             // Identical to the drawn route (a slider move that didn't cross a breakpoint): leave it.
             if (changed) {
@@ -369,7 +396,7 @@ export default function MapApp() {
       cancelled = true;
       cancelAnimationFrame(frame);
     };
-  }, [resolvedStart, dest, treeWeight]);
+  }, [resolvedStart, dest, treeWeight, ferryWeight, allowFerries]);
 
   // A new destination collapses any open maneuver list; keyed on the coordinates so a reverse-geocode
   // label patch (same point, new object identity) doesn't snap it shut.
@@ -410,6 +437,16 @@ export default function MapApp() {
   const handleTreeWeight = useCallback((weight: number) => {
     setTreeWeight(weight);
     window.localStorage.setItem(TREE_WEIGHT_KEY, String(weight));
+  }, []);
+
+  const handleFerryWeight = useCallback((weight: number) => {
+    setFerryWeight(weight);
+    window.localStorage.setItem(FERRY_WEIGHT_KEY, String(weight));
+  }, []);
+
+  const handleAllowFerries = useCallback((allow: boolean) => {
+    setAllowFerries(allow);
+    window.localStorage.setItem(FERRY_ALLOW_KEY, String(allow));
   }, []);
 
   const handleDestSelect = useCallback((result: GeocodeResult) => {
@@ -708,19 +745,23 @@ export default function MapApp() {
           summary={
             routeState.kind === "ready"
               ? {
-                  lengthMeters: routeState.result.lengthMeters,
-                  walkSeconds: routeState.result.walkSeconds,
+                  walkMeters: routeState.result.walkMeters,
+                  travelSeconds: routeState.result.travelSeconds,
                   coverFraction: routeState.result.coverFraction,
                 }
               : null
           }
           treeWeight={treeWeight}
+          ferryWeight={ferryWeight}
+          allowFerries={allowFerries}
           directions={directions}
           progress={progress}
           directionsOpen={directionsOpen}
           collapseCrossings={collapseCrossings}
           minimized={panelMinimized}
           onTreeWeight={handleTreeWeight}
+          onFerryWeight={handleFerryWeight}
+          onAllowFerries={handleAllowFerries}
           onStartSelect={handleStartSelect}
           onDestSelect={handleDestSelect}
           onStartClear={handleClearStart}

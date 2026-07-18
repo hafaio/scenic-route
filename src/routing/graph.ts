@@ -1,20 +1,21 @@
 // The client's view of the routing graph baked by `tiler graph`. Layout: scripts/README.md
-// (magic GRPH, v2 — the sidewalk graph). Fixed sections are viewed in place over the fetched
-// buffer; the strided edge records are copied once into parallel typed arrays so the search loop
-// touches only flat arrays.
+// (magic GRPH, v3 — the sidewalk graph with inert ferry edges). Fixed sections are viewed in place
+// over the fetched buffer; the strided edge records are copied once into parallel typed arrays so
+// the search loop touches only flat arrays.
 
-// A no-geometry edge (a crossing or a link) stores this sentinel in its geometry offset; its
-// polyline is the straight line between its two node coordinates.
+// A no-geometry edge (a crossing, a link, or a straight ferry) stores this sentinel in its geometry
+// offset; its polyline is the straight line between its two node coordinates.
 export const NO_GEOMETRY = 0xffffffff;
 const NAME_NONE = 0xffff;
-// Edge kind lives in bits 0-1 of the kind+side byte; the side in bits 2-4.
-const KIND_MASK = 0x3;
-const SIDE_SHIFT = 2;
+// Edge kind lives in bits 0-2 of the kind+side byte; the side in bits 3-5.
+const KIND_MASK = 0x7;
+const SIDE_SHIFT = 3;
 const SIDE_MASK = 0x7;
+const KIND_FERRY = 4;
 // flags byte bit 2 marks a sidewalk that lies to the right of its stored geometry direction.
 const GEOMETRY_RIGHT_FLAG = 0x4;
 
-export type EdgeKind = "sidewalk" | "crossing" | "link" | "path";
+export type EdgeKind = "sidewalk" | "crossing" | "link" | "path" | "ferry";
 export type SideLabel = "north" | "east" | "south" | "west" | null;
 
 const EDGE_KINDS: readonly EdgeKind[] = [
@@ -22,6 +23,7 @@ const EDGE_KINDS: readonly EdgeKind[] = [
   "crossing",
   "link",
   "path",
+  "ferry",
 ];
 const SIDE_LABELS: readonly SideLabel[] = [
   null,
@@ -47,19 +49,25 @@ export interface RoutingGraph {
   edgeLength: Float32Array; // geodesic metres
   edgeGeomOffset: Uint32Array; // byte offset into the geometry blob; NO_GEOMETRY = straight a -> b
   edgeGeomCount: Uint16Array; // geometry vertices, 0 when no geometry
-  edgeCover: Uint8Array; // 0..255, this edge's own single value
+  edgeCover: Uint8Array; // 0..255, this edge's own single value; 0 for a ferry
   edgeNameId: Uint16Array; // index into names, or NAME_NONE
-  edgeKindSide: Uint8Array; // bits 0-1 kind, bits 2-4 side
+  edgeKindSide: Uint8Array; // bits 0-2 kind, bits 3-5 side
   maxCover: number; // the greatest per-edge cover in the graph, 0..1; sets the cost clip floor
 
-  edgeHalfOffsetDm: Uint8Array; // decimetres to a sidewalk; 0 for crossings/links/paths
+  edgeHalfOffsetDm: Uint8Array; // decimetres to a sidewalk; 0 for crossings/links/paths/ferries
+  edgeDurationSeconds: Float32Array; // a ferry edge's crossing-plus-wait seconds; 0 for every other kind
+  ferryEdges: Uint32Array; // ids of the ferry edges, for the A* ferry-credit heuristic
+  minFerrySecPerMetre: number; // min over ferry edges of duration/length, Infinity when there are none
   edgeFlags: Uint8Array; // bit0 structure, bit1 steps, bit2 geometry-right (sidewalks)
   names: string[];
   geometry: Uint8Array;
+  // Per ferry edge, its two terminal stop names at the node-a and node-b ends (aligned to
+  // edgeNodeA/edgeNodeB). The route name is the edge's own name (`edgeName`).
+  ferryEndpointNames: Map<number, { a: string; b: string }>;
 }
 
 const MAGIC = "GRPH";
-const FORMAT_VERSION = 2;
+const FORMAT_VERSION = 3;
 const HEADER_BYTES = 64;
 const EDGE_RECORD_BYTES = 24;
 const GRAPH_URL = "routing/nyc.bin"; // relative, so it picks up the deploy basePath
@@ -86,6 +94,7 @@ export function decodeGraph(buffer: ArrayBuffer): RoutingGraph {
   const nameTableOffset = view.getUint32(44, true);
   const geometryOffset = view.getUint32(52, true);
   const geometryLength = view.getUint32(56, true);
+  const ferryNameTableOffset = view.getUint32(60, true);
 
   // Fixed sections run back to back after the header, each starting 4-byte aligned. They are
   // viewed in place; the quantized coordinates, components, and CSR need no copy.
@@ -110,8 +119,11 @@ export function decodeGraph(buffer: ArrayBuffer): RoutingGraph {
   const edgeNameId = new Uint16Array(edgeCount);
   const edgeKindSide = new Uint8Array(edgeCount);
   const edgeHalfOffsetDm = new Uint8Array(edgeCount);
+  const edgeDurationSeconds = new Float32Array(edgeCount);
   const edgeFlags = new Uint8Array(edgeCount);
+  const ferryEdges: number[] = [];
   let maxCoverByte = 0;
+  let minFerrySecPerMetre = Number.POSITIVE_INFINITY;
   for (let edge = 0; edge < edgeCount; edge++) {
     const record = offset + edge * EDGE_RECORD_BYTES;
     edgeNodeA[edge] = view.getUint32(record, true);
@@ -120,16 +132,34 @@ export function decodeGraph(buffer: ArrayBuffer): RoutingGraph {
     edgeGeomOffset[edge] = view.getUint32(record + 12, true);
     edgeGeomCount[edge] = view.getUint16(record + 16, true);
     edgeNameId[edge] = view.getUint16(record + 18, true);
-    edgeCover[edge] = bytes[record + 20];
-    edgeHalfOffsetDm[edge] = bytes[record + 21];
-    edgeKindSide[edge] = bytes[record + 22];
+    const kindSide = bytes[record + 22];
+    edgeKindSide[edge] = kindSide;
     edgeFlags[edge] = bytes[record + 23];
-    maxCoverByte = Math.max(maxCoverByte, edgeCover[edge]);
+    if ((kindSide & KIND_MASK) === KIND_FERRY) {
+      // A ferry carries no cover and no half-offset; bytes 20-21 are a u16 crossing-plus-wait
+      // duration. Cover stays 0 so it never lifts maxCover (the cost heuristic's floor).
+      const duration = view.getUint16(record + 20, true);
+      edgeDurationSeconds[edge] = duration;
+      ferryEdges.push(edge);
+      const length = edgeLength[edge];
+      if (length > 0) {
+        minFerrySecPerMetre = Math.min(minFerrySecPerMetre, duration / length);
+      }
+    } else {
+      edgeCover[edge] = bytes[record + 20];
+      edgeHalfOffsetDm[edge] = bytes[record + 21];
+      maxCoverByte = Math.max(maxCoverByte, edgeCover[edge]);
+    }
   }
   const maxCover = maxCoverByte / 255;
 
   const names = decodeNames(buffer, nameTableOffset);
   const geometry = new Uint8Array(buffer, geometryOffset, geometryLength);
+  const ferryEndpointNames = decodeFerryEndpointNames(
+    buffer,
+    ferryNameTableOffset,
+    names,
+  );
 
   return {
     nodeCount,
@@ -152,9 +182,13 @@ export function decodeGraph(buffer: ArrayBuffer): RoutingGraph {
     edgeKindSide,
     maxCover,
     edgeHalfOffsetDm,
+    edgeDurationSeconds,
+    ferryEdges: Uint32Array.from(ferryEdges),
+    minFerrySecPerMetre,
     edgeFlags,
     names,
     geometry,
+    ferryEndpointNames,
   };
 }
 
@@ -175,6 +209,31 @@ function decodeNames(buffer: ArrayBuffer, tableOffset: number): string[] {
     );
   }
   return names;
+}
+
+// The ferry endpoint-stop-name side table (byte-60 offset): a u32 count, then per ferry edge a
+// (u32 edge id, u16 a-stop name id, u16 b-stop name id) triple, both ids into the name table. The
+// route name rides on the edge itself, so only the two terminal names live here.
+function decodeFerryEndpointNames(
+  buffer: ArrayBuffer,
+  tableOffset: number,
+  names: string[],
+): Map<number, { a: string; b: string }> {
+  const map = new Map<number, { a: string; b: string }>();
+  if (tableOffset === 0 || tableOffset + 4 > buffer.byteLength) {
+    return map;
+  }
+  const view = new DataView(buffer);
+  const count = view.getUint32(tableOffset, true);
+  let at = tableOffset + 4;
+  for (let index = 0; index < count; index++) {
+    const edge = view.getUint32(at, true);
+    const aId = view.getUint16(at + 4, true);
+    const bId = view.getUint16(at + 6, true);
+    at += 8;
+    map.set(edge, { a: names[aId] ?? "", b: names[bId] ?? "" });
+  }
+  return map;
 }
 
 export function edgeKind(graph: RoutingGraph, edge: number): EdgeKind {
@@ -235,8 +294,14 @@ export interface EdgePath {
 }
 
 // Bounded most-recently-used cache: a route decodes an edge's geometry once for the search and
-// again while stitching, and adjacent queries revisit the same corridor.
+// again while stitching, and adjacent queries revisit the same corridor. Production runs one graph,
+// so keying on the edge id alone is safe; tests that build several synthetic graphs reusing edge ids
+// call clearEdgePathCache between them so a stale polyline never leaks across graphs.
 const pathCache = new Map<number, EdgePath>();
+
+export function clearEdgePathCache(): void {
+  pathCache.clear();
+}
 
 export function edgePath(graph: RoutingGraph, edge: number): EdgePath {
   const cached = pathCache.get(edge);

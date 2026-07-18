@@ -12,6 +12,7 @@ pub const CANOPY_FORMAT: u16 = 1; // the measured 2017 LiDAR canopy, the shared 
 pub const LAND_FORMAT: u16 = 1;
 pub const STREET_FORMAT: u16 = 5;
 pub const PATH_FORMAT: u16 = 1; // OSM pedestrian/park ways: STRT v5's layout, magic "PATH"
+pub const FERRY_FORMAT: u16 = 2; // the time-independent NYC ferry graph, magic "FERR"; v2 adds a route name id
 
 pub const SIDES: usize = 2; // the two sidewalks a density blob carries per vertex, left then right
 pub const DECIMETERS_PER_METER: f64 = 10.0; // the crown byte's unit: a decimetre of crown radius
@@ -55,6 +56,14 @@ fn u16_at(bytes: &[u8], offset: usize) -> u16 {
 
 fn u32_at(bytes: &[u8], offset: usize) -> u32 {
     u32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("4 bytes"))
+}
+
+fn i32_at(bytes: &[u8], offset: usize) -> i32 {
+    i32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("4 bytes"))
+}
+
+fn f32_at(bytes: &[u8], offset: usize) -> f32 {
+    f32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("4 bytes"))
 }
 
 fn f64_at(bytes: &[u8], offset: usize) -> f64 {
@@ -356,6 +365,141 @@ fn read_network(path: &Path, magic: &str, format: u16) -> Fallible<Streets> {
         scale,
         density_offset,
     })
+}
+
+/// One ferry stop, in final geographic coordinates with its GTFS name — unsnapped in the file;
+/// `tiler graph` snaps it to the nearest walking node.
+pub struct FerryStop {
+    pub lng: f64,
+    pub lat: f64,
+    pub name: String,
+}
+
+/// One ferry segment: an unordered stop pair (`stop_a` is the lexicographically smaller key), the
+/// combined crossing-plus-wait time the later phase costs it by, the primary route's display name
+/// ("Staten Island Ferry", "East River"; empty when the feed named none), and the drawing polyline
+/// oriented A -> B (first and last vertices are the two stops' own coordinates, else `None` for a
+/// straight leg).
+pub struct FerrySegment {
+    pub stop_a: u32,
+    pub stop_b: u32,
+    pub raw_time_seconds: f32,
+    pub route_name: String,
+    pub geometry: Option<Vec<Coord>>,
+}
+
+pub struct Ferries {
+    pub stops: Vec<FerryStop>,
+    pub segments: Vec<FerrySegment>,
+}
+
+/// FERR v2: the consolidated NYC ferry graph. A 56-byte header, a stop table (quantized lng/lat and
+/// a name id), a segment table (a stop pair, the raw time, a geometry pointer, and a route name id),
+/// a varint geometry blob, and a trailing name blob that holds the stop names and the route names
+/// together — the shared codec, coordinates quantized about the south-west origin. Layout:
+/// scripts/README.md.
+pub fn read_ferries(path: &Path) -> Fallible<Ferries> {
+    const STOP_BYTES: usize = 12;
+    const SEGMENT_BYTES: usize = 20;
+    const NO_GEOMETRY: u32 = 0xFFFF_FFFF; // a segment's geometry offset when it is a straight A -> B
+    const NO_ROUTE_NAME: u16 = 0xFFFF; // a segment's route name id when the feed named no route
+
+    let bytes = fs::read(path)?;
+    check_magic(&bytes, "FERR", FERRY_FORMAT, path)?;
+    let header_bytes = usize::from(u16_at(&bytes, 6));
+    let stop_count = u32_at(&bytes, 8) as usize;
+    let segment_count = u32_at(&bytes, 12) as usize;
+    let origin_lng = f64_at(&bytes, 16);
+    let origin_lat = f64_at(&bytes, 24);
+    let scale = f64_at(&bytes, 32);
+    let geometry_offset = u32_at(&bytes, 40) as usize;
+    let name_offset = u32_at(&bytes, 48) as usize;
+    let name_bytes = u32_at(&bytes, 52) as usize;
+    if bytes.len() < name_offset + name_bytes {
+        return Err(format!(
+            "{} is truncated: {} bytes, {} needed for {stop_count} stops and {segment_count} segments",
+            path.display(),
+            bytes.len(),
+            name_offset + name_bytes
+        )
+        .into());
+    }
+
+    // The name blob: a u32 count, then each name as a u16 byte length and its UTF-8 bytes.
+    let mut names: Vec<String> = Vec::new();
+    let mut name_cursor = name_offset;
+    let name_count = u32_at(&bytes, name_cursor) as usize;
+    name_cursor += 4;
+    names.reserve(name_count);
+    for _ in 0..name_count {
+        let len = usize::from(u16_at(&bytes, name_cursor));
+        name_cursor += 2;
+        names.push(String::from_utf8_lossy(&bytes[name_cursor..name_cursor + len]).into_owned());
+        name_cursor += len;
+    }
+
+    let stop_table = header_bytes;
+    let mut stops = Vec::with_capacity(stop_count);
+    for index in 0..stop_count {
+        let record = stop_table + index * STOP_BYTES;
+        let x = i32_at(&bytes, record);
+        let y = i32_at(&bytes, record + 4);
+        let name_id = u32_at(&bytes, record + 8) as usize;
+        stops.push(FerryStop {
+            lng: origin_lng + f64::from(x) * scale,
+            lat: origin_lat + f64::from(y) * scale,
+            name: names.get(name_id).cloned().unwrap_or_default(),
+        });
+    }
+
+    let segment_table = stop_table + stop_count * STOP_BYTES;
+    let mut segments = Vec::with_capacity(segment_count);
+    for index in 0..segment_count {
+        let record = segment_table + index * SEGMENT_BYTES;
+        let stop_a = u32_at(&bytes, record);
+        let stop_b = u32_at(&bytes, record + 4);
+        let raw_time_seconds = f32_at(&bytes, record + 8);
+        let geom_offset = u32_at(&bytes, record + 12);
+        let vertex_count = usize::from(u16_at(&bytes, record + 16));
+        let route_name_id = u16_at(&bytes, record + 18);
+        let route_name = if route_name_id == NO_ROUTE_NAME {
+            String::new()
+        } else {
+            names
+                .get(usize::from(route_name_id))
+                .cloned()
+                .unwrap_or_default()
+        };
+        let geometry = if geom_offset == NO_GEOMETRY {
+            None
+        } else {
+            let mut cursor = Cursor {
+                bytes: &bytes,
+                offset: geometry_offset + geom_offset as usize,
+            };
+            let mut polyline = Vec::with_capacity(vertex_count);
+            let mut x: i64 = 0;
+            let mut y: i64 = 0;
+            for _ in 0..vertex_count {
+                x += i64::from(cursor.varint());
+                y += i64::from(cursor.varint());
+                polyline.push(Coord {
+                    lng: origin_lng + x as f64 * scale,
+                    lat: origin_lat + y as f64 * scale,
+                });
+            }
+            Some(polyline)
+        };
+        segments.push(FerrySegment {
+            stop_a,
+            stop_b,
+            raw_time_seconds,
+            route_name,
+            geometry,
+        });
+    }
+
+    Ok(Ferries { stops, segments })
 }
 
 pub fn zigzag(value: i64) -> u64 {

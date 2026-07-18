@@ -27,7 +27,7 @@ tiler densities --params <file.json>                          # fills the street
 tiler canopy --manifest … --ramp … --data … --tiles …         # the LiDAR-canopy cover fill pyramid
 tiler genus  --manifest … --palette … --data … --tiles …      # the genus-dot raster pyramid
 tiler chunks --manifest … --data … --chunks … [--paths …]     # slices STRT (+PATH) into the client's street chunks
-tiler graph  --streets <in.bin> --out <out.bin> [--paths …]   # contracts STRT (+PATH) into the GRPH routing graph
+tiler graph  --streets <in.bin> --out <out.bin> [--paths …] [--ferries …]   # contracts STRT (+PATH, +FERR) into the GRPH routing graph
 ```
 
 Both scripts shell out with `cargo run --release`, which no-ops once the binary is built, so
@@ -217,6 +217,7 @@ in its own band.
 | land | NYC borough boundaries (water areas excluded), Socrata `gthc-hcne` | the population the cover distribution is taken over, and the clip that drops New Jersey |
 | canopy | NYC's 2017 LiDAR tree canopy, ArcGIS `TreeCanopy2017_Simplified_1ft` | the *measured* canopy footprint the cover field is blurred from, a committed source, magic `CNPY` — feeds the density blobs and, through them, routing; see below |
 | paths | OSM pedestrian/park ways (footway/path/pedestrian/steps/cycleway/bridleway/track) plus park drives (roads closed to through motor traffic), via Overpass | the park, greenway and car-free-drive network CSCL lacks; a separate committed source, magic `PATH` — see below and "Binary layouts" |
+| ferries | the two NYC ferry GTFS feeds — Staten Island Ferry (NYC DOT) and NYC Ferry (Hornblower, via Connexionz) | consolidated to a time-independent ferry graph, a committed source, magic `FERR` — OSM- and canopy-independent, read by a later phase's routing graph, not the cover pipeline; see below and "Binary layouts" |
 
 Only walkable road types are kept. Highways, ramps, driveways, ferry routes, u-turns and
 non-physical segments are not part of the network a person walks. Bridges and tunnels come in
@@ -314,6 +315,69 @@ Overpass — which fetches both the paths and the OSM trees — is the flakiest 
 the query rotates over three mirrors, backs off in minutes rather than seconds, and must send a
 `User-Agent` (an anonymous client gets a 429 on sight). Everything is cached, so this is a one-time
 cost.
+
+### The ferry network (`FERR` v2)
+
+CSCL and OSM carry the *piers*, but not the crossings over the water between them, so a route can
+walk to a terminal and no further. The two NYC ferry GTFS feeds fill that in as a third committed
+network, `data/ferries/nyc.bin`, magic `FERR`. This is a data-ingest step only: it neither snaps
+stops to the routing graph nor touches the tree-cover manifest — a later phase reads it into the
+graph and prices the crossings.
+
+The feeds (`scripts/gtfs.ts` downloads and parses them, `scripts/ferries.ts` consolidates and
+encodes):
+
+- **Staten Island Ferry**, NYC DOT — `https://www.nyc.gov/html/dot/downloads/misc/siferry-gtfs.zip`.
+  Its Akamai edge 403s a non-browser client, so the fetch sends a browser `User-Agent`; its files
+  are nested under a `siferry-gtfs_<version>/` folder, matched by basename.
+- **NYC Ferry** (Hornblower), served through Connexionz —
+  `https://nycferry.connexionz.net/rtt/public/utility/gtfs.aspx`.
+
+`scripts/gtfs.ts` is dependency-light: it parses the zip's central directory by hand and inflates
+each entry with `node:zlib`, and parses the CSV tables (RFC 4180 quoting, CRLF, a stripped BOM)
+itself — no zip or csv package. Each download is disk-cached (base64, keyed on the URL) like every
+other source read, and the ingest also **freezes the two raw feed zips** under `data/ferries/`
+(`siferry-gtfs.zip`, `nycferry-gtfs.zip`, both LFS-tracked) so a future time-of-day pass can
+re-derive from the exact feeds a build read.
+
+**Time-independent consolidation.** The whole schedule collapses to one representative value per
+segment:
+
+- **Active services only.** A `service_id` counts if `calendar.txt`'s date range covers the build
+  date *and* it runs at least one regular weekday — which drops an expired feed and the all-zero-mask
+  services (SI Ferry's `holiday`/`threeboat`) that `calendar_dates.txt` only substitutes in on
+  specific dates. `calendar_dates.txt` is read to confirm it adds no otherwise-inactive regular
+  service (for both current feeds it does not); `frequencies.txt` is honoured if present, but SI
+  Ferry's is empty and NYC Ferry ships none.
+- **Ferries only.** Only `route_type` 4 (ferry) trips are kept; the NYC Ferry feed also carries its
+  free shuttle-bus routes (`route_type` 3, the Rockaway East/West shuttles), whose street-corner
+  stops are not crossings and are dropped. The **Rockaway** ferry terminal is also excluded for now
+  — the peninsula is not connected to the routable walking network, so a ferry-only stub there would
+  route nowhere; revisit once that connection is modelled.
+- **Segments.** Every active trip is cut into consecutive-stop pairs (stop *i* → *i+1* by
+  `stop_sequence`), keyed by the *unordered* pair (so both directions fold together). Stops from the
+  two feeds are namespaced by feed, so the two St. George berths are **not** fused — that
+  cross-feed conflation is the routing graph's job.
+- **Route name.** Each segment records the display name of its **primary route** — the `route_id`
+  serving the most of its trips (ties broken deterministically), read as `route_long_name` (else
+  `route_short_name`). Both feeds put the real name in `route_long_name` ("Staten Island Ferry",
+  "East River"; `route_short_name` is the bare code "AS"/"ER" or empty). A later phase labels a
+  ferry maneuver with it ("Take the East River ferry to Wall St/Pier 11").
+- **Crossing time** = the median over all trips of (arrival at the next stop − departure at this
+  one).
+- **Headway** = the median gap between successive departures serving the segment. Gaps are taken
+  *within* one service and one direction (a weekday gap is never differenced against a weekend one),
+  then pooled across both. A segment served only by single trips has no gap, so its wait falls to the
+  cap.
+- **`rawTimeSeconds = medianCrossing + min(headway/2, 600)`** — the crossing plus half a headway of
+  expected wait, capped at ten minutes. This single combined value is the only time the artifact
+  carries; a later phase's discount multiplies it whole.
+
+**Geometry.** Each segment carries the ferry path polyline for drawing: the sub-path of the trip's
+`shapes.txt` shape between the two stops. `shape_dist_traveled` is empty in both feeds, so each stop
+is projected to its nearest shape vertex (forced monotonic along the trip) and the shape slice
+between them is taken, capped by the two stop coordinates; a segment with no shape falls back to a
+straight line (no stored geometry). Stops stay in geographic lng/lat with their GTFS name.
 
 ## The colour scale
 
@@ -546,6 +610,64 @@ concatenates them after the street names and offsets the path name-ids by the st
 This is a committed **ODbL** source: it is an extract of OSM geometry, so its share-alike terms
 follow it (see `data/README.md`).
 
+### `data/ferries/<id>.bin` — the ferry network, magic `FERR` (v2)
+
+The time-independent ferry graph consolidated from the two NYC ferry GTFS feeds (above). Little-
+endian; coordinates quantized to `COORD_SCALE` (1e-6°) about the south-west origin, exactly the
+shared codec. Read by a later phase's routing graph; it carries no density blob (the ferry cost is
+`rawTimeSeconds`, not canopy) and does not enter the manifest.
+
+Header, 56 bytes:
+
+| offset | type | field |
+| --- | --- | --- |
+| 0 | u8[4] | magic `FERR` |
+| 4 | u16 | format version = 2 |
+| 6 | u16 | header bytes = 56 |
+| 8 | u32 | stop count S |
+| 12 | u32 | segment count E |
+| 16 | f64 | origin longitude, degrees |
+| 24 | f64 | origin latitude, degrees |
+| 32 | f64 | coordinate scale, degrees per quantized unit |
+| 40 | u32 | geometry blob offset, from the start of the file |
+| 44 | u32 | geometry blob length |
+| 48 | u32 | name blob offset, from the start of the file |
+| 52 | u32 | name blob length |
+
+Then the sections, back to back. The **stop table** (S × 12 bytes) and the **segment table**
+(E × 20 bytes) follow the header directly, so their offsets are implicit (`56` and `56 + 12·S`); the
+geometry and name blobs carry explicit offsets because they are variable-length.
+
+Stop record, 12 bytes — a stop in geographic coordinates, unsnapped:
+
+| offset | type | field |
+| --- | --- | --- |
+| 0 | i32 | longitude, quantized |
+| 4 | i32 | latitude, quantized |
+| 8 | u32 | stop name id, an index into the name blob |
+
+Segment record, 20 bytes — one unordered stop pair:
+
+| offset | type | field |
+| --- | --- | --- |
+| 0 | u32 | stop A index (the lexicographically smaller stop key) |
+| 4 | u32 | stop B index |
+| 8 | f32 | `rawTimeSeconds` — median crossing + `min(headway/2, 600)` |
+| 12 | u32 | geometry offset within the geometry blob; **0xFFFFFFFF = no geometry** (straight A→B) |
+| 16 | u16 | geometry vertex count (0 when straight) |
+| 18 | u16 | primary route's name id, an index into the name blob (`0xFFFF` = no route name) |
+
+Then the **geometry blob**: per segment that has a polyline, `vertex count` (longitude, latitude)
+zigzag-LEB128 varint delta pairs oriented A→B. The **first pair is the absolute quantized position**
+(delta from the origin); the rest are from the previous vertex — the GRPH geometry convention. The
+first and last vertices are the two stops' own coordinates. The blob is zero-padded to a 4-byte
+boundary so the name blob starts aligned.
+
+Finally the **name blob**: a `u32` count of distinct names, then each name as a `u16` byte length
+and that many UTF-8 bytes, back to back — the GRPH/STRT trailing-name-blob layout. It holds the GTFS
+`stop_name`s **and** the route display names together, deduped and sorted; a stop record's name id
+and a segment's routeNameId both index it.
+
 ### `public/streets/{x}/{y}.bin` — the chunks (derived, gitignored)
 
 The segments touching one z12 tile. A segment goes into every z12 tile its bounding box
@@ -583,7 +705,7 @@ Then `segment count` segments, back to back, each:
 
 Decoded by `components/street-score-layer.tsx`, which applies the offset in *pixels*.
 
-### `public/routing/{id}.bin` — the routing graph, magic `GRPH` (v2, derived, gitignored)
+### `public/routing/{id}.bin` — the routing graph, magic `GRPH` (v3, derived, gitignored)
 
 `tiler graph` contracts STRT into the graph the client routes on, then expands it into the edges a
 walker actually uses. When `--paths` is supplied it first **conflates** the OSM pedestrian/park
@@ -614,18 +736,29 @@ spans two names — reported as `nameBreakJoints`); polylines are pruned of coll
   their own geometry, tied into a corner fan by geometry-less **link edges**.
 
 A final mop-up adds a crossing at any isolated deg-2 ring whose two sidewalk sides would otherwise
-be separate components (`mopupCrossings`), and the build asserts the v2 component count equals the
-v1 count. Nodes are sorted by (component, latitude, longitude) and renumbered, edges by (component,
-min node id); components are labelled by size descending (0 = largest). Every edge length is at
-least its straight-line node distance (clamped up if not; `lengthClamped`). Everything
-little-endian.
+be separate components (`mopupCrossings`), and the build asserts the walking component count equals
+the v1 count. Nodes are sorted by (component, latitude, longitude) and renumbered, edges by
+(component, min node id).
+
+When `--ferries` is supplied (`data/ferries/<id>.bin`, magic `FERR`, referenced by convention — not
+the manifest), a final stage adds the ferry network **after** that walking assertion and renumber,
+so neither is disturbed. Each FERR terminal snaps to the nearest walking node within 250 m (a linear
+scan; a stop with none in range drops its segments, `ferryStopsUnsnapped`); a segment whose two stops
+snap to one node is dropped, and segments snapping to the same unordered node pair are deduped to the
+smaller raw time. Each survivor becomes a **ferry edge** (`ferryEdges`) whose geometry, when the FERR
+leg carries a shape, runs node-a → the shape's interior vertices → node-b (a straight leg carries no
+geometry). The edge's name is its FERR primary-route name, and its two terminal stop names are
+recorded in the byte-60 endpoint side table (below). Connectivity is then recomputed over **walking ∪ ferry** edges and the component labels
+(and count) overwritten with that merge, so Staten Island and Governors Island join the main
+component. Components are labelled by size descending (0 = largest). Every edge length is at least its
+straight-line node distance (clamped up if not; `lengthClamped`). Everything little-endian.
 
 Header, 64 bytes:
 
 | offset | type | field |
 | --- | --- | --- |
 | 0 | u8[4] | magic `GRPH` |
-| 4 | u16 | format version = 2 |
+| 4 | u16 | format version = 3 |
 | 6 | u16 | header bytes = 64 |
 | 8 | u32 | node count N |
 | 12 | u32 | edge count E |
@@ -637,7 +770,7 @@ Header, 64 bytes:
 | 48 | u32 | name table length |
 | 52 | u32 | geometry blob offset, from the start of the file |
 | 56 | u32 | geometry blob length |
-| 60 | u32 | reserved (zero) |
+| 60 | u32 | ferry endpoint-stop-name side-table offset, from the start of the file (0-length table when the build carried no ferries) |
 
 Then the sections, back to back, each starting 4-byte aligned (zero-padded as needed so the client
 can view them as typed arrays without copying):
@@ -658,18 +791,34 @@ can view them as typed arrays without copying):
 | 12 | u32 | geometry offset within the blob; **0xFFFFFFFF = no geometry** (straight a→b) |
 | 16 | u16 | geometry vertex count (0 when no geometry) |
 | 18 | u16 | street name id into the name table (0xFFFF = unnamed) |
-| 20 | u8 | cover, 0–255, this edge's own single value |
-| 21 | u8 | half-offset to the sidewalk, decimetres (sidewalk kind only; else 0) |
-| 22 | u8 | kind and side: bits 0–1 kind (0 sidewalk, 1 crossing, 2 link, 3 path); bits 2–4 side (0 none, 1 N, 2 E, 3 S, 4 W) |
+| 20 | u8 | cover, 0–255, this edge's own single value (**ferry**: low byte of the u16 duration at 20–21) |
+| 21 | u8 | half-offset to the sidewalk, decimetres (sidewalk kind only; else 0) (**ferry**: high byte of the duration) |
+| 22 | u8 | kind and side: bits 0–2 kind (0 sidewalk, 1 crossing, 2 link, 3 path, 4 ferry); bits 3–5 side (0 none, 1 N, 2 E, 3 S, 4 W) |
 | 23 | u8 | flags: bit0 structure, bit1 steps, bit2 **geometry-right** (this sidewalk lies right of its stored geometry direction; clear = left), bit3 **OSM** (this edge came from the conflated OSM path network) |
+
+A **ferry edge** (kind 4) has no tree cover and no sidewalk half-offset, so bytes 20–21 instead carry
+a little-endian **u16 of crossing-plus-wait seconds** (`rawTimeSeconds`, ≤ ~2200). Its **name id**
+(byte 18) is its FERR primary-route display name, so `edgeName` labels the maneuver ("East River"),
+and its two terminal stop names ride in the byte-60 side table below. The client zeroes its cover (so
+it never lifts `maxCover`) and derives `minFerrySecPerMetre` (min over ferry edges of duration ÷
+length) at decode; its terminals are ordinary walking nodes, and the merged component labels let a
+route cross it.
+
+9. **Ferry endpoint-stop-name side table** (at the byte-60 offset, 4-aligned after the geometry
+   blob): `u32 count`, then per ferry edge a (`u32 edge id`, `u16 a-stop name id`, `u16 b-stop name
+   id`) triple, both ids into the name table (7). The two ids are the terminal names at the edge's
+   node-a and node-b ends, aligned to its `node a`/`node b`. These ids are **not** edge name_ids, so
+   `tiler graph` adds them to the kept-name set and remaps them alongside the edge names. A later
+   phase reads the destination terminal from here (`node b` when the ferry is ridden a → b).
 
 7. **Name table**: `u32 count`, then (count+1) × u32 byte offsets into the following UTF-8 blob,
    then the blob. Only the names the kept edges reference, re-indexed; offsets make client access
    O(1).
-8. **Geometry blob**: one entry per sidewalk edge (its own baked corner-to-corner offset) and per
-   path edge — `vertex count` (longitude, latitude) zigzag-LEB128 varint delta pairs. The **first
-   pair is the absolute quantized position** (delta from the graph origin); the rest are from the
-   previous vertex. Crossings and links carry none.
+8. **Geometry blob**: one entry per sidewalk edge (its own baked corner-to-corner offset), per path
+   edge, and per shape-carrying ferry edge — `vertex count` (longitude, latitude) zigzag-LEB128
+   varint delta pairs. The **first pair is the absolute quantized position** (delta from the graph
+   origin); the rest are from the previous vertex. Crossings, links, and straight ferry edges carry
+   none.
 
 A pure degree-2 cycle is emitted as a self-loop on the one node it retains. GRPH edge flags are
 distinct from the STRT record flags: a step street is bit1, and bit2 on a **sidewalk** marks the
