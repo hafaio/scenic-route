@@ -97,35 +97,6 @@ pub fn flatten(polygons: &[Polygon]) -> PolygonSet {
     set
 }
 
-impl PolygonSet {
-    /// Whether the polygon at `index` covers the point, even-odd over all of its rings so an
-    /// inner ring cuts a hole rather than filling it — the containment counterpart of the fill's
-    /// scanline crossing test, scoped to one polygon. The bounding box rejects the far misses in
-    /// a couple of comparisons before any ring is walked.
-    pub fn covers(&self, index: usize, lng: f64, lat: f64) -> bool {
-        let box_ = &self.boxes[index];
-        if lng < box_.west || lng > box_.east || lat < box_.south || lat > box_.north {
-            return false;
-        }
-        let mut inside = false;
-        for ring in &self.rings[index] {
-            let mut previous = ring.lngs.len() - 1;
-            for point in 0..ring.lngs.len() {
-                if (ring.lats[point] > lat) != (ring.lats[previous] > lat) {
-                    let at = ring.lngs[point]
-                        + ((lat - ring.lats[point]) / (ring.lats[previous] - ring.lats[point]))
-                            * (ring.lngs[previous] - ring.lngs[point]);
-                    if lng < at {
-                        inside = !inside;
-                    }
-                }
-                previous = point;
-            }
-        }
-        inside
-    }
-}
-
 /// Even-odd scanline fill of the polygons at `indices` into a `width` by `height` mask,
 /// returning how many reached it. `project` carries a lng/lat to the mask's coordinate space;
 /// both tile projections are separable, but a single point map keeps this one loop. Taking
@@ -345,29 +316,6 @@ impl PolygonGrid {
         }
     }
 
-    /// Whether any polygon of `set` covers the point, found through the single grid cell the
-    /// point falls in. A polygon that contains the point has a bounding box that contains it too,
-    /// so it is listed in that cell — no wider search is needed. Allocation-free and unsorted, so
-    /// the blurred-cover quadrature can call it once per node without touching the heap.
-    pub fn covered(&self, set: &PolygonSet, lng: f64, lat: f64) -> bool {
-        if lng < self.bounds.west
-            || lng > self.bounds.east
-            || lat < self.bounds.south
-            || lat > self.bounds.north
-        {
-            return false;
-        }
-        let col = (((lng - self.bounds.west) / self.cell_lng) as usize).min(self.cols - 1);
-        let row = (((lat - self.bounds.south) / self.cell_lat) as usize).min(self.rows - 1);
-        let cell = row * self.cols + col;
-        for slot in self.starts[cell]..self.starts[cell + 1] {
-            if set.covers(self.items[slot as usize] as usize, lng, lat) {
-                return true;
-            }
-        }
-        false
-    }
-
     /// The deduplicated polygon indices whose grid cells the clip overlaps, into `out`. A
     /// candidate's box may still miss the tile — the fill's own box test rejects it — but the
     /// set the caller rasterizes is a few hundred rather than a million.
@@ -399,15 +347,32 @@ impl PolygonGrid {
     }
 }
 
+/// Reusable scratch for `blurred_cover`, so the per-vertex hot path allocates nothing. One per
+/// worker thread: the candidate gather, the node mask, the projected-vertex buffers and the
+/// scanline crossings all live here and are cleared, never reallocated, between calls.
+#[derive(Default)]
+pub struct CoverScratch {
+    candidates: Vec<u32>, // the polygons whose box reaches this node grid
+    mask: Vec<u8>,        // QUAD_NODES x QUAD_NODES, 1 where a node lands on canopy
+    xs: Vec<f64>,         // candidate ring vertices projected into node-index space, flat
+    ys: Vec<f64>,
+    ring_starts: Vec<usize>, // offsets into xs/ys, one per ring plus a final end
+    crossings: Vec<f64>,     // scanline crossings for the row being filled
+}
+
 /// The blurred canopy cover at one point: the oriented Gaussian convolution of the canopy
-/// indicator, evaluated by quadrature. The kernel runs `sigma_along` down the street's bearing
-/// and `sigma_across` over it (isotropic when the two are equal), so a sidewalk near but not
-/// under a crown reads partial shade. Each node's world position is looked up in the grid's cell;
-/// the node lands on canopy the moment a polygon there contains it, and its weight joins the
-/// covered mass. The weights already sum to one, so the return is the covered fraction in [0, 1].
-// The canopy set, its grid and the projection travel together and the two sigmas name the
-// oriented kernel; bundling them into a struct only to satisfy the arg-count lint would obscure
-// what each call passes.
+/// indicator over the quadrature's `QUAD_NODES` x `QUAD_NODES` grid. The kernel runs `sigma_along`
+/// down the street's bearing and `sigma_across` over it (isotropic when the two are equal), so a
+/// sidewalk near but not under a crown reads partial shade.
+///
+/// Rather than test every node against the polygons one point at a time — which re-walks a park's
+/// hundred-thousand-vertex boundary once per node — this projects each nearby polygon into the
+/// oriented node grid and scanline-fills it there, so a ring is walked once per sample instead of
+/// once per node. `fill_indices` marks a cell iff its centre is inside, so placing node `i` at
+/// cell centre `i + 0.5` makes the result byte-for-byte identical to per-node point-in-polygon.
+/// The weights sum to one, so the return is the covered fraction in [0, 1].
+// The canopy set, its grid and the projection travel together and the two sigmas name the oriented
+// kernel; bundling them into a struct only to satisfy the arg-count lint would obscure the call.
 #[allow(clippy::too_many_arguments)]
 pub fn blurred_cover(
     set: &PolygonSet,
@@ -418,23 +383,111 @@ pub fn blurred_cover(
     bearing: Bearing,
     sigma_along: f64,
     sigma_across: f64,
+    scratch: &mut CoverScratch,
 ) -> f64 {
-    let (positions, weights) = &*QUAD;
+    let weights = &QUAD.1;
     let meters_per_degree_lng = projection.meters_per_degree_lng();
-    // The across axis is the street's left normal, so a node's offset rotates into the world
-    // frame exactly as `sidewalks::left_normal` places the sidewalks it is sampled at.
-    let across_x = -bearing.along_y;
-    let across_y = bearing.along_x;
+    // The across axis is the street's left normal, so a vertex projects into the node frame exactly
+    // as `sidewalks::left_normal` places the sidewalks the grid is oriented to.
+    let (along_x, along_y) = (bearing.along_x, bearing.along_y);
+    let (across_x, across_y) = (-bearing.along_y, bearing.along_x);
+    let along_step = sigma_along / 4.0;
+    let across_step = sigma_across / 4.0;
+    // The node farthest from the centre sits at 2.5 sigma on each axis; its axis-aligned reach is
+    // at most 2.5 * hypot(along, across), whatever the bearing — enough to gather every polygon a
+    // node can land on.
+    let reach = 2.5 * sigma_along.hypot(sigma_across);
+    let clip = Bounds {
+        west: lng - reach / meters_per_degree_lng,
+        east: lng + reach / meters_per_degree_lng,
+        south: lat - reach / METERS_PER_DEGREE_LAT,
+        north: lat + reach / METERS_PER_DEGREE_LAT,
+    };
+    grid.candidates(&clip, &mut scratch.candidates);
+
+    let width = QUAD_NODES;
+    let height = QUAD_NODES;
+    let centre = QUAD_STEPS as f64 + 0.5; // node i sits at cell centre i + 0.5
+    scratch.mask.clear();
+    scratch.mask.resize(width * height, 0);
+    for slot in 0..scratch.candidates.len() {
+        let index = scratch.candidates[slot] as usize;
+        let box_ = &set.boxes[index];
+        if box_.east < clip.west
+            || box_.west > clip.east
+            || box_.north < clip.south
+            || box_.south > clip.north
+        {
+            continue;
+        }
+
+        scratch.xs.clear();
+        scratch.ys.clear();
+        scratch.ring_starts.clear();
+        let mut low_row = f64::INFINITY;
+        let mut high_row = f64::NEG_INFINITY;
+        for ring in &set.rings[index] {
+            scratch.ring_starts.push(scratch.xs.len());
+            for (ring_lng, ring_lat) in ring.lngs.iter().zip(&ring.lats) {
+                let metre_x = (ring_lng - lng) * meters_per_degree_lng;
+                let metre_y = (ring_lat - lat) * METERS_PER_DEGREE_LAT;
+                let along = metre_x * along_x + metre_y * along_y;
+                let across = metre_x * across_x + metre_y * across_y;
+                let node_x = along / along_step + centre;
+                let node_y = across / across_step + centre;
+                low_row = low_row.min(node_y);
+                high_row = high_row.max(node_y);
+                scratch.xs.push(node_x);
+                scratch.ys.push(node_y);
+            }
+        }
+        scratch.ring_starts.push(scratch.xs.len());
+
+        let first_row = low_row.floor().max(0.0) as usize;
+        let last_row = high_row.ceil().min((height as f64) - 1.0);
+        if last_row < first_row as f64 {
+            continue;
+        }
+        for row in first_row..=(last_row as usize) {
+            let line = row as f64 + 0.5;
+            scratch.crossings.clear();
+            for ring in 0..scratch.ring_starts.len() - 1 {
+                let start = scratch.ring_starts[ring];
+                let end = scratch.ring_starts[ring + 1];
+                if end == start {
+                    continue;
+                }
+                let mut previous = end - 1;
+                for point in start..end {
+                    if (scratch.ys[point] > line) != (scratch.ys[previous] > line) {
+                        scratch.crossings.push(
+                            scratch.xs[point]
+                                + ((line - scratch.ys[point])
+                                    / (scratch.ys[previous] - scratch.ys[point]))
+                                    * (scratch.xs[previous] - scratch.xs[point]),
+                        );
+                    }
+                    previous = point;
+                }
+            }
+            scratch
+                .crossings
+                .sort_by(|left, right| left.total_cmp(right));
+            for pair in scratch.crossings.chunks_exact(2) {
+                let from = (pair[0] - 0.5).ceil().max(0.0) as usize;
+                let to = (pair[1] - 0.5).floor().min((width as f64) - 1.0);
+                if to < from as f64 {
+                    continue;
+                }
+                scratch.mask[row * width + from..=row * width + to as usize].fill(1);
+            }
+        }
+    }
+
     let mut covered = 0.0;
-    for (along_node, along_position) in positions.iter().enumerate() {
-        let along = along_position * sigma_along;
-        for (across_node, across_position) in positions.iter().enumerate() {
-            let across = across_position * sigma_across;
-            let metre_x = along * bearing.along_x + across * across_x;
-            let metre_y = along * bearing.along_y + across * across_y;
-            let query_lng = lng + metre_x / meters_per_degree_lng;
-            let query_lat = lat + metre_y / METERS_PER_DEGREE_LAT;
-            if grid.covered(set, query_lng, query_lat) {
+    for across_node in 0..height {
+        for along_node in 0..width {
+            if scratch.mask[across_node * width + along_node] != 0 {
                 covered += weights[along_node] * weights[across_node];
             }
         }
