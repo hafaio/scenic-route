@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use crate::Fallible;
 use crate::binfmt::{self, LAND_FORMAT};
 use crate::geometry::{
-    PolygonGrid, PolygonIndex, PolygonSet, blurred_cover, flatten, round_half_up,
+    CoverScratch, PolygonGrid, PolygonIndex, PolygonSet, blurred_cover, flatten, round_half_up,
 };
 use crate::kde::{Bearing, Projection, reach_bounds};
 use crate::manifest::{Bounds, Distribution};
@@ -149,7 +149,7 @@ fn cover_at_vertices(
 ) -> Vec<f64> {
     (0..network.segments())
         .into_par_iter()
-        .flat_map(|segment| {
+        .map_init(CoverScratch::default, |scratch, segment| {
             let from = network.starts[segment] as usize;
             let to = network.starts[segment + 1] as usize;
             let xs: Vec<f64> = network.lngs[from..to]
@@ -172,7 +172,7 @@ fn cover_at_vertices(
                 // The offset is placed in metre space, then handed back to the lng/lat field; the
                 // kernel is oriented to the street's bearing, tight across it so the two sidewalks
                 // do not blur into one.
-                let at = |x: f64, y: f64| {
+                let mut at = |x: f64, y: f64| {
                     blurred_cover(
                         canopy,
                         grid,
@@ -182,6 +182,7 @@ fn cover_at_vertices(
                         bearing,
                         params.tight_sigma_along_meters,
                         params.tight_sigma_across_meters,
+                        scratch,
                     )
                 };
                 let (normal_x, normal_y) = sidewalks::left_normal(bearing);
@@ -202,6 +203,7 @@ fn cover_at_vertices(
             }
             sampled
         })
+        .flatten_iter()
         .collect()
 }
 
@@ -247,7 +249,7 @@ pub fn run(params: &Path) -> Fallible<()> {
     };
     let land_densities: Vec<f64> = (0..points.lngs.len())
         .into_par_iter()
-        .map(|sample| {
+        .map_init(CoverScratch::default, |scratch, sample| {
             blurred_cover(
                 &canopy,
                 &grid,
@@ -257,6 +259,7 @@ pub fn run(params: &Path) -> Fallible<()> {
                 isotropic,
                 params.fill_sigma_meters,
                 params.fill_sigma_meters,
+                scratch,
             )
         })
         .collect();
