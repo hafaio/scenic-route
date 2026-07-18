@@ -1,5 +1,5 @@
-// `bun run build-tiles`: renders data/{trees,woodland,land,streets}/<id>.bin into the two
-// overlays the client draws — raster tiles at public/tiles/tree-cover/{z}/{x}/{y}.png and vector
+// `bun run build-tiles`: renders data/{canopy,land,streets,paths}/<id>.bin into what the client
+// draws — the blurred canopy raster pyramid at public/tiles/canopy/{z}/{x}/{y}.webp and the vector
 // chunks at public/streets/{x}/{y}.bin. Both are gitignored build output, rebuilt by `bun dev`
 // and `bun export`. The rendering itself is crates/tiler; this decides whether it needs to run
 // and hands it the colour ramp. See scripts/README.md.
@@ -15,10 +15,12 @@ type City = (typeof manifest.cities)[number];
 
 const DATA_DIR = join(import.meta.dirname, "..", "data");
 const PUBLIC_DIR = join(import.meta.dirname, "..", "public");
-const TILE_DIR = join(PUBLIC_DIR, "tiles", "tree-cover");
+// The measured LiDAR canopy pyramid, rendered by `tiler canopy` from data/canopy/*.bin: the
+// map's cover fill, blurred and coloured by the shared ramp.
+const CANOPY_TILE_DIR = join(PUBLIC_DIR, "tiles", "canopy");
 const CHUNK_DIR = join(PUBLIC_DIR, "streets");
 const ROUTING_DIR = join(PUBLIC_DIR, "routing");
-const STAMP_PATH = join(TILE_DIR, ".stamp");
+const STAMP_PATH = join(CANOPY_TILE_DIR, ".stamp");
 const MANIFEST_PATH = join(
   import.meta.dirname,
   "..",
@@ -66,9 +68,10 @@ async function newestInputMtime(cities: City[]): Promise<number> {
     ...(await tilerSources()),
     ...cities.flatMap((city) => [
       sourcePath("streets", city.streets.file),
-      sourcePath("trees", city.field.trees.file),
-      sourcePath("woodland", city.field.woodland.file),
       sourcePath("land", city.field.land.file),
+      ...(city.field.canopy
+        ? [sourcePath("canopy", city.field.canopy.file)]
+        : []),
       ...(city.paths ? [sourcePath("paths", city.paths.file)] : []),
     ]),
   ];
@@ -94,34 +97,50 @@ async function build(): Promise<void> {
     return;
   }
 
-  await rm(TILE_DIR, { recursive: true, force: true });
+  await rm(CANOPY_TILE_DIR, { recursive: true, force: true });
   await rm(CHUNK_DIR, { recursive: true, force: true });
   await rm(ROUTING_DIR, { recursive: true, force: true });
-  await mkdir(TILE_DIR, { recursive: true });
+  await mkdir(CANOPY_TILE_DIR, { recursive: true });
   await mkdir(CHUNK_DIR, { recursive: true });
   await mkdir(ROUTING_DIR, { recursive: true });
   await writeRamp();
 
-  const tilesArgs = [
-    "tiles",
+  const chunksArgs = [
+    "chunks",
     "--manifest",
     MANIFEST_PATH,
-    "--ramp",
-    RAMP_LUT_PATH,
     "--data",
     DATA_DIR,
-    "--tiles",
-    TILE_DIR,
     "--chunks",
     CHUNK_DIR,
   ];
-  // The OSM paths are drawn into the same z12 street chunks, coloured by their own cover; the
-  // single-city manifest carries one paths layer, so it rides along here as it does for the graph.
+  // The OSM paths are drawn into the same z12 street chunks; the single-city manifest carries one
+  // paths layer, so it rides along here as it does for the graph.
   const withPaths = cities.find((city) => city.paths);
   if (withPaths?.paths) {
-    tilesArgs.push("--paths", sourcePath("paths", withPaths.paths.file));
+    chunksArgs.push("--paths", sourcePath("paths", withPaths.paths.file));
   }
-  runTiler(tilesArgs, false);
+  runTiler(chunksArgs, false);
+
+  // The blurred LiDAR canopy pyramid, coloured by the shared ramp LUT: the map's cover fill. The
+  // subcommand renders every manifest city that carries a canopy layer, so it runs once when any
+  // city does.
+  if (cities.some((city) => city.field.canopy)) {
+    runTiler(
+      [
+        "canopy",
+        "--manifest",
+        MANIFEST_PATH,
+        "--ramp",
+        RAMP_LUT_PATH,
+        "--data",
+        DATA_DIR,
+        "--tiles",
+        CANOPY_TILE_DIR,
+      ],
+      false,
+    );
+  }
 
   // The routing graph is derived from the same STRT the chunks are, one artifact per city; its
   // one-line JSON stats go to stdout and land in the build log.

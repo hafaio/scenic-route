@@ -7,6 +7,7 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fetchCanopyPolygons } from "./canopy";
 import {
   boxOf,
   COORD_SCALE,
@@ -19,6 +20,7 @@ import {
 import { buildLandTest } from "./land-filter";
 import {
   type Bounds,
+  type CanopyLayer,
   type CityEntry,
   type Distribution,
   type FieldLayer,
@@ -102,7 +104,6 @@ interface RawDistribution {
 
 interface Estimate {
   bounds: Bounds; // the sources, grown by the kernel's reach: what the pyramid covers
-  woodlandSquareKm: number;
   draws: number;
   landDensity: RawDistribution; // the cover over land: its mean is the sanity-check figure
   streetDensity: RawDistribution;
@@ -123,15 +124,18 @@ const UNNAMED_ID = 0xffff; // the segment's name id when CSCL carries no label �
 const TREE_FORMAT = 2; // v2 carries a crown-radius byte per tree; v1 was points only
 const WOODLAND_FORMAT = 1;
 const LAND_FORMAT = 1;
+const CANOPY_FORMAT = 1; // the measured 2017 LiDAR canopy, WOOD's polygon layout under magic CNPY
 
-const BROAD_SIGMA_METERS = 70; // neighbourhood leafiness
-// What a sidewalk is lined with. Broad along the road so the colour does not lurch from tree to
-// tree; loose across it, because the crown discs now do the physical work of reaching over the
-// road — a hard across-cut is exactly what this phase removes. At a 6.5 m half-offset the far
-// sidewalk is ~13 m across, where a same-size tree contributes exp(-13.1^2/(2*8^2)) = 0.26 of a
-// near one: a real reach-over, still clearly near-dominated (it was 0.03 at 5 m).
+const BROAD_SIGMA_METERS = 70; // neighbourhood leafiness (the tree-KDE fill pyramid, Phase 2)
+// The isotropic blur the canopy field is rendered and reported through: closed woods stay dark,
+// lawns stay blank, and a park edge feathers over ~2σ ≈ 30 m. The land cover distribution reads
+// this kernel, so meanCoverOverLand is the map's own mean.
+const FILL_SIGMA_METERS = 15;
+// The oriented blur that colours the two sidewalks: broad along the road so the line runs smooth,
+// tight across it so a one-sided street — a park-bounding avenue — keeps its dark park side and
+// pale building side distinct rather than blurring to their mean.
 const TIGHT_SIGMA_ALONG_METERS = 15;
-const TIGHT_SIGMA_ACROSS_METERS = 8;
+const TIGHT_SIGMA_ACROSS_METERS = 4;
 const SIDEWALK_INSET_METERS = 2; // curb to the centre of the sidewalk
 // A wood is simply ~90% canopy cover, a measurement rather than an arbitrary floor: this is a
 // cover value now, not a normalized density, and it is applied after the 1 - e^-CAI transform.
@@ -523,6 +527,61 @@ async function fetchNycLand(): Promise<Polygon[]> {
   return polygons;
 }
 
+// Land-clips the measured canopy polygons the same ring-midpoint way the paths and OSM trees are
+// clipped: a polygon is kept if the midpoint vertex of its outer ring is on land. The ArcGIS
+// service is NYC Parks' own LiDAR and carries essentially no New Jersey / Westchester spill, but
+// the clip is applied for parity with the other polygon sources and to guard a future re-extent.
+function clipCanopyToLand(
+  polygons: Polygon[],
+  onLand: (coord: Coord) => boolean,
+): Polygon[] {
+  const kept: Polygon[] = [];
+  for (const polygon of polygons) {
+    const outer = polygon[0];
+    const midpoint = outer[Math.floor(outer.length / 2)];
+    if (onLand(midpoint)) {
+      kept.push(polygon);
+    }
+  }
+  return kept;
+}
+
+// The area of one ring in square metres, in a local equirectangular metre space about `refLat`
+// (the shoelace, signed by the ring's winding). Esri gives outer rings and their holes opposite
+// windings, so summing the signed ring areas of a polygon and taking the magnitude nets the holes
+// out. Good to a fraction of a percent over a single crown-sized polygon, which is all a coverage
+// sanity figure needs.
+function ringSignedAreaSquareMeters(ring: Coord[], refLat: number): number {
+  const metersPerLng =
+    METERS_PER_DEGREE_LAT * Math.cos(refLat * (Math.PI / 180));
+  let twiceArea = 0;
+  for (
+    let point = 0, previous = ring.length - 1;
+    point < ring.length;
+    point++
+  ) {
+    const currentX = ring[point].lng * metersPerLng;
+    const currentY = ring[point].lat * METERS_PER_DEGREE_LAT;
+    const previousX = ring[previous].lng * metersPerLng;
+    const previousY = ring[previous].lat * METERS_PER_DEGREE_LAT;
+    twiceArea += previousX * currentY - currentX * previousY;
+    previous = point;
+  }
+  return twiceArea / 2;
+}
+
+function canopySquareKm(polygons: Polygon[], refLat: number): number {
+  let squareMeters = 0;
+  for (const polygon of polygons) {
+    let net = 0;
+    for (const ring of polygon) {
+      net += ringSignedAreaSquareMeters(ring, refLat);
+    }
+    squareMeters += Math.abs(net);
+  }
+  return squareMeters / 1e6;
+}
+
 // The raw extent of the sources. The tiler grows it by the widest kernel's reach — it owns the
 // truncation radius — and hands back the bounds the pyramid is planned over.
 // The path vertices are deliberately NOT swallowed here: the box is grown by the broad kernel's
@@ -757,6 +816,10 @@ const CITY = {
   woodlandSourceUrl: "https://www.openstreetmap.org/copyright",
   pathAttribution: "OpenStreetMap contributors",
   pathSourceUrl: "https://www.openstreetmap.org/copyright",
+  // The measured 2017 LiDAR canopy: NYC-public (no ODbL entanglement), NYC Parks' own polygons.
+  canopyAttribution: "Tree canopy © NYC OTI / NYC Parks (2017 LiDAR)",
+  canopySourceUrl:
+    "https://services3.arcgis.com/xJHn8F2NTtwCMFtX/arcgis/rest/services/TreeCanopy2017_Simplified_1ft/FeatureServer/0",
 } as const;
 
 async function ingest(): Promise<void> {
@@ -778,8 +841,29 @@ async function ingest(): Promise<void> {
   );
 
   // The land test is built once from the borough polygons and reused: the paths ask it up to
-  // three times each, and the OSM trees once each.
+  // three times each, the OSM trees once each, and the canopy polygons once each.
   const onLand = buildLandTest(land);
+
+  // The measured 2017 LiDAR canopy: NYC Parks' polygon feature service, ~1M polygons paged and
+  // disk-cached, then land-clipped. It is a second, independent cover source from the point-KDE
+  // this ingest builds — display-only, never in routing — encoded below alongside the woodland.
+  console.error(`${CITY.id}: fetching 2017 LiDAR tree canopy polygons`);
+  const canopy = await fetchCanopyPolygons();
+  const canopyOnLand = clipCanopyToLand(canopy.polygons, onLand);
+  const canopyReferenceLat = (landBox.south + landBox.north) / 2;
+  const canopySquareKilometers = canopySquareKm(
+    canopyOnLand,
+    canopyReferenceLat,
+  );
+  let canopyVertices = 0;
+  for (const polygon of canopyOnLand) {
+    for (const ring of polygon) {
+      canopyVertices += ring.length;
+    }
+  }
+  console.error(
+    `${CITY.id}: canopy ${canopy.fetched} polygons fetched, ${canopyOnLand.length} on land, ${canopyVertices} vertices, ${canopySquareKilometers.toFixed(1)} km² (${canopy.dropped} degenerate dropped)`,
+  );
 
   // Paths are the other Overpass query, so they are fetched next while a mirror is warm — and
   // land-clipped here, against the borough polygons, to drop the New Jersey and Westchester
@@ -870,6 +954,15 @@ async function ingest(): Promise<void> {
     land.length,
     encodePolygons("LAND", LAND_FORMAT, land),
   );
+  // The canopy is WOOD's polygon layout under its own magic (CNPY) so a canopy blob self-identifies
+  // and never masquerades as woodland; the tiler reads it Phase 3 with the same generic decoder.
+  const canopyFile = await writeSource(
+    "canopy",
+    file,
+    CANOPY_FORMAT,
+    canopyOnLand.length,
+    encodePolygons("CNPY", CANOPY_FORMAT, canopyOnLand),
+  );
   const streetPath = join(DATA_DIR, "streets", file);
   await mkdir(join(DATA_DIR, "streets"), { recursive: true });
   await writeFile(streetPath, encodeStreets(segments, names));
@@ -882,23 +975,23 @@ async function ingest(): Promise<void> {
   for (const segment of segments) {
     vertices += segment.points.length;
   }
+  // The density estimator now reads the measured canopy, blurred: the isotropic fill kernel for
+  // the reported land distribution, the oriented along/across kernel at each sidewalk offset. The
+  // trees and woodland are still fetched and encoded above (display + the KDE fill pyramid), but
+  // the street/path density blobs no longer consume them.
   await writeFile(
     PARAMS_PATH,
     JSON.stringify({
-      trees: join(DATA_DIR, "trees", file),
-      woodland: join(DATA_DIR, "woodland", file),
+      canopy: join(DATA_DIR, "canopy", file),
       land: join(DATA_DIR, "land", file),
       streets: streetPath,
       paths: pathPath,
       sourceBox: sourceBoxOf(segments, trees),
       landBox,
-      broadSigmaMeters: BROAD_SIGMA_METERS,
+      fillSigmaMeters: FILL_SIGMA_METERS,
       tightSigmaAlongMeters: TIGHT_SIGMA_ALONG_METERS,
       tightSigmaAcrossMeters: TIGHT_SIGMA_ACROSS_METERS,
       sidewalkInsetMeters: SIDEWALK_INSET_METERS,
-      woodlandFloor: WOODLAND_FLOOR,
-      woodlandFeatherMeters: WOODLAND_FEATHER_METERS,
-      woodlandPlateau: WOODLAND_PLATEAU,
       coverSamples: COVER_SAMPLES,
       coverSeed: COVER_SEED,
       percentiles: PERCENTILES.map((percentile) => Number(percentile.slice(1))),
@@ -917,10 +1010,30 @@ async function ingest(): Promise<void> {
   }
 
   const updated = new Date().toISOString().slice(0, 10);
+  // The woodland area the manifest still records for the KDE fill pyramid: the estimator no longer
+  // rasterizes the woodland-∧-land mask (the density blobs read the measured canopy now), so its
+  // land-clipped polygon area is measured here instead. Retired with the woodland source in Phase 3.
+  const woodlandSquareKilometers = canopySquareKm(
+    clipCanopyToLand(woodland.polygons, onLand),
+    canopyReferenceLat,
+  );
+  const canopyLayer: CanopyLayer = {
+    file: canopyFile.file,
+    format: canopyFile.format,
+    polygons: canopyFile.count,
+    vertices: canopyVertices,
+    bytes: canopyFile.bytes,
+    sha256: canopyFile.sha256,
+    squareKm: Math.round(canopySquareKilometers * 10) / 10,
+    updated,
+    attribution: CITY.canopyAttribution,
+    sourceUrl: CITY.canopySourceUrl,
+  };
   const field: FieldLayer = {
     trees: treeFile,
     woodland: woodlandFile,
     land: landFile,
+    canopy: canopyLayer,
     broadSigmaMeters: BROAD_SIGMA_METERS,
     tightSigmaAlongMeters: TIGHT_SIGMA_ALONG_METERS,
     tightSigmaAcrossMeters: TIGHT_SIGMA_ACROSS_METERS,
@@ -935,7 +1048,7 @@ async function ingest(): Promise<void> {
     meanCoverOverLand: estimate.landDensity.mean,
     coverSamples: COVER_SAMPLES,
     coverSeed: COVER_SEED,
-    woodlandSquareKm: estimate.woodlandSquareKm,
+    woodlandSquareKm: Math.round(woodlandSquareKilometers * 10) / 10,
     woodlandFloor: WOODLAND_FLOOR,
     woodlandFeatherMeters: WOODLAND_FEATHER_METERS,
     woodlandPlateau: WOODLAND_PLATEAU,
@@ -997,7 +1110,7 @@ async function ingest(): Promise<void> {
   const megabytes = (bytes: number): string => (bytes / 1024 / 1024).toFixed(1);
   const seconds = ((performance.now() - started) / 1000).toFixed(1);
   console.error(
-    `${CITY.id}: wrote trees (${megabytes(treeFile.bytes)} MiB), woodland (${megabytes(woodlandFile.bytes)} MiB), land (${megabytes(landFile.bytes)} MiB), streets (${segments.length} segments, ${vertices} vertices, ${megabytes(streetBytes.length)} MiB) and paths (${pathSegments.length} ways, ${pathVertices} vertices, ${megabytes(pathBytes.length)} MiB) in ${seconds}s`,
+    `${CITY.id}: wrote trees (${megabytes(treeFile.bytes)} MiB), woodland (${megabytes(woodlandFile.bytes)} MiB), canopy (${canopyOnLand.length} polygons, ${megabytes(canopyFile.bytes)} MiB), land (${megabytes(landFile.bytes)} MiB), streets (${segments.length} segments, ${vertices} vertices, ${megabytes(streetBytes.length)} MiB) and paths (${pathSegments.length} ways, ${pathVertices} vertices, ${megabytes(pathBytes.length)} MiB) in ${seconds}s`,
   );
 }
 

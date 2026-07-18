@@ -1,3 +1,4 @@
+data/canopy/*.bin filter=lfs diff=lfs merge=lfs -text
 data/land/*.bin filter=lfs diff=lfs merge=lfs -text
 data/paths/*.bin filter=lfs diff=lfs merge=lfs -text
 data/streets/*.bin filter=lfs diff=lfs merge=lfs -text

@@ -7,27 +7,17 @@ use std::path::Path;
 
 use crate::Fallible;
 
-pub const TREE_FORMAT: u16 = 2; // v2 carries a crown-radius byte per tree; v1 was points only
-pub const WOODLAND_FORMAT: u16 = 1;
+pub const CANOPY_FORMAT: u16 = 1; // the measured 2017 LiDAR canopy, WOOD's polygon layout under magic CNPY
 pub const LAND_FORMAT: u16 = 1;
 pub const STREET_FORMAT: u16 = 5;
 pub const PATH_FORMAT: u16 = 1; // OSM pedestrian/park ways: STRT v5's layout, magic "PATH"
 
 pub const SIDES: usize = 2; // the two sidewalks a density blob carries per vertex, left then right
-pub const DECIMETERS_PER_METER: f64 = 10.0; // the crown byte's unit: a decimetre of crown radius
 
 #[derive(Clone, Copy)]
 pub struct Coord {
     pub lng: f64,
     pub lat: f64,
-}
-
-/// The tree inventory: a point per tree, and the radius of the crown disc it shades the ground
-/// with — decoded from the trailing crown byte, decimetres to metres. The crown is what the
-/// canopy-cover model weights each tree by; see scripts/README.md.
-pub struct Trees {
-    pub coords: Vec<Coord>,
-    pub crown_radii_m: Vec<f64>,
 }
 
 pub type Ring = Vec<Coord>;
@@ -110,52 +100,6 @@ fn header(bytes: &[u8]) -> Header {
         scale: f64_at(bytes, 32),
         body: usize::from(u16_at(bytes, 6)),
     }
-}
-
-/// The points, then the `count` trailing crown bytes in the same order — one decimetre of crown
-/// radius per tree. The two arrays are parallel: the crown byte at index `i` sizes the tree at
-/// point `i`.
-pub fn read_trees(path: &Path) -> Fallible<Trees> {
-    let bytes = fs::read(path)?;
-    check_magic(&bytes, "TREE", TREE_FORMAT, path)?;
-    let head = header(&bytes);
-    let mut cursor = Cursor {
-        bytes: &bytes,
-        offset: head.body,
-    };
-
-    let mut coords = Vec::with_capacity(head.count);
-    let mut x: i64 = 0;
-    let mut y: i64 = 0;
-    for _ in 0..head.count {
-        x += i64::from(cursor.varint());
-        y += i64::from(cursor.varint());
-        coords.push(Coord {
-            lng: head.origin_lng + x as f64 * head.scale,
-            lat: head.origin_lat + y as f64 * head.scale,
-        });
-    }
-    // The crown bytes are the fixed-size trailing region, one per point, written after the
-    // variable-length coordinate stream the cursor has just walked to the end of.
-    let crowns = cursor.offset;
-    if bytes.len() < crowns + head.count {
-        return Err(format!(
-            "{} is truncated: {} bytes, {} needed for {} crown bytes",
-            path.display(),
-            bytes.len(),
-            crowns + head.count,
-            head.count
-        )
-        .into());
-    }
-    let crown_radii_m = bytes[crowns..crowns + head.count]
-        .iter()
-        .map(|byte| f64::from(*byte) / DECIMETERS_PER_METER)
-        .collect();
-    Ok(Trees {
-        coords,
-        crown_radii_m,
-    })
 }
 
 pub fn read_polygons(path: &Path, magic: &str, format: u16) -> Fallible<Vec<Polygon>> {

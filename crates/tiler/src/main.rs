@@ -5,6 +5,8 @@
 //! See scripts/README.md.
 
 mod binfmt;
+mod canopy;
+mod chunks;
 mod conflate;
 mod corners;
 mod densities;
@@ -12,8 +14,8 @@ mod geometry;
 mod graph;
 mod kde;
 mod manifest;
+mod raster;
 mod sidewalks;
-mod tiles;
 
 use std::collections::HashMap;
 use std::error::Error;
@@ -24,7 +26,8 @@ pub type Fallible<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
 const USAGE: &str = "usage:
   tiler densities --params <file.json>
-  tiler tiles --manifest <file.json> --ramp <file.bin> --data <dir> --tiles <dir> --chunks <dir> [--paths <file.bin>]
+  tiler chunks --manifest <file.json> --data <dir> --chunks <dir> [--paths <file.bin>]
+  tiler canopy --manifest <file.json> --ramp <file.bin> --data <dir> --tiles <dir>
   tiler graph --streets <file.bin> [--paths <file.bin>] --out <file.bin>
 ";
 
@@ -55,13 +58,17 @@ fn run() -> Fallible<()> {
     let flags = flags(args)?;
     match command.as_str() {
         "densities" => densities::run(&path(&flags, "params")?),
-        "tiles" => tiles::run(&tiles::Args {
+        "chunks" => chunks::run(&chunks::Args {
+            manifest: path(&flags, "manifest")?,
+            data: path(&flags, "data")?,
+            chunks: path(&flags, "chunks")?,
+            paths: flags.get("paths").map(PathBuf::from),
+        }),
+        "canopy" => canopy::run(&canopy::Args {
             manifest: path(&flags, "manifest")?,
             ramp: path(&flags, "ramp")?,
             data: path(&flags, "data")?,
             tiles: path(&flags, "tiles")?,
-            chunks: path(&flags, "chunks")?,
-            paths: flags.get("paths").map(PathBuf::from),
         }),
         "graph" => graph::run(&graph::Args {
             streets: path(&flags, "streets")?,
