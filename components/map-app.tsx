@@ -159,8 +159,6 @@ export default function MapApp() {
   const [routingGraph, setRoutingGraph] = useState<RoutingGraph | null>(null);
   // The maneuver list toggles open below the summary; it collapses whenever the destination changes.
   const [directionsOpen, setDirectionsOpen] = useState<boolean>(false);
-  // Hide linear street crossings ("Cross E 22 St" at every block) by default; the panel can reveal them.
-  const [collapseCrossings, setCollapseCrossings] = useState<boolean>(true);
   // The panel can shrink to a slim peek bar so the map stays usable while navigating.
   const [panelMinimized, setPanelMinimized] = useState<boolean>(false);
   // The start point routing actually uses: the manual start when set, else the live location snapped
@@ -409,10 +407,6 @@ export default function MapApp() {
     setDirectionsOpen((open) => !open);
   }, []);
 
-  const handleToggleCollapse = useCallback(() => {
-    setCollapseCrossings((on) => !on);
-  }, []);
-
   const handleToggleMinimize = useCallback(() => {
     setPanelMinimized((on) => !on);
   }, []);
@@ -650,10 +644,10 @@ export default function MapApp() {
     () =>
       routingGraph && routeResult
         ? buildDirections(routingGraph, routeResult, {
-            collapseLinearCrossings: collapseCrossings,
+            collapseLinearCrossings: true,
           })
         : null,
-    [routingGraph, routeResult, collapseCrossings],
+    [routingGraph, routeResult],
   );
   // Live progress along the ready route from the current fix; null when off-route or unlocated, which
   // makes the panel fall back to the route summary. Recomputes as watchPosition updates userLocation.
@@ -757,7 +751,6 @@ export default function MapApp() {
           directions={directions}
           progress={progress}
           directionsOpen={directionsOpen}
-          collapseCrossings={collapseCrossings}
           minimized={panelMinimized}
           onTreeWeight={handleTreeWeight}
           onFerryWeight={handleFerryWeight}
@@ -770,7 +763,6 @@ export default function MapApp() {
           onArmStart={handleArmStart}
           onArmDest={handleArmDest}
           onToggleDirections={handleToggleDirections}
-          onToggleCollapse={handleToggleCollapse}
           onToggleMinimize={handleToggleMinimize}
           onClose={handleToggleRouting}
         />
