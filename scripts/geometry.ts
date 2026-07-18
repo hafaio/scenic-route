@@ -68,17 +68,20 @@ function writeHeader(
 }
 
 // A tree, with the crown disc it shades the ground with already sized from its dbh: the model
-// weights each tree by this crown, so it travels with the point.
+// weights each tree by this crown, so it travels with the point. `genusId` is the top-12 genus
+// id 0..11, or 12 ("Other") for a tail genus, an unknown genus, or an OSM tree.
 export interface CrownedTree extends Coord {
   crownRadiusM: number;
+  genusId: number;
 }
 
 export const DECIMETERS_PER_METER = 10; // the crown byte's unit: a decimetre of crown radius
 
-// Every point carries a crown-radius byte, written as a fixed-size trailing region after the
-// coordinate stream and in the very same sorted order, so byte i sizes point i. The points are
-// sorted by quantized (lat, lng), so a delta carries a step along a row rather than a jump
-// across the city and the whole inventory fits in about four bytes a tree. TREE v2.
+// Every point carries a crown-radius byte and a genus byte, each written as a fixed-size trailing
+// region after the coordinate stream and in the very same sorted order, so byte i sizes/labels
+// point i. The points are sorted by quantized (lat, lng), so a delta carries a step along a row
+// rather than a jump across the city and the whole inventory fits in about five bytes a tree.
+// Crown and genus ride through the sort with each point, so the two blocks stay parallel. TREE v3.
 // layout: scripts/README.md
 export function encodeTrees(
   format: number,
@@ -92,7 +95,7 @@ export function encodeTrees(
   }
 
   const quantized = trees
-    .map(({ lat, lng, crownRadiusM }) => ({
+    .map(({ lat, lng, crownRadiusM, genusId }) => ({
       x: Math.round((lng - originLng) / COORD_SCALE),
       y: Math.round((lat - originLat) / COORD_SCALE),
       // Clamped into the byte: a decimetre of radius, 0..25.5 m, which the allometry never
@@ -101,11 +104,12 @@ export function encodeTrees(
         255,
         Math.max(0, Math.round(crownRadiusM * DECIMETERS_PER_METER)),
       ),
+      genusId, // 0..12, one byte
     }))
     .sort((left, right) => left.y - right.y || left.x - right.x);
 
-  // Two varints of at most five bytes each per point, then one crown byte each.
-  const bytes = new Uint8Array(HEADER_BYTES + trees.length * 11);
+  // Two varints of at most five bytes each per point, then one crown byte and one genus byte each.
+  const bytes = new Uint8Array(HEADER_BYTES + trees.length * 12);
   const view = new DataView(bytes.buffer);
   let offset = HEADER_BYTES;
   let previousX = 0;
@@ -118,6 +122,10 @@ export function encodeTrees(
   }
   for (const { crown } of quantized) {
     bytes[offset] = crown;
+    offset += 1;
+  }
+  for (const { genusId } of quantized) {
+    bytes[offset] = genusId;
     offset += 1;
   }
   writeHeader(bytes, view, "TREE", format, trees.length, originLng, originLat);

@@ -10,6 +10,7 @@ mod chunks;
 mod conflate;
 mod corners;
 mod densities;
+mod genus;
 mod geometry;
 mod graph;
 mod kde;
@@ -28,6 +29,7 @@ const USAGE: &str = "usage:
   tiler densities --params <file.json>
   tiler chunks --manifest <file.json> --data <dir> --chunks <dir> [--paths <file.bin>]
   tiler canopy --manifest <file.json> --ramp <file.bin> --data <dir> --tiles <dir>
+  tiler genus --manifest <file.json> --palette <file.bin> --data <dir> --tiles <dir>
   tiler graph --streets <file.bin> [--paths <file.bin>] --out <file.bin>
 ";
 
@@ -67,6 +69,12 @@ fn run() -> Fallible<()> {
         "canopy" => canopy::run(&canopy::Args {
             manifest: path(&flags, "manifest")?,
             ramp: path(&flags, "ramp")?,
+            data: path(&flags, "data")?,
+            tiles: path(&flags, "tiles")?,
+        }),
+        "genus" => genus::run(&genus::Args {
+            manifest: path(&flags, "manifest")?,
+            palette: path(&flags, "palette")?,
             data: path(&flags, "data")?,
             tiles: path(&flags, "tiles")?,
         }),

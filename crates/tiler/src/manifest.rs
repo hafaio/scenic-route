@@ -25,11 +25,18 @@ pub struct CanopyLayer {
     pub file: String,
 }
 
+/// Presence marks a city the genus overlay renders; the tiler reads the trees blob and the shared
+/// palette, not this, so nothing inside is needed here.
+#[derive(Deserialize)]
+pub struct GenusLayer {}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FieldLayer {
+    pub trees: SourceFile,
     pub land: SourceFile,
     pub canopy: Option<CanopyLayer>,
+    pub genus: Option<GenusLayer>,
 }
 
 #[derive(Deserialize)]

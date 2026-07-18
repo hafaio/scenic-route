@@ -129,8 +129,9 @@ pub(crate) fn encode_webp(pixels: &[u8]) -> Fallible<Vec<u8>> {
 }
 
 /// Cities can share a tile at low zoom, so tiles are keyed globally and every city touching one
-/// paints into the same buffer rather than overwriting it.
-pub(crate) fn plan_tiles(cities: &[City]) -> Vec<Tile> {
+/// paints into the same buffer rather than overwriting it. `max_zoom` is the pyramid's finest
+/// level — MAX_ZOOM for the canopy fill, one deeper for the genus dots, which upscale worse.
+pub(crate) fn plan_tiles(cities: &[City], max_zoom: u32) -> Vec<Tile> {
     let mut plan: Vec<Tile> = Vec::new();
     let mut seen: HashMap<(u32, u32, u32), usize> = HashMap::new();
     for (index, city) in cities.iter().enumerate() {
@@ -140,7 +141,7 @@ pub(crate) fn plan_tiles(cities: &[City]) -> Vec<Tile> {
             north,
             east,
         } = city.bounds;
-        for zoom in MIN_ZOOM..=MAX_ZOOM {
+        for zoom in MIN_ZOOM..=max_zoom {
             let min_x = tile_index(lng_to_pixel_x(west, zoom), zoom);
             let max_x = tile_index(lng_to_pixel_x(east, zoom), zoom);
             let min_y = tile_index(lat_to_pixel_y(north, zoom), zoom);

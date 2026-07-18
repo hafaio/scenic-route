@@ -14,6 +14,7 @@
 /public/tiles/
 /public/streets/
 /public/routing/
+/public/trees/
 
 # raw source reads cached by `bun run build-tree-data`; --refresh to go back to the network
 /.cache/
