@@ -8,16 +8,17 @@ export interface Rgb {
   blue: number;
 }
 
-// A single-hue sequential emerald ramp, light to dark and strictly monotonic in
-// lightness, so more green always reads as more trees.
+// A single-hue sequential teal/mint ramp, light to dark and strictly monotonic in lightness, so
+// more green always reads as more trees. Deliberately mintier (bluer) than the brand emerald the
+// route line draws in, so a route over canopy reads apart from the greenery under it.
 const RAMP: readonly string[] = [
-  "#d1fae5",
-  "#a7f3d0",
-  "#6ee7b7",
-  "#34d399",
-  "#10b981",
-  "#059669",
-  "#047857",
+  "#ccfbf1",
+  "#99f6e4",
+  "#5eead4",
+  "#2dd4bf",
+  "#14b8a6",
+  "#0d9488",
+  "#0f766e",
 ];
 
 const STOPS: readonly Rgb[] = RAMP.map((hex) => ({
