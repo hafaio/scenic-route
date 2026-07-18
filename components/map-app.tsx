@@ -14,6 +14,7 @@ import {
   watchPins,
 } from "../src/firebase";
 import { type GeocodeResult, reverseGeocode } from "../src/geocode";
+import { isOverlayId, type OverlayId } from "../src/overlays/registry";
 import type { Pin, PinDraft } from "../src/pin";
 import { DEFAULT_TREE_WEIGHT, MAX_TREE_WEIGHT } from "../src/routing/cost";
 import { buildDirections } from "../src/routing/directions";
@@ -52,6 +53,8 @@ type RouteState =
   | { kind: "error"; message: string };
 
 const TREE_WEIGHT_KEY = "scenic-route:tree-weight";
+const OVERLAY_KEY = "scenic-route:overlay";
+const OVERLAY_OFF = "none"; // sentinel persisted for the "Off" (null) overlay choice
 const RESNAP_METERS = 25; // a followed location must drift this far before the route recomputes
 
 // The graph and its snap index are fetched and built once, on first Directions use, and shared by
@@ -112,8 +115,11 @@ export default function MapApp() {
   const [logging, setLogging] = useState<boolean>(false);
   const [refreshing, setRefreshing] = useState<boolean>(false);
   const [following, setFollowing] = useState<boolean>(true);
-  // the only content a signed-out visitor has, so it starts on
-  const [treeCover, setTreeCover] = useState<boolean>(true);
+  // the overlay drawn over the basemap; the canopy cover is the only content a signed-out
+  // visitor has, so it starts on. Hydrated from localStorage below; null means all overlays hidden.
+  const [activeOverlay, setActiveOverlay] = useState<OverlayId | null>(
+    "canopy",
+  );
   const [signingIn, setSigningIn] = useState<boolean>(false);
   const [locationError, setLocationError] = useState<
     "denied" | "unavailable" | null
@@ -167,6 +173,18 @@ export default function MapApp() {
       if (Number.isFinite(parsed)) {
         setTreeWeight(Math.min(MAX_TREE_WEIGHT, Math.max(0, parsed)));
       }
+    }
+  }, []);
+
+  // Restore the persisted overlay: the "Off" sentinel hides everything, a known id selects it,
+  // and anything stale (a persisted "trees" from before the canopy switch, or no value) leaves
+  // the canopy default.
+  useEffect(() => {
+    const stored = window.localStorage.getItem(OVERLAY_KEY);
+    if (stored === OVERLAY_OFF) {
+      setActiveOverlay(null);
+    } else if (stored !== null && isOverlayId(stored)) {
+      setActiveOverlay(stored);
     }
   }, []);
 
@@ -230,8 +248,9 @@ export default function MapApp() {
     setFollowing((on) => !on);
   }, []);
 
-  const handleToggleTreeCover = useCallback(() => {
-    setTreeCover((on) => !on);
+  const handleSelectOverlay = useCallback((id: OverlayId | null) => {
+    setActiveOverlay(id);
+    window.localStorage.setItem(OVERLAY_KEY, id ?? OVERLAY_OFF);
   }, []);
 
   // stable identity for a long-lived map listener; functional updater keeps disengage idempotent
@@ -616,7 +635,7 @@ export default function MapApp() {
         target={target}
         userLocation={userLocation}
         following={following}
-        treeCover={treeCover}
+        activeOverlay={activeOverlay}
         routeResult={routeResult}
         routeDest={routeDest}
         routeStart={routeStart}
@@ -628,10 +647,10 @@ export default function MapApp() {
       <Toolbar
         auth={auth}
         pinCount={pins.length}
-        treeCover={treeCover}
+        activeOverlay={activeOverlay}
         routing={routingOpen}
         refreshingClaims={refreshing}
-        onToggleTreeCover={handleToggleTreeCover}
+        onSelectOverlay={handleSelectOverlay}
         onToggleRouting={handleToggleRouting}
         onSignIn={handleSignIn}
         onSignOut={handleSignOut}

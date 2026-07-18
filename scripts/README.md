@@ -218,6 +218,7 @@ in its own band.
 | streets | NYC CSCL street centerline, Socrata `inkn-q76z` | `rw_type` in 1, 5, 6, 7, 10 = street, boardwalk, path/trail, step street, alley, plus pedestrian bridges/tunnels (3, 4) where `nonped != 'V'` |
 | land | NYC borough boundaries (water areas excluded), Socrata `gthc-hcne` | the population the cover distribution is taken over, and the clip that drops New Jersey |
 | woodland | OSM `natural=wood` + `landuse=forest`, via Overpass | see below |
+| canopy | NYC's 2017 LiDAR tree canopy, ArcGIS `TreeCanopy2017_Simplified_1ft` | the *measured* canopy footprint, a second committed source, magic `CNPY` — display-only, never in routing; see below |
 | paths | OSM pedestrian/park ways (`highway` footway/path/pedestrian/steps/cycleway/bridleway/track), via Overpass | the park and greenway network CSCL lacks; a separate committed source, magic `PATH` — see below and "Binary layouts" |
 
 Only walkable road types are kept. Highways, ramps, driveways, ferry routes, u-turns and
@@ -259,6 +260,45 @@ ballfields and the Reservoir are all `leisure=park` and none of them is a tree.
 Overpass is the flakiest thing in the pipeline — the query rotates over three mirrors, backs
 off in minutes rather than seconds, and must send a `User-Agent` (an anonymous client gets a
 429 on sight). Everything is cached, so this is a one-time cost.
+
+### The measured LiDAR canopy (`CNPY` v1)
+
+The field's cover is a point-KDE inferred from the ForMS street-tree register, and the woodland
+mask above is the only thing that lifts a park interior — the register carries almost no park
+trees, so a densely wooded Central Park box (~5 ForMS trees) would otherwise read bare. The *fix
+by measurement* is NYC's **2017 LiDAR tree canopy**: NYC Parks publishes it as ~1.08 M simplified
+polygons on a public ArcGIS feature service
+(`TreeCanopy2017_Simplified_1ft`), which `scripts/canopy.ts` pages (2000 rows a page, ordered by
+`OBJECTID` so the `resultOffset` paging is stable) into lon/lat rings, each page disk-cached like
+every other source read. It is land-clipped against the borough polygons (the same ring-midpoint
+test the paths use, though the service is NYC-only and spills essentially nothing), and encoded to
+`data/canopy/<id>.bin` in **exactly the `WOOD` polygon byte-format** — the shared `encodePolygons`
+encoder, under its own magic **`CNPY`** so a canopy blob self-identifies rather than masquerading
+as woodland. `binfmt.rs::read_polygons` is already generic over the magic, so nothing in the tiler
+changes to read it.
+
+This is a **second, independent cover source**, kept deliberately separate from the point-KDE so
+the two can be read against each other: the point-KDE reads pale in the Ramble (3 ForMS points),
+where the LiDAR polygons blanket it. It is **display-only** — it is *never* fed to `tiler graph`
+or the cost, carries no density blob, and does not enter the field the streets and paths sample.
+Its area on land is ~a fifth of the city (the published all-canopy figure is ~22%), recorded in
+the manifest as `field.canopy.squareKm`.
+
+`tiler canopy` renders it into its **own tile pyramid**, `public/tiles/canopy/{z}/{x}/{y}.png`,
+over the same z9–z15 plan the tree-cover fill uses and coloured by the **same ramp LUT** — canopy
+is a covered fraction in [0, 1), the very quantity the ramp is defined over. A coarse grid over
+the ~1.08 M polygons (CSR-style, like the tree index) hands each tile only the polygons it
+touches; each pixel's canopy fraction is a 4× supersampled even-odd polygon fill averaged back
+down (so multipolygon holes punch through and edges antialias), clipped to the land mask so
+nothing bleeds over water. A tile with no canopy is the shared blank PNG. The client draws it with
+`components/canopy-layer.tsx`, a bare `TileLayer` with no street-line companion — canopy is areal,
+not per-street. `build-street-tiles.ts` runs it after the `tiles` pass; the pyramid is gitignored
+build output like the rest of `public/tiles/`, rebuilt by `bun dev`/`bun export`.
+
+**License:** NYC-public (NYC OTI / NYC Parks, 2017 LiDAR) — no ODbL entanglement, unlike the OSM
+sources. Attribution: "Tree canopy © NYC OTI / NYC Parks (2017 LiDAR)". The authoritative 6-inch
+land-cover raster (`he6d-2qns`, 1.33 GB, class 1 = Tree Canopy) is the documented fallback if the
+polygon service disappears; it needs a GeoTIFF crate, so the std-only polygon service is preferred.
 
 ### The pedestrian and park paths (`PATH` v1)
 
@@ -418,6 +458,14 @@ a time, so two overlapping woods do not cancel each other out.
 Identical layout to `WOOD`. Needed at ingest (the population the cover distribution is taken
 over) and at tile time (the AND against the woodland), so it is committed rather than fused into
 anything.
+
+### `data/canopy/<id>.bin` — the measured LiDAR canopy, magic `CNPY` (v1)
+
+**Byte-for-byte the `WOOD` polygon layout** — the same 40-byte header, then `count` even-odd
+polygons of varint-delta rings — under its own magic so it self-identifies. It is NYC's 2017 LiDAR
+tree-canopy footprint (~1.08 M polygons, land-clipped), a *measured* cover source distinct from the
+point-KDE the field infers. Read with the generic `read_polygons(path, "CNPY", 1)`; **display-only**
+— nothing in `tiler graph`, `tiler densities` or the streets/paths field reads it.
 
 ### `data/streets/<id>.bin` — the network, magic `STRT` (v5)
 

@@ -16,19 +16,20 @@ pub struct Bounds {
 #[derive(Deserialize)]
 pub struct SourceFile {
     pub file: String,
-    pub count: usize,
+}
+
+/// The measured LiDAR canopy source, when a city has one. Only the file is read here — the
+/// tiler rasterizes the polygons themselves; the counts and provenance stay in the JSON.
+#[derive(Deserialize)]
+pub struct CanopyLayer {
+    pub file: String,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FieldLayer {
-    pub trees: SourceFile,
-    pub woodland: SourceFile,
     pub land: SourceFile,
-    pub broad_sigma_meters: f64,
-    pub woodland_floor: f64,
-    pub woodland_feather_meters: f64,
-    pub woodland_plateau: f64,
+    pub canopy: Option<CanopyLayer>,
 }
 
 #[derive(Deserialize)]

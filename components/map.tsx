@@ -10,12 +10,11 @@ import {
   useMap,
   useMapEvents,
 } from "react-leaflet";
+import { OVERLAYS, type OverlayId } from "../src/overlays/registry";
 import type { Pin, PinDraft } from "../src/pin";
 import type { RouteResult } from "../src/routing/search";
 import { savedIcon, userIcon } from "./map-icons";
 import RouteLayer from "./route-layer";
-import StreetScoreLayer from "./street-score-layer";
-import TreeCoverLayer from "./tree-cover-layer";
 
 export interface MapTarget {
   lat: number;
@@ -29,7 +28,7 @@ interface MapViewProps {
   target: MapTarget | null;
   userLocation: { lat: number; lng: number } | null;
   following: boolean;
-  treeCover: boolean;
+  activeOverlay: OverlayId | null;
   routeResult: RouteResult | null;
   routeDest: { lat: number; lng: number } | null;
   routeStart: { lat: number; lng: number } | null;
@@ -156,7 +155,7 @@ export default function MapView({
   target,
   userLocation,
   following,
-  treeCover,
+  activeOverlay,
   routeResult,
   routeDest,
   routeStart,
@@ -202,9 +201,9 @@ export default function MapView({
         subdomains="abcd"
         maxZoom={20}
       />
-      {/* the smooth block-level fill, with the per-street lines drawn over it */}
-      {treeCover ? <TreeCoverLayer /> : null}
-      {treeCover ? <StreetScoreLayer /> : null}
+      {/* the active overlay's Leaflet layers, from the registry; nothing when Off */}
+      {OVERLAYS.find((overlay) => overlay.id === activeOverlay)?.render() ??
+        null}
       <MapController
         target={target}
         following={following}

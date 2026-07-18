@@ -54,6 +54,23 @@ export interface CrownAllometry {
   logBiasCorrection: number;
 }
 
+// data/canopy/<id>.bin: NYC's 2017 LiDAR tree-canopy polygons, magic `CNPY`, the same byte layout
+// as the woodland source (a header, then per-polygon varint-delta rings). This is the *measured*
+// canopy footprint, distinct from the point-KDE the field infers — display-only, never fed to
+// `tiler graph` or the cost, so it carries no density blob. layout: scripts/README.md
+export interface CanopyLayer {
+  file: string;
+  format: number;
+  polygons: number;
+  vertices: number;
+  bytes: number;
+  sha256: string;
+  squareKm: number; // canopy area on land, ~a fifth of the city's land — a coverage sanity check
+  updated: string;
+  attribution: string; // NYC OTI / NYC Parks (2017 LiDAR)
+  sourceUrl: string;
+}
+
 // The canopy-cover field: not a raster, but the points and masks it is computed from, plus the
 // constants that turn a crown-weighted kernel density estimate into the covered fraction in
 // [0, 1) the ramp reads. There is no saturation constant — cover is bounded by construction.
@@ -61,6 +78,7 @@ export interface FieldLayer {
   trees: SourceFile; // data/trees/<id>.bin, the points and crowns the estimate sums over
   woodland: SourceFile; // data/woodland/<id>.bin, the canopy the inventory does not carry
   land: SourceFile; // data/land/<id>.bin, the population and the clip
+  canopy: CanopyLayer; // data/canopy/<id>.bin, the measured 2017 LiDAR canopy: display-only
   broadSigmaMeters: number; // kernel behind the background fill
   tightSigmaAlongMeters: number; // the street kernel, down the road: the colour stays smooth
   tightSigmaAcrossMeters: number; // and over it, loosely: a big tree opposite reaches over
