@@ -25,7 +25,15 @@ interface OverpassRelation {
   members?: { type: string; role: string; geometry?: OverpassPoint[] }[];
 }
 
-type OverpassElement = OverpassWay | OverpassRelation;
+// `out;` (no geom) returns a node's position at the top level, not inside a geometry array.
+interface OverpassNode {
+  type: "node";
+  lat?: number;
+  lon?: number;
+  tags?: Record<string, string>;
+}
+
+type OverpassElement = OverpassWay | OverpassRelation | OverpassNode;
 
 export interface Woodland {
   polygons: Polygon[];
@@ -137,7 +145,7 @@ function toPolygons(elements: OverpassElement[]): Woodland {
         ways += 1;
         polygons.push([toCoords(geometry)]);
       }
-    } else {
+    } else if (element.type === "relation") {
       const members = (element.members ?? [])
         .filter(
           (member) =>
@@ -290,4 +298,57 @@ export async function fetchPaths(
     });
   }
   return ways;
+}
+
+// One OSM natural=tree node: a point, and the crown diameter the mapper recorded when there is
+// one. Phase 3 of the park-paths plan supplements the ForMS street-tree census with these where
+// ForMS is a hole — Central Park is managed by the Conservancy and carries only 697 ForMS trees
+// against ~3,945 OSM ones, so its paths would otherwise read bare. scripts/README.md
+export interface OsmTree {
+  lat: number;
+  lng: number;
+  crownDiameterMeters?: number; // diameter_crown, metres, when the tag is present and parses
+}
+
+function osmTreesQuery(
+  south: number,
+  west: number,
+  north: number,
+  east: number,
+): string {
+  const box = `${south},${west},${north},${east}`;
+  return `[out:json][timeout:${QUERY_TIMEOUT_SECONDS}];node["natural"="tree"](${box});out;`;
+}
+
+export async function fetchOsmTrees(
+  south: number,
+  west: number,
+  north: number,
+  east: number,
+): Promise<OsmTree[]> {
+  const elements = await overpassQuery(
+    "overpass-trees",
+    osmTreesQuery(south, west, north, east),
+  );
+  const trees: OsmTree[] = [];
+  for (const element of elements) {
+    if (
+      element.type !== "node" ||
+      element.lat === undefined ||
+      element.lon === undefined
+    ) {
+      continue;
+    }
+    // Lenient: diameter_crown is metres but comes in as "12", "12 m", "12.5" — parseFloat takes
+    // the leading number and ignores the unit. A zero or unparseable value is treated as absent,
+    // so the ingest sizes that tree's crown from the imputed median instead.
+    const diameter = Number.parseFloat(element.tags?.diameter_crown ?? "");
+    trees.push({
+      lat: element.lat,
+      lng: element.lon,
+      crownDiameterMeters:
+        Number.isFinite(diameter) && diameter > 0 ? diameter : undefined,
+    });
+  }
+  return trees;
 }
