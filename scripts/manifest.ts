@@ -54,10 +54,11 @@ export interface CrownAllometry {
   logBiasCorrection: number;
 }
 
-// data/canopy/<id>.bin: NYC's 2017 LiDAR tree-canopy polygons, magic `CNPY`, the same byte layout
-// as the woodland source (a header, then per-polygon varint-delta rings). This is the *measured*
-// canopy footprint, distinct from the point-KDE the field infers — display-only, never fed to
-// `tiler graph` or the cost, so it carries no density blob. layout: scripts/README.md
+// data/canopy/<id>.bin: NYC's 2017 LiDAR tree-canopy polygons, magic `CNPY`, the shared polygon
+// byte layout (a header, then per-polygon varint-delta rings). This is the *measured* canopy
+// footprint — the cover field itself: `tiler canopy` rasterizes it for the fill pyramid and
+// `tiler densities` samples it at each sidewalk to fill the routing density blobs. The canopy
+// `.bin` is polygons only; it carries no density blob of its own. layout: scripts/README.md
 export interface CanopyLayer {
   file: string;
   format: number;
@@ -79,18 +80,18 @@ export interface GenusTable {
   otherCount: number; // trees that fell to id 11: tail genera, unknown genus, and all OSM trees
 }
 
-// The canopy-cover field: not a raster, but the points and masks it is computed from, plus the
-// constants that turn a crown-weighted kernel density estimate into the covered fraction in
-// [0, 1) the ramp reads. There is no saturation constant — cover is bounded by construction.
+// The canopy-cover field: the measured LiDAR canopy the cover is blurred from, plus the tree
+// points the genus overlay draws and the constants that size them. The covered fraction is in
+// [0, 1) by construction — a normalized Gaussian over a 0/1 canopy indicator — so there is no
+// saturation constant to fit.
 export interface FieldLayer {
-  trees: SourceFile; // data/trees/<id>.bin, the points and crowns the estimate sums over
-  woodland: SourceFile; // data/woodland/<id>.bin, the canopy the inventory does not carry
+  trees: SourceFile; // data/trees/<id>.bin, the points and crowns the genus overlay draws
   land: SourceFile; // data/land/<id>.bin, the population and the clip
-  canopy: CanopyLayer; // data/canopy/<id>.bin, the measured 2017 LiDAR canopy: display-only
-  broadSigmaMeters: number; // kernel behind the background fill
+  canopy: CanopyLayer; // data/canopy/<id>.bin, the measured 2017 LiDAR canopy: the cover source
+  fillSigmaMeters: number; // the isotropic blur the canopy fill and the land mean read
   tightSigmaAlongMeters: number; // the street kernel, down the road: the colour stays smooth
-  tightSigmaAcrossMeters: number; // and over it, loosely: a big tree opposite reaches over
-  crownAllometry: CrownAllometry; // dbh -> crown radius, the weight each tree carries
+  tightSigmaAcrossMeters: number; // and tight across it, so the two sidewalks stay distinct
+  crownAllometry: CrownAllometry; // dbh -> crown radius, the size each genus dot draws at
   maxDbhInches: number; // trunks past this are clamped: the source has nonsense outliers
   imputedDbhInches: number; // the median, given to the trees carrying no dbh
   clampedTrees: number; // how many trunks the clamp caught
@@ -101,14 +102,10 @@ export interface FieldLayer {
   meanCoverOverLand: number; // the mean covered fraction; sanity-checked against ~22% all-sources
   coverSamples: number; // land points the cover distribution was estimated from
   coverSeed: number; // and the seed they were drawn with, so the mean is reproducible
-  woodlandSquareKm: number; // woodland inside the city, after clipping to land
-  woodlandFloor: number; // the cover a wood is treated as: a forest is ~90% canopy
-  woodlandFeatherMeters: number; // soft park edge, rather than a hard cut
-  woodlandPlateau: number; // coverage the feather is called complete at
   genus: GenusTable; // the top-12 genus legend the genus overlay renders from
   density: Distribution; // the covered fraction over the land points; its mean is the check
   updated: string;
-  attribution: string; // the woodland source; trees are credited on the city
+  attribution: string; // the OSM paths and trees the field mixes in; ForMS is credited on the city
   sourceUrl: string;
 }
 
@@ -131,7 +128,7 @@ export interface StreetLayer {
 
 // data/paths/<id>.bin: the OSM pedestrian/park network, magic `PATH`. STRT v5's byte layout,
 // reinterpreted per record (offset 0 = OSM way id, 20 = kind 6 path / 7 steps); it carries the
-// same tree density at every vertex, filled by `tiler densities`. layout: scripts/README.md
+// same canopy cover at every vertex, filled by `tiler densities`. layout: scripts/README.md
 export interface PathLayer {
   file: string;
   format: number;

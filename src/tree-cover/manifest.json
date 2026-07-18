@@ -22,13 +22,6 @@
           "bytes": 5412288,
           "sha256": "fbcf17fda26025c5cb4cb39fcb4f83c07da357e48ba18f7bf9cef1f216b8a041"
         },
-        "woodland": {
-          "file": "nyc.bin",
-          "format": 1,
-          "count": 4864,
-          "bytes": 571367,
-          "sha256": "0f60f88ade8ef0db92fdc18be7730456fbf51e4281275f9146bb01a94d8c621e"
-        },
         "land": {
           "file": "nyc.bin",
           "format": 1,
@@ -48,7 +41,7 @@
           "attribution": "Tree canopy © NYC OTI / NYC Parks (2017 LiDAR)",
           "sourceUrl": "https://services3.arcgis.com/xJHn8F2NTtwCMFtX/arcgis/rest/services/TreeCanopy2017_Simplified_1ft/FeatureServer/0"
         },
-        "broadSigmaMeters": 70,
+        "fillSigmaMeters": 15,
         "tightSigmaAlongMeters": 15,
         "tightSigmaAcrossMeters": 4,
         "crownAllometry": {
@@ -68,10 +61,6 @@
         "meanCoverOverLand": 0.22,
         "coverSamples": 1000000,
         "coverSeed": 42,
-        "woodlandSquareKm": 43.6,
-        "woodlandFloor": 0.9,
-        "woodlandFeatherMeters": 30,
-        "woodlandPlateau": 0.5,
         "genus": {
           "table": [
             {
@@ -155,7 +144,7 @@
           }
         },
         "updated": "2026-07-18",
-        "attribution": "woodland, path & tree data © OpenStreetMap contributors",
+        "attribution": "path & tree data © OpenStreetMap contributors",
         "sourceUrl": "https://www.openstreetmap.org/copyright"
       },
       "streets": {

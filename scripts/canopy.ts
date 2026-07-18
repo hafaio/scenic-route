@@ -1,10 +1,8 @@
 // NYC's 2017 LiDAR tree-canopy polygons, from NYC Parks' public ArcGIS FeatureServer. This is the
-// *measured* canopy footprint — every crown the LiDAR saw — where the field's own cover is a
-// point-KDE inferred from the street-tree register, which structurally cannot show park forest: a
-// densely wooded Central Park box carries only ~5 ForMS trees yet reads as solid canopy on
-// satellite. Same polygon shape as the OSM woodland source, so the ingest encodes it to
-// data/canopy/<id>.bin with the shared polygon encoder (magic `CNPY`). Display-only, never in
-// routing. See scripts/README.md.
+// *measured* canopy footprint — every crown the LiDAR saw — and it is the cover field itself: the
+// ingest encodes it to data/canopy/<id>.bin with the shared polygon encoder (magic `CNPY`), and
+// the tiler blurs it for the fill pyramid and samples it at every sidewalk for the routing
+// density. See scripts/README.md.
 
 import { cached } from "./cache";
 import type { Polygon } from "./overpass";

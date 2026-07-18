@@ -14,8 +14,7 @@ use crate::Fallible;
 use crate::binfmt::{self, SIDES, write_varint, zigzag};
 use crate::conflate::{self, ProtoEdge};
 use crate::corners::{self, EdgeEnd};
-use crate::geometry::round_half_up;
-use crate::kde::METERS_PER_DEGREE_LAT;
+use crate::geometry::{METERS_PER_DEGREE_LAT, round_half_up};
 use crate::sidewalks::{self, FLAG_NON_VEHICULAR};
 
 // STRT record flags (byte 23). FLAG_NON_VEHICULAR lives in sidewalks.rs, where the chunk offsets

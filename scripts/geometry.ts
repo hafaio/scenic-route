@@ -67,9 +67,9 @@ function writeHeader(
   view.setFloat64(32, COORD_SCALE, true);
 }
 
-// A tree, with the crown disc it shades the ground with already sized from its dbh: the model
-// weights each tree by this crown, so it travels with the point. `genusId` is the top-12 genus
-// id 0..11, or 12 ("Other") for a tail genus, an unknown genus, or an OSM tree.
+// A tree, with the crown disc already sized from its dbh: the genus overlay draws each tree at
+// this crown size, so it travels with the point through the encoder. `genusId` is the top-12
+// genus id 0..11, or 12 ("Other") for a tail genus, an unknown genus, or an OSM tree.
 export interface CrownedTree extends Coord {
   crownRadiusM: number;
   genusId: number;

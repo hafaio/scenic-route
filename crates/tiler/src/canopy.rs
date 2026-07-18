@@ -12,8 +12,7 @@ use rayon::prelude::*;
 
 use crate::Fallible;
 use crate::binfmt::{self, LAND_FORMAT};
-use crate::geometry::{self, PolygonGrid, PolygonSet, round_half_up};
-use crate::kde::Projection;
+use crate::geometry::{self, PolygonGrid, PolygonSet, Projection, round_half_up};
 use crate::manifest::{Bounds, City, Manifest};
 use crate::raster::{
     EQUATOR_METERS_PER_PIXEL, LandMask, MAX_ZOOM, MIN_ALPHA, MIN_FEATHER_PIXELS, MIN_ZOOM,
@@ -29,7 +28,8 @@ const CNPY_FORMAT: u16 = 1;
 // The raw polygon coverage is too concentrated to read as density — a hard 1 under a crown, 0
 // between — and shade physically reaches past a crown's edge. So the fraction is convolved with
 // an isotropic Gaussian before colouring, the same blur the sidewalk sampler uses, at the same
-// sigma. Held here as a const until the manifest carries it (Phase 3); mirrors densities.
+// sigma. Mirrors the ingest's FILL_SIGMA_METERS, which build-tree-data passes to densities and
+// records in the manifest as `field.fillSigmaMeters`.
 const FILL_SIGMA_METERS: f64 = 15.0;
 
 pub struct Args {
