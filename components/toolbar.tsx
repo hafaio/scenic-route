@@ -1,7 +1,15 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { FiLogOut, FiRefreshCw, FiUser } from "react-icons/fi";
+import {
+  FiCrosshair,
+  FiInfo,
+  FiLoader,
+  FiLogIn,
+  FiLogOut,
+  FiRefreshCw,
+  FiUser,
+} from "react-icons/fi";
 import type { OverlayId } from "../src/overlays/registry";
 import LayersControl from "./layers-control";
 import type { AuthState } from "./map-app";
@@ -19,7 +27,16 @@ interface ToolbarProps {
   onSignIn: () => void;
   onSignOut: () => void | Promise<void>;
   onRefreshClaims: () => void | Promise<void>;
+  onAbout: () => void;
+  onLogHere: () => void;
+  logHereDisabled: boolean; // no live location yet, so there's nothing to log
+  logHereBusy: boolean; // a high-accuracy fix + geocode is in flight
+  logHereHint: string | null; // why the location is unavailable, when it is
 }
+
+const MENU_ITEM =
+  "flex w-full items-center gap-2 px-4 py-3 text-left text-sm font-medium text-slate-700 hover:bg-slate-50 dark:text-slate-200 dark:hover:bg-slate-700/60";
+const MENU_DIVIDER = "border-b border-slate-200/60 dark:border-slate-700/60";
 
 function initialFor(email: string | null): string {
   if (!email) {
@@ -40,6 +57,11 @@ export default function Toolbar({
   onSignIn,
   onSignOut,
   onRefreshClaims,
+  onAbout,
+  onLogHere,
+  logHereDisabled,
+  logHereBusy,
+  logHereHint,
 }: ToolbarProps) {
   const [menuOpen, setMenuOpen] = useState<boolean>(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
@@ -67,6 +89,7 @@ export default function Toolbar({
   }, [menuOpen]);
 
   const pinLabel = pinCount === 1 ? "1 pin" : `${pinCount} pins`;
+  const signedIn = auth.kind === "signedIn";
   const email = auth.kind === "signedIn" ? auth.info.user.email : null;
   const isAdmin = auth.kind === "signedIn" && auth.info.admin;
 
@@ -75,37 +98,30 @@ export default function Toolbar({
       <RouteToggle active={routing} onToggle={onToggleRouting} />
       <LayersControl activeOverlay={activeOverlay} onSelect={onSelectOverlay} />
       <ThemeToggle />
-      {auth.kind === "signedOut" ? (
+      <div ref={menuRef} className="relative">
         <button
           type="button"
-          onClick={onSignIn}
-          aria-label="Sign in"
-          title="Sign in"
-          className="grid h-10 w-10 place-items-center rounded-full bg-white/85 text-slate-700 shadow-lg ring-1 ring-black/5 backdrop-blur-md transition hover:bg-white dark:bg-slate-800/80 dark:text-slate-100 dark:ring-white/10 dark:hover:bg-slate-800"
+          onClick={() => setMenuOpen((open) => !open)}
+          aria-haspopup="menu"
+          aria-expanded={menuOpen}
+          aria-label={signedIn ? "Account menu" : "Menu"}
+          className="grid h-10 w-10 place-items-center rounded-full bg-white/85 text-sm font-semibold text-slate-700 shadow-lg ring-1 ring-black/5 backdrop-blur-md transition hover:bg-white dark:bg-slate-800/80 dark:text-slate-100 dark:ring-white/10 dark:hover:bg-slate-800"
         >
-          <FiUser className="h-4 w-4" aria-hidden="true" />
-        </button>
-      ) : null}
-      {auth.kind === "signedIn" ? (
-        <div ref={menuRef} className="relative">
-          <button
-            type="button"
-            onClick={() => setMenuOpen((open) => !open)}
-            aria-haspopup="menu"
-            aria-expanded={menuOpen}
-            aria-label="Account menu"
-            className="grid h-10 w-10 place-items-center rounded-full bg-white/85 text-sm font-semibold text-slate-700 shadow-lg ring-1 ring-black/5 backdrop-blur-md transition hover:bg-white dark:bg-slate-800/80 dark:text-slate-100 dark:ring-white/10 dark:hover:bg-slate-800"
-          >
+          {signedIn ? (
             <span className="grid h-7 w-7 place-items-center rounded-full bg-gradient-to-br from-brand-400 to-brand-600 text-white">
               {initialFor(email)}
             </span>
-          </button>
-          {menuOpen ? (
-            <div
-              role="menu"
-              className="absolute right-0 mt-2 w-72 origin-top-right overflow-hidden rounded-2xl bg-white/95 shadow-2xl ring-1 ring-black/5 backdrop-blur-md dark:bg-slate-800/95 dark:ring-white/10"
-            >
-              <div className="border-b border-slate-200/60 px-4 py-3 dark:border-slate-700/60">
+          ) : (
+            <FiUser className="h-4 w-4" aria-hidden="true" />
+          )}
+        </button>
+        {menuOpen ? (
+          <div
+            role="menu"
+            className="absolute right-0 mt-2 w-72 origin-top-right overflow-hidden rounded-2xl bg-white/95 shadow-2xl ring-1 ring-black/5 backdrop-blur-md dark:bg-slate-800/95 dark:ring-white/10"
+          >
+            {signedIn ? (
+              <div className={`px-4 py-3 ${MENU_DIVIDER}`}>
                 <p className="text-[11px] uppercase tracking-wide text-slate-400 dark:text-slate-500">
                   Signed in as
                 </p>
@@ -123,22 +139,62 @@ export default function Toolbar({
                   </p>
                 )}
               </div>
-              {isAdmin ? null : (
-                <button
-                  type="button"
-                  role="menuitem"
-                  onClick={() => {
-                    void onRefreshClaims();
-                  }}
-                  disabled={refreshingClaims}
-                  className="flex w-full items-center gap-2 border-b border-slate-200/60 px-4 py-3 text-left text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700/60 dark:text-slate-200 dark:hover:bg-slate-700/60"
-                >
-                  <FiRefreshCw
-                    className={refreshingClaims ? "animate-spin" : undefined}
-                  />
-                  Check again
-                </button>
-              )}
+            ) : null}
+            {isAdmin ? (
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  setMenuOpen(false);
+                  onLogHere();
+                }}
+                disabled={logHereDisabled || logHereBusy}
+                className={`items-start disabled:opacity-50 ${MENU_ITEM} ${MENU_DIVIDER}`}
+              >
+                {logHereBusy ? (
+                  <FiLoader className="mt-0.5 animate-spin" />
+                ) : (
+                  <FiCrosshair className="mt-0.5" />
+                )}
+                <span className="flex min-w-0 flex-col">
+                  <span>{logHereBusy ? "Locating…" : "Log here"}</span>
+                  {!logHereBusy && (logHereHint || logHereDisabled) ? (
+                    <span className="mt-0.5 text-xs font-normal text-slate-400 dark:text-slate-500">
+                      {logHereHint ?? "Waiting for your location…"}
+                    </span>
+                  ) : null}
+                </span>
+              </button>
+            ) : null}
+            {signedIn && !isAdmin ? (
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  void onRefreshClaims();
+                }}
+                disabled={refreshingClaims}
+                className={`disabled:opacity-50 ${MENU_ITEM} ${MENU_DIVIDER}`}
+              >
+                <FiRefreshCw
+                  className={refreshingClaims ? "animate-spin" : undefined}
+                />
+                Check again
+              </button>
+            ) : null}
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                setMenuOpen(false);
+                onAbout();
+              }}
+              className={`${MENU_ITEM} ${MENU_DIVIDER}`}
+            >
+              <FiInfo />
+              About
+            </button>
+            {signedIn ? (
               <button
                 type="button"
                 role="menuitem"
@@ -146,15 +202,28 @@ export default function Toolbar({
                   setMenuOpen(false);
                   void onSignOut();
                 }}
-                className="flex w-full items-center gap-2 px-4 py-3 text-left text-sm font-medium text-slate-700 hover:bg-slate-50 dark:text-slate-200 dark:hover:bg-slate-700/60"
+                className={MENU_ITEM}
               >
                 <FiLogOut />
                 Sign out
               </button>
-            </div>
-          ) : null}
-        </div>
-      ) : null}
+            ) : (
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  setMenuOpen(false);
+                  onSignIn();
+                }}
+                className={MENU_ITEM}
+              >
+                <FiLogIn />
+                Sign in
+              </button>
+            )}
+          </div>
+        ) : null}
+      </div>
     </div>
   );
 }
