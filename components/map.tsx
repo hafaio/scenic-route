@@ -63,6 +63,88 @@ function PickCatcher({
   return null;
 }
 
+// Leaflet 1.9 dropped its touch `tap` handler, so double-tap no longer reaches doubleClickZoom on
+// mobile. This adds it back: two single-finger taps in the same spot within DOUBLE_TAP_MS zoom in
+// one level toward the tap (or the centre while following, matching the scroll/pinch anchor). The
+// second tap's preventDefault both blocks the browser's own double-tap zoom and suppresses the
+// synthesised dblclick, so the desktop doubleClickZoom below never fires twice.
+const DOUBLE_TAP_MS = 300;
+const DOUBLE_TAP_SLOP = 40; // px between the two taps
+const TAP_MOVE_SLOP = 12; // px a single tap may drift before it counts as a drag
+
+function DoubleTapZoom({
+  following,
+  picking,
+}: {
+  following: boolean;
+  picking: boolean;
+}) {
+  const map = useMap();
+  useEffect(() => {
+    const container = map.getContainer();
+    let lastTime = 0;
+    let lastX = 0;
+    let lastY = 0;
+    let startX = 0;
+    let startY = 0;
+    let fingers = 0;
+
+    const onStart = (event: TouchEvent) => {
+      fingers = event.touches.length;
+      if (fingers === 1) {
+        startX = event.touches[0].clientX;
+        startY = event.touches[0].clientY;
+      }
+    };
+    const onEnd = (event: TouchEvent) => {
+      // only a clean single-finger tap counts — not the lift-off of a pinch or a drag
+      if (fingers > 1 || event.changedTouches.length !== 1) {
+        lastTime = 0;
+        return;
+      }
+      const touch = event.changedTouches[0];
+      if (
+        Math.hypot(touch.clientX - startX, touch.clientY - startY) >
+        TAP_MOVE_SLOP
+      ) {
+        lastTime = 0;
+        return;
+      }
+      const elapsed = event.timeStamp - lastTime;
+      const near =
+        Math.hypot(touch.clientX - lastX, touch.clientY - lastY) <
+        DOUBLE_TAP_SLOP;
+      if (lastTime > 0 && elapsed < DOUBLE_TAP_MS && near) {
+        lastTime = 0;
+        event.preventDefault();
+        if (picking) {
+          return;
+        }
+        const rect = container.getBoundingClientRect();
+        const point = L.point(
+          touch.clientX - rect.left,
+          touch.clientY - rect.top,
+        );
+        const anchor = following
+          ? map.getCenter()
+          : map.containerPointToLatLng(point);
+        map.setZoomAround(anchor, map.getZoom() + 1, { animate: true });
+      } else {
+        lastTime = event.timeStamp;
+        lastX = touch.clientX;
+        lastY = touch.clientY;
+      }
+    };
+    container.addEventListener("touchstart", onStart, { passive: true });
+    container.addEventListener("touchend", onEnd, { passive: false });
+    return () => {
+      container.removeEventListener("touchstart", onStart);
+      container.removeEventListener("touchend", onEnd);
+    };
+  }, [map, following, picking]);
+  return null;
+}
+
 interface MapControllerProps {
   target: MapTarget | null;
   following: boolean;
@@ -194,12 +276,15 @@ export default function MapView({
       zoom={DEFAULT_ZOOM}
       className={picking ? "h-dvh w-full scenic-picking" : "h-dvh w-full"}
       zoomControl={false}
+      bounceAtZoomLimits={false}
     >
       <TileLayer
         url="https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png"
         attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
         subdomains="abcd"
         maxZoom={20}
+        updateWhenZooming={false}
+        keepBuffer={4}
       />
       {/* the active overlay's Leaflet layers, from the registry; nothing when Off */}
       {OVERLAYS.find((overlay) => overlay.id === activeOverlay)?.render() ??
@@ -217,6 +302,7 @@ export default function MapView({
         onDisengageFollow={onDisengageFollow}
       />
       {picking ? <PickCatcher onMapPick={onMapPick} /> : null}
+      <DoubleTapZoom following={following} picking={picking} />
       {markers}
       {userLocation ? (
         <Marker
