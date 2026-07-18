@@ -17,10 +17,10 @@
       "field": {
         "trees": {
           "file": "nyc.bin",
-          "format": 2,
+          "format": 3,
           "count": 925338,
-          "bytes": 4486950,
-          "sha256": "f730351ae0a85f2856f1c6e5009e8f87e8b645bdea748c5af17bd007afe308a7"
+          "bytes": 5412288,
+          "sha256": "fbcf17fda26025c5cb4cb39fcb4f83c07da357e48ba18f7bf9cef1f216b8a041"
         },
         "woodland": {
           "file": "nyc.bin",
@@ -72,6 +72,66 @@
         "woodlandFloor": 0.9,
         "woodlandFeatherMeters": 30,
         "woodlandPlateau": 0.5,
+        "genus": {
+          "table": [
+            {
+              "genus": "Quercus",
+              "common": "Oak",
+              "count": 134123
+            },
+            {
+              "genus": "Platanus",
+              "common": "London planetree",
+              "count": 103561
+            },
+            {
+              "genus": "Acer",
+              "common": "Maple",
+              "count": 86276
+            },
+            {
+              "genus": "Gleditsia",
+              "common": "Honeylocust",
+              "count": 77735
+            },
+            {
+              "genus": "Tilia",
+              "common": "Linden",
+              "count": 60873
+            },
+            {
+              "genus": "Prunus",
+              "common": "Cherry",
+              "count": 57622
+            },
+            {
+              "genus": "Pyrus",
+              "common": "Callery pear",
+              "count": 52683
+            },
+            {
+              "genus": "Zelkova",
+              "common": "Zelkova",
+              "count": 40690
+            },
+            {
+              "genus": "Ulmus",
+              "common": "Elm",
+              "count": 26959
+            },
+            {
+              "genus": "Ginkgo",
+              "common": "Ginkgo",
+              "count": 24560
+            },
+            {
+              "genus": "Fraxinus",
+              "common": "Ash",
+              "count": 20791
+            }
+          ],
+          "otherCount": 239465
+        },
         "density": {
           "min": 0,
           "max": 1,

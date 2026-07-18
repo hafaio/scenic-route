@@ -431,16 +431,27 @@ Header, 40 bytes:
 | 24 | f64 | origin latitude, degrees |
 | 32 | f64 | coordinate scale, degrees per quantized unit |
 
-### `data/trees/<id>.bin` — the points and their crowns, magic `TREE` (v2)
+### `data/trees/<id>.bin` — the points, their crowns and their genus, magic `TREE` (v3)
 
 `count` (longitude, latitude) pairs, each a varint delta from the previous point — the first
 from the origin. The points are **sorted by quantized (latitude, longitude)** before they are
 written, so a delta carries a step along a row rather than a jump across the city.
 
-Then, as a fixed-size trailing region, `count` **crown bytes** in that same sorted order — byte
-*i* sizes point *i*. Each is the crown radius in **decimetres** (0–25.5 m; the allometry never
-approaches the ceiling), so the estimator reads a radius and squares it to a crown area. v1 was
-points only; the ingest bumps the format to v2 when it starts writing crowns.
+Then two fixed-size trailing regions in that same sorted order, so byte *i* of each describes
+point *i*:
+
+- `count` **crown bytes** — the crown radius in **decimetres** (0–25.5 m; the allometry never
+  approaches the ceiling), the size the genus overlay draws each tree's dot at.
+- `count` **genus bytes** — the genus id 0–11: 0–10 index the manifest's `field.genus.table` (the
+  11 most abundant genera, descending count), and 11 is "Other" (tail genera, unknown genus, and
+  every OSM tree).
+
+v1 was points only; v2 added the crown byte; v3 appends the genus byte.
+
+The genus overlay renders this file two ways: `tiler genus` bakes a raster pyramid of
+genus-coloured dots (`public/tiles/genus`, z9–14, the zoomed-out view), and the blob itself is
+served at `public/trees/<id>.bin` so the client (`components/tree-dots-layer.tsx`) draws the dots
+live as crisp canvas discs from z15 up, where an upscaled raster tile would blur.
 
 ### `data/woodland/<id>.bin` — the canopy mask, magic `WOOD`
 

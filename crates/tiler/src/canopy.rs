@@ -337,7 +337,7 @@ pub fn run(args: &Args) -> Fallible<()> {
         }
     }
 
-    let plan = plan_tiles(&manifest.cities);
+    let plan = plan_tiles(&manifest.cities, MAX_ZOOM);
     for tile in &plan {
         fs::create_dir_all(
             args.tiles

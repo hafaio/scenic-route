@@ -7,12 +7,14 @@ use std::path::Path;
 
 use crate::Fallible;
 
+pub const TREE_FORMAT: u16 = 3; // v3 adds a genus byte per tree; v2 added the crown byte
 pub const CANOPY_FORMAT: u16 = 1; // the measured 2017 LiDAR canopy, WOOD's polygon layout under magic CNPY
 pub const LAND_FORMAT: u16 = 1;
 pub const STREET_FORMAT: u16 = 5;
 pub const PATH_FORMAT: u16 = 1; // OSM pedestrian/park ways: STRT v5's layout, magic "PATH"
 
 pub const SIDES: usize = 2; // the two sidewalks a density blob carries per vertex, left then right
+pub const DECIMETERS_PER_METER: f64 = 10.0; // the crown byte's unit: a decimetre of crown radius
 
 #[derive(Clone, Copy)]
 pub struct Coord {
@@ -100,6 +102,64 @@ fn header(bytes: &[u8]) -> Header {
         scale: f64_at(bytes, 32),
         body: usize::from(u16_at(bytes, 6)),
     }
+}
+
+/// The tree inventory: a point per tree, the radius of the crown disc it shades the ground with
+/// (decoded from the trailing crown byte, decimetres to metres), and its genus id (0..12, from the
+/// genus byte block after the crowns). The three arrays are parallel — index `i` is one tree.
+pub struct Trees {
+    pub coords: Vec<Coord>,
+    pub crown_radii_m: Vec<f64>,
+    pub genus_ids: Vec<u8>,
+}
+
+/// The points, then the `count` crown bytes, then the `count` genus bytes — each a fixed-size
+/// trailing region in the same sorted order, so index `i` is one tree across all three. TREE v3.
+pub fn read_trees(path: &Path) -> Fallible<Trees> {
+    let bytes = fs::read(path)?;
+    check_magic(&bytes, "TREE", TREE_FORMAT, path)?;
+    let head = header(&bytes);
+    let mut cursor = Cursor {
+        bytes: &bytes,
+        offset: head.body,
+    };
+
+    let mut coords = Vec::with_capacity(head.count);
+    let mut x: i64 = 0;
+    let mut y: i64 = 0;
+    for _ in 0..head.count {
+        x += i64::from(cursor.varint());
+        y += i64::from(cursor.varint());
+        coords.push(Coord {
+            lng: head.origin_lng + x as f64 * head.scale,
+            lat: head.origin_lat + y as f64 * head.scale,
+        });
+    }
+    // The crown bytes then the genus bytes are the two fixed-size trailing regions, one byte each
+    // per point, written after the variable-length coordinate stream the cursor just walked.
+    let crowns = cursor.offset;
+    let genera = crowns + head.count;
+    let end = genera + head.count;
+    if bytes.len() < end {
+        return Err(format!(
+            "{} is truncated: {} bytes, {} needed for {} crown and genus bytes",
+            path.display(),
+            bytes.len(),
+            end,
+            head.count
+        )
+        .into());
+    }
+    let crown_radii_m = bytes[crowns..genera]
+        .iter()
+        .map(|byte| f64::from(*byte) / DECIMETERS_PER_METER)
+        .collect();
+    let genus_ids = bytes[genera..end].to_vec();
+    Ok(Trees {
+        coords,
+        crown_radii_m,
+        genus_ids,
+    })
 }
 
 pub fn read_polygons(path: &Path, magic: &str, format: u16) -> Fallible<Vec<Polygon>> {
