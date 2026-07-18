@@ -21,14 +21,15 @@ const PANE_Z_INDEX = 450; // above tiles (~200), below markers (~600)
 const MIN_ZOOM = 3;
 const MAX_ZOOM = 20;
 
-// The line reads as a route ribbon: ~4.5 px at z16, growing with zoom like the street layer, with
-// a white casing 3 px wider under it so it stays legible over any basemap.
+// The line reads as a route ribbon: ~4.5 px at z16, growing with zoom like the street layer, drawn
+// as a neutral slate core inside a white casing. A neutral route reads clearly over the canopy — or
+// any future overlay — without competing with its colour, and the white halo lifts it off the map.
 const WIDTH_AT_Z16 = 4.5;
 const WIDTH_PER_ZOOM = 1.3;
 const MIN_WIDTH = 2.5;
-const CASING_EXTRA = 3;
+const CASING_EXTRA = 3; // white halo, ~1.5 px each side
 
-const ROUTE_COLOR = "#059669"; // brand-600
+const ROUTE_COLOR = "#334155"; // slate-700: a neutral route that reads over any overlay colour
 const CASING_COLOR = "#ffffff";
 const CONNECTOR_COLOR = "#94a3b8"; // slate-400
 const CONNECTOR_MIN_METERS = 15; // draw the dashed tapped->snapped link only past this gap

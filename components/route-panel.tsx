@@ -352,7 +352,7 @@ export default function RoutePanel({
                         ref={isNext ? highlightRef : null}
                         className={`flex items-start gap-3 rounded-lg px-2 py-1.5 ${
                           isNext
-                            ? "bg-brand-50 font-medium ring-1 ring-brand-200 dark:bg-brand-500/15 dark:ring-brand-500/30"
+                            ? "bg-brand-100 font-medium dark:bg-brand-500/25"
                             : ""
                         } ${isPassed ? "opacity-50" : ""}`}
                       >
