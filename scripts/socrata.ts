@@ -9,9 +9,10 @@ export interface Coord {
 
 // A standing tree, with the trunk diameter its crown is sized from. ForMS records `dbh` in
 // whole inches; 734 of the 898,618 standing trees carry none, and the ingest is what decides
-// what to do about that.
+// what to do about that. `genus` is the first token of the scientific name, "" when unknown.
 export interface Tree extends Coord {
   dbhInches: number;
+  genus: string;
 }
 
 const PAGE_SIZE = 50_000;
@@ -101,20 +102,39 @@ export function parseWktPoint(wkt: string): Coord | null {
   }
 }
 
+// The genus is the first whitespace token of the scientific name, the part of `genusspecies`
+// before " - " (e.g. "Acer nigrum - black maple" -> "Acer", "Quercus" -> "Quercus"). A blank
+// or "Unknown" name has no genus and comes back as "".
+function genusOf(genusspecies: string | undefined): string {
+  const scientific = (genusspecies ?? "").split(" - ")[0].trim();
+  const genus = scientific.split(/\s+/)[0] ?? "";
+  if (genus === "" || genus === "Unknown") {
+    return "";
+  } else {
+    return genus;
+  }
+}
+
 // Every standing tree in the NYC Parks forestry inventory; stumps and empty pits
 // are excluded by tpstructure. A missing dbh comes back as 0 — the ingest imputes it.
 export async function fetchNycTrees(): Promise<Tree[]> {
-  const rows = await fetchDataset<{ geometry?: string; dbh?: string }>(
-    TREE_DATASET,
-    { $select: "geometry,dbh", $where: "tpstructure='Full'" },
-    TREE_COUNT,
-  );
+  // `*` so a newly-read column (here genusspecies) is free after one refetch: the disk cache
+  // keys on the query, so narrowing $select would force a full re-page on every added column.
+  const rows = await fetchDataset<{
+    geometry?: string;
+    dbh?: string;
+    genusspecies?: string;
+  }>(TREE_DATASET, { $select: "*", $where: "tpstructure='Full'" }, TREE_COUNT);
   const trees: Tree[] = [];
   for (const row of rows) {
     const coord = row.geometry ? parseWktPoint(row.geometry) : null;
     if (coord) {
       const dbh = Number.parseInt(row.dbh ?? "", 10);
-      trees.push({ ...coord, dbhInches: Number.isFinite(dbh) ? dbh : 0 });
+      trees.push({
+        ...coord,
+        dbhInches: Number.isFinite(dbh) ? dbh : 0,
+        genus: genusOf(row.genusspecies),
+      });
     }
   }
   return trees;

@@ -74,7 +74,7 @@ export default function AboutDialog({ onClose }: AboutDialogProps) {
           <p>
             Scenic Route finds nicer ways to walk across New York. Use
             Directions to plan out a path, or switch between the map overlays to
-            explore what's around you.
+            explore tree canopy and genus around you.
           </p>
         </div>
 
@@ -86,6 +86,10 @@ export default function AboutDialog({ onClose }: AboutDialogProps) {
             <Source
               label="Tree canopy"
               detail="2017 LiDAR land-cover survey · NYC Open Data"
+            />
+            <Source
+              label="Tree genus"
+              detail="NYC Parks Forestry (ForMS) · NYC Open Data"
             />
             <Source
               label="Streets"

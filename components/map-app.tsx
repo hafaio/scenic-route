@@ -14,7 +14,11 @@ import {
   watchPins,
 } from "../src/firebase";
 import { type GeocodeResult, reverseGeocode } from "../src/geocode";
-import { isOverlayId, type OverlayId } from "../src/overlays/registry";
+import {
+  isOverlayId,
+  OVERLAYS,
+  type OverlayId,
+} from "../src/overlays/registry";
 import type { Pin, PinDraft } from "../src/pin";
 import { DEFAULT_TREE_WEIGHT, MAX_TREE_WEIGHT } from "../src/routing/cost";
 import { buildDirections } from "../src/routing/directions";
@@ -663,6 +667,14 @@ export default function MapApp() {
         logHereHint={locationHint}
       />
       <FollowToggle active={following} onToggle={handleToggleFollow} />
+      {/* the active overlay's floating key (genus only); bottom-left keeps it clear of the
+          toolbar, follow toggle, attribution, and the centered route panel */}
+      <div className="pointer-events-none absolute bottom-3 left-3 z-[1000] max-w-[70vw]">
+        <div className="pointer-events-auto">
+          {OVERLAYS.find((overlay) => overlay.id === activeOverlay)?.legend ??
+            null}
+        </div>
+      </div>
       {banner ? (
         <div className="absolute top-16 left-1/2 z-[1200] flex max-w-[90vw] -translate-x-1/2 items-center gap-3 rounded-2xl bg-slate-900/90 px-4 py-2.5 text-sm font-medium text-white shadow-xl backdrop-blur-md dark:bg-slate-100/95 dark:text-slate-900">
           <span>{banner}</span>

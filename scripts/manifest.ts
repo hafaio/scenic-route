@@ -71,6 +71,14 @@ export interface CanopyLayer {
   sourceUrl: string;
 }
 
+// The genus legend the genus overlay reads: the 11 most abundant genera by tree count, in id
+// order (id = array index), plus the tail. Every tree carries a genus byte 0..11 in the TREE
+// file — an id 0..10 into `table`, or 11 for the tail/unknown/OSM trees counted in `otherCount`.
+export interface GenusTable {
+  table: { genus: string; common: string; count: number }[]; // top 11, id order
+  otherCount: number; // trees that fell to id 11: tail genera, unknown genus, and all OSM trees
+}
+
 // The canopy-cover field: not a raster, but the points and masks it is computed from, plus the
 // constants that turn a crown-weighted kernel density estimate into the covered fraction in
 // [0, 1) the ramp reads. There is no saturation constant — cover is bounded by construction.
@@ -97,6 +105,7 @@ export interface FieldLayer {
   woodlandFloor: number; // the cover a wood is treated as: a forest is ~90% canopy
   woodlandFeatherMeters: number; // soft park edge, rather than a hard cut
   woodlandPlateau: number; // coverage the feather is called complete at
+  genus: GenusTable; // the top-12 genus legend the genus overlay renders from
   density: Distribution; // the covered fraction over the land points; its mean is the check
   updated: string;
   attribution: string; // the woodland source; trees are credited on the city
