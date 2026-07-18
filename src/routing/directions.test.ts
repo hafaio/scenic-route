@@ -1,6 +1,7 @@
-import { expect, test } from "bun:test";
+import { beforeEach, expect, test } from "bun:test";
 import { buildDirections } from "./directions";
 import {
+  clearEdgePathCache,
   type EdgeKind,
   NO_GEOMETRY,
   type RoutingGraph,
@@ -9,6 +10,10 @@ import {
 import type { RouteResult, RouteStep } from "./search";
 
 const SCALE = 1e-6;
+
+// buildDirections reads edge geometry through the module-level path cache, which is keyed by edge id
+// only; another test file's synthetic graph can reuse the same ids, so reset it before each test.
+beforeEach(clearEdgePathCache);
 
 // A minimal geometry-less graph: every edge is a straight line between two node coordinates, which
 // is all buildDirections needs (it reads step labels directly and only calls edgePath for bearings).
@@ -40,8 +45,11 @@ interface EdgeSpec {
   b: number;
   kind: EdgeKind;
   side: SideLabel;
-  name: string | null;
+  name: string | null; // the edge name; for a ferry this is its route display name
   lengthMeters: number;
+  durationSeconds?: number; // a ferry leg's crossing seconds
+  aStop?: string; // a ferry edge's terminal name at node a
+  bStop?: string; // a ferry edge's terminal name at node b
 }
 
 // Build steps (and the geometry-less edge arrays they reference) walking a -> b along each spec.
@@ -51,11 +59,36 @@ function makeResult(graph: RoutingGraph, specs: ReadonlyArray<EdgeSpec>) {
   const edgeNodeB = new Uint32Array(edgeCount);
   const edgeGeomOffset = new Uint32Array(edgeCount).fill(NO_GEOMETRY);
   const edgeGeomCount = new Uint16Array(edgeCount);
+  const edgeDurationSeconds = new Float32Array(edgeCount);
+  // The name table and per-edge name id back edgeName(), which the ferry maneuver reads for its
+  // route; the ferry endpoint map carries the two terminal names per ferry edge.
+  const NAME_NONE = 0xffff;
+  const edgeNameId = new Uint16Array(edgeCount).fill(NAME_NONE);
+  const names: string[] = [];
+  const nameId = new Map<string, number>();
+  const ferryEndpointNames = new Map<number, { a: string; b: string }>();
+  const internName = (name: string): number => {
+    const existing = nameId.get(name);
+    if (existing !== undefined) {
+      return existing;
+    }
+    const id = names.length;
+    names.push(name);
+    nameId.set(name, id);
+    return id;
+  };
   const steps: RouteStep[] = [];
   for (let edge = 0; edge < edgeCount; edge++) {
     const spec = specs[edge];
     edgeNodeA[edge] = spec.a;
     edgeNodeB[edge] = spec.b;
+    edgeDurationSeconds[edge] = spec.durationSeconds ?? 0;
+    if (spec.name !== null) {
+      edgeNameId[edge] = internName(spec.name);
+    }
+    if (spec.aStop !== undefined && spec.bStop !== undefined) {
+      ferryEndpointNames.set(edge, { a: spec.aStop, b: spec.bStop });
+    }
     steps.push({
       edge,
       forward: true,
@@ -71,11 +104,19 @@ function makeResult(graph: RoutingGraph, specs: ReadonlyArray<EdgeSpec>) {
     edgeNodeB: Uint32Array;
     edgeGeomOffset: Uint32Array;
     edgeGeomCount: Uint16Array;
+    edgeDurationSeconds: Float32Array;
+    edgeNameId: Uint16Array;
+    names: string[];
+    ferryEndpointNames: Map<number, { a: string; b: string }>;
   };
   wired.edgeNodeA = edgeNodeA;
   wired.edgeNodeB = edgeNodeB;
   wired.edgeGeomOffset = edgeGeomOffset;
   wired.edgeGeomCount = edgeGeomCount;
+  wired.edgeDurationSeconds = edgeDurationSeconds;
+  wired.edgeNameId = edgeNameId;
+  wired.names = names;
+  wired.ferryEndpointNames = ferryEndpointNames;
   return { steps } as unknown as RouteResult;
 }
 
@@ -294,6 +335,64 @@ test("linear crossings collapse into one walk maneuver", () => {
   // The whole straight segment (both crossings + every walk run) folds into the one walk.
   expect(collapsed[0].lengthMeters).toBe(186);
   expect(collapsed[0].stepRange).toEqual([0, 5]);
+});
+
+test("a ferry leg becomes its own maneuver reporting the crossing time", () => {
+  // Walk east, ride the ferry northeast, walk east again to arrive.
+  const graph = makeGraph([
+    [40.7, -74.01], // 0
+    [40.7, -74.0], // 1
+    [40.72, -73.99], // 2 (across the water)
+    [40.72, -73.98], // 3
+  ]);
+  const result = makeResult(graph, [
+    {
+      a: 0,
+      b: 1,
+      kind: "sidewalk",
+      side: null,
+      name: "SOUTH ST",
+      lengthMeters: 120,
+    },
+    {
+      a: 1,
+      b: 2,
+      kind: "ferry",
+      side: null,
+      name: "Staten Island Ferry", // the route display name edgeName() returns
+      lengthMeters: 2600,
+      durationSeconds: 1500, // 25 min
+      aStop: "Whitehall Ferry Terminal",
+      bStop: "St. George Ferry Terminal",
+    },
+    {
+      a: 2,
+      b: 3,
+      kind: "sidewalk",
+      side: null,
+      name: "PIER ST",
+      lengthMeters: 90,
+    },
+  ]);
+  const maneuvers = buildDirections(graph, result);
+
+  expect(maneuvers.map((m) => m.kind)).toEqual([
+    "start",
+    "ferry",
+    "start",
+    "arrive",
+  ]);
+  const ferry = maneuvers[1];
+  // The route ends in "Ferry" (so no doubled "ferry") and " Ferry Terminal" is stripped from the
+  // destination terminal — forward a -> b, so the destination is the node-b stop. The crossing time
+  // rides in durationSeconds, not the text (the panel renders it in the distance slot).
+  expect(ferry.text).toBe("Take the Staten Island Ferry to St. George");
+  expect(ferry.durationSeconds).toBe(1500);
+  // The ferry keeps its span as lengthMeters so nav-progress's along-route accounting stays intact.
+  expect(ferry.lengthMeters).toBe(2600);
+  expect(ferry.stepRange).toEqual([1, 2]);
+  // The leg after the ferry starts a fresh walk rather than turning off the ferry's bearing.
+  expect(maneuvers[2].text.startsWith("Walk")).toBe(true);
 });
 
 test("an action crossing survives collapsing", () => {

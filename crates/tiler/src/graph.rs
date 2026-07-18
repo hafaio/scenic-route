@@ -1,7 +1,8 @@
 //! `tiler graph`: contracts STRT v5 into the pedestrian routing graph the client searches, then
 //! expands every street into the two sidewalks a walker uses, joined at corner nodes, with derived
-//! crossings at real intersections and paths stitched in by links — and writes it as GRPH v2 to
-//! public/routing/<id>.bin. The tile pyramid and the street chunks draw every walkable segment;
+//! crossings at real intersections and paths stitched in by links — and writes it as GRPH v3 to
+//! public/routing/<id>.bin. Ferry terminals snap to the nearest walking node so a ferry edge joins the
+//! two boroughs it serves. The tile pyramid and the street chunks draw every walkable segment;
 //! this drops the vehicular-only ones, collapses the shape joints, and turns "which side" from a
 //! display choice into topology, so a router settles a cross-borough query in tens of
 //! milliseconds. See scripts/README.md.
@@ -33,12 +34,16 @@ const GRPH_PATHLIKE: u8 = 1 << 2; // offset 0: boardwalk, path, steps, or a non-
 // this. Provenance rides in `Edge::osm` through construction and only lands in the byte at write.
 const GRPH_OSM: u8 = 1 << 3;
 
-// v2 edge kinds (record byte 22, bits 0-1) and side labels (bits 2-4). A crossing carries no
-// geometry and no side; a sidewalk is the only kind with a half-offset and a geometry-right flag.
+// v3 edge kinds (record byte 22, bits 0-2) and side labels (bits 3-5). A crossing carries no
+// geometry and no side; a sidewalk is the only kind with a half-offset and a geometry-right flag; a
+// ferry reuses the two cover/half-offset bytes (20-21) to carry a u16 crossing-plus-wait duration.
 const KIND_SIDEWALK: u8 = 0;
 const KIND_CROSSING: u8 = 1;
 const KIND_LINK: u8 = 2;
 const KIND_PATH: u8 = 3;
+const KIND_FERRY: u8 = 4;
+const KIND_MASK: u8 = 0x7;
+const SIDE_SHIFT: u8 = 3;
 const SIDE_NONE: u8 = 0;
 const SIDE_NORTH: u8 = 1;
 const SIDE_EAST: u8 = 2;
@@ -46,7 +51,7 @@ const SIDE_SOUTH: u8 = 3;
 const SIDE_WEST: u8 = 4;
 const FLAG_GEOMETRY_RIGHT: u8 = 1 << 2; // this sidewalk lies right of its stored geometry direction
 
-const GRAPH_FORMAT: u16 = 2;
+const GRAPH_FORMAT: u16 = 3;
 const GRAPH_HEADER_BYTES: usize = 64;
 const EDGE_RECORD_BYTES: usize = 24;
 const NO_GEOMETRY: u32 = 0xFFFF_FFFF; // edge record byte 12 sentinel: straight a->b, no blob entry
@@ -72,10 +77,14 @@ const MERGE_RADIUS_METERS: f64 = 1.0; // CSCL digitization slivers, mopped up af
 const GRID_METERS: f64 = 3.0; // near-miss bucket size; a 3x3 scan then covers the merge radius
 const PRUNE_DEVIATION_UNITS: f64 = 1.5; // ~0.15 m; the ingest's 25 m densification is pure lerp
 const MAX_EDGE_VERTICES: usize = u16::MAX as usize; // a guard on the merged polyline, never a limit
+// A ferry terminal (a pier) sits off the street grid, so its snap to the nearest walking node has a
+// looser radius than the node merge; a linear scan over the ~26 stops is well under a millisecond.
+const FERRY_SNAP_RADIUS_METERS: f64 = 250.0;
 
 pub struct Args {
     pub streets: PathBuf,
     pub paths: Option<PathBuf>,
+    pub ferries: Option<PathBuf>,
     pub out: PathBuf,
 }
 
@@ -538,6 +547,23 @@ fn put_f32(bytes: &mut [u8], offset: usize, value: f32) {
 
 fn put_f64(bytes: &mut [u8], offset: usize, value: f64) {
     bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+}
+
+// Append `name` to `all_names` if new (deduped through `interned`) and return its u16 id. The ferry
+// route and terminal names are not in the STRT/PATH name tables, so they are interned here.
+fn intern_name(
+    all_names: &mut Vec<String>,
+    interned: &mut HashMap<String, u16>,
+    name: &str,
+) -> u16 {
+    if let Some(&id) = interned.get(name) {
+        id
+    } else {
+        let id = all_names.len() as u16;
+        all_names.push(name.to_string());
+        interned.insert(name.to_string(), id);
+        id
+    }
 }
 
 pub fn run(args: &Args) -> Fallible<()> {
@@ -1282,7 +1308,6 @@ pub fn run(args: &Args) -> Fallible<()> {
     }
     let mut roots: Vec<(u32, usize)> = component_size.into_iter().collect();
     roots.sort_by(|left, right| right.1.cmp(&left.1).then(left.0.cmp(&right.0)));
-    let largest_component = roots.first().map_or(0, |&(_, size)| size);
     let mut component_label: HashMap<u32, u16> = HashMap::with_capacity(component_count);
     for (label, &(root, _)) in roots.iter().enumerate() {
         component_label.insert(root, label as u16);
@@ -1318,6 +1343,189 @@ pub fn run(args: &Args) -> Fallible<()> {
             .cmp(&node_component[right.a as usize])
             .then(left.a.min(left.b).cmp(&right.a.min(right.b)))
     });
+
+    // Ferries: a final stage, after the walking parity assertion and the node renumber above (both
+    // left untouched, so they still validate the walking-only build). Each FERR segment becomes a
+    // KIND_FERRY edge between the two walking nodes its terminals snap to; the merged walking-plus-
+    // ferry connectivity then relabels the components, joining Staten Island and Governors Island to
+    // the main component so the "an edge joins two components" invariant still holds for a ferry edge.
+    let mut ferry_edges = 0usize;
+    let mut ferry_dropped_unsnapped = 0usize;
+    let mut ferry_dropped_same_node = 0usize;
+    let mut ferry_dropped_duplicate = 0usize;
+    let mut ferry_stops_unsnapped = 0usize;
+    // Per ferry edge, the terminal stop name ids (into `all_names`) at its node-a and node-b ends,
+    // aligned to `edgeNodeA`/`edgeNodeB`. Written as the byte-60 side table after the geometry blob;
+    // these ids are not edge name_ids, so they are added to `used_names` and remapped explicitly.
+    let mut ferry_stop_names: Vec<(u32, u16, u16)> = Vec::new();
+    let mut ferry_interned: HashMap<String, u16> = HashMap::new();
+    if let Some(ferries_file) = &args.ferries {
+        let ferries = binfmt::read_ferries(ferries_file)?;
+
+        // Snap each stop to the nearest walking node within the radius; a linear scan over the final
+        // nodes is trivial for the ~26 stops. A stop with no node in range drops every segment on it.
+        let mut stop_node: Vec<Option<u32>> = Vec::with_capacity(ferries.stops.len());
+        for stop in &ferries.stops {
+            let stop_x = quantize_x(stop.lng);
+            let stop_y = quantize_y(stop.lat);
+            let mut nearest: Option<(u32, f64)> = None;
+            for node in 0..node_count {
+                let metres = great_circle(
+                    stop_x,
+                    stop_y,
+                    node_lng[node],
+                    node_lat[node],
+                    origin_lng,
+                    origin_lat,
+                    scale,
+                );
+                if nearest.is_none_or(|(_, best)| metres < best) {
+                    nearest = Some((node as u32, metres));
+                }
+            }
+            match nearest {
+                Some((node, metres)) if metres <= FERRY_SNAP_RADIUS_METERS => {
+                    stop_node.push(Some(node));
+                }
+                _ => {
+                    ferry_stops_unsnapped += 1;
+                    eprintln!(
+                        "tiler graph: ferry stop \"{}\" ({:.6}, {:.6}) has no walking node within {FERRY_SNAP_RADIUS_METERS:.0} m; dropping its segments",
+                        stop.name, stop.lng, stop.lat
+                    );
+                    stop_node.push(None);
+                }
+            }
+        }
+
+        // Dedup segments that snap to the same unordered node pair, keeping the smaller raw time.
+        let mut best_segment: HashMap<(u32, u32), usize> = HashMap::new();
+        for (index, segment) in ferries.segments.iter().enumerate() {
+            let (Some(node_a), Some(node_b)) = (
+                stop_node[segment.stop_a as usize],
+                stop_node[segment.stop_b as usize],
+            ) else {
+                ferry_dropped_unsnapped += 1;
+                continue;
+            };
+            if node_a == node_b {
+                ferry_dropped_same_node += 1;
+                continue;
+            }
+            let key = (node_a.min(node_b), node_a.max(node_b));
+            let replace = match best_segment.get(&key).copied() {
+                Some(kept) => {
+                    ferry_dropped_duplicate += 1;
+                    segment.raw_time_seconds < ferries.segments[kept].raw_time_seconds
+                }
+                None => true,
+            };
+            if replace {
+                best_segment.insert(key, index);
+            }
+        }
+
+        for &index in best_segment.values() {
+            let segment = &ferries.segments[index];
+            let node_a = stop_node[segment.stop_a as usize].expect("a kept segment's stop snapped");
+            let node_b = stop_node[segment.stop_b as usize].expect("a kept segment's stop snapped");
+            // The combined crossing-plus-wait time the later phase costs this leg by, rounded into a
+            // u16 of seconds (well under the ~2200 s ceiling) and split across the cover/half-offset
+            // bytes at write time.
+            let duration = round_half_up(f64::from(segment.raw_time_seconds).max(0.0))
+                .min(f64::from(u16::MAX)) as u16;
+            let (geom, length) = match &segment.geometry {
+                Some(shape) => {
+                    // The stored polyline runs node_a -> the FERR interior shape vertices -> node_b, so
+                    // its endpoints are exactly the two snapped node coordinates; the shape's own end
+                    // vertices are the unsnapped stop coordinates and are dropped.
+                    let mut poly_x = vec![node_lng[node_a as usize]];
+                    let mut poly_y = vec![node_lat[node_a as usize]];
+                    for point in &shape[1..shape.len() - 1] {
+                        poly_x.push(quantize_x(point.lng));
+                        poly_y.push(quantize_y(point.lat));
+                    }
+                    poly_x.push(node_lng[node_b as usize]);
+                    poly_y.push(node_lat[node_b as usize]);
+                    let length =
+                        polyline_length(&poly_x, &poly_y, origin_lng, origin_lat, scale) as f32;
+                    let geom_index = geometry_polys.len() as u32;
+                    geometry_polys.push((poly_x, poly_y));
+                    (geom_index, length)
+                }
+                None => {
+                    // A straight leg carries no geometry entry; the client draws the line between its
+                    // two node coordinates, so its length is that node distance.
+                    let length = node_distance(
+                        &node_lng, &node_lat, node_a, node_b, origin_lng, origin_lat, scale,
+                    ) as f32;
+                    (NO_GEOMETRY, length)
+                }
+            };
+            // The route display name becomes the edge's name (so the client's `edgeName` returns it),
+            // and the two terminal stop names go into the side table, aligned to node-a/node-b.
+            let name_id = if segment.route_name.is_empty() {
+                UNNAMED
+            } else {
+                intern_name(&mut all_names, &mut ferry_interned, &segment.route_name)
+            };
+            let a_stop_name = intern_name(
+                &mut all_names,
+                &mut ferry_interned,
+                &ferries.stops[segment.stop_a as usize].name,
+            );
+            let b_stop_name = intern_name(
+                &mut all_names,
+                &mut ferry_interned,
+                &ferries.stops[segment.stop_b as usize].name,
+            );
+            let edge_id = v2_edges.len() as u32;
+            ferry_stop_names.push((edge_id, a_stop_name, b_stop_name));
+            v2_edges.push(V2Edge {
+                a: node_a,
+                b: node_b,
+                length,
+                geom,
+                cover: (duration & 0x00FF) as u8,
+                half_offset: (duration >> 8) as u8,
+                name_id,
+                kind: KIND_FERRY,
+                side: SIDE_NONE,
+                flags: 0,
+            });
+            ferry_edges += 1;
+        }
+    }
+
+    // Merged walking-plus-ferry connectivity: union-find over every edge, then relabel the components
+    // by size descending (0 = largest). This overwrites the walking-only node_component/component_count
+    // above, so the ferry-joined boroughs share one component and the pre-write invariant loop's "an
+    // edge joins two components" check passes for the ferry edges that caused the merge. A walking
+    // edge's two ends shared a component already, so a merge only ever keeps them together.
+    let mut merged_parent: Vec<u32> = (0..node_count as u32).collect();
+    for edge in &v2_edges {
+        union(&mut merged_parent, edge.a, edge.b);
+    }
+    let mut merged_size: HashMap<u32, usize> = HashMap::new();
+    let mut merged_root = vec![0u32; node_count];
+    for (node, slot) in merged_root.iter_mut().enumerate() {
+        let root = find(&mut merged_parent, node as u32);
+        *slot = root;
+        *merged_size.entry(root).or_insert(0) += 1;
+    }
+    let component_count = merged_size.len();
+    if component_count > u16::MAX as usize + 1 {
+        return Err(format!("{component_count} merged components do not fit a u16 label").into());
+    }
+    let mut merged_roots: Vec<(u32, usize)> = merged_size.into_iter().collect();
+    merged_roots.sort_by(|left, right| right.1.cmp(&left.1).then(left.0.cmp(&right.0)));
+    let largest_component = merged_roots.first().map_or(0, |&(_, size)| size);
+    let mut merged_label: HashMap<u32, u16> = HashMap::with_capacity(component_count);
+    for (label, &(root, _)) in merged_roots.iter().enumerate() {
+        merged_label.insert(root, label as u16);
+    }
+    let node_component: Vec<u16> = merged_root.iter().map(|root| merged_label[root]).collect();
+
     let edge_count = v2_edges.len();
 
     // The compact name table: only the names the kept edges reference, re-indexed, sorted by their
@@ -1327,6 +1535,12 @@ pub fn run(args: &Args) -> Fallible<()> {
         .map(|edge| edge.name_id)
         .filter(|&id| id != UNNAMED)
         .collect();
+    // The ferry side-table stop-name ids are not carried by any edge's name_id, so add them here or
+    // the compaction below would drop the strings they point at.
+    for &(_, a_stop_name, b_stop_name) in &ferry_stop_names {
+        used_names.push(a_stop_name);
+        used_names.push(b_stop_name);
+    }
     used_names.sort_unstable();
     used_names.dedup();
     if used_names.len() > UNNAMED as usize {
@@ -1336,6 +1550,13 @@ pub fn run(args: &Args) -> Fallible<()> {
     for (index, &original) in used_names.iter().enumerate() {
         name_remap.insert(original, index as u16);
     }
+    // Remap the side-table stop-name ids through the same compaction the edge names use.
+    let ferry_side_table: Vec<(u32, u16, u16)> = ferry_stop_names
+        .iter()
+        .map(|&(edge_id, a_stop_name, b_stop_name)| {
+            (edge_id, name_remap[&a_stop_name], name_remap[&b_stop_name])
+        })
+        .collect();
 
     // CSR adjacency of edge ids: node n owns [csr[n], csr[n + 1]); a self-loop lists its edge twice
     // on its node, so the half-edge total is 2E.
@@ -1473,7 +1694,12 @@ pub fn run(args: &Args) -> Fallible<()> {
             Some(&index) => index,
             None => UNNAMED,
         };
-        let cover = if edge.cover > 254 {
+        // A ferry carries a u16 duration in bytes 20-21 (edge.cover is its low byte, edge.half_offset
+        // its high byte), so the 254 cover clamp — which keeps a real edge's client maxCover < 1 —
+        // applies only to the cover-bearing kinds.
+        let cover = if edge.kind == KIND_FERRY {
+            edge.cover
+        } else if edge.cover > 254 {
             cover_clamped += 1;
             254
         } else {
@@ -1487,7 +1713,7 @@ pub fn run(args: &Args) -> Fallible<()> {
         put_u16(&mut bytes, record + 18, name);
         bytes[record + 20] = cover;
         bytes[record + 21] = edge.half_offset;
-        bytes[record + 22] = (edge.kind & 0b11) | (edge.side << 2);
+        bytes[record + 22] = (edge.kind & KIND_MASK) | (edge.side << SIDE_SHIFT);
         bytes[record + 23] = edge.flags;
     }
 
@@ -1498,6 +1724,22 @@ pub fn run(args: &Args) -> Fallible<()> {
     let name_blob_offset = name_offset + 4 + 4 * name_offsets.len();
     bytes[name_blob_offset..name_blob_offset + name_blob.len()].copy_from_slice(&name_blob);
     bytes.extend_from_slice(&geometry);
+
+    // The ferry endpoint-stop-name side table, 4-aligned after the geometry blob: a u32 count, then
+    // per ferry edge a (u32 edge id, u16 a-stop name id, u16 b-stop name id) triple, the ids into
+    // the name table above. Its offset rides in the spare header u32 at byte 60 (0-length when the
+    // build carried no ferries).
+    while bytes.len() % 4 != 0 {
+        bytes.push(0);
+    }
+    let ferry_table_offset = bytes.len() as u32;
+    put_u32(&mut bytes, 60, ferry_table_offset);
+    bytes.extend_from_slice(&(ferry_side_table.len() as u32).to_le_bytes());
+    for &(edge_id, a_stop_name, b_stop_name) in &ferry_side_table {
+        bytes.extend_from_slice(&edge_id.to_le_bytes());
+        bytes.extend_from_slice(&a_stop_name.to_le_bytes());
+        bytes.extend_from_slice(&b_stop_name.to_le_bytes());
+    }
 
     if let Some(parent) = args.out.parent() {
         fs::create_dir_all(parent)?;
@@ -1546,6 +1788,11 @@ pub fn run(args: &Args) -> Fallible<()> {
         "droppedOsmIslandKm": dropped_osm_island_km,
         "osmPathEdges": osm_path_edges,
         "osmPathKm": osm_path_km,
+        "ferryEdges": ferry_edges,
+        "ferryStopsUnsnapped": ferry_stops_unsnapped,
+        "ferryDroppedUnsnapped": ferry_dropped_unsnapped,
+        "ferryDroppedSameNode": ferry_dropped_same_node,
+        "ferryDroppedDuplicate": ferry_dropped_duplicate,
         "names": used_names.len(),
         "totalKm": total_km,
         "bytes": bytes.len(),

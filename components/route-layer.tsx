@@ -3,7 +3,12 @@
 import L from "leaflet";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Marker, Polyline, useMap } from "react-leaflet";
-import { edgePath, loadGraph, type RoutingGraph } from "../src/routing/graph";
+import {
+  edgeKind,
+  edgePath,
+  loadGraph,
+  type RoutingGraph,
+} from "../src/routing/graph";
 import type { RouteResult, RouteStep } from "../src/routing/search";
 import type { Snap } from "../src/routing/snap";
 import { draftIcon, savedIcon } from "./map-icons";
@@ -30,6 +35,7 @@ const MIN_WIDTH = 2.5;
 const CASING_EXTRA = 3; // white halo, ~1.5 px each side
 
 const ROUTE_COLOR = "#334155"; // slate-700: a neutral route that reads over any overlay colour
+const FERRY_COLOR = "#2563eb"; // blue-600: the over-water ferry legs, distinct from the walked line
 const CASING_COLOR = "#ffffff";
 const CONNECTOR_COLOR = "#94a3b8"; // slate-400
 const CONNECTOR_MIN_METERS = 15; // draw the dashed tapped->snapped link only past this gap
@@ -60,6 +66,7 @@ function haversineMeters(
 interface DrawStep {
   lngs: Float64Array;
   lats: Float64Array;
+  ferry: boolean; // a ferry leg, stroked in blue instead of the neutral walked line
 }
 
 // The a -> b along-distance bounds this step actually walked, so the end edges are trimmed at the
@@ -169,6 +176,7 @@ function buildDrawSteps(graph: RoutingGraph, result: RouteResult): DrawStep[] {
     draw.push({
       lngs: Float64Array.from(lngs),
       lats: Float64Array.from(lats),
+      ferry: edgeKind(graph, step.edge) === "ferry",
     });
   }
   return draw;
@@ -195,8 +203,9 @@ class RouteGrid extends L.GridLayer {
     return tile;
   }
 
-  // Casing across every step first, then the brand line across every step, so the round joins
-  // meet seamlessly rather than each step's casing overpainting its neighbour's fill.
+  // Casing across every step first, then the coloured lines, so the round joins meet seamlessly
+  // rather than each step's casing overpainting its neighbour's fill. Ferry legs collect into their
+  // own path and stroke blue over the same shared casing, so a walk<->ferry junction stays clean.
   private draw(context: CanvasRenderingContext2D, coords: L.Coords): void {
     const map = this._map;
     const originX = coords.x * TILE_SIZE;
@@ -205,7 +214,8 @@ class RouteGrid extends L.GridLayer {
       MIN_WIDTH,
       WIDTH_AT_Z16 * WIDTH_PER_ZOOM ** (coords.z - 16),
     );
-    const path = new Path2D();
+    const walkPath = new Path2D();
+    const ferryPath = new Path2D();
     let longest = 0;
     for (const step of this.drawSteps) {
       longest = Math.max(longest, step.lngs.length);
@@ -240,6 +250,7 @@ class RouteGrid extends L.GridLayer {
       if (!overlaps) {
         continue;
       }
+      const path = step.ferry ? ferryPath : walkPath;
       path.moveTo(xs[0], ys[0]);
       for (let vertex = 1; vertex < count; vertex++) {
         path.lineTo(xs[vertex], ys[vertex]);
@@ -250,10 +261,13 @@ class RouteGrid extends L.GridLayer {
     context.lineJoin = "round";
     context.lineWidth = width + CASING_EXTRA;
     context.strokeStyle = CASING_COLOR;
-    context.stroke(path);
+    context.stroke(walkPath);
+    context.stroke(ferryPath);
     context.lineWidth = width;
     context.strokeStyle = ROUTE_COLOR;
-    context.stroke(path);
+    context.stroke(walkPath);
+    context.strokeStyle = FERRY_COLOR;
+    context.stroke(ferryPath);
   }
 }
 

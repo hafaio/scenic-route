@@ -12,6 +12,7 @@ import {
 } from "react-icons/fi";
 import {
   MdArrowUpward,
+  MdDirectionsBoat,
   MdFlag,
   MdOutlineDirectionsWalk,
   MdSwapHoriz,
@@ -21,10 +22,14 @@ import {
   MdTurnSlightRight,
   MdUTurnLeft,
 } from "react-icons/md";
-import { PiTreeEvergreenFill } from "react-icons/pi";
+import { PiBoatFill, PiTreeEvergreenFill } from "react-icons/pi";
 import type { GeocodeResult } from "../src/geocode";
-import { MAX_TREE_WEIGHT } from "../src/routing/cost";
-import { formatDistance, type Maneuver } from "../src/routing/directions";
+import { MAX_FERRY_WEIGHT, MAX_TREE_WEIGHT } from "../src/routing/cost";
+import {
+  formatDistance,
+  formatDuration,
+  type Maneuver,
+} from "../src/routing/directions";
 import type { NavProgress } from "../src/routing/nav-progress";
 import LocationField from "./location-field";
 
@@ -39,17 +44,21 @@ interface RoutePanelProps {
   status: "idle" | "loading" | "ready" | "error";
   errorMessage: string | null;
   summary: {
-    lengthMeters: number;
-    walkSeconds: number;
+    walkMeters: number; // walking-only distance; the mileage shown excludes any ferry crossing
+    travelSeconds: number;
     coverFraction: number;
   } | null;
   treeWeight: number;
+  ferryWeight: number;
+  allowFerries: boolean;
   directions: Maneuver[] | null;
   progress: NavProgress | null; // live position along the route, or null when off-route/unlocated
   directionsOpen: boolean;
   collapseCrossings: boolean; // hide linear street crossings in the maneuver list
   minimized: boolean; // shrunk to the slim peek bar
   onTreeWeight: (weight: number) => void;
+  onFerryWeight: (weight: number) => void;
+  onAllowFerries: (allow: boolean) => void;
   onStartSelect: (result: GeocodeResult) => void;
   onDestSelect: (result: GeocodeResult) => void;
   onStartClear: () => void;
@@ -65,15 +74,19 @@ interface RoutePanelProps {
 
 const METERS_PER_MILE = 1609.344;
 
-function summarize(summary: {
-  lengthMeters: number;
-  walkSeconds: number;
-  coverFraction: number;
-}): string {
-  const miles = summary.lengthMeters / METERS_PER_MILE;
-  const minutes = Math.max(1, Math.round(summary.walkSeconds / 60));
+function summarize(
+  summary: {
+    walkMeters: number;
+    travelSeconds: number;
+    coverFraction: number;
+  },
+  hasFerry: boolean,
+): string {
+  const miles = summary.walkMeters / METERS_PER_MILE;
+  const minutes = Math.max(1, Math.round(summary.travelSeconds / 60));
   const shaded = Math.round(summary.coverFraction * 100);
-  return `${miles.toFixed(1)} mi · ${minutes} min · ${shaded}% shaded`;
+  const base = `${miles.toFixed(1)} mi · ${minutes} min · ${shaded}% shaded`;
+  return hasFerry ? `${base} · ferry` : base;
 }
 
 function maneuverIcon(maneuver: Maneuver) {
@@ -83,6 +96,9 @@ function maneuverIcon(maneuver: Maneuver) {
   }
   if (maneuver.kind === "arrive") {
     return <MdFlag {...props} />;
+  }
+  if (maneuver.kind === "ferry") {
+    return <MdDirectionsBoat {...props} />;
   }
   if (maneuver.kind === "continue") {
     return <MdArrowUpward {...props} />;
@@ -118,12 +134,16 @@ export default function RoutePanel({
   errorMessage,
   summary,
   treeWeight,
+  ferryWeight,
+  allowFerries,
   directions,
   progress,
   directionsOpen,
   collapseCrossings,
   minimized,
   onTreeWeight,
+  onFerryWeight,
+  onAllowFerries,
   onStartSelect,
   onDestSelect,
   onStartClear,
@@ -145,8 +165,11 @@ export default function RoutePanel({
     }
   }, [nextIndex]);
 
-  // The slider is a 0..100 track over the [0, MAX_TREE_WEIGHT] weight range.
+  // Each slider is a 0..100 track over its [0, MAX_*_WEIGHT] weight range.
   const slider = Math.round((treeWeight / MAX_TREE_WEIGHT) * 100);
+  const ferrySlider = Math.round((ferryWeight / MAX_FERRY_WEIGHT) * 100);
+  const hasFerry =
+    directions?.some((maneuver) => maneuver.kind === "ferry") ?? false;
   const pickHint =
     pickTarget === "start"
       ? "Tap the map to set your start"
@@ -192,7 +215,7 @@ export default function RoutePanel({
           ) : (
             <span className="min-w-0 flex-1 truncate text-sm font-semibold text-slate-800 dark:text-slate-100">
               {status === "ready" && summary
-                ? summarize(summary)
+                ? summarize(summary, hasFerry)
                 : "Walking directions"}
             </span>
           )}
@@ -213,6 +236,19 @@ export default function RoutePanel({
             Walking directions
           </p>
           <div className="flex items-center gap-1">
+            <button
+              type="button"
+              onClick={() => onAllowFerries(!allowFerries)}
+              aria-label="Allow ferries"
+              aria-pressed={allowFerries}
+              className={`-m-1 grid h-8 w-8 place-items-center rounded-full hover:bg-slate-100 dark:hover:bg-slate-700 ${
+                allowFerries
+                  ? "text-blue-600 dark:text-blue-400"
+                  : "text-slate-400"
+              }`}
+            >
+              <MdDirectionsBoat />
+            </button>
             <button
               type="button"
               onClick={onToggleMinimize}
@@ -294,6 +330,37 @@ export default function RoutePanel({
           />
         </label>
 
+        <div className="mt-4">
+          {/* Ferries are toggled from the header boat icon; this slider only matters when they are
+              allowed, so it greys out and stops responding when the toggle is off. */}
+          <label
+            className={`block ${allowFerries ? "" : "pointer-events-none opacity-40"}`}
+          >
+            <span className="flex items-center justify-between text-xs font-medium text-slate-500 dark:text-slate-400">
+              Prefer ferries
+              <PiBoatFill
+                className="h-3.5 w-3.5 text-blue-600 dark:text-blue-400"
+                aria-hidden="true"
+              />
+            </span>
+            <input
+              type="range"
+              min={0}
+              max={100}
+              value={ferrySlider}
+              disabled={!allowFerries}
+              onChange={(event) =>
+                onFerryWeight(
+                  (Number.parseInt(event.target.value, 10) / 100) *
+                    MAX_FERRY_WEIGHT,
+                )
+              }
+              aria-label="Prefer ferries"
+              className="mt-1.5 w-full accent-blue-600"
+            />
+          </label>
+        </div>
+
         {needsStart ? (
           <p className="mt-3 text-center text-xs text-slate-400 dark:text-slate-500">
             Set a start point or wait for your location to load
@@ -308,7 +375,7 @@ export default function RoutePanel({
         ) : null}
         {status === "ready" && summary ? (
           <p className="mt-3 text-sm font-semibold text-slate-800 dark:text-slate-100">
-            {summarize(summary)}
+            {summarize(summary, hasFerry)}
           </p>
         ) : null}
         {status === "error" && errorMessage ? (
@@ -350,20 +417,24 @@ export default function RoutePanel({
                       <li
                         key={`${maneuver.kind}-${maneuver.stepRange[0]}-${maneuver.stepRange[1]}`}
                         ref={isNext ? highlightRef : null}
-                        className={`flex items-start gap-3 rounded-lg px-2 py-1.5 ${
+                        className={`flex items-center gap-3 rounded-lg px-2 py-1.5 ${
                           isNext
                             ? "bg-brand-100 font-medium dark:bg-brand-500/25"
                             : ""
                         } ${isPassed ? "opacity-50" : ""}`}
                       >
-                        <span className="mt-0.5 grid h-7 w-7 shrink-0 place-items-center rounded-full bg-brand-50 text-brand-600 dark:bg-brand-500/15 dark:text-brand-300">
+                        <span className="grid h-7 w-7 shrink-0 place-items-center rounded-full bg-brand-50 text-brand-600 dark:bg-brand-500/15 dark:text-brand-300">
                           {maneuverIcon(maneuver)}
                         </span>
                         <span className="min-w-0 flex-1 text-sm text-slate-700 dark:text-slate-200">
                           {maneuver.text}
                         </span>
-                        {maneuver.lengthMeters > 0 ? (
-                          <span className="mt-0.5 shrink-0 text-xs font-medium text-slate-400 dark:text-slate-500">
+                        {maneuver.kind === "ferry" ? (
+                          <span className="shrink-0 text-xs font-medium text-slate-400 dark:text-slate-500">
+                            {formatDuration(maneuver.durationSeconds ?? 0)}
+                          </span>
+                        ) : maneuver.lengthMeters > 0 ? (
+                          <span className="shrink-0 text-xs font-medium text-slate-400 dark:text-slate-500">
                             {formatDistance(maneuver.lengthMeters)}
                           </span>
                         ) : null}

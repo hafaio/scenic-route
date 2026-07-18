@@ -12,6 +12,8 @@ fetches. None of these files is ever served to a browser. Layouts are documented
 | `land/nyc.bin` | shoreline-clipped borough boundaries | NYC borough boundaries (`gthc-hcne`) |
 | `canopy/nyc.bin` | measured 2017 LiDAR tree-canopy polygons — the cover source | NYC OTI / NYC Parks |
 | `paths/nyc.bin` | OSM pedestrian/park ways (footway, path, greenway, steps…) and park drives (roads closed to through motor traffic), with the canopy cover at every vertex | **OpenStreetMap** |
+| `ferries/nyc.bin` | the time-independent ferry graph (stops, crossings, per-segment crossing+wait time and drawing geometry) — OSM- and canopy-independent | NYC DOT Staten Island Ferry GTFS + NYC Ferry (Hornblower) GTFS |
+| `ferries/siferry-gtfs.zip`, `ferries/nycferry-gtfs.zip` | the two raw GTFS feeds, frozen so a later time-of-day pass can re-derive from the exact feeds a build read | NYC DOT + NYC Ferry (Hornblower) |
 
 All of these are tracked in **Git LFS** (see `.gitattributes`).
 
@@ -30,6 +32,13 @@ folds in OSM `natural=tree` points alongside the NYC ForMS census, so the same O
 
 The rendered map is a different matter. Tiles and street chunks are *Produced Works*, which ODbL
 covers with attribution alone — which the app gives, in the Leaflet attribution control.
+
+The **ferry** sources are not from OSM. The **Staten Island Ferry** feed is NYC DOT's, published on
+NYC Open Data terms (Local Law 11 of 2012, no usage restriction). The **NYC Ferry** feed (operated
+by Hornblower for NYCEDC, served through Connexionz) ships with **no explicit licence** in the feed —
+it is a public GTFS feed published for consumption by transit apps; there is no share-alike clause,
+and the app attributes "NYC Ferry" as a courtesy. `ferries/nyc.bin` mixes the two, so it inherits
+neither OSM's ODbL nor any restriction.
 
 Everything else here comes from **NYC Open Data**, which carries no usage restrictions (Local Law
 11 of 2012); attribution is a courtesy rather than an obligation, and the app gives it anyway.

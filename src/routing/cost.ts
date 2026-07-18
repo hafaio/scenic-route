@@ -11,15 +11,23 @@
 // collapses — and the fix is to switch to a lexicographic (unshaded, distance) cost, whose distance
 // tiebreak handles the free edge (see scratchpad/lexico-analysis.md).
 
-import type { RoutingGraph } from "./graph";
+import { edgeKind, type RoutingGraph } from "./graph";
 
 export const WALK_METERS_PER_SECOND = 1.4;
 
 // w must stay <= 1: the floor 1 - w*maxCover goes negative past w = 1/maxCover (~1.07 today), and a
-// negative edge cost breaks Dijkstra/A*. The slider spans [0, 1] and rests at the top — w = 1 is the
-// clean "minimise unshaded metres" point.
+// negative edge cost breaks Dijkstra/A*. The slider spans [0, 1] (w = 1 is the clean "minimise
+// unshaded metres" point) and defaults a little below the top, for a mild shade bias by default.
 export const MAX_TREE_WEIGHT = 1;
-export const DEFAULT_TREE_WEIGHT = 1;
+export const DEFAULT_TREE_WEIGHT = 0.8;
+
+// The ferry weight discounts a ferry's crossing time the way the tree weight discounts a sunny
+// metre: at 0 a ferry costs its full duration, at 1 it costs FERRY_FLOOR of it (never free, so the
+// search cannot loop a ferry for a heuristic credit). The slider spans [0, 1] but defaults low — a
+// stronger default over-favours ferries and yields odd detour routes.
+export const MAX_FERRY_WEIGHT = 1;
+export const DEFAULT_FERRY_WEIGHT = 0.1;
+export const FERRY_FLOOR = 1e-3;
 
 // A cover gap (0..255) at or under this reads as "too close to call" (~5% cover) — the threshold
 // Phase 3 directions use before bothering to name a greener side.
@@ -46,4 +54,84 @@ export function edgeMultiplier(
 // the graph's true minimum, it is also the tightest such coefficient.
 export function minMultiplier(graph: RoutingGraph, treeWeight: number): number {
   return 1 - treeWeight * graph.maxCover;
+}
+
+// The undiscounted travel time of an edge: a ferry's baked crossing-plus-wait seconds, or a walked
+// edge's length over walking speed. This is the ETA unit — the reported trip time sums it.
+export function rawSeconds(graph: RoutingGraph, edge: number): number {
+  if (edgeKind(graph, edge) === "ferry") {
+    return graph.edgeDurationSeconds[edge];
+  } else {
+    return graph.edgeLength[edge] / WALK_METERS_PER_SECOND;
+  }
+}
+
+// Cost is effective seconds: raw time times a clipped discount. A ferry discounts by the ferry
+// weight (unusable when ferries are barred); every other kind by the tree multiplier. No edge is
+// both a ferry and shaded (ferries carry cover 0), so the general product of multipliers collapses
+// to this one kind branch; a future biking mode adds a third element to that product.
+export function effSeconds(
+  graph: RoutingGraph,
+  edge: number,
+  treeWeight: number,
+  ferryWeight: number,
+  allowFerries: boolean,
+): number {
+  if (edgeKind(graph, edge) === "ferry") {
+    if (!allowFerries) {
+      return Number.POSITIVE_INFINITY;
+    } else {
+      return (
+        graph.edgeDurationSeconds[edge] * Math.max(FERRY_FLOOR, 1 - ferryWeight)
+      );
+    }
+  } else {
+    return (
+      (graph.edgeLength[edge] / WALK_METERS_PER_SECOND) *
+      edgeMultiplier(graph, edge, treeWeight)
+    );
+  }
+}
+
+// The least seconds a walked metre can cost — the greenest edge's multiplier over walking speed.
+// The A* heuristic scales straight-line distance by this: a lower bound on remaining walking time.
+export function walkSecondsCoeff(
+  graph: RoutingGraph,
+  treeWeight: number,
+): number {
+  return minMultiplier(graph, treeWeight) / WALK_METERS_PER_SECOND;
+}
+
+// The most seconds a route can save by riding ferries instead of walking their spans, bounded to
+// the two best ferries. Per ferry, shortcut = max(0, walk-time of its span - its effective time);
+// summing the two largest covers any route using <= 2 ferries (every realistic NYC ferry OD, up to
+// Staten Island -> Governors Island). Subtracting it from the walking heuristic keeps A* admissible
+// without letting a many-ferry fantasy path make the estimate exceed the truth. Zero when ferries
+// are barred or the graph has none. Costs one pass over the ~36 ferry edges, run once per search.
+export function ferryCredit(
+  graph: RoutingGraph,
+  treeWeight: number,
+  ferryWeight: number,
+  allowFerries: boolean,
+): number {
+  if (!allowFerries) {
+    return 0;
+  }
+  const coeff = walkSecondsCoeff(graph, treeWeight);
+  let bestShortcut = 0;
+  let secondShortcut = 0;
+  for (const edge of graph.ferryEdges) {
+    const shortcut = Math.max(
+      0,
+      coeff * graph.edgeLength[edge] -
+        effSeconds(graph, edge, treeWeight, ferryWeight, allowFerries),
+    );
+    if (shortcut > bestShortcut) {
+      secondShortcut = bestShortcut;
+      bestShortcut = shortcut;
+    } else if (shortcut > secondShortcut) {
+      secondShortcut = shortcut;
+    }
+  }
+  return bestShortcut + secondShortcut;
 }

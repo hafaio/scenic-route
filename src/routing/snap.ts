@@ -54,10 +54,11 @@ export function buildSnapIndex(graph: RoutingGraph): SnapIndex {
   const buckets = new Map<number, number[]>();
   const cursor = { offset: 0 };
   for (let edge = 0; edge < graph.edgeCount; edge++) {
-    // You never start a walk mid-crosswalk or on a corner link, so those kinds — the only ones
-    // without geometry — are left out of the index entirely.
+    // You never start a walk mid-crosswalk, on a corner link, or aboard a ferry, so those kinds are
+    // left out of the index entirely — the geometry-less ones (crossings, links, straight ferries)
+    // would also have no polyline to index.
     const kind = edgeKind(graph, edge);
-    if (kind === "crossing" || kind === "link") {
+    if (kind === "crossing" || kind === "link" || kind === "ferry") {
       continue;
     }
     cursor.offset = graph.edgeGeomOffset[edge];
