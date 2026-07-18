@@ -1,6 +1,6 @@
-// OpenStreetMap via Overpass: the walking paths and the natural=tree points that supplement the
-// ForMS street-tree census, plus the shared request helper and polygon-ring type the rest of the
-// ingest builds on. See scripts/README.md.
+// OpenStreetMap via Overpass: the walking and park-drive network and the natural=tree points that
+// supplement the ForMS street-tree census, plus the shared request helper and polygon-ring type
+// the rest of the ingest builds on. See scripts/README.md.
 
 import { cached } from "./cache";
 import type { Coord } from "./socrata";
@@ -114,16 +114,38 @@ export interface PathWay {
   points: Coord[];
 }
 
-// Decision 1 of the park-paths plan (scripts/README.md, "PATH v1"). footway/path/pedestrian/
-// steps are the core walking net; cycleway brings the greenways (a bike-only segment carries
-// foot=no and drops out); bridleway is the Central Park bridle path; track is park maintenance
-// roads. footway=sidewalk|crossing|traffic_island are excluded — GRPH derives those from CSCL,
-// and ingesting OSM's would double the sidewalk network. area=yes (plazas) is not an edge;
-// access/foot no|private and indoor=yes are not walkable.
-const PATH_FILTER =
+// Shared exclusions on every path clause: plazas (area=yes) are not edges, indoor ways are not
+// the outdoor network, and anything barred to pedestrians (foot no|private) is not walkable.
+const WALKABLE = '["area"!="yes"]["indoor"!="yes"]["foot"!~"^(no|private)$"]';
+
+// The core walking net: dedicated foot and park ways. footway/path/pedestrian/steps are the
+// pedestrian core; cycleway brings the greenways (a bike-only segment carries foot=no and drops
+// out); bridleway is Central Park's bridle path; track is park maintenance roads. Bridge and
+// tunnel promenades ride in here already — the East River bridges' paths are footway/cycleway.
+// footway=sidewalk|crossing|traffic_island are excluded: GRPH derives those from CSCL, and
+// ingesting OSM's would double the sidewalk network. access no|private is not walkable.
+const FOOT_WAYS =
   'way["highway"~"^(footway|path|pedestrian|steps|cycleway|bridleway|track)$"]' +
-  '["footway"!~"^(sidewalk|crossing|traffic_island)$"]' +
-  '["area"!="yes"]["access"!~"^(no|private)$"]["foot"!~"^(no|private)$"]["indoor"!="yes"]';
+  '["footway"!~"^(sidewalk|crossing|traffic_island)$"]["access"!~"^(no|private)$"]' +
+  WALKABLE;
+
+// Park drives: a road open on foot but closed to through motor traffic — Central Park's East /
+// West / Terrace Drives, Prospect Park's loop. The signal is motor_vehicle no|private on an
+// ordinary road class; service=driveway and its kin are the private stubs to leave out. A merely
+// private road (motor_vehicle=private) must also carry an affirmative pedestrian signal — a
+// foot=yes|designated grant, or a name — so gated driveways lacking one stay out. Whatever leaks
+// through and coincides with a real street is later deduped against CSCL by the graph conflation.
+const DRIVE_ROAD =
+  '["highway"~"^(unclassified|service|residential|tertiary|living_street)$"]' +
+  '["service"!~"^(driveway|parking_aisle|alley|drive-through|emergency_access)$"]';
+const DRIVE_CLAUSES = [
+  `way["motor_vehicle"="no"]${DRIVE_ROAD}${WALKABLE}`,
+  `way["motor_vehicle"="private"]["foot"~"^(yes|designated)$"]${DRIVE_ROAD}${WALKABLE}`,
+  `way["motor_vehicle"="private"]["name"]${DRIVE_ROAD}${WALKABLE}`,
+];
+
+// Unioned in Overpass, which returns each matching way once even where the clauses overlap.
+const PATH_CLAUSES = [FOOT_WAYS, ...DRIVE_CLAUSES];
 
 function pathsQuery(
   south: number,
@@ -132,7 +154,8 @@ function pathsQuery(
   east: number,
 ): string {
   const box = `${south},${west},${north},${east}`;
-  return `[out:json][timeout:${QUERY_TIMEOUT_SECONDS}];(${PATH_FILTER}(${box}););out geom;`;
+  const union = PATH_CLAUSES.map((clause) => `${clause}(${box});`).join("");
+  return `[out:json][timeout:${QUERY_TIMEOUT_SECONDS}];(${union});out geom;`;
 }
 
 // present-and-not-"no": a bridge/tunnel tag is a structure unless it explicitly says "no".

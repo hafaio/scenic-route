@@ -216,7 +216,7 @@ in its own band.
 | streets | NYC CSCL street centerline, Socrata `inkn-q76z` | `rw_type` in 1, 5, 6, 7, 10 = street, boardwalk, path/trail, step street, alley, plus pedestrian bridges/tunnels (3, 4) where `nonped != 'V'` |
 | land | NYC borough boundaries (water areas excluded), Socrata `gthc-hcne` | the population the cover distribution is taken over, and the clip that drops New Jersey |
 | canopy | NYC's 2017 LiDAR tree canopy, ArcGIS `TreeCanopy2017_Simplified_1ft` | the *measured* canopy footprint the cover field is blurred from, a committed source, magic `CNPY` — feeds the density blobs and, through them, routing; see below |
-| paths | OSM pedestrian/park ways (`highway` footway/path/pedestrian/steps/cycleway/bridleway/track), via Overpass | the park and greenway network CSCL lacks; a separate committed source, magic `PATH` — see below and "Binary layouts" |
+| paths | OSM pedestrian/park ways (footway/path/pedestrian/steps/cycleway/bridleway/track) plus park drives (roads closed to through motor traffic), via Overpass | the park, greenway and car-free-drive network CSCL lacks; a separate committed source, magic `PATH` — see below and "Binary layouts" |
 
 Only walkable road types are kept. Highways, ramps, driveways, ferry routes, u-turns and
 non-physical segments are not part of the network a person walks. Bridges and tunnels come in
@@ -270,19 +270,34 @@ committed network, `data/paths/nyc.bin`, magic `PATH`. Its byte layout is **STRT
 so `binfmt.rs` reads it with the same code (`read_paths`) and `tiler densities` samples it with
 the same loop; only a few record fields are reinterpreted (see "Binary layouts").
 
-The Overpass filter (decision 1 of the park-paths plan) keeps the walking net and nothing else:
+The Overpass filter is a union of two kinds of clause: the walking net, and park drives.
+
+The **walking net** is the dedicated foot and park ways:
 
     way["highway"~"^(footway|path|pedestrian|steps|cycleway|bridleway|track)$"]
-       ["footway"!~"^(sidewalk|crossing|traffic_island)$"]
-       ["area"!="yes"]["access"!~"^(no|private)$"]["foot"!~"^(no|private)$"]["indoor"!="yes"]
+       ["footway"!~"^(sidewalk|crossing|traffic_island)$"]["access"!~"^(no|private)$"]
+       ["area"!="yes"]["indoor"!="yes"]["foot"!~"^(no|private)$"]
 
 `footway`/`path`/`pedestrian`/`steps` are the core; `cycleway` brings the greenways (a bike-only
 segment carries `foot=no` and drops out); `bridleway` is the Central Park bridle path; `track` is
-park maintenance road. **`footway=sidewalk`/`crossing`/`traffic_island` are excluded** — GRPH
-already derives sidewalks and crossings from CSCL, and ingesting OSM's would double the network;
-`area=yes` (plazas) is not an edge; `access`/`foot` `no`/`private` and `indoor=yes` are not
-walkable. `highway=service` is left out wholesale (driveways and parking aisles; CSCL's rw_type 10
-already carries the walkable alleys). The ways are land-clipped against the borough polygons — a
+park maintenance road. Bridge and tunnel promenades already ride in here — the East River bridges'
+paths are `footway`/`cycleway`, so Brooklyn/Manhattan/Williamsburg/Queensboro are captured (the
+Verrazzano is not: every one of its ways is `highway=motorway`, `foot=no`, `bicycle=no` — there is
+no shared-use path on it in OSM). **`footway=sidewalk`/`crossing`/`traffic_island` are excluded** —
+GRPH already derives sidewalks and crossings from CSCL, and ingesting OSM's would double the
+network; `area=yes` (plazas) is not an edge; `access`/`foot` `no`/`private` and `indoor=yes` are
+not walkable.
+
+**Park drives** are roads open on foot but closed to through motor traffic — Central Park's East /
+West / Terrace Drives, Prospect Park's loop. The signal is `motor_vehicle`=`no`|`private` on an
+ordinary road class (`unclassified`/`service`/`residential`/`tertiary`/`living_street`), minus
+`service`=`driveway` and its kin (the private stubs). A merely-`private` road must also carry an
+affirmative pedestrian signal — a `foot`=`yes`|`designated` grant, or a `name` — so gated driveways
+lacking one stay out. This is why `highway=service` is not excluded wholesale: West Drive is a
+`service` road. Whatever still leaks through and coincides with a real street is deduped against
+CSCL by the graph conflation, so double-counting a named residential block is self-correcting.
+
+The ways are land-clipped against the borough polygons — a
 way is kept if its midpoint or either endpoint is on land, which drops the New Jersey and
 Westchester spill the bounding box reaches — densified to 25 m, degenerate ways under a metre
 dropped, and their names **uppercased** so the client's prettifier renders "BOW BRIDGE" as "Bow

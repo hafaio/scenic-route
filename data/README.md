@@ -11,7 +11,7 @@ fetches. None of these files is ever served to a browser. Layouts are documented
 | `streets/nyc.bin` | the walkable street network, with the canopy cover at every vertex | NYC CSCL street centerline (`inkn-q76z`) |
 | `land/nyc.bin` | shoreline-clipped borough boundaries | NYC borough boundaries (`gthc-hcne`) |
 | `canopy/nyc.bin` | measured 2017 LiDAR tree-canopy polygons — the cover source | NYC OTI / NYC Parks |
-| `paths/nyc.bin` | OSM pedestrian/park ways (footway, path, greenway, steps…), with the canopy cover at every vertex | **OpenStreetMap** |
+| `paths/nyc.bin` | OSM pedestrian/park ways (footway, path, greenway, steps…) and park drives (roads closed to through motor traffic), with the canopy cover at every vertex | **OpenStreetMap** |
 
 All of these are tracked in **Git LFS** (see `.gitattributes`).
 
