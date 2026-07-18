@@ -54,7 +54,6 @@ interface RoutePanelProps {
   directions: Maneuver[] | null;
   progress: NavProgress | null; // live position along the route, or null when off-route/unlocated
   directionsOpen: boolean;
-  collapseCrossings: boolean; // hide linear street crossings in the maneuver list
   minimized: boolean; // shrunk to the slim peek bar
   onTreeWeight: (weight: number) => void;
   onFerryWeight: (weight: number) => void;
@@ -67,7 +66,6 @@ interface RoutePanelProps {
   onArmStart: () => void;
   onArmDest: () => void;
   onToggleDirections: () => void;
-  onToggleCollapse: () => void;
   onToggleMinimize: () => void;
   onClose: () => void;
 }
@@ -139,7 +137,6 @@ export default function RoutePanel({
   directions,
   progress,
   directionsOpen,
-  collapseCrossings,
   minimized,
   onTreeWeight,
   onFerryWeight,
@@ -152,7 +149,6 @@ export default function RoutePanel({
   onArmStart,
   onArmDest,
   onToggleDirections,
-  onToggleCollapse,
   onToggleMinimize,
   onClose,
 }: RoutePanelProps) {
@@ -396,53 +392,41 @@ export default function RoutePanel({
               {directionsOpen ? "Hide directions" : "Get directions"}
             </button>
             {directionsOpen ? (
-              <>
-                <button
-                  type="button"
-                  onClick={onToggleCollapse}
-                  aria-pressed={!collapseCrossings}
-                  className="mt-2 text-xs font-medium text-brand-600 hover:underline dark:text-brand-400"
-                >
-                  {collapseCrossings
-                    ? "Show every crossing"
-                    : "Hide street crossings"}
-                </button>
-                <ol className="mt-2 max-h-[45vh] space-y-1 overflow-y-auto pb-[env(safe-area-inset-bottom)]">
-                  {directions.map((maneuver, index) => {
-                    const isNext =
-                      progress !== null && index === progress.nextManeuver;
-                    const isPassed =
-                      progress !== null && index < progress.currentManeuver;
-                    return (
-                      <li
-                        key={`${maneuver.kind}-${maneuver.stepRange[0]}-${maneuver.stepRange[1]}`}
-                        ref={isNext ? highlightRef : null}
-                        className={`flex items-center gap-3 rounded-lg px-2 py-1.5 ${
-                          isNext
-                            ? "bg-brand-100 font-medium dark:bg-brand-500/25"
-                            : ""
-                        } ${isPassed ? "opacity-50" : ""}`}
-                      >
-                        <span className="grid h-7 w-7 shrink-0 place-items-center rounded-full bg-brand-50 text-brand-600 dark:bg-brand-500/15 dark:text-brand-300">
-                          {maneuverIcon(maneuver)}
+              <ol className="mt-2 max-h-[45vh] space-y-1 overflow-y-auto pb-[env(safe-area-inset-bottom)]">
+                {directions.map((maneuver, index) => {
+                  const isNext =
+                    progress !== null && index === progress.nextManeuver;
+                  const isPassed =
+                    progress !== null && index < progress.currentManeuver;
+                  return (
+                    <li
+                      key={`${maneuver.kind}-${maneuver.stepRange[0]}-${maneuver.stepRange[1]}`}
+                      ref={isNext ? highlightRef : null}
+                      className={`flex items-center gap-3 rounded-lg px-2 py-1.5 ${
+                        isNext
+                          ? "bg-brand-100 font-medium dark:bg-brand-500/25"
+                          : ""
+                      } ${isPassed ? "opacity-50" : ""}`}
+                    >
+                      <span className="grid h-7 w-7 shrink-0 place-items-center rounded-full bg-brand-50 text-brand-600 dark:bg-brand-500/15 dark:text-brand-300">
+                        {maneuverIcon(maneuver)}
+                      </span>
+                      <span className="min-w-0 flex-1 text-sm text-slate-700 dark:text-slate-200">
+                        {maneuver.text}
+                      </span>
+                      {maneuver.kind === "ferry" ? (
+                        <span className="shrink-0 text-xs font-medium text-slate-400 dark:text-slate-500">
+                          {formatDuration(maneuver.durationSeconds ?? 0)}
                         </span>
-                        <span className="min-w-0 flex-1 text-sm text-slate-700 dark:text-slate-200">
-                          {maneuver.text}
+                      ) : maneuver.lengthMeters > 0 ? (
+                        <span className="shrink-0 text-xs font-medium text-slate-400 dark:text-slate-500">
+                          {formatDistance(maneuver.lengthMeters)}
                         </span>
-                        {maneuver.kind === "ferry" ? (
-                          <span className="shrink-0 text-xs font-medium text-slate-400 dark:text-slate-500">
-                            {formatDuration(maneuver.durationSeconds ?? 0)}
-                          </span>
-                        ) : maneuver.lengthMeters > 0 ? (
-                          <span className="shrink-0 text-xs font-medium text-slate-400 dark:text-slate-500">
-                            {formatDistance(maneuver.lengthMeters)}
-                          </span>
-                        ) : null}
-                      </li>
-                    );
-                  })}
-                </ol>
-              </>
+                      ) : null}
+                    </li>
+                  );
+                })}
+              </ol>
             ) : null}
           </>
         ) : null}
