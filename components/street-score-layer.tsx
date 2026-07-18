@@ -360,6 +360,12 @@ export default function StreetScoreLayer() {
         minZoom: MIN_ZOOM,
         maxZoom: MAX_ZOOM,
         zIndex: Z_INDEX,
+        // Each tile is a canvas drawn by projecting every street vertex and building Path2D
+        // strokes — far too heavy to redo as a pinch crosses tile boundaries. Defer all tile
+        // creation to when the gesture settles, and keep a wider ring so panning after a zoom
+        // doesn't immediately re-draw.
+        updateWhenZooming: false,
+        keepBuffer: 4,
         attribution: `<a href="${city.streets.sourceUrl}" target="_blank" rel="noreferrer">${city.streets.attribution}</a>`,
       });
     });

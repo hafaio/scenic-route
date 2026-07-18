@@ -32,6 +32,8 @@ export default function CanopyLayer() {
           minNativeZoom={MIN_NATIVE_ZOOM}
           maxNativeZoom={MAX_NATIVE_ZOOM}
           maxZoom={20}
+          updateWhenZooming={false}
+          keepBuffer={4}
           zIndex={Z_INDEX}
           attribution={`<a href="${canopy?.sourceUrl}" target="_blank" rel="noreferrer">${canopy?.attribution}</a>`}
         />
