@@ -2,7 +2,8 @@
 
 import dynamic from "next/dynamic";
 import type { ReactNode } from "react";
-import { PiTreeFill } from "react-icons/pi";
+import { PiTreeFill, PiTreeStructureFill } from "react-icons/pi";
+import TreeLegend from "../../components/tree-legend";
 
 // The Leaflet layer components touch `window` at import, so they load only in the browser —
 // the same ssr:false isolation the map itself uses. That also lets the layers control import
@@ -14,14 +15,18 @@ const StreetScoreLayer = dynamic(
 const CanopyLayer = dynamic(() => import("../../components/canopy-layer"), {
   ssr: false,
 });
+const GenusLayer = dynamic(() => import("../../components/genus-layer"), {
+  ssr: false,
+});
 
-export type OverlayId = "canopy";
+export type OverlayId = "canopy" | "genus";
 
 export interface OverlayDef {
   id: OverlayId;
   label: string; // menu text
   icon: ReactNode; // menu glyph; inherits the row's text colour
   render: () => ReactNode; // the Leaflet layer(s) this overlay mounts on the map
+  legend?: ReactNode; // floating key shown while this overlay is active
 }
 
 // The single source of truth for the overlay switcher: this ordered array drives both the
@@ -39,6 +44,13 @@ export const OVERLAYS: readonly OverlayDef[] = [
         <StreetScoreLayer />
       </>
     ),
+  },
+  {
+    id: "genus",
+    label: "Tree genus",
+    icon: <PiTreeStructureFill className="h-4 w-4" aria-hidden="true" />,
+    render: () => <GenusLayer />,
+    legend: <TreeLegend />,
   },
 ];
 

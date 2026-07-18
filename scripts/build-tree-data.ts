@@ -121,12 +121,30 @@ const STREET_HEADER_BYTES = 64;
 const STREET_RECORD_BYTES = 24;
 const STREET_SIDES = 2; // the density blob carries both sidewalks of every vertex, left then right
 const UNNAMED_ID = 0xffff; // the segment's name id when CSCL carries no label — measured zero for NYC
-const TREE_FORMAT = 2; // v2 carries a crown-radius byte per tree; v1 was points only
+const TREE_FORMAT = 3; // v3 adds a genus byte per tree; v2 added the crown byte, v1 was points only
 const WOODLAND_FORMAT = 1;
 const LAND_FORMAT = 1;
 const CANOPY_FORMAT = 1; // the measured 2017 LiDAR canopy, WOOD's polygon layout under magic CNPY
 
 const BROAD_SIGMA_METERS = 70; // neighbourhood leafiness (the tree-KDE fill pyramid, Phase 2)
+const TOP_GENUS_COUNT = 11; // the genera given their own id 0..10; the rest share id 11 ("Other")
+const OTHER_GENUS_ID = TOP_GENUS_COUNT; // 12: tail genera, unknown genus, and every OSM tree
+// The legend's common names for the expected top-12 genera; a selected genus not here falls back
+// to its own name, so a shift in the ranks stays legible rather than blank.
+const GENUS_COMMON_NAMES: Record<string, string> = {
+  Quercus: "Oak",
+  Acer: "Maple",
+  Platanus: "London planetree",
+  Gleditsia: "Honeylocust",
+  Pyrus: "Callery pear",
+  Tilia: "Linden",
+  Prunus: "Cherry",
+  Zelkova: "Zelkova",
+  Fraxinus: "Ash",
+  Ginkgo: "Ginkgo",
+  Ulmus: "Elm",
+  Styphnolobium: "Pagoda tree",
+};
 // The isotropic blur the canopy field is rendered and reported through: closed woods stay dark,
 // lawns stay blank, and a park edge feathers over ~2σ ≈ 30 m. The land cover distribution reads
 // this kernel, so meanCoverOverLand is the map's own mean.
@@ -223,14 +241,17 @@ function crownRadiusMeters(dbhInches: number): number {
 // Sizes every tree's crown from its dbh, clamping the nonsense outliers and imputing the median
 // for the trees that carry no dbh — reporting how many of each so the model's inputs are not
 // silent. The crown then rides with the point through the encoder.
-function crownTrees(trees: readonly Tree[]): {
+function crownTrees(
+  trees: readonly Tree[],
+  genusId: ReadonlyMap<string, number>,
+): {
   crowned: CrownedTree[];
   clamped: number;
   imputed: number;
 } {
   let clamped = 0;
   let imputed = 0;
-  const crowned = trees.map(({ lat, lng, dbhInches }) => {
+  const crowned = trees.map(({ lat, lng, dbhInches, genus }) => {
     let dbh = dbhInches;
     if (dbh <= 0) {
       dbh = MEDIAN_DBH_INCHES;
@@ -239,7 +260,12 @@ function crownTrees(trees: readonly Tree[]): {
       dbh = MAX_DBH_INCHES;
       clamped += 1;
     }
-    return { lat, lng, crownRadiusM: crownRadiusMeters(dbh) };
+    return {
+      lat,
+      lng,
+      crownRadiusM: crownRadiusMeters(dbh),
+      genusId: genusId.get(genus) ?? OTHER_GENUS_ID,
+    };
   });
   return { crowned, clamped, imputed };
 }
@@ -332,7 +358,12 @@ function crownOsmTrees(
       crownRadiusM = imputedCrownRadiusM;
       imputedCrowns += 1;
     }
-    crowned.push({ lat: tree.lat, lng: tree.lng, crownRadiusM });
+    crowned.push({
+      lat: tree.lat,
+      lng: tree.lng,
+      crownRadiusM,
+      genusId: OTHER_GENUS_ID, // OSM trees carry no genus; they all fall to Other
+    });
   }
   return { crowned, onLandCount, deduped, imputedCrowns };
 }
@@ -444,11 +475,13 @@ function buildNameTable(records: Named[]): string[] {
 }
 
 async function fetchNycStreets(): Promise<Segment[]> {
+  // `*` so a newly-read column is free after one refetch: the disk cache keys on the query, so
+  // narrowing $select would force a full re-page whenever a new column is wanted. StreetRow names
+  // only the columns toSegments reads.
   const rows = await fetchDataset<StreetRow>(
     "inkn-q76z",
     {
-      $select:
-        "the_geom,physicalid,rw_type,streetwidth,posted_speed,nonped,trafdir,stname_label",
+      $select: "*",
       $where:
         "rw_type in ('1','5','6','7','10') OR (rw_type in ('3','4') AND (nonped IS NULL OR nonped != 'V'))",
     },
@@ -511,9 +544,11 @@ function toPathSegments(
 // against, and so the OSM woodland the city's bounding box also catches in New Jersey and
 // Westchester is cut away.
 async function fetchNycLand(): Promise<Polygon[]> {
+  // `*` so a newly-read column is free after one refetch (see fetchNycStreets); BoroughRow reads
+  // only the_geom.
   const rows = await fetchDataset<BoroughRow>(
     "gthc-hcne",
-    { $select: "the_geom" },
+    { $select: "*" },
     NYC_BOROUGH_COUNT,
   );
   const polygons: Polygon[] = [];
@@ -913,9 +948,33 @@ async function ingest(): Promise<void> {
   );
   console.error(`${CITY.id}: fetching trees`);
   const trees = await fetchNycTrees();
-  const { crowned, clamped, imputed } = crownTrees(trees);
+
+  // The genus legend: tally the ForMS genera, take the 12 most abundant, and give each an id 0..11
+  // in descending-count order. Everything else — tail genera, unknown genus, and every OSM tree —
+  // maps to id 12 ("Other"). The map is threaded into crownTrees so each tree gets its genus byte.
+  const genusCounts = new Map<string, number>();
+  for (const tree of trees) {
+    if (tree.genus !== "") {
+      genusCounts.set(tree.genus, (genusCounts.get(tree.genus) ?? 0) + 1);
+    }
+  }
+  const topGenera = [...genusCounts.entries()]
+    .sort((left, right) => right[1] - left[1])
+    .slice(0, TOP_GENUS_COUNT);
+  const genusId = new Map(topGenera.map(([genus], index) => [genus, index]));
+  const genusTable = topGenera.map(([genus, count]) => ({
+    genus,
+    common: GENUS_COMMON_NAMES[genus] ?? genus,
+    count,
+  }));
+  const topGenusTotal = topGenera.reduce((sum, [, count]) => sum + count, 0);
+
+  const { crowned, clamped, imputed } = crownTrees(trees, genusId);
   console.error(
     `${CITY.id}: sized ${crowned.length} crowns (clamped ${clamped} trunks past ${MAX_DBH_INCHES} in, imputed ${imputed} missing dbh at ${MEDIAN_DBH_INCHES} in)`,
+  );
+  console.error(
+    `${CITY.id}: top ${genusTable.length} genera ${genusTable.map((entry) => `${entry.genus}:${entry.count}`).join(", ")}`,
   );
 
   // Supplement the ForMS census with the OSM trees: land-clipped, deduped against ForMS, crowned,
@@ -1052,6 +1111,11 @@ async function ingest(): Promise<void> {
     woodlandFloor: WOODLAND_FLOOR,
     woodlandFeatherMeters: WOODLAND_FEATHER_METERS,
     woodlandPlateau: WOODLAND_PLATEAU,
+    genus: {
+      table: genusTable,
+      // The ForMS tail and unknowns, plus every OSM tree — all the "Other" (id 11) points.
+      otherCount: trees.length - topGenusTotal + osm.crowned.length,
+    },
     density: distributionOf(estimate.landDensity),
     updated,
     attribution: CITY.fieldAttribution,
