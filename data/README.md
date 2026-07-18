@@ -7,13 +7,13 @@ fetches. None of these files is ever served to a browser. Layouts are documented
 
 | file | what | source |
 | --- | --- | --- |
-| `trees/nyc.bin` | 898,618 standing street trees | NYC ForMS "Forestry Tree Points" (`hn5i-inap`) |
-| `streets/nyc.bin` | the walkable street network, with the tree density at every vertex | NYC CSCL street centerline (`inkn-q76z`) |
+| `trees/nyc.bin` | 925,338 tree points (899,394 standing ForMS street trees + 25,944 OSM `natural=tree`), each with its crown and genus — the genus overlay | NYC ForMS "Forestry Tree Points" (`hn5i-inap`) + **OpenStreetMap** |
+| `streets/nyc.bin` | the walkable street network, with the canopy cover at every vertex | NYC CSCL street centerline (`inkn-q76z`) |
 | `land/nyc.bin` | shoreline-clipped borough boundaries | NYC borough boundaries (`gthc-hcne`) |
-| `woodland/nyc.bin` | `natural=wood` + `landuse=forest` polygons | **OpenStreetMap** |
-| `paths/nyc.bin` | OSM pedestrian/park ways (footway, path, greenway, steps…), with the tree density at every vertex | **OpenStreetMap** |
+| `canopy/nyc.bin` | measured 2017 LiDAR tree-canopy polygons — the cover source | NYC OTI / NYC Parks |
+| `paths/nyc.bin` | OSM pedestrian/park ways (footway, path, greenway, steps…), with the canopy cover at every vertex | **OpenStreetMap** |
 
-All five are tracked in **Git LFS** (see `.gitattributes`).
+All of these are tracked in **Git LFS** (see `.gitattributes`).
 
 > **`sl commit` does not run git-lfs clean filters.** It commits the raw multi-megabyte blob and
 > says nothing. Commit these with `git commit`, then `git lfs push --object-id origin <oid>`.
@@ -22,11 +22,11 @@ All five are tracked in **Git LFS** (see `.gitattributes`).
 
 The code in this repository is MIT. The data here is not all MIT, and the difference matters.
 
-**`woodland/nyc.bin` and `paths/nyc.bin` are derived from OpenStreetMap and are therefore licensed
-under the [ODbL 1.0](https://opendatacommons.org/licenses/odbl/1-0/)**, © OpenStreetMap
-contributors. Each is an extract of OSM geometry — a *Derivative Database* in ODbL's terms — so its
-share-alike clause applies to it: reuse it, and what you build from it stays open under the same
-terms.
+**`paths/nyc.bin` is derived from OpenStreetMap and is therefore licensed under the
+[ODbL 1.0](https://opendatacommons.org/licenses/odbl/1-0/)**, © OpenStreetMap contributors. It is an
+extract of OSM geometry — a *Derivative Database* in ODbL's terms — so its share-alike clause applies
+to it: reuse it, and what you build from it stays open under the same terms. `trees/nyc.bin` also
+folds in OSM `natural=tree` points alongside the NYC ForMS census, so the same ODbL terms reach it.
 
 The rendered map is a different matter. Tiles and street chunks are *Produced Works*, which ODbL
 covers with attribution alone — which the app gives, in the Leaflet attribution control.

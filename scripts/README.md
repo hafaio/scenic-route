@@ -14,18 +14,20 @@ automatically whenever an input is newer than the last run.
 
 ## Who does what: TypeScript fetches, Rust computes
 
-**All of the model math lives in `crates/tiler`**, a Rust binary with three subcommands. The
+**All of the model math lives in `crates/tiler`**, a Rust binary with five subcommands. The
 scripts fetch, encode and orchestrate; they compute nothing about trees.
 
 | | |
 | --- | --- |
 | `scripts/` | Socrata paging, the Overpass mirror rotation, the disk cache, the `.bin` encoders, the manifest, and the colour ramp |
-| `crates/tiler` | the crown-weighted kernel density estimate, the cover transform, the Monte-Carlo cover distribution, the sidewalk offsets and their cover, the woodland mask and feather, the tile pyramid, the PNGs, the street chunks, and the routing graph |
+| `crates/tiler` | the canopy convolution and the cover it yields, the sidewalk offsets and their cover, the Monte-Carlo cover distribution, the genus-dot overlay, the tile pyramids, the WebPs, the street chunks, and the routing graph |
 
 ```sh
-tiler densities --params <file.json>   # fills the streets file's density blob, in place
-tiler tiles --manifest … --ramp … --data … --tiles … --chunks …
-tiler graph --streets <in.bin> --out <out.bin>   # contracts STRT into the GRPH routing graph
+tiler densities --params <file.json>                          # fills the street & path density blobs, in place
+tiler canopy --manifest … --ramp … --data … --tiles …         # the LiDAR-canopy cover fill pyramid
+tiler genus  --manifest … --palette … --data … --tiles …      # the genus-dot raster pyramid
+tiler chunks --manifest … --data … --chunks … [--paths …]     # slices STRT (+PATH) into the client's street chunks
+tiler graph  --streets <in.bin> --out <out.bin> [--paths …]   # contracts STRT (+PATH) into the GRPH routing graph
 ```
 
 Both scripts shell out with `cargo run --release`, which no-ops once the binary is built, so
@@ -37,11 +39,13 @@ they would live in two languages and have to be kept in step. One home.
 
 Two things cross the boundary in the other direction, and both are deliberate:
 
-- **The manifest is the single source of the model constants** (σ_broad, σ_tight, the crown
-  allometry, the woodland floor, feather and plateau). `tiler tiles` reads them with serde
-  rather than redeclaring them. `tiler densities` runs before the manifest is finished — it is
-  what *reports* the cover distribution that goes into it — so the ingest passes it those
-  constants as arguments.
+- **The manifest carries the per-city structure the tiler reads with serde** — each city's
+  bounds and which layer files and overlays it has, which `tiler canopy`, `tiler genus` and
+  `tiler chunks` read. The numeric model constants (σ_fill, σ_tight, the sidewalk inset, the
+  cover sample count and seed) ride to `tiler densities` in its params JSON instead: densities
+  runs *before* the manifest is finished — it is what *reports* the cover distribution that goes
+  into it — so it cannot read them back from it. The crown allometry stays in the ingest, baked
+  into each tree's crown byte, so the tiler does geometry, not botany.
 - **The colour ramp stays in TypeScript** (`src/tree-cover/ramp.ts`), because the client's
   street layer imports the same module. That shared import is what guarantees the block fill
   and the street lines are one colour function. `build-tiles` evaluates it over the 256 density
@@ -50,61 +54,46 @@ Two things cross the boundary in the other direction, and both are deliberate:
 
 Because the estimator now sits *behind* the encoders, it reads the coordinates that actually
 ship: the cover at a street vertex is sampled at the quantized position in
-`data/streets/<id>.bin`, not at the raw source coordinate 0.05 m away, and the canopy mask is
-rasterized from the polygons in `data/woodland/<id>.bin` rather than from the floats they were
-rounded from.
+`data/streets/<id>.bin`, not at the raw source coordinate 0.05 m away, and the canopy the cover
+convolves is read from the polygons in `data/canopy/<id>.bin` rather than from the floats they
+were rounded from.
 
 ## The model
 
 The map shows **one quantity: the fraction of ground under tree canopy** — not a tree count and
-not a score per road. It lives in [0, 1] *by construction*, so there is nothing to clip and no
-saturation constant to fit. Both overlays are that same quantity, estimated at two scales from
-the same points, which is what lets them be read against each other.
+not a score per road. It is the **measured 2017 LiDAR tree canopy**, lightly blurred; it lives in
+[0, 1] *by construction*, so there is nothing to clip and no saturation constant to fit. Both
+overlays — the block fill and the street lines — are that same field at two scales, which is what
+lets them be read against each other, and the router walks on it too.
 
-**Why cover, not count.** Street trees are a *line*, not a field. Estimate an areal density with
-a kernel of width σ on that line and the estimate scales like 1/σ — the tighter you look, the
-denser it reads (σ = 70 m fill: ~12–30 trees/ha; a 20 m centreline kernel: ~39; an 8 m kernel at
-the sidewalk: ~64). Any kernel tight enough to resolve two sidewalks 14 m apart reads 2–3× the
-fill, so a count normalized by one saturation constant pinned every leafy street at maximum
-green: p70, p80 and p90 of the street distribution were all exactly 1.0, and you could not tell a
-nice street from a spectacular one. Cover has no such constant to saturate against.
+**Why a fraction, not a count.** A tree count has no natural ceiling, so turning it into a colour
+needs a saturation constant — and any constant tight enough to show a nice street pins a
+spectacular one at the same maximum green, because a leafy block already carries far more trees
+than the constant allows for. A covered fraction has none to saturate against: 40% under canopy is
+40%, and full green is kept for ground that is genuinely near-closed. And because the source is the
+*measured* LiDAR canopy — every tree the airborne scan saw, park and backyard included — the field
+carries no holes where a street-tree register would have them.
 
-**How.** Give every tree a crown disc of area `A_i = π·r_i²`, with `r_i` from its trunk diameter
-(the allometry, below). The **canopy-area index** at a point is the kernel density estimate with
-each tree weighted by its crown area instead of by 1 — crown area per unit ground area, which may
-exceed 1 where crowns overlap:
+**How.** The canopy is published as polygons (the `CNPY` source, below); treat them as a **0/1
+ground indicator** — a point is under canopy or it is not. Convolve that indicator with a
+normalized Gaussian and the value at a point is the Gaussian-weighted fraction of its
+neighbourhood that is wooded: a weighted average of 0s and 1s, so it is in [0, 1] with nothing to
+normalize against. The work happens in a local metre space with the city's bounding-box centre as
+the origin (one reference latitude for the whole city — across NYC's 0.42° of span that costs about
+0.7% in the east-west scale). The convolution is a Gauss quadrature: the indicator is rasterized
+onto a grid of nodes spaced σ/4 apart out to **±2.5σ** on each axis, and the covered nodes'
+weights — normalized to sum to one — are added up. No crowns and no tuning: the field *is* the
+measurement, blurred.
 
-    CAI_σ(p) = Σ_{i : d_i < 3σ}  exp(-d_i² / (2σ²)) · A_i  /  (2πσ² · (1 - e^{-4.5}))
+Two scales, the same field:
 
-and the covered fraction follows from the standard Boolean (Poisson) canopy model, which handles
-overlapping crowns without double-counting:
-
-    cover(p) = 1 − exp(−CAI(p))              // in [0, 1), monotone, never clips
-
-Working in a local metre space with the city's bounding-box centre as the origin (one reference
-latitude for the whole city — across NYC's 0.42° of span that costs about 0.7% in the east-west
-scale), `d_i` is the distance in metres. The kernel is truncated at 3σ and renormalized by
-`1 - e^{-4.5}` so it still integrates to one — so a tree's crown area is spread over the ground
-exactly, and the index is a true crown-per-ground fraction rather than one off by the truncated
-tail. The `1 − e^{−x}` is a plain `exp` once per pixel, not the tabulated kernel: a different
-domain, and cheap where it sits.
-
-Two scales, same points:
-
-- **broad** (σ = 70 m) — neighbourhood leafiness. This is the background fill.
-- **tight** — what a given *sidewalk* is actually lined with. Evaluated at both sidewalks of
-  every street vertex, from an oriented anisotropic kernel; see below.
-
-Because both are the same cover fraction at different scales, they are comparable without any
-shared-constant argument: a tree-lined street reads as a darker line on the green it sits in, a
-bare one as a pale gap through it. **Whether a tree across the road counts is no longer a σ we
-invented — it is decided by how big that tree actually is.** A mature London plane reaches over
-the road; a sapling does not.
+- **fill** (isotropic, σ = 15 m) — the block fill, the map's background green.
+- **street** — what a given *sidewalk* is lined with, from an oriented anisotropic kernel
+  evaluated at both sidewalks of every street vertex; see below.
 
 The mean cover over land is reported in the manifest (`meanCoverOverLand`), estimated over the
-same seeded million-point land sample that the fill's percentiles are drawn from. For NYC's
-street trees it lands at **~6–8%** — far below the ~22% all-sources canopy figure from LiDAR,
-exactly as it must, since ForMS is a street-tree register and carries no park or backyard trees.
+seeded million-point land sample the fill's percentiles are drawn from. For NYC it lands at
+**~22%** — the LiDAR all-canopy figure, as it must, since the field simply *is* that canopy.
 
 ### The streets: two sidewalks, and a kernel that knows which way the road runs
 
@@ -113,25 +102,20 @@ completely: a block with a full canopy on the north side and bare pavement on th
 one averaged line. So the street cover is sampled **twice per vertex**, once either side.
 
 The two sidewalks are only ~14 m apart, so telling them apart wants a kernel that is not too wide
-across the street; but a kernel tight in every direction makes the colour lurch from tree to tree
-along the road. The demands conflict only if the kernel is isotropic, so the street uses an
-**oriented anisotropic Gaussian**, aligned to the local street bearing θ:
+across the street; but a kernel tight in every direction makes the colour lurch from patch to
+patch along the road. The demands conflict only if the kernel is isotropic, so the street uses an
+**oriented anisotropic Gaussian**, aligned to the local street bearing θ — broad *along* the road
+so the line runs smooth, tight *across* it so the two sides stay distinct:
 
     u =  dx·cosθ + dy·sinθ                       // along the road,  σ = 15 m
-    v = -dx·sinθ + dy·cosθ                       // across it,       σ =  8 m
-    CAI(p) = Σ exp(-(u²/2σ_along² + v²/2σ_across²)) · A_i / (2π·σ_along·σ_across·(1 - e^-4.5))
+    v = -dx·sinθ + dy·cosθ                       // across it,       σ =  4 m
+    cover(p) = Σ_nodes  w(u) · w(v) · canopy(p + node)      // normalized weights, Σ w = 1
 
-truncated at 3σ in the *rotated* metric (`u²/σ_along² + v²/σ_across² < 9`), whose unit ellipse
-holds exactly the mass a 3σ disc does — so the **same** renormalization applies and the street
-index lands on the very same scale as the broad one.
-
-The across-street σ is **deliberately loose** (8 m, not the old 5 m). With the crown discs doing
-the physical work of reaching over the road, the kernel no longer has to separate the sides by
-brute tightness, and it *should not*: a 5 m σ_across is a hard cut in disguise. At the real
-geometry (a ~6.5 m half-offset, so the far sidewalk is ~13 m across) a same-size tree on the far
-side now contributes `exp(-13.1²/(2·8²)) = 0.26` of a near one — a genuine reach-over — against
-0.03 at σ_across = 5 m. It is still clearly near-dominated, and a *large* far tree, carrying a
-far larger crown area, can now legitimately colour the near sidewalk, which is the whole point.
+The same σ/4 quadrature as the fill, stretched to σ_along × σ_across and rotated to θ; it reaches
+±2.5σ on each axis, and because the weights are normalized the street value lands on the very same
+[0, 1] scale as the fill. The tight across-street σ (4 m) is what keeps a one-sided street honest:
+a park-bounding avenue holds its dark park side and its pale building side rather than blurring to
+their mean, which a wider kernel would.
 
 The **bearing** at a vertex is the central difference of its neighbours (one-sided at the ends);
 the geometry is densified to ≤ 25 m, so that is a good local tangent.
@@ -157,43 +141,56 @@ zooms in. It is never baked into the data.
 
 ### The allometry: trunk to crown
 
-ForMS carries `dbh` (trunk diameter at breast height, in whole inches) on 99.9% of standing
-trees. The crown radius each tree is weighted by comes from a **published** relation, not an
-invented one: **McPherson, van Doorn & Peper 2016, *Urban Tree Database and Allometric
-Equations*, USDA Forest Service GTR-PSW-253** (data archive RDS-2016-0005). Its "NoEast"
+The cover field is measured, not inferred from the tree points — but the points are still drawn,
+as the **genus overlay** (`tiler genus`, `components/tree-dots-layer.tsx`): each tree a disc
+coloured by its genus and *sized by its crown*. That crown radius comes from a **published**
+relation, not an invented one: **McPherson, van Doorn & Peper 2016, *Urban Tree Database and
+Allometric Equations*, USDA Forest Service GTR-PSW-253** (data archive RDS-2016-0005). Its "NoEast"
 reference city is Queens, so this is literally NYC street-tree data; the **London planetree**
 log-log curve — the city's most abundant street species, R² 0.94 — stands in for every species,
 since the ingest does not read species. With dbh in cm and diameter in metres,
 
     crown_diameter = exp( -0.752 + 2.414·ln(ln(dbh_cm + 1)) + 0.00988 )
-    crown_radius   = crown_diameter / 2 ;  crown_area = π·crown_radius²
+    crown_radius   = crown_diameter / 2
 
-At the NYC median dbh (~10 in) this is an ~8.4 m crown (~55 m²); at the mean (~11.7 in) ~9.4 m
-(~70 m²). The constant is **not** fitted to hit a canopy target — the mean cover it produces is
-reported and read against reality, not tuned to it.
+At the NYC median dbh (~10 in) this is an ~8.4 m crown; at the mean (~11.7 in) ~9.4 m. The curve
+is **not** fitted to any target — it only sets how big a tree's dot draws, so a mature London
+plane reads as a broad disc and a sapling as a speck.
 
 Two inputs are cleaned before the curve sees them, in `scripts/build-tree-data.ts`:
 
 - **Outliers.** `max(dbh)` is 2427 in, nonsense. Trunks past **60 in** (already a very large
   street tree) are clamped there; ~200 rows are affected. The ingest logs the count.
-- **Missing dbh.** ~734 trees carry `dbh = 0`. They are given the **median (9 in)** rather than
+- **Missing dbh.** ~740 trees carry `dbh = 0`. They are given the **median (9 in)** rather than
   a zero crown. The ingest logs that count too, and the manifest records both.
 
 The allometry lives only in the ingest: it writes a **crown-radius byte per tree** (decimetres,
-0–25.5 m) into the `TREE` file, and Rust reads the radius and squares it. So the model constants
-sit in one place, and the estimator does geometry, not botany.
+0–25.5 m) into the `TREE` file, and `tiler genus` reads it back as the radius to draw each dot at
+— clamped to [1.5, 16] px so a distant crown still shows and a lone giant does not swell into a
+blob. So the model constant sits in one place, and the renderer does geometry, not botany.
 
 ### Anti-aliasing the fill
 
-A pixel is an area, not a point. What the fill wants is the field averaged over the pixel's
-footprint, and a box of side *p* has variance `p²/12`, so the kernel is widened to absorb it:
+A canopy polygon has a hard edge — 1 under it, 0 outside — and the fill pyramid (`tiler canopy`)
+turns those polygons into a smooth green in two steps. First the polygon fill is **supersampled
+4×**: each pixel is rasterized as a 4 × 4 block of sub-pixels and averaged back down, so a pixel
+half under canopy reads 0.5 rather than a jagged 0/1 boundary. Then the fraction is **convolved
+with an isotropic Gaussian at σ = 15 m** — the same blur, at the same σ, the sidewalk sampler
+uses — because raw polygon coverage is too concentrated to read as shade (a hard 1 under a crown,
+0 in the gap between two) and because shade physically reaches a little past a crown's edge.
 
-    σ_eff = sqrt(σ_broad² + p² / 12)
+The blur runs in pixel space, so its width is `σ_pixels = 15 m / (ground metres per pixel at that
+tile's zoom and latitude)`. That shrinks as the map zooms out: at z15 (`p` ≈ 3.6 m) it is ~4 px
+and does real work; at z9 (`p` ≈ 232 m) it is ~0.06 px, below the **half-pixel floor** at which it
+is skipped entirely — a 15 m kernel has nothing left to say through a 232 m pixel, and the
+supersample average already *is* the field there. So the fill antialiases at every zoom but only
+blurs where the blur is visible.
 
-with `p` the ground metres per pixel at that tile's zoom and latitude. At z15 (`p` ≈ 3.6 m)
-this is nothing; at z9 (`p` ≈ 232 m) it is most of the kernel, and without it the tile would
-be point-sampling a 70 m field through a 232 m pixel and aliasing badly. This applies only to
-the fill — a sidewalk is sampled at a point, and gets the street kernel unwidened.
+Because the kernel truncates at 3σ, a tile blurred at its own edge would lose mass and seam against
+its neighbour, so each tile is rendered with a **halo** of ⌈3·σ_pixels⌉ pixels of surrounding
+canopy that is cropped off afterwards. The result is clipped to the land mask so no green bleeds
+over water. A sidewalk, sampled at a single point rather than over a raster, is convolved directly
+and needs neither the supersample nor the halo.
 
 ### The cover distribution, by Monte Carlo
 
@@ -202,9 +199,10 @@ manifest still records **what the cover actually is** over the city, so the ramp
 against a real distribution and the mean can be sanity-checked. It is measured from a million
 points drawn uniformly over the city's *ground area*: longitude uniform, latitude uniform in
 `sin(lat)` (a degree of latitude at the top of the city is not worth more than one at the
-bottom), rejected against the land polygons, and the broad cover evaluated exactly at each one
-that lands. The draw is seeded from a fixed constant, so the reported mean does not churn between
-runs; the manifest records the sample count, the seed, the mean and the full set of percentiles.
+bottom), rejected against the land polygons, and the isotropic fill cover (σ = 15 m) evaluated
+exactly at each one that lands. The draw is seeded from a fixed constant, so the reported mean does
+not churn between runs; the manifest records the sample count, the seed, the mean and the full set
+of percentiles.
 
 Point-in-polygon against a shoreline of ~200k edges, a million times over, needs an index:
 every edge is bucketed into the horizontal bands it spans, and a query only tests the edges
@@ -217,8 +215,7 @@ in its own band.
 | trees | NYC ForMS "Forestry Tree Points", Socrata `hn5i-inap` | ~899k rows at `tpstructure='Full'` — standing trees only, no stumps or empty pits; `dbh` (trunk inches) is read to size each crown |
 | streets | NYC CSCL street centerline, Socrata `inkn-q76z` | `rw_type` in 1, 5, 6, 7, 10 = street, boardwalk, path/trail, step street, alley, plus pedestrian bridges/tunnels (3, 4) where `nonped != 'V'` |
 | land | NYC borough boundaries (water areas excluded), Socrata `gthc-hcne` | the population the cover distribution is taken over, and the clip that drops New Jersey |
-| woodland | OSM `natural=wood` + `landuse=forest`, via Overpass | see below |
-| canopy | NYC's 2017 LiDAR tree canopy, ArcGIS `TreeCanopy2017_Simplified_1ft` | the *measured* canopy footprint, a second committed source, magic `CNPY` — display-only, never in routing; see below |
+| canopy | NYC's 2017 LiDAR tree canopy, ArcGIS `TreeCanopy2017_Simplified_1ft` | the *measured* canopy footprint the cover field is blurred from, a committed source, magic `CNPY` — feeds the density blobs and, through them, routing; see below |
 | paths | OSM pedestrian/park ways (`highway` footway/path/pedestrian/steps/cycleway/bridleway/track), via Overpass | the park and greenway network CSCL lacks; a separate committed source, magic `PATH` — see below and "Binary layouts" |
 
 Only walkable road types are kept. Highways, ramps, driveways, ferry routes, u-turns and
@@ -227,73 +224,37 @@ only when they carry pedestrians (`rw_type` 3/4 with `nonped != 'V'`) — that i
 East River crossings — and every kept row is flagged (record byte 23) so a router can drop the
 vehicular-only streets the overlay still draws.
 
-### Why woodland is a separate source
-
-**ForMS is a street/managed-tree register. It contains no woodland at all.** The Central
-Park Ramble is *zero* trees in it, not sparse ones; Van Cortlandt's forest is the same.
-Ingesting only ForMS therefore paints exactly the leafiest ground in the city as bare.
-
-So OSM `natural=wood` and `landuse=forest` polygons are filled into a canopy mask, and inside
-that mask the cover is raised to a floor. A forest is simply **~90% canopy cover** — a
-measurement, not an arbitrary constant, and the old normalized-density hack is gone: the floor is
-a cover value now, applied after the `1 − e^{−CAI}` transform, because the mask carries no crowns
-of its own. Its edge is feathered (Gaussian, σ = 30 m) so a park boundary is not a hard cut, and
-because a blurred mask sags in the middle of anything narrower than the blur — OSM maps a wood
-like the Ramble as a scatter of small polygons around its paths and clearings — the feather is
-divided by a plateau constant (0.5) and clamped, so ground the blur calls half-covered is fully
-wooded and only the outer half of the kernel tapers:
-
-    feather = gaussian_30m(woodland ∧ land)
-    floor   = 0.90 * min(1, feather / 0.5)
-    value   = max( 1 − e^{−CAI}, floor )
-
-The **woodland ∧ land** is what keeps New Jersey's forests and Westchester's out: the
-bounding box an Overpass query needs runs straight over both. This is the one place a raster
-survives, and it is a *mask*, not a field — its resolution bounds how sharply a park edge can
-be drawn and nothing else, so it costs the tree kernel nothing. The tiler rasterizes it per
-tile at the tile's own resolution, into a haloed buffer so the feather has its mass at the
-edges; the ingest rasterizes it once over the city at 20 m to floor the street vertices.
-
-`leisure=park` is **deliberately excluded**. A park is not canopy: the Great Lawn, the
-ballfields and the Reservoir are all `leisure=park` and none of them is a tree.
-
-Overpass is the flakiest thing in the pipeline — the query rotates over three mirrors, backs
-off in minutes rather than seconds, and must send a `User-Agent` (an anonymous client gets a
-429 on sight). Everything is cached, so this is a one-time cost.
-
 ### The measured LiDAR canopy (`CNPY` v1)
 
-The field's cover is a point-KDE inferred from the ForMS street-tree register, and the woodland
-mask above is the only thing that lifts a park interior — the register carries almost no park
-trees, so a densely wooded Central Park box (~5 ForMS trees) would otherwise read bare. The *fix
-by measurement* is NYC's **2017 LiDAR tree canopy**: NYC Parks publishes it as ~1.08 M simplified
-polygons on a public ArcGIS feature service
-(`TreeCanopy2017_Simplified_1ft`), which `scripts/canopy.ts` pages (2000 rows a page, ordered by
-`OBJECTID` so the `resultOffset` paging is stable) into lon/lat rings, each page disk-cached like
-every other source read. It is land-clipped against the borough polygons (the same ring-midpoint
-test the paths use, though the service is NYC-only and spills essentially nothing), and encoded to
-`data/canopy/<id>.bin` in **exactly the `WOOD` polygon byte-format** — the shared `encodePolygons`
-encoder, under its own magic **`CNPY`** so a canopy blob self-identifies rather than masquerading
-as woodland. `binfmt.rs::read_polygons` is already generic over the magic, so nothing in the tiler
-changes to read it.
+The map's cover is the **measured 2017 LiDAR tree canopy**, lightly blurred — not a point-KDE
+inferred from the ForMS register. NYC Parks publishes the canopy as ~1.08 M simplified polygons on
+a public ArcGIS feature service (`TreeCanopy2017_Simplified_1ft`), which `scripts/canopy.ts` pages
+(2000 rows a page, ordered by `OBJECTID` so the `resultOffset` paging is stable) into lon/lat
+rings, each page disk-cached like every other source read. It is land-clipped against the borough
+polygons (the same ring-midpoint test the paths use, though the service is NYC-only and spills
+essentially nothing), and encoded to `data/canopy/<id>.bin` in the **shared polygon byte-format**
+(the `LAND` polygon header and varint-delta rings, see "Binary layouts") — the shared
+`encodePolygons` encoder, under its own magic **`CNPY`** so a canopy blob self-identifies rather
+than masquerading as another polygon source. `binfmt.rs::read_polygons` is already generic over the
+magic, so nothing in the tiler changes to read it.
 
-This is a **second, independent cover source**, kept deliberately separate from the point-KDE so
-the two can be read against each other: the point-KDE reads pale in the Ramble (3 ForMS points),
-where the LiDAR polygons blanket it. It is **display-only** — it is *never* fed to `tiler graph`
-or the cost, carries no density blob, and does not enter the field the streets and paths sample.
-Its area on land is ~a fifth of the city (the published all-canopy figure is ~22%), recorded in
-the manifest as `field.canopy.squareKm`.
+This is the **cover source itself**: `tiler densities` convolves the canopy indicator with a
+Gaussian and samples it at each sidewalk offset, so the byte in every street and path density blob
+— and, through them, `tiler graph` and the routing cost — is the blurred measured canopy. There is
+no separate point-KDE lifting park interiors; the ForMS points now drive only the genus overlay
+(see `crates/tiler/src/genus.rs`), not the cover field. Its area on land is ~a fifth of the city (the
+published all-canopy figure is ~22%), recorded in the manifest as `field.canopy.squareKm`.
 
-`tiler canopy` renders it into its **own tile pyramid**, `public/tiles/canopy/{z}/{x}/{y}.png`,
-over the same z9–z15 plan the tree-cover fill uses and coloured by the **same ramp LUT** — canopy
-is a covered fraction in [0, 1), the very quantity the ramp is defined over. A coarse grid over
-the ~1.08 M polygons (CSR-style, like the tree index) hands each tile only the polygons it
-touches; each pixel's canopy fraction is a 4× supersampled even-odd polygon fill averaged back
-down (so multipolygon holes punch through and edges antialias), clipped to the land mask so
-nothing bleeds over water. A tile with no canopy is the shared blank PNG. The client draws it with
-`components/canopy-layer.tsx`, a bare `TileLayer` with no street-line companion — canopy is areal,
-not per-street. `build-street-tiles.ts` runs it after the `tiles` pass; the pyramid is gitignored
-build output like the rest of `public/tiles/`, rebuilt by `bun dev`/`bun export`.
+`tiler canopy` renders it into the cover **fill pyramid**, `public/tiles/canopy/{z}/{x}/{y}.webp`,
+over the z9–z15 plan and coloured by the **same ramp LUT** — canopy is a covered fraction in
+[0, 1), the very quantity the ramp is defined over. A coarse grid over the ~1.08 M polygons
+(CSR-style, like the tree index) hands each tile only the polygons it touches; each pixel's canopy
+fraction is a 4× supersampled even-odd polygon fill averaged back down (so multipolygon holes
+punch through and edges antialias), clipped to the land mask so nothing bleeds over water. A tile
+with no canopy is the shared blank WebP. The client draws it with `components/canopy-layer.tsx`, a
+bare `TileLayer` with no street-line companion — canopy is areal, not per-street.
+`build-street-tiles.ts` runs it after the `chunks` pass; the pyramid is gitignored build output
+like the rest of `public/tiles/`, rebuilt by `bun dev`/`bun export`.
 
 **License:** NYC-public (NYC OTI / NYC Parks, 2017 LiDAR) — no ODbL entanglement, unlike the OSM
 sources. Attribution: "Tree canopy © NYC OTI / NYC Parks (2017 LiDAR)". The authoritative 6-inch
@@ -325,13 +286,19 @@ already carries the walkable alleys). The ways are land-clipped against the boro
 way is kept if its midpoint or either endpoint is on land, which drops the New Jersey and
 Westchester spill the bounding box reaches — densified to 25 m, degenerate ways under a metre
 dropped, and their names **uppercased** so the client's prettifier renders "BOW BRIDGE" as "Bow
-Bridge". `tiler densities` fills their density blob from the same tree field the streets use: a
+Bridge". `tiler densities` fills their density blob from the same canopy field the streets use: a
 path is its own walking surface, so it is sampled once on its line and that one value stands for
 both sides.
 
-This is **Phase 1** of the park-paths plan: the source exists and carries honest cover, but it is
-not yet in the routing graph or the tiles (`tiler graph` and `tiler tiles` do not read `PATH`
-this phase, so their output is unchanged). Conflation into GRPH is Phase 2.
+The paths carry honest cover and are conflated into the network: `tiler graph --paths` reads them
+into the GRPH routing graph and `tiler chunks --paths` appends their segments to the street chunks
+the client draws, so a route can follow a greenway or step street rather than only the CSCL
+centerlines.
+
+Overpass — which fetches both the paths and the OSM trees — is the flakiest thing in the pipeline:
+the query rotates over three mirrors, backs off in minutes rather than seconds, and must send a
+`User-Agent` (an anonymous client gets a 429 on sight). Everything is cached, so this is a one-time
+cost.
 
 ## The colour scale
 
@@ -374,24 +341,26 @@ read last time — not a fresher copy it did not ask for.
 
 ### Where the tile build spends its time
 
-The pyramid is ~3,800 tiles and ~247 M pixels, and a 3σ disc at σ_broad holds ~160 trees, so
-a full build is on the order of 36 billion kernel evaluations. Three things keep that
-tractable and all are load-bearing:
+The pyramid is a few thousand webp tiles across z9–z15, rendered across the rayon pool a tile
+at a time. Two rasterizers dominate, and both lean on a spatial index so a tile touches only the
+sources that can reach it, and both send a tile with nothing in it straight to the one shared
+blank webp:
 
-- **An exp lookup table.** The kernel only ever wants `t = d²/2σ²` on `[0, 4.5)`, so it is
-  tabulated over exactly that range; the nearest entry is within 3e-4 of the exact weight.
-- **A uniform 60 m index over the trees**, flat arrays, CSR-style. A query scans only the
-  buckets its 3σ disc reaches; an empty neighbourhood is *exactly* zero, and a tile with no
-  tree within 3σ of its bounding box and no woodland in it goes straight to the shared blank
-  PNG.
-- **A kernel loop that neither branches nor stalls.** A row of buckets overshoots the disc by
-  a fifth of its area, so the 3σ test is a coin flip the branch predictor loses: the table
-  index is masked into range instead, which turns the test into a select. And the weights are
-  summed into four accumulators rather than one, because a single one serializes the whole
-  scan on the latency of an add — three times what the rest of a tree costs.
+- **The canopy fill (`tiler canopy`).** The ~1.08 M LiDAR polygons are far too many to test per
+  tile, so a uniform grid over their bounding boxes (CSR-style) hands each tile only the few
+  hundred whose box overlaps its haloed extent. Those are rasterized even-odd at **4× supersample**
+  and averaged back down for edge anti-aliasing, then an **isotropic Gaussian** (σ_fill in pixel
+  space, skipped below half a pixel, haloed by 3σ so tiles do not seam) grades the shade out past
+  a crown before the land clip and the ramp.
+- **The genus dots (`tiler genus`).** A uniform **60 m index over the trees**, flat arrays,
+  CSR-style: a tile scans only the buckets a dot can reach, and a tile with no tree whose disc
+  spills into it goes straight to the blank webp. Each tree is a single anti-aliased disc, so this
+  pass is cheap next to the polygon fill.
 
-The build prints its own breakdown — `kde`, `mask`, `png`, `write`, `other`, as core-seconds
-summed across the rayon pool.
+`tiler densities` is the third heavy pass: it convolves the same canopy indicator at both
+sidewalks of every street and path vertex, and draws a seeded million-point land sample for the
+reported distribution (below). Each pass prints its own tile, painted-tile and byte counts as it
+finishes.
 
 ## Committing the binaries: `sl` will silently corrupt them
 
@@ -404,7 +373,7 @@ never shipped to the client — only the tiles and chunks rendered from them are
 Commit these files with git, and push the objects explicitly:
 
 ```sh
-git commit -- data/trees/nyc.bin data/woodland/nyc.bin data/land/nyc.bin data/streets/nyc.bin
+git commit -- data/trees/nyc.bin data/canopy/nyc.bin data/land/nyc.bin data/streets/nyc.bin data/paths/nyc.bin
 git lfs push --object-id origin <oid>
 ```
 
@@ -453,30 +422,27 @@ genus-coloured dots (`public/tiles/genus`, z9–14, the zoomed-out view), and th
 served at `public/trees/<id>.bin` so the client (`components/tree-dots-layer.tsx`) draws the dots
 live as crisp canvas discs from z15 up, where an upscaled raster tile would blur.
 
-### `data/woodland/<id>.bin` — the canopy mask, magic `WOOD`
+### `data/land/<id>.bin` — the land mask, magic `LAND`
 
-`count` polygons, each:
+This is the canonical **polygon layout**, shared by every polygon source (`LAND`, `CNPY`) under its
+own magic. After the 40-byte header, `count` polygons, each:
 
 - `u16` ring count
 - per ring: `u32` vertex count, then that many (longitude, latitude) varint-delta pairs, the
   first from the origin and the rest from the previous vertex
 
 Filled even-odd, so a multipolygon's inner rings punch holes; the polygons are filled one at
-a time, so two overlapping woods do not cancel each other out.
-
-### `data/land/<id>.bin` — the land mask, magic `LAND`
-
-Identical layout to `WOOD`. Needed at ingest (the population the cover distribution is taken
-over) and at tile time (the AND against the woodland), so it is committed rather than fused into
-anything.
+a time, so two overlapping polygons do not cancel each other out. The land mask is needed at
+ingest (the population the cover distribution is taken over) and at tile time (the clip that keeps
+canopy from bleeding over water), so it is committed rather than fused into anything.
 
 ### `data/canopy/<id>.bin` — the measured LiDAR canopy, magic `CNPY` (v1)
 
-**Byte-for-byte the `WOOD` polygon layout** — the same 40-byte header, then `count` even-odd
-polygons of varint-delta rings — under its own magic so it self-identifies. It is NYC's 2017 LiDAR
-tree-canopy footprint (~1.08 M polygons, land-clipped), a *measured* cover source distinct from the
-point-KDE the field infers. Read with the generic `read_polygons(path, "CNPY", 1)`; **display-only**
-— nothing in `tiler graph`, `tiler densities` or the streets/paths field reads it.
+The **`LAND` polygon layout** exactly — the same 40-byte header, then `count` even-odd polygons of
+varint-delta rings — under its own magic so it self-identifies. It is NYC's 2017 LiDAR tree-canopy
+footprint (~1.08 M polygons, land-clipped), the *measured* field the cover is blurred from. Read
+with the generic `read_polygons(path, "CNPY", 1)`; `tiler densities` convolves and samples it to
+fill the streets/paths density blobs, and `tiler canopy` rasterizes it into the fill pyramid.
 
 ### `data/streets/<id>.bin` — the network, magic `STRT` (v5)
 
@@ -560,9 +526,10 @@ meaning of a few record fields differ. Per 24-byte record:
 
 Kind 6/7 both drive `half_offset_meters` to 0, so — exactly like a boardwalk or a CSCL path — the
 one sample taken on the centerline fills both density bytes of the vertex. The name blob holds the
-ways' **uppercased** `name` tags, deduped and sorted, in PATH's own index space (the graph will
-concatenate it after the street names in Phase 2). This is a committed **ODbL** source: it is an
-extract of OSM geometry, so its share-alike terms follow it (see `data/README.md`).
+ways' **uppercased** `name` tags, deduped and sorted, in PATH's own index space; `tiler graph`
+concatenates them after the street names and offsets the path name-ids by the street name count.
+This is a committed **ODbL** source: it is an extract of OSM geometry, so its share-alike terms
+follow it (see `data/README.md`).
 
 ### `public/streets/{x}/{y}.bin` — the chunks (derived, gitignored)
 
@@ -571,7 +538,7 @@ touches; segments are short, so the few tiles it lands in beyond the ones it tru
 cost nothing and cannot leave a gap at a seam. Each chunk's origin is its own tile's
 north-west corner, which keeps the first delta of every segment small.
 
-When a city carries a PATH layer, `tiler tiles --paths …` appends the OSM path segments to the
+When a city carries a PATH layer, `tiler chunks --paths …` appends the OSM path segments to the
 same chunks, back to back with the streets. A path is a single centreline, so it lands with
 **half-offset 0** and its own sampled cover — the client draws an offset-0 segment as the one
 line it is, so no client change is needed and park paths appear as cover-coloured lines.
@@ -604,7 +571,14 @@ Decoded by `components/street-score-layer.tsx`, which applies the offset in *pix
 ### `public/routing/{id}.bin` — the routing graph, magic `GRPH` (v2, derived, gitignored)
 
 `tiler graph` contracts STRT into the graph the client routes on, then expands it into the edges a
-walker actually uses. Steps 1–7 are the v1 contraction: vehicular-only segments (`nonped='V'`, flag
+walker actually uses. When `--paths` is supplied it first **conflates** the OSM pedestrian/park
+network (`PATH`) into the CSCL edges (`conflate.rs`): the paths are deduped against CSCL, noded
+among themselves, welded at at-grade crossings, their dangling entrances snapped to the nearest
+street, and the CSCL splits applied — so a greenway or step street joins the routable network.
+Conflated edges carry the OSM flag (byte-23 bit3), and the pass reports `osmPathEdges`,
+`weldedVertices`, `entranceSnaps`, `osmTSplits`, `mergedNearNodes` and `droppedOsmIslands`.
+
+Steps 1–7 are the v1 contraction: vehicular-only segments (`nonped='V'`, flag
 bit 0) are dropped; endpoints are noded by exact quantized equality then near-misses within 1 m are
 union-found together; degree-2 shape joints are contracted where the two edges share a half-offset
 byte, GRPH flags **and street name** (a name change mid-block is kept, so a sidewalk edge never
@@ -672,7 +646,7 @@ can view them as typed arrays without copying):
 | 20 | u8 | cover, 0–255, this edge's own single value |
 | 21 | u8 | half-offset to the sidewalk, decimetres (sidewalk kind only; else 0) |
 | 22 | u8 | kind and side: bits 0–1 kind (0 sidewalk, 1 crossing, 2 link, 3 path); bits 2–4 side (0 none, 1 N, 2 E, 3 S, 4 W) |
-| 23 | u8 | flags: bit0 structure, bit1 steps, bit2 **geometry-right** (this sidewalk lies right of its stored geometry direction; clear = left) |
+| 23 | u8 | flags: bit0 structure, bit1 steps, bit2 **geometry-right** (this sidewalk lies right of its stored geometry direction; clear = left), bit3 **OSM** (this edge came from the conflated OSM path network) |
 
 7. **Name table**: `u32 count`, then (count+1) × u32 byte offsets into the following UTF-8 blob,
    then the blob. Only the names the kept edges reference, re-indexed; offsets make client access
@@ -694,18 +668,22 @@ of two cities that share a low-zoom tile are painted into the same buffer rather
 overwriting each other.
 
 What has to change is the ingest in `scripts/build-tree-data.ts`, which is currently one
-hard-coded `CITY` constant plus three NYC-specific fetchers. A new city needs:
+hard-coded `CITY` constant plus four NYC-specific fetchers. A new city needs:
 
-1. **A tree inventory** — points, ideally with a standing/removed flag and a trunk diameter to
-   size the crowns (without one, a city would need its own way to a crown radius). This is the
-   part with no standard: every city publishes its own.
-2. **A street centerline** — line geometry plus some road classification, so the non-walkable
+1. **A measured tree-canopy source** — polygons of the canopy footprint (NYC uses its 2017 LiDAR
+   canopy). This *is* the cover field: without it `tiler densities` has nothing to convolve and the
+   map has no cover at all.
+2. **A tree inventory** — points, ideally with a standing/removed flag and a trunk diameter to
+   size the crowns (without one, a city would need its own way to a crown radius). This feeds the
+   **genus overlay**, not the cover. It is the part with no standard: every city publishes its own.
+3. **A street centerline** — line geometry plus some road classification, so the non-walkable
    types can be dropped.
-3. **A land mask** — a polygon to take the cover distribution over and to clip the OSM woodland
-   against (otherwise a bounding-box Overpass query pulls in the neighbouring state's forests).
-4. Its expected row counts, which the Socrata reader uses as a floor to catch a page the
+4. **A land mask** — a polygon to take the cover distribution over and to clip the canopy and OSM
+   sources against (otherwise a bounding-box query pulls in the neighbouring state's canopy and
+   paths).
+5. Its expected row counts, which the Socrata reader uses as a floor to catch a page the
    server quietly cut short.
 
-The **woodland source already works anywhere** — Overpass is queried by bounding box, not by
-city. The estimator, the cover transform, the encoders and the tiler are all city-agnostic; only
-the three source fetchers, the crown allometry and the `CITY` constant are not.
+The **OSM sources already work anywhere** — Overpass is queried by bounding box, not by
+city. The estimator, the encoders and the tiler are all city-agnostic; only
+the source fetchers, the crown allometry and the `CITY` constant are not.

@@ -1,7 +1,6 @@
-//! The tree-cover model, end to end: the crown-weighted kernel density estimate, the cover
-//! transform, the Monte-Carlo cover distribution, the woodland mask, the tile pyramid and the
-//! street chunks. TypeScript fetches the sources, encodes the `.bin`s and owns the manifest and
-//! the colour ramp; everything numeric is here.
+//! The tree-cover model, end to end: the blurred measured-canopy cover field, the Monte-Carlo
+//! cover distribution, the tile pyramids and the street chunks. TypeScript fetches the sources,
+//! encodes the `.bin`s and owns the manifest and the colour ramp; everything numeric is here.
 //! See scripts/README.md.
 
 mod binfmt;
@@ -13,7 +12,6 @@ mod densities;
 mod genus;
 mod geometry;
 mod graph;
-mod kde;
 mod manifest;
 mod raster;
 mod sidewalks;

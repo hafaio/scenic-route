@@ -2,7 +2,7 @@
 //! of the road, so the field is sampled twice per vertex, once either side of the centreline —
 //! and no usable sidewalk dataset exists to sample it on. See scripts/README.md.
 
-use crate::kde::Bearing;
+use crate::geometry::Bearing;
 
 const METERS_PER_FOOT: f64 = 0.3048;
 const MEDIAN_WIDTH_FEET: f64 = 30.0; // what the 2% of streets carrying no width fall back to

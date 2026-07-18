@@ -22,9 +22,9 @@ use serde::{Deserialize, Serialize};
 use crate::Fallible;
 use crate::binfmt::{self, LAND_FORMAT};
 use crate::geometry::{
-    CoverScratch, PolygonGrid, PolygonIndex, PolygonSet, blurred_cover, flatten, round_half_up,
+    Bearing, CoverScratch, PolygonGrid, PolygonIndex, PolygonSet, Projection, blurred_cover,
+    flatten, reach_bounds, round_half_up,
 };
-use crate::kde::{Bearing, Projection, reach_bounds};
 use crate::manifest::{Bounds, Distribution};
 use crate::sidewalks;
 

@@ -8,7 +8,7 @@ use std::path::Path;
 use crate::Fallible;
 
 pub const TREE_FORMAT: u16 = 3; // v3 adds a genus byte per tree; v2 added the crown byte
-pub const CANOPY_FORMAT: u16 = 1; // the measured 2017 LiDAR canopy, WOOD's polygon layout under magic CNPY
+pub const CANOPY_FORMAT: u16 = 1; // the measured 2017 LiDAR canopy, the shared polygon layout under magic CNPY
 pub const LAND_FORMAT: u16 = 1;
 pub const STREET_FORMAT: u16 = 5;
 pub const PATH_FORMAT: u16 = 1; // OSM pedestrian/park ways: STRT v5's layout, magic "PATH"

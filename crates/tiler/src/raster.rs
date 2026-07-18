@@ -7,8 +7,7 @@ use std::collections::HashMap;
 
 use crate::Fallible;
 use crate::binfmt::Polygon;
-use crate::geometry;
-use crate::kde::Projection;
+use crate::geometry::{self, Projection};
 use crate::manifest::{Bounds, City};
 
 pub(crate) const TILE_SIZE: usize = 256;
