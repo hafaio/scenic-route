@@ -14,6 +14,7 @@ mod geometry;
 mod graph;
 mod manifest;
 mod raster;
+mod scenic;
 mod sidewalks;
 
 use std::collections::HashMap;
@@ -28,7 +29,7 @@ const USAGE: &str = "usage:
   tiler chunks --manifest <file.json> --data <dir> --chunks <dir> [--paths <file.bin>]
   tiler canopy --manifest <file.json> --ramp <file.bin> --data <dir> --tiles <dir>
   tiler genus --manifest <file.json> --palette <file.bin> --data <dir> --tiles <dir>
-  tiler graph --streets <file.bin> [--paths <file.bin>] [--ferries <file.bin>] --out <file.bin>
+  tiler graph --streets <file.bin> [--paths <file.bin>] [--ferries <file.bin>] [--landmarks <file.bin>] [--art <file.bin>] [--highways <file.bin>] --out <file.bin>
 ";
 
 fn flags(mut args: impl Iterator<Item = String>) -> Fallible<HashMap<String, String>> {
@@ -80,6 +81,9 @@ fn run() -> Fallible<()> {
             streets: path(&flags, "streets")?,
             paths: flags.get("paths").map(PathBuf::from),
             ferries: flags.get("ferries").map(PathBuf::from),
+            landmarks: flags.get("landmarks").map(PathBuf::from),
+            art: flags.get("art").map(PathBuf::from),
+            highways: flags.get("highways").map(PathBuf::from),
             out: path(&flags, "out")?,
         }),
         _ => Err(format!("unknown command \"{command}\"\n{USAGE}").into()),
