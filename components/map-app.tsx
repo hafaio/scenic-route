@@ -21,14 +21,19 @@ import {
 } from "../src/overlays/registry";
 import type { Pin, PinDraft } from "../src/pin";
 import {
+  DEFAULT_ART_WEIGHT,
   DEFAULT_FERRY_WEIGHT,
+  DEFAULT_HIGHWAY_WEIGHT,
+  DEFAULT_LANDMARK_WEIGHT,
   DEFAULT_TREE_WEIGHT,
   MAX_FERRY_WEIGHT,
   MAX_TREE_WEIGHT,
+  type RouteWeights,
 } from "../src/routing/cost";
 import { buildDirections } from "../src/routing/directions";
 import { loadGraph, type RoutingGraph } from "../src/routing/graph";
 import { navProgress } from "../src/routing/nav-progress";
+import { loadPois, type PoiSet, passedPois } from "../src/routing/pois";
 import { RouteCache } from "../src/routing/route-cache";
 import {
   type RouteResult,
@@ -68,9 +73,14 @@ type RouteState =
 const TREE_WEIGHT_KEY = "scenic-route:tree-weight";
 const FERRY_WEIGHT_KEY = "scenic-route:ferry-weight";
 const FERRY_ALLOW_KEY = "scenic-route:allow-ferries";
+const LANDMARK_WEIGHT_KEY = "scenic-route:landmark-weight";
+const ART_WEIGHT_KEY = "scenic-route:art-weight";
+const HIGHWAY_WEIGHT_KEY = "scenic-route:highway-weight";
 const OVERLAY_KEY = "scenic-route:overlay";
-const OVERLAY_OFF = "none"; // sentinel persisted for the "Off" (null) overlay choice
 const RESNAP_METERS = 25; // a followed location must drift this far before the route recomputes
+// How close to the route a POI must be to count as passed.
+const LANDMARK_PASS_METERS = 40;
+const ART_PASS_METERS = 40;
 
 // The graph and its snap index are fetched and built once, on first Directions use, and shared by
 // every recompute and the route layer's geometry lookups.
@@ -130,10 +140,11 @@ export default function MapApp() {
   const [logging, setLogging] = useState<boolean>(false);
   const [refreshing, setRefreshing] = useState<boolean>(false);
   const [following, setFollowing] = useState<boolean>(true);
-  // the overlay drawn over the basemap; the canopy cover is the only content a signed-out
-  // visitor has, so it starts on. Hydrated from localStorage below; null means all overlays hidden.
-  const [activeOverlay, setActiveOverlay] = useState<OverlayId | null>(
-    "canopy",
+  // The overlays drawn over the basemap, a freely-combinable set (tree genus is the one exception —
+  // it goes solo). The canopy cover is the only content a signed-out visitor has, so it starts on.
+  // Hydrated from localStorage below; an empty set hides every overlay.
+  const [activeOverlays, setActiveOverlays] = useState<ReadonlySet<OverlayId>>(
+    () => new Set<OverlayId>(["canopy"]),
   );
   const [signingIn, setSigningIn] = useState<boolean>(false);
   const [aboutOpen, setAboutOpen] = useState<boolean>(false);
@@ -159,8 +170,23 @@ export default function MapApp() {
   // localStorage below so a reload keeps the setting.
   const [ferryWeight, setFerryWeight] = useState<number>(DEFAULT_FERRY_WEIGHT);
   const [allowFerries, setAllowFerries] = useState<boolean>(true);
+  // The other scenic factors: landmark and public-art discounts and the highway/rail penalty. Held
+  // here at their defaults (their sliders land in a later pass), restored from localStorage below.
+  const [landmarkWeight, setLandmarkWeight] = useState<number>(
+    DEFAULT_LANDMARK_WEIGHT,
+  );
+  const [artWeight, setArtWeight] = useState<number>(DEFAULT_ART_WEIGHT);
+  const [highwayWeight, setHighwayWeight] = useState<number>(
+    DEFAULT_HIGHWAY_WEIGHT,
+  );
   // The decoded graph, kept so directions can be rebuilt from a route without a re-fetch.
   const [routingGraph, setRoutingGraph] = useState<RoutingGraph | null>(null);
+  // The landmark and public-art points, loaded once directions are in use, so the turn-by-turn can
+  // name the ones the route passes.
+  const [poiSets, setPoiSets] = useState<{
+    landmarks: PoiSet;
+    art: PoiSet;
+  } | null>(null);
   // The maneuver list toggles open below the summary; it collapses whenever the destination changes.
   const [directionsOpen, setDirectionsOpen] = useState<boolean>(false);
   // The panel can shrink to a slim peek bar so the map stays usable while navigating.
@@ -230,15 +256,29 @@ export default function MapApp() {
     }
   }, []);
 
-  // Restore the persisted overlay: the "Off" sentinel hides everything, a known id selects it,
-  // and anything stale (a persisted "trees" from before the canopy switch, or no value) leaves
-  // the canopy default.
+  useEffect(() => {
+    for (const [key, apply] of [
+      [LANDMARK_WEIGHT_KEY, setLandmarkWeight],
+      [ART_WEIGHT_KEY, setArtWeight],
+      [HIGHWAY_WEIGHT_KEY, setHighwayWeight],
+    ] as const) {
+      const stored = window.localStorage.getItem(key);
+      if (stored !== null) {
+        const parsed = Number.parseFloat(stored);
+        if (Number.isFinite(parsed)) {
+          apply(Math.min(1, Math.max(0, parsed)));
+        }
+      }
+    }
+  }, []);
+
+  // Restore the persisted overlays from the comma-separated id list; unknown ids (a stale "trees"
+  // from before the canopy switch) are dropped. A missing value leaves the canopy default; an empty
+  // string is a deliberate "all off".
   useEffect(() => {
     const stored = window.localStorage.getItem(OVERLAY_KEY);
-    if (stored === OVERLAY_OFF) {
-      setActiveOverlay(null);
-    } else if (stored !== null && isOverlayId(stored)) {
-      setActiveOverlay(stored);
+    if (stored !== null) {
+      setActiveOverlays(new Set(stored.split(",").filter(isOverlayId)));
     }
   }, []);
 
@@ -316,9 +356,30 @@ export default function MapApp() {
     setFollowing((on) => !on);
   }, []);
 
-  const handleSelectOverlay = useCallback((id: OverlayId | null) => {
-    setActiveOverlay(id);
-    window.localStorage.setItem(OVERLAY_KEY, id ?? OVERLAY_OFF);
+  // Toggle one overlay. Tree genus is exclusive: turning it on clears the rest, and turning on any
+  // normal layer clears it — so the dense per-genus recolouring never fights the other overlays.
+  const handleToggleOverlay = useCallback((id: OverlayId) => {
+    setActiveOverlays((current) => {
+      const next = new Set(current);
+      const isExclusive = (candidate: OverlayId): boolean =>
+        OVERLAYS.find((overlay) => overlay.id === candidate)?.exclusive ??
+        false;
+      if (next.has(id)) {
+        next.delete(id);
+      } else if (isExclusive(id)) {
+        next.clear();
+        next.add(id);
+      } else {
+        next.add(id);
+        for (const other of next) {
+          if (isExclusive(other)) {
+            next.delete(other);
+          }
+        }
+      }
+      window.localStorage.setItem(OVERLAY_KEY, [...next].join(","));
+      return next;
+    });
   }, []);
 
   // stable identity for a long-lived map listener; functional updater keeps disengage idempotent
@@ -397,6 +458,14 @@ export default function MapApp() {
           setRoutingGraph((current) => current ?? graph);
           routedForRef.current = request;
           const pair = snapPair(graph, index, request.start, request.dest);
+          const weights: RouteWeights = {
+            tree: treeWeight,
+            ferry: ferryWeight,
+            landmark: landmarkWeight,
+            art: artWeight,
+            highway: highwayWeight,
+            allowFerries,
+          };
           if (!pair.ok) {
             setRouteState({ kind: "error", message: messageFor(pair.reason) });
           } else if (draggingRef.current) {
@@ -406,9 +475,7 @@ export default function MapApp() {
             const solver = (dragSolverRef.current ??= new RouteSolver(
               graph,
               which === "dest" ? pair.start : pair.dest,
-              treeWeight,
-              ferryWeight,
-              allowFerries,
+              weights,
             ));
             const moving = which === "dest" ? pair.dest : pair.start;
             const solved = solver.solveApprox(moving);
@@ -428,9 +495,7 @@ export default function MapApp() {
               graph,
               pair.start,
               pair.dest,
-              treeWeight,
-              ferryWeight,
-              allowFerries,
+              weights,
             );
             // Identical to the drawn route (a slider move that didn't cross a breakpoint): leave it —
             // but always apply when nothing is drawn yet, or an unchanged result would strand the
@@ -466,6 +531,9 @@ export default function MapApp() {
     dest,
     treeWeight,
     ferryWeight,
+    landmarkWeight,
+    artWeight,
+    highwayWeight,
     allowFerries,
     routeRefreshNonce,
   ]);
@@ -515,6 +583,21 @@ export default function MapApp() {
   const handleAllowFerries = useCallback((allow: boolean) => {
     setAllowFerries(allow);
     window.localStorage.setItem(FERRY_ALLOW_KEY, String(allow));
+  }, []);
+
+  const handleLandmarkWeight = useCallback((weight: number) => {
+    setLandmarkWeight(weight);
+    window.localStorage.setItem(LANDMARK_WEIGHT_KEY, String(weight));
+  }, []);
+
+  const handleArtWeight = useCallback((weight: number) => {
+    setArtWeight(weight);
+    window.localStorage.setItem(ART_WEIGHT_KEY, String(weight));
+  }, []);
+
+  const handleHighwayWeight = useCallback((weight: number) => {
+    setHighwayWeight(weight);
+    window.localStorage.setItem(HIGHWAY_WEIGHT_KEY, String(weight));
   }, []);
 
   const handleDestSelect = useCallback((result: GeocodeResult) => {
@@ -751,16 +834,49 @@ export default function MapApp() {
 
   const draft = editing?.mode === "create" ? editing.draft : null;
 
+  // Load the landmark and art points once the routing panel is in use, so directions can name the
+  // POIs the route passes. A failed load just omits the names — they are a nice-to-have.
+  useEffect(() => {
+    if (!routingOpen || poiSets) {
+      return;
+    }
+    let cancelled = false;
+    Promise.all([
+      loadPois("landmarks/nyc.bin", "LMRK"),
+      loadPois("art/nyc.bin", "ARTW"),
+    ]).then(
+      ([landmarks, art]) => {
+        if (!cancelled) {
+          setPoiSets({ landmarks, art });
+        }
+      },
+      () => {},
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [routingOpen, poiSets]);
+
   const routeResult = routeState.kind === "ready" ? routeState.result : null;
-  const directions = useMemo(
-    () =>
-      routingGraph && routeResult
-        ? buildDirections(routingGraph, routeResult, {
-            collapseLinearCrossings: true,
-          })
-        : null,
-    [routingGraph, routeResult],
-  );
+  const directions = useMemo(() => {
+    if (!routingGraph || !routeResult) {
+      return null;
+    }
+    const passed = poiSets
+      ? passedPois(routingGraph, routeResult, [
+          {
+            kind: "landmark",
+            set: poiSets.landmarks,
+            thresholdMeters: LANDMARK_PASS_METERS,
+          },
+          { kind: "art", set: poiSets.art, thresholdMeters: ART_PASS_METERS },
+        ])
+      : [];
+    return buildDirections(routingGraph, routeResult, {
+      collapseLinearCrossings: true,
+      passed,
+    });
+  }, [routingGraph, routeResult, poiSets]);
   // Live progress along the ready route from the current fix; null when off-route or unlocated, which
   // makes the panel fall back to the route summary. Recomputes as watchPosition updates userLocation.
   const progress = useMemo(
@@ -796,7 +912,7 @@ export default function MapApp() {
         target={target}
         userLocation={userLocation}
         following={following}
-        activeOverlay={activeOverlay}
+        activeOverlays={activeOverlays}
         routeResult={routeResult}
         routeDest={routeDest}
         routeStart={routeStart}
@@ -811,10 +927,10 @@ export default function MapApp() {
       <Toolbar
         auth={auth}
         pinCount={pins.length}
-        activeOverlay={activeOverlay}
+        activeOverlays={activeOverlays}
         routing={routingOpen}
         refreshingClaims={refreshing}
-        onSelectOverlay={handleSelectOverlay}
+        onToggleOverlay={handleToggleOverlay}
         onToggleRouting={handleToggleRouting}
         onSignIn={handleSignIn}
         onSignOut={handleSignOut}
@@ -826,12 +942,16 @@ export default function MapApp() {
         logHereHint={locationHint}
       />
       <FollowToggle active={following} onToggle={handleToggleFollow} />
-      {/* the active overlay's floating key (genus only); bottom-left keeps it clear of the
+      {/* the active overlays' floating keys (genus only today); bottom-left keeps them clear of the
           toolbar, follow toggle, attribution, and the centered route panel */}
       <div className="pointer-events-none absolute bottom-3 left-3 z-[1000] max-w-[70vw]">
-        <div className="pointer-events-auto">
-          {OVERLAYS.find((overlay) => overlay.id === activeOverlay)?.legend ??
-            null}
+        <div className="pointer-events-auto space-y-2">
+          {OVERLAYS.filter((overlay) => activeOverlays.has(overlay.id)).map(
+            (overlay) =>
+              overlay.legend ? (
+                <div key={overlay.id}>{overlay.legend}</div>
+              ) : null,
+          )}
         </div>
       </div>
       {banner ? (
@@ -876,6 +996,9 @@ export default function MapApp() {
           treeWeight={treeWeight}
           ferryWeight={ferryWeight}
           allowFerries={allowFerries}
+          landmarkWeight={landmarkWeight}
+          artWeight={artWeight}
+          highwayWeight={highwayWeight}
           directions={directions}
           progress={progress}
           directionsOpen={directionsOpen}
@@ -883,6 +1006,9 @@ export default function MapApp() {
           onTreeWeight={handleTreeWeight}
           onFerryWeight={handleFerryWeight}
           onAllowFerries={handleAllowFerries}
+          onLandmarkWeight={handleLandmarkWeight}
+          onArtWeight={handleArtWeight}
+          onHighwayWeight={handleHighwayWeight}
           onStartSelect={handleStartSelect}
           onDestSelect={handleDestSelect}
           onStartClear={handleClearStart}

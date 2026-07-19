@@ -1,6 +1,12 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import {
+  type ComponentType,
+  type CSSProperties,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import {
   FiChevronDown,
   FiChevronUp,
@@ -11,10 +17,13 @@ import {
   FiX,
 } from "react-icons/fi";
 import {
+  MdAccountBalance,
   MdArrowUpward,
   MdDirectionsBoat,
+  MdDirectionsCar,
   MdFlag,
   MdOutlineDirectionsWalk,
+  MdPalette,
   MdSwapHoriz,
   MdTurnLeft,
   MdTurnRight,
@@ -24,7 +33,13 @@ import {
 } from "react-icons/md";
 import { PiBoatFill, PiTreeEvergreenFill } from "react-icons/pi";
 import type { GeocodeResult } from "../src/geocode";
-import { MAX_FERRY_WEIGHT, MAX_TREE_WEIGHT } from "../src/routing/cost";
+import {
+  MAX_ART_WEIGHT,
+  MAX_FERRY_WEIGHT,
+  MAX_HIGHWAY_WEIGHT,
+  MAX_LANDMARK_WEIGHT,
+  MAX_TREE_WEIGHT,
+} from "../src/routing/cost";
 import {
   formatDistance,
   formatDuration,
@@ -51,6 +66,9 @@ interface RoutePanelProps {
   treeWeight: number;
   ferryWeight: number;
   allowFerries: boolean;
+  landmarkWeight: number;
+  artWeight: number;
+  highwayWeight: number;
   directions: Maneuver[] | null;
   progress: NavProgress | null; // live position along the route, or null when off-route/unlocated
   directionsOpen: boolean;
@@ -58,6 +76,9 @@ interface RoutePanelProps {
   onTreeWeight: (weight: number) => void;
   onFerryWeight: (weight: number) => void;
   onAllowFerries: (allow: boolean) => void;
+  onLandmarkWeight: (weight: number) => void;
+  onArtWeight: (weight: number) => void;
+  onHighwayWeight: (weight: number) => void;
   onStartSelect: (result: GeocodeResult) => void;
   onDestSelect: (result: GeocodeResult) => void;
   onStartClear: () => void;
@@ -69,6 +90,22 @@ interface RoutePanelProps {
   onToggleMinimize: () => void;
   onClose: () => void;
 }
+
+// One scenic routing factor as the panel renders it: a chip when collapsed, a full slider when open.
+interface Factor {
+  key: string;
+  label: string;
+  Icon: ComponentType<{ className?: string; "aria-hidden"?: boolean }>;
+  weight: number;
+  max: number;
+  onChange: (weight: number) => void;
+  tint: string; // text colour for the icon and chip
+  color: string; // the slider's fill/thumb colour (a CSS hex; matches the map overlay)
+  disabled?: boolean;
+}
+
+const percent = (factor: Factor): number =>
+  Math.round((factor.weight / factor.max) * 100);
 
 const METERS_PER_MILE = 1609.344;
 
@@ -89,6 +126,12 @@ function summarize(
 
 function maneuverIcon(maneuver: Maneuver) {
   const props = { className: "h-4 w-4", "aria-hidden": true } as const;
+  if (maneuver.kind === "landmark") {
+    return <MdAccountBalance {...props} />;
+  }
+  if (maneuver.kind === "art") {
+    return <MdPalette {...props} />;
+  }
   if (maneuver.kind === "cross") {
     return <MdSwapHoriz {...props} />;
   }
@@ -134,6 +177,9 @@ export default function RoutePanel({
   treeWeight,
   ferryWeight,
   allowFerries,
+  landmarkWeight,
+  artWeight,
+  highwayWeight,
   directions,
   progress,
   directionsOpen,
@@ -141,6 +187,9 @@ export default function RoutePanel({
   onTreeWeight,
   onFerryWeight,
   onAllowFerries,
+  onLandmarkWeight,
+  onArtWeight,
+  onHighwayWeight,
   onStartSelect,
   onDestSelect,
   onStartClear,
@@ -161,9 +210,77 @@ export default function RoutePanel({
     }
   }, [nextIndex]);
 
-  // Each slider is a 0..100 track over its [0, MAX_*_WEIGHT] weight range.
-  const slider = Math.round((treeWeight / MAX_TREE_WEIGHT) * 100);
-  const ferrySlider = Math.round((ferryWeight / MAX_FERRY_WEIGHT) * 100);
+  // The five scenic factors collapse to a row of value chips and expand to full sliders on demand —
+  // too many to keep all open at once. Ferries stay gated by the header boat toggle.
+  const [sceneryOpen, setSceneryOpen] = useState(false);
+  // The scenery sliders and the directions list are each tall, so only one opens at a time — opening
+  // one closes the other, or the panel runs off the top of the screen.
+  useEffect(() => {
+    if (directionsOpen) {
+      setSceneryOpen(false);
+    }
+  }, [directionsOpen]);
+  const toggleScenery = () => {
+    const opening = !sceneryOpen;
+    setSceneryOpen(opening);
+    if (opening && directionsOpen) {
+      onToggleDirections();
+    }
+  };
+  const factors: Factor[] = [
+    {
+      key: "tree",
+      label: "Prefer tree cover",
+      Icon: PiTreeEvergreenFill,
+      weight: treeWeight,
+      max: MAX_TREE_WEIGHT,
+      onChange: onTreeWeight,
+      tint: "text-brand-600 dark:text-brand-400",
+      color: "#059669",
+    },
+    {
+      key: "landmark",
+      label: "Pass landmarks",
+      Icon: MdAccountBalance,
+      weight: landmarkWeight,
+      max: MAX_LANDMARK_WEIGHT,
+      onChange: onLandmarkWeight,
+      tint: "text-amber-600 dark:text-amber-400",
+      color: "#f59e0b",
+    },
+    {
+      key: "art",
+      label: "Pass public art",
+      Icon: MdPalette,
+      weight: artWeight,
+      max: MAX_ART_WEIGHT,
+      onChange: onArtWeight,
+      tint: "text-fuchsia-600 dark:text-fuchsia-400",
+      color: "#d946ef",
+    },
+    {
+      key: "highway",
+      label: "Avoid highways",
+      Icon: MdDirectionsCar,
+      weight: highwayWeight,
+      max: MAX_HIGHWAY_WEIGHT,
+      onChange: onHighwayWeight,
+      tint: "text-rose-600 dark:text-rose-400",
+      color: "#ef4444",
+    },
+    {
+      key: "ferry",
+      label: "Prefer ferries",
+      Icon: PiBoatFill,
+      weight: ferryWeight,
+      max: MAX_FERRY_WEIGHT,
+      onChange: onFerryWeight,
+      tint: "text-blue-600 dark:text-blue-400",
+      color: "#2563eb",
+      // The ferry slider only matters when the gate is on, so it greys out and stops responding.
+      disabled: !allowFerries,
+    },
+  ];
   const hasFerry =
     directions?.some((maneuver) => maneuver.kind === "ferry") ?? false;
   const pickHint =
@@ -173,8 +290,10 @@ export default function RoutePanel({
         ? "Tap the map to set your destination"
         : null;
 
+  // Full-width and centred on small screens; on sm+ it is a tall panel, so it right-aligns rather
+  // than covering the middle of the map.
   const wrapper =
-    "fixed bottom-0 left-1/2 z-[1000] w-full max-w-md -translate-x-1/2 px-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]";
+    "fixed bottom-0 left-1/2 z-[1000] w-full max-w-md -translate-x-1/2 px-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:left-auto sm:right-4 sm:translate-x-0 sm:px-0";
 
   // Minimized: a slim peek bar. While navigating (progress on a ready route) it shows the next
   // maneuver and the distance to it; otherwise it falls back to the route summary.
@@ -302,59 +421,87 @@ export default function RoutePanel({
           </p>
         ) : null}
 
-        <label className="mt-4 block">
-          <span className="flex items-center justify-between text-xs font-medium text-slate-500 dark:text-slate-400">
-            Prefer tree cover
-            <PiTreeEvergreenFill
-              className="h-3.5 w-3.5 text-brand-600 dark:text-brand-400"
-              aria-hidden="true"
-            />
-          </span>
-          <input
-            type="range"
-            min={0}
-            max={100}
-            value={slider}
-            onChange={(event) =>
-              onTreeWeight(
-                (Number.parseInt(event.target.value, 10) / 100) *
-                  MAX_TREE_WEIGHT,
-              )
-            }
-            aria-label="Prefer tree cover"
-            className="mt-1.5 w-full accent-brand-600"
-          />
-        </label>
-
         <div className="mt-4">
-          {/* Ferries are toggled from the header boat icon; this slider only matters when they are
-              allowed, so it greys out and stops responding when the toggle is off. */}
-          <label
-            className={`block ${allowFerries ? "" : "pointer-events-none opacity-40"}`}
+          <button
+            type="button"
+            onClick={toggleScenery}
+            aria-expanded={sceneryOpen}
+            aria-label={sceneryOpen ? "Hide scenery sliders" : "Adjust scenery"}
+            className="flex w-full items-center justify-between gap-2"
           >
-            <span className="flex items-center justify-between text-xs font-medium text-slate-500 dark:text-slate-400">
-              Prefer ferries
-              <PiBoatFill
-                className="h-3.5 w-3.5 text-blue-600 dark:text-blue-400"
+            <span className="text-[11px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+              Scenery
+            </span>
+            {sceneryOpen ? (
+              <FiChevronUp
+                className="h-4 w-4 text-slate-400"
                 aria-hidden="true"
               />
-            </span>
-            <input
-              type="range"
-              min={0}
-              max={100}
-              value={ferrySlider}
-              disabled={!allowFerries}
-              onChange={(event) =>
-                onFerryWeight(
-                  (Number.parseInt(event.target.value, 10) / 100) *
-                    MAX_FERRY_WEIGHT,
-                )
-              }
-              aria-label="Prefer ferries"
-              className="mt-1.5 w-full accent-blue-600"
-            />
-          </label>
+            ) : (
+              <span className="flex items-center gap-2">
+                {factors.map((factor) => (
+                  <span
+                    key={factor.key}
+                    className={`flex items-center gap-0.5 text-[11px] font-semibold tabular-nums ${
+                      factor.disabled ? "opacity-40" : factor.tint
+                    }`}
+                  >
+                    <factor.Icon className="h-3.5 w-3.5" aria-hidden={true} />
+                    {percent(factor)}
+                  </span>
+                ))}
+                <FiChevronDown
+                  className="ml-0.5 h-4 w-4 text-slate-400"
+                  aria-hidden="true"
+                />
+              </span>
+            )}
+          </button>
+
+          {sceneryOpen ? (
+            <div className="mt-2 space-y-3">
+              {factors.map((factor) => (
+                <label
+                  key={factor.key}
+                  className={`block ${
+                    factor.disabled ? "pointer-events-none opacity-40" : ""
+                  }`}
+                >
+                  <span className="flex items-center justify-between text-xs font-medium text-slate-500 dark:text-slate-400">
+                    <span className="flex items-center gap-1.5">
+                      <factor.Icon
+                        className={`h-3.5 w-3.5 ${factor.tint}`}
+                        aria-hidden={true}
+                      />
+                      {factor.label}
+                    </span>
+                    <span className="tabular-nums">{percent(factor)}%</span>
+                  </span>
+                  <input
+                    type="range"
+                    min={0}
+                    max={100}
+                    value={percent(factor)}
+                    disabled={factor.disabled}
+                    onChange={(event) =>
+                      factor.onChange(
+                        (Number.parseInt(event.target.value, 10) / 100) *
+                          factor.max,
+                      )
+                    }
+                    aria-label={factor.label}
+                    className="scenery-slider mt-1.5 w-full"
+                    style={
+                      {
+                        "--fill": factor.color,
+                        "--pct": `${percent(factor)}%`,
+                      } as CSSProperties
+                    }
+                  />
+                </label>
+              ))}
+            </div>
+          ) : null}
         </div>
 
         {needsStart ? (
@@ -398,9 +545,23 @@ export default function RoutePanel({
                     progress !== null && index === progress.nextManeuver;
                   const isPassed =
                     progress !== null && index < progress.currentManeuver;
+                  // Passed landmarks and artwork wear their overlay colour, so the turn-by-turn reads
+                  // as the same palette as the map.
+                  const bubbleClass =
+                    maneuver.kind === "landmark"
+                      ? "bg-amber-50 text-amber-600 dark:bg-amber-500/15 dark:text-amber-300"
+                      : maneuver.kind === "art"
+                        ? "bg-fuchsia-50 text-fuchsia-600 dark:bg-fuchsia-500/15 dark:text-fuchsia-300"
+                        : "bg-brand-50 text-brand-600 dark:bg-brand-500/15 dark:text-brand-300";
+                  const textClass =
+                    maneuver.kind === "landmark"
+                      ? "text-amber-700 dark:text-amber-300"
+                      : maneuver.kind === "art"
+                        ? "text-fuchsia-700 dark:text-fuchsia-300"
+                        : "text-slate-700 dark:text-slate-200";
                   return (
                     <li
-                      key={`${maneuver.kind}-${maneuver.stepRange[0]}-${maneuver.stepRange[1]}`}
+                      key={`${maneuver.kind}-${maneuver.stepRange[0]}-${maneuver.stepRange[1]}-${maneuver.text}`}
                       ref={isNext ? highlightRef : null}
                       className={`flex items-center gap-3 rounded-lg px-2 py-1.5 ${
                         isNext
@@ -408,10 +569,12 @@ export default function RoutePanel({
                           : ""
                       } ${isPassed ? "opacity-50" : ""}`}
                     >
-                      <span className="grid h-7 w-7 shrink-0 place-items-center rounded-full bg-brand-50 text-brand-600 dark:bg-brand-500/15 dark:text-brand-300">
+                      <span
+                        className={`grid h-7 w-7 shrink-0 place-items-center rounded-full ${bubbleClass}`}
+                      >
                         {maneuverIcon(maneuver)}
                       </span>
-                      <span className="min-w-0 flex-1 text-sm text-slate-700 dark:text-slate-200">
+                      <span className={`min-w-0 flex-1 text-sm ${textClass}`}>
                         {maneuver.text}
                       </span>
                       {maneuver.kind === "ferry" ? (

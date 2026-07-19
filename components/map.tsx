@@ -1,7 +1,7 @@
 "use client";
 
 import L from "leaflet";
-import { useEffect, useMemo, useRef } from "react";
+import { Fragment, useEffect, useMemo, useRef } from "react";
 import {
   MapContainer,
   Marker,
@@ -28,7 +28,7 @@ interface MapViewProps {
   target: MapTarget | null;
   userLocation: { lat: number; lng: number } | null;
   following: boolean;
-  activeOverlay: OverlayId | null;
+  activeOverlays: ReadonlySet<OverlayId>;
   routeResult: RouteResult | null;
   routeDest: { lat: number; lng: number } | null;
   routeStart: { lat: number; lng: number } | null;
@@ -244,7 +244,7 @@ export default function MapView({
   target,
   userLocation,
   following,
-  activeOverlay,
+  activeOverlays,
   routeResult,
   routeDest,
   routeStart,
@@ -296,9 +296,12 @@ export default function MapView({
         updateWhenZooming={false}
         keepBuffer={4}
       />
-      {/* the active overlay's Leaflet layers, from the registry; nothing when Off */}
-      {OVERLAYS.find((overlay) => overlay.id === activeOverlay)?.render() ??
-        null}
+      {/* every active overlay's Leaflet layers, from the registry; nothing when the set is empty */}
+      {OVERLAYS.filter((overlay) => activeOverlays.has(overlay.id)).map(
+        (overlay) => (
+          <Fragment key={overlay.id}>{overlay.render()}</Fragment>
+        ),
+      )}
       <MapController
         target={target}
         following={following}
