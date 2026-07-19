@@ -7,6 +7,7 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { ingestArt } from "./art";
 import { fetchCanopyPolygons } from "./canopy";
 import { ingestFerries } from "./ferries";
 import {
@@ -18,7 +19,10 @@ import {
   writeVarint,
   zigzag,
 } from "./geometry";
+import { ingestHighways } from "./highways";
+import { fetchNycLand, type LandContext } from "./land";
 import { buildLandTest } from "./land-filter";
+import { ingestLandmarks } from "./landmarks";
 import {
   type Bounds,
   type CanopyLayer,
@@ -86,10 +90,6 @@ interface StreetRow {
   nonped?: string; // 'V' vehicular-only, 'D' dedicated deck, else null
   trafdir?: string; // 'NV' non-vehicular (a ped/bike deck)
   stname_label?: string; // CSCL's normalized street name, e.g. "W 60 ST"
-}
-
-interface BoroughRow {
-  the_geom?: { type: string; coordinates: [number, number][][][] };
 }
 
 // What `tiler densities` reports back, once it has filled the streets file's density blob. The
@@ -209,7 +209,6 @@ const ROAD_TYPES: readonly RoadType[] = [1, 3, 4, 5, 6, 7, 10];
 // the current Socrata count (111,675 rows for the $where below: 99,361 street + 2,205 bridge +
 // 7 tunnel + 101 boardwalk + 5,918 path + 248 step + 3,835 alley) rather than tracking it exactly.
 const NYC_SEGMENT_COUNT = 111_000;
-const NYC_BOROUGH_COUNT = 5;
 
 function toInt(value: string | undefined): number {
   const parsed = Number.parseInt(value ?? "", 10);
@@ -530,28 +529,6 @@ function toPathSegments(
   return { segments, onLandCount };
 }
 
-// Shoreline-clipped, so the harbour is not part of the distribution the ramp normalizes
-// against, and so the OSM trees and paths the city's bounding box also catches in New Jersey
-// and Westchester are cut away.
-async function fetchNycLand(): Promise<Polygon[]> {
-  // `*` so a newly-read column is free after one refetch (see fetchNycStreets); BoroughRow reads
-  // only the_geom.
-  const rows = await fetchDataset<BoroughRow>(
-    "gthc-hcne",
-    { $select: "*" },
-    NYC_BOROUGH_COUNT,
-  );
-  const polygons: Polygon[] = [];
-  for (const row of rows) {
-    for (const parts of row.the_geom?.coordinates ?? []) {
-      polygons.push(
-        parts.map((ring) => ring.map(([lng, lat]) => ({ lat, lng }))),
-      );
-    }
-  }
-  return polygons;
-}
-
 // Land-clips the measured canopy polygons the same ring-midpoint way the paths and OSM trees are
 // clipped: a polygon is kept if the midpoint vertex of its outer ring is on land. The ArcGIS
 // service is NYC Parks' own LiDAR and carries essentially no New Jersey / Westchester spill, but
@@ -866,6 +843,18 @@ async function ingest(): Promise<void> {
   // The land test is built once from the borough polygons and reused: the paths ask it up to
   // three times each, the OSM trees once each, and the canopy polygons once each.
   const onLand = buildLandTest(land);
+
+  // The scenic-factor sources: landmarks and public art (POI points, discounts) and the highway /
+  // elevated-rail lines (a proximity penalty). Each is a committed build input a later phase reads
+  // into the routing graph — none enters the tree-cover manifest, so they are produced here, apart
+  // from the cover pipeline, exactly as the ferries are.
+  const landContext: LandContext = { onLand, box: landBox };
+  const landmarks = await ingestLandmarks(CITY.id, landContext);
+  const art = await ingestArt(CITY.id, landContext);
+  const highways = await ingestHighways(CITY.id, landContext);
+  console.error(
+    `${CITY.id}: landmarks ${landmarks.count}, art ${art.count}, highways ${highways.count} lines`,
+  );
 
   // The measured 2017 LiDAR canopy: NYC Parks' polygon feature service, ~1M polygons paged and
   // disk-cached, then land-clipped. It is the cover source — `tiler canopy` rasterizes it for the
