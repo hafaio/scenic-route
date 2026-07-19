@@ -221,6 +221,7 @@ in its own band.
 | landmarks | NYC LPC Individual Landmark Sites, Socrata `buis-pvji` | ~1.5k designated historic/touristy sites, taken at their WGS84 centroid; a committed POI source, magic `LMRK` — a later phase fans them out into a per-edge routing discount, not the cover pipeline; see "Binary layouts" |
 | art | NYC PDC Outdoor Public Art Inventory (Socrata `2pg3-gcaa`) + OSM `tourism=artwork` via Overpass | public art and murals (OSM carries the murals the PDC set is thin on), deduped by proximity; a committed POI source, magic `ARTW` — its own routing discount, distinct scenery from landmarks; see "Binary layouts" |
 | highways | OSM limited-access highways (`motorway`/`trunk` + ramps) and above-ground rail (surface, open cut, or elevated — anything not `tunnel`), via Overpass | the lines walking near is unpleasant, as polylines; a committed source, magic `HWAY` — a later phase turns proximity into a routing *penalty*; never routed; see "Binary layouts" |
+| buildings | NYC Building Footprints, Socrata `5zhs-2jue` (`feature_code=2100` with a positive `height_roof`, feet→metres) | 867,920 footprints with their roof heights; a committed source, magic `BLDG` — the input a later **building-shade** factor will raise walls from and cast shadows with; not yet read by routing; see "Binary layouts" |
 
 Only walkable road types are kept. Highways, ramps, driveways, ferry routes, u-turns and
 non-physical segments are not part of the network a person walks. Bridges and tunnels come in
@@ -547,6 +548,21 @@ the generic polygon reader carry it with no new format. Unlike the walking netwo
 routed — a later phase rasterizes them into an areal proximity field and turns nearness into a
 per-edge routing *penalty* (the mirror of the POI discount). Nuisance is areal, not path-bound, so
 the geometry is raw (undensified); the field's kernel does the smoothing.
+
+### `data/buildings/<id>.bin` — the footprints and their heights, magic `BLDG` (v1)
+
+The **`LAND` polygon layout** (the same 40-byte header, then `count` even-odd polygons via the shared
+`encodePolygons` body), followed by **two parallel trailing regions**, each one `u16` little-endian per
+polygon in the same polygon order — mirroring how `TREE` appends its parallel crown/genus bytes. First
+the **roof height** in **decimetres**; then the **base (ground) elevation** in decimetres, stored
+biased by `+ELEVATION_BIAS_METERS` (100 m) so the shoreline's slightly-negative bases stay in the
+unsigned range — recover it as `decimetres / 10 − 100`. A building whose footprint is a multi-part
+MultiPolygon expands to several polygon records, each repeating that building's height and base, so both
+regions stay parallel to the polygons. Written by `encodeBuildings`. Not yet read by the tiler: it is
+the committed input for a future building-shade factor, which will raise each wall from its base
+elevation, project its shadow by the sun position, and bake a time-bucketed per-edge shade attribute
+(a separate artifact, not the GRPH edge record). The base elevation makes the casters terrain-aware;
+bare-earth self-shadowing (hills/parks with no buildings) would need the separate 1-ft LiDAR DEM.
 
 ### `data/streets/<id>.bin` — the network, magic `STRT` (v5)
 

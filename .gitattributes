@@ -1,4 +1,5 @@
 data/art/*.bin filter=lfs diff=lfs merge=lfs -text
+data/buildings/*.bin filter=lfs diff=lfs merge=lfs -text
 data/canopy/*.bin filter=lfs diff=lfs merge=lfs -text
 data/ferries/*.bin filter=lfs diff=lfs merge=lfs -text
 data/ferries/*.zip filter=lfs diff=lfs merge=lfs -text
