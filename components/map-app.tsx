@@ -30,7 +30,11 @@ import { buildDirections } from "../src/routing/directions";
 import { loadGraph, type RoutingGraph } from "../src/routing/graph";
 import { navProgress } from "../src/routing/nav-progress";
 import { RouteCache } from "../src/routing/route-cache";
-import type { RouteResult } from "../src/routing/search";
+import {
+  type RouteResult,
+  RouteSolver,
+  reverseResult,
+} from "../src/routing/search";
 import { buildSnapIndex, type SnapIndex, snapPair } from "../src/routing/snap";
 import AboutDialog from "./about-dialog";
 import FollowToggle from "./follow-toggle";
@@ -182,6 +186,17 @@ export default function MapApp() {
   // True while an endpoint marker is mid-drag, so the live recompute holds the drawn route instead of
   // flashing a loading state on every frame.
   const draggingRef = useRef<boolean>(false);
+  const dragWhichRef = useRef<"start" | "dest">("dest"); // which endpoint the active drag moves
+  // The per-gesture incremental solver, rooted at the held endpoint and reused across a drag's frames.
+  const dragSolverRef = useRef<RouteSolver | null>(null);
+  // Reactive mirror of draggingRef, so the map's reframe can switch to zoom-out-only during a drag.
+  const [dragging, setDragging] = useState<boolean>(false);
+  // Bumped on drop to re-run the route effect for the exact recompute, since a start drop leaves the
+  // resolved endpoints unchanged and nothing else would re-trigger it.
+  const [routeRefreshNonce, setRouteRefreshNonce] = useState<number>(0);
+  // Mirrors routeState.kind === "ready" so a recompute never flashes a spinner over an already-drawn
+  // route; kept in sync by the effect below.
+  const hasReadyRouteRef = useRef<boolean>(false);
 
   // Defaults to destination-pick when the routing panel is open with no destination; arming a field
   // from the panel overrides which end the next tap sets.
@@ -336,10 +351,15 @@ export default function MapApp() {
     }
   }, [manualStart, userLocation]);
 
+  useEffect(() => {
+    hasReadyRouteRef.current = routeState.kind === "ready";
+  }, [routeState]);
+
   // Live recompute: whenever a resolvable start and a destination both exist, (re)find the route,
   // keyed on the endpoints and the tree weight and rAF-coalesced so a slider drag computes at most
-  // once per frame. The loading flash shows only for a new endpoint pair; a slider move re-costs in
-  // place. Writes only routeState/routedForRef (neither a dep), so it can't re-trigger itself.
+  // once per frame. The loading flash shows only for a new endpoint pair with nothing drawn yet; a
+  // slider move re-costs in place. Writes only routeState/routedForRef (neither a dep).
+  // biome-ignore lint/correctness/useExhaustiveDependencies: routeRefreshNonce is a re-trigger only (a drop bumps it to force the exact recompute); it is intentionally not read in the body
   useEffect(() => {
     if (!resolvedStart || !dest) {
       setRouteState({ kind: "idle" });
@@ -359,7 +379,7 @@ export default function MapApp() {
       previous.start.lng !== request.start.lng;
     let cancelled = false;
     const frame = requestAnimationFrame(() => {
-      if (isNewTarget && !draggingRef.current) {
+      if (isNewTarget && !draggingRef.current && !hasReadyRouteRef.current) {
         setRouteState({ kind: "loading" });
       }
       loadRouting().then(
@@ -372,6 +392,29 @@ export default function MapApp() {
           const pair = snapPair(graph, index, request.start, request.dest);
           if (!pair.ok) {
             setRouteState({ kind: "error", message: messageFor(pair.reason) });
+          } else if (draggingRef.current) {
+            // Mid-drag: reuse a per-gesture solver rooted at the held endpoint for an approximate
+            // route each frame; the drop recomputes exactly. Start-drags solve from the dest and flip.
+            const which = dragWhichRef.current;
+            const solver = (dragSolverRef.current ??= new RouteSolver(
+              graph,
+              which === "dest" ? pair.start : pair.dest,
+              treeWeight,
+              ferryWeight,
+              allowFerries,
+            ));
+            const moving = which === "dest" ? pair.dest : pair.start;
+            const solved = solver.solveApprox(moving);
+            const result =
+              which === "start" && solved ? reverseResult(solved) : solved;
+            if (result) {
+              setRouteState({ kind: "ready", result });
+            } else {
+              setRouteState({
+                kind: "error",
+                message: messageFor("disconnected"),
+              });
+            }
           } else {
             const cache = (routeCacheRef.current ??= new RouteCache());
             const { result, changed } = cache.route(
@@ -382,8 +425,10 @@ export default function MapApp() {
               ferryWeight,
               allowFerries,
             );
-            // Identical to the drawn route (a slider move that didn't cross a breakpoint): leave it.
-            if (changed) {
+            // Identical to the drawn route (a slider move that didn't cross a breakpoint): leave it —
+            // but always apply when nothing is drawn yet, or an unchanged result would strand the
+            // loading state. A drop resets the cache first, so its exact route reads as changed anyway.
+            if (changed || !hasReadyRouteRef.current) {
               if (result) {
                 setRouteState({ kind: "ready", result });
               } else {
@@ -409,7 +454,14 @@ export default function MapApp() {
       cancelled = true;
       cancelAnimationFrame(frame);
     };
-  }, [resolvedStart, dest, treeWeight, ferryWeight, allowFerries]);
+  }, [
+    resolvedStart,
+    dest,
+    treeWeight,
+    ferryWeight,
+    allowFerries,
+    routeRefreshNonce,
+  ]);
 
   // A new destination collapses any open maneuver list; keyed on the coordinates so a reverse-geocode
   // label patch (same point, new object identity) doesn't snap it shut.
@@ -527,6 +579,8 @@ export default function MapApp() {
   const handleEndpointDragMove = useCallback(
     (which: "start" | "dest", lat: number, lng: number) => {
       draggingRef.current = true;
+      dragWhichRef.current = which;
+      setDragging(true);
       handleDisengageFollow();
       if (which === "start") {
         setManualStart((previous) => ({
@@ -541,12 +595,18 @@ export default function MapApp() {
     [handleDisengageFollow],
   );
 
-  // Drop of a dragged endpoint: settle that end and reverse-geocode its label.
+  // Drop of a dragged endpoint: settle that end, discard the approximate solver, and reverse-geocode
+  // its label. The drag bypassed the route cache, so reset it (its stale baseline would otherwise read
+  // the exact drop route as unchanged) and bump the nonce to re-run the exact recompute.
   const handleEndpointDrag = useCallback(
     (which: "start" | "dest", lat: number, lng: number) => {
       draggingRef.current = false;
+      dragSolverRef.current = null;
+      setDragging(false);
       handleDisengageFollow();
       applyPick(which, lat, lng);
+      routeCacheRef.current = new RouteCache();
+      setRouteRefreshNonce((nonce) => nonce + 1);
     },
     [applyPick, handleDisengageFollow],
   );
@@ -704,12 +764,16 @@ export default function MapApp() {
     [routeResult, directions, userLocation],
   );
   // Start marker position: the snapped route start, or the manual start before a route exists. A
-  // live-location-only start gets no dot — the location marker already shows it.
-  const routeStart = routeResult
-    ? routeResult.start.point
-    : manualStart
-      ? { lat: manualStart.lat, lng: manualStart.lng }
-      : null;
+  // live-location-only start gets no dot — the location marker already shows it. WHILE the start is
+  // being dragged it must follow the cursor (manualStart), not the snapped route point — writing the
+  // snapped point back onto the marker mid-drag fights Leaflet's own drag and strands the gesture.
+  const draggingStart = dragging && dragWhichRef.current === "start";
+  const routeStart =
+    !draggingStart && routeResult
+      ? routeResult.start.point
+      : manualStart
+        ? { lat: manualStart.lat, lng: manualStart.lng }
+        : null;
   // The destination marker appears the moment a destination exists; the line follows live once both
   // endpoints resolve and the search lands.
   const routeDest = dest ? { lat: dest.lat, lng: dest.lng } : null;
@@ -728,6 +792,7 @@ export default function MapApp() {
         routeStart={routeStart}
         picking={effectivePickTarget !== null}
         onMapPick={handleMapPick}
+        dragging={dragging}
         onDisengageFollow={handleDisengageFollow}
         onEndpointDragMove={handleEndpointDragMove}
         onEndpointDrag={handleEndpointDrag}

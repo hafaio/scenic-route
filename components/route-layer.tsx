@@ -17,6 +17,7 @@ interface RouteLayerProps {
   result: RouteResult | null;
   dest: { lat: number; lng: number } | null; // the tapped/searched destination
   start: { lat: number; lng: number } | null; // the snapped start, for the dot
+  dragging: boolean; // an endpoint is being dragged; reframe zooms out only, never in
   onDisengageFollow: () => void;
   // Live position of a dragged endpoint, each frame: re-routes without reverse-geocoding.
   onEndpointDragMove: (
@@ -292,6 +293,7 @@ export default function RouteLayer({
   result,
   dest,
   start,
+  dragging,
   onDisengageFollow,
   onEndpointDragMove,
   onEndpointDrag,
@@ -345,9 +347,20 @@ export default function RouteLayer({
     gridRef.current?.setDrawSteps(drawSteps);
   }, [drawSteps]);
 
-  // Frame a fresh destination once its route lands; slider recomputes leave the camera alone.
+  // Frame a fresh destination once its route lands; slider recomputes leave the camera alone. While an
+  // endpoint is dragged the reframe only zooms out to keep the route in view — never the aggressive
+  // zoom-in that fights the drag.
   useEffect(() => {
     if (!result || !dest) {
+      return;
+    }
+    if (dragging) {
+      const bounds = routeBounds(result);
+      if (!map.getBounds().contains(bounds)) {
+        map.fitBounds(bounds, { padding: [64, 96], animate: false });
+      }
+      // Mark the current dest framed so releasing the drag doesn't snap-reframe the settled route.
+      framedDest.current = dest;
       return;
     }
     if (
@@ -360,7 +373,7 @@ export default function RouteLayer({
     framedDest.current = dest;
     map.flyToBounds(routeBounds(result), { padding: [64, 96] });
     onDisengageFollow();
-  }, [result, dest, map, onDisengageFollow]);
+  }, [result, dest, map, dragging, onDisengageFollow]);
 
   const snappedDest = result?.dest.point ?? null;
   const showConnector =
@@ -376,6 +389,9 @@ export default function RouteLayer({
           position={[start.lat, start.lng]}
           icon={startIcon}
           draggable
+          // Above the live-location marker (which renders later at the same spot) so the start always
+          // owns the drag gesture; otherwise the location marker can swallow it and strand the drag.
+          zIndexOffset={1000}
           eventHandlers={{
             drag: (event) => {
               const { lat, lng } = event.target.getLatLng();

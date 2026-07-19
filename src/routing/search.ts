@@ -220,6 +220,126 @@ function makeStep(
   };
 }
 
+// Build the oriented route from a settled search: the parent-edge tree, the dest endpoint the
+// route reaches through (bestDestNode, or -1 with bestSameEdge for a walk along the shared edge),
+// and the two snaps. Reads only the parent tree and graph geometry — no distance array needed.
+function reconstruct(
+  graph: RoutingGraph,
+  start: Snap,
+  dest: Snap,
+  parentEdge: Int32Array,
+  bestDestNode: number,
+  bestSameEdge: boolean,
+): RouteResult {
+  const startB = graph.edgeNodeB[start.edge];
+  const startLength = graph.edgeLength[start.edge];
+  const destA = graph.edgeNodeA[dest.edge];
+  const destLength = graph.edgeLength[dest.edge];
+
+  const steps: RouteStep[] = [];
+  const lngsOut: number[] = [];
+  const latsOut: number[] = [];
+
+  if (bestSameEdge) {
+    const forward = start.metersFromA <= dest.metersFromA;
+    const low = Math.min(start.metersFromA, dest.metersFromA);
+    const high = Math.max(start.metersFromA, dest.metersFromA);
+    steps.push(makeStep(graph, start.edge, forward, high - low));
+    const { lngs, lats } = subPolyline(graph, start.edge, low, high);
+    appendPolyline(lngsOut, latsOut, lngs, lats, forward, true);
+  } else {
+    // Interior edges from the start-edge endpoint we depart through to the dest-edge endpoint.
+    const interior: number[] = [];
+    let node = bestDestNode;
+    while (parentEdge[node] !== -1) {
+      const edge = parentEdge[node];
+      interior.unshift(edge);
+      node = otherEnd(graph, edge, node);
+    }
+    const seed = node; // startA or startB, whichever the route left the start edge by
+
+    const startForward = seed === startB;
+    const startWalked = startForward
+      ? startLength - start.metersFromA
+      : start.metersFromA;
+    const startPiece = startForward
+      ? subPolyline(graph, start.edge, start.metersFromA, startLength)
+      : subPolyline(graph, start.edge, 0, start.metersFromA);
+    steps.push(makeStep(graph, start.edge, startForward, startWalked));
+    appendPolyline(
+      lngsOut,
+      latsOut,
+      startPiece.lngs,
+      startPiece.lats,
+      startForward,
+      true,
+    );
+
+    let previous = seed;
+    for (const edge of interior) {
+      const forward = graph.edgeNodeA[edge] === previous;
+      steps.push(makeStep(graph, edge, forward, graph.edgeLength[edge]));
+      const { lngs, lats } = edgePath(graph, edge);
+      appendPolyline(
+        lngsOut,
+        latsOut,
+        Array.from(lngs),
+        Array.from(lats),
+        forward,
+        false,
+      );
+      previous = otherEnd(graph, edge, previous);
+    }
+
+    const destForward = bestDestNode === destA;
+    const destWalked = destForward
+      ? dest.metersFromA
+      : destLength - dest.metersFromA;
+    const destPiece = destForward
+      ? subPolyline(graph, dest.edge, 0, dest.metersFromA)
+      : subPolyline(graph, dest.edge, dest.metersFromA, destLength);
+    steps.push(makeStep(graph, dest.edge, destForward, destWalked));
+    appendPolyline(
+      lngsOut,
+      latsOut,
+      destPiece.lngs,
+      destPiece.lats,
+      destForward,
+      false,
+    );
+  }
+
+  let lengthMeters = 0;
+  let walkLengthMeters = 0; // ferry spans excluded, so shade % is over the walked route only
+  let coverLengthMeters = 0;
+  let travelSeconds = 0; // undiscounted ETA: walked time by span, ferry time by its baked duration
+  for (const step of steps) {
+    lengthMeters += step.lengthMeters;
+    if (step.kind === "ferry") {
+      travelSeconds += rawSeconds(graph, step.edge);
+    } else {
+      walkLengthMeters += step.lengthMeters;
+      coverLengthMeters += step.cover * step.lengthMeters;
+      travelSeconds += step.lengthMeters / WALK_METERS_PER_SECOND;
+    }
+  }
+
+  return {
+    path: {
+      lats: Float64Array.from(latsOut),
+      lngs: Float64Array.from(lngsOut),
+    },
+    steps,
+    lengthMeters,
+    walkMeters: walkLengthMeters,
+    travelSeconds,
+    coverFraction:
+      walkLengthMeters > 0 ? coverLengthMeters / walkLengthMeters : 0,
+    start,
+    dest,
+  };
+}
+
 export function findRoute(
   graph: RoutingGraph,
   start: Snap,
@@ -340,106 +460,261 @@ export function findRoute(
     return null;
   }
 
-  const steps: RouteStep[] = [];
-  const lngsOut: number[] = [];
-  const latsOut: number[] = [];
-
-  if (bestSameEdge) {
-    const forward = start.metersFromA <= dest.metersFromA;
-    const low = Math.min(start.metersFromA, dest.metersFromA);
-    const high = Math.max(start.metersFromA, dest.metersFromA);
-    steps.push(makeStep(graph, start.edge, forward, high - low));
-    const { lngs, lats } = subPolyline(graph, start.edge, low, high);
-    appendPolyline(lngsOut, latsOut, lngs, lats, forward, true);
-  } else {
-    // Interior edges from the start-edge endpoint we depart through to the dest-edge endpoint.
-    const interior: number[] = [];
-    let node = bestDestNode;
-    while (parentEdge[node] !== -1) {
-      const edge = parentEdge[node];
-      interior.unshift(edge);
-      node = otherEnd(graph, edge, node);
-    }
-    const seed = node; // startA or startB, whichever the route left the start edge by
-
-    const startForward = seed === startB;
-    const startWalked = startForward
-      ? startLength - start.metersFromA
-      : start.metersFromA;
-    const startPiece = startForward
-      ? subPolyline(graph, start.edge, start.metersFromA, startLength)
-      : subPolyline(graph, start.edge, 0, start.metersFromA);
-    steps.push(makeStep(graph, start.edge, startForward, startWalked));
-    appendPolyline(
-      lngsOut,
-      latsOut,
-      startPiece.lngs,
-      startPiece.lats,
-      startForward,
-      true,
-    );
-
-    let previous = seed;
-    for (const edge of interior) {
-      const forward = graph.edgeNodeA[edge] === previous;
-      steps.push(makeStep(graph, edge, forward, graph.edgeLength[edge]));
-      const { lngs, lats } = edgePath(graph, edge);
-      appendPolyline(
-        lngsOut,
-        latsOut,
-        Array.from(lngs),
-        Array.from(lats),
-        forward,
-        false,
-      );
-      previous = otherEnd(graph, edge, previous);
-    }
-
-    const destForward = bestDestNode === destA;
-    const destWalked = destForward
-      ? dest.metersFromA
-      : destLength - dest.metersFromA;
-    const destPiece = destForward
-      ? subPolyline(graph, dest.edge, 0, dest.metersFromA)
-      : subPolyline(graph, dest.edge, dest.metersFromA, destLength);
-    steps.push(makeStep(graph, dest.edge, destForward, destWalked));
-    appendPolyline(
-      lngsOut,
-      latsOut,
-      destPiece.lngs,
-      destPiece.lats,
-      destForward,
-      false,
-    );
-  }
-
-  let lengthMeters = 0;
-  let walkLengthMeters = 0; // ferry spans excluded, so shade % is over the walked route only
-  let coverLengthMeters = 0;
-  let travelSeconds = 0; // undiscounted ETA: walked time by span, ferry time by its baked duration
-  for (const step of steps) {
-    lengthMeters += step.lengthMeters;
-    if (step.kind === "ferry") {
-      travelSeconds += rawSeconds(graph, step.edge);
-    } else {
-      walkLengthMeters += step.lengthMeters;
-      coverLengthMeters += step.cover * step.lengthMeters;
-      travelSeconds += step.lengthMeters / WALK_METERS_PER_SECOND;
-    }
-  }
-
-  return {
-    path: {
-      lats: Float64Array.from(latsOut),
-      lngs: Float64Array.from(lngsOut),
-    },
-    steps,
-    lengthMeters,
-    walkMeters: walkLengthMeters,
-    travelSeconds,
-    coverFraction:
-      walkLengthMeters > 0 ? coverLengthMeters / walkLengthMeters : 0,
+  return reconstruct(
+    graph,
     start,
     dest,
+    parentEdge,
+    bestDestNode,
+    bestSameEdge,
+  );
+}
+
+// An incremental A* from a fixed source that reuses its settled search across successive dests, for
+// live endpoint dragging. It keeps the g-values, parent tree, and closed set from one call to the
+// next and never reopens a closed node — the deliberate approximation that makes reuse cheap. When a
+// dragged dest lands in already-explored territory it answers with no search at all; otherwise it
+// resumes the frontier toward the new goal. Exact when the heuristic is consistent (ferries off),
+// near-optimal with ferries on.
+export class RouteSolver {
+  private readonly graph: RoutingGraph;
+  private readonly source: Snap;
+  private readonly treeWeight: number;
+  private readonly ferryWeight: number;
+  private readonly allowFerries: boolean;
+
+  private readonly distance: Float64Array; // best-known g (effective seconds) from source
+  private readonly parentEdge: Int32Array;
+  private readonly closed: Uint8Array; // 1 once a node has been settled; never reopened
+  private readonly reached: number[] = []; // every node ever given a finite distance
+
+  private readonly sourceA: number;
+  private readonly sourceB: number;
+  private readonly sourcePerMeter: number;
+  private readonly sourceLength: number;
+
+  constructor(
+    graph: RoutingGraph,
+    source: Snap,
+    treeWeight: number,
+    ferryWeight: number,
+    allowFerries: boolean,
+  ) {
+    this.graph = graph;
+    this.source = source;
+    this.treeWeight = treeWeight;
+    this.ferryWeight = ferryWeight;
+    this.allowFerries = allowFerries;
+
+    const nodeCount = graph.nodeCount;
+    this.distance = new Float64Array(nodeCount).fill(Number.POSITIVE_INFINITY);
+    this.parentEdge = new Int32Array(nodeCount).fill(-1);
+    this.closed = new Uint8Array(nodeCount);
+
+    this.sourceA = graph.edgeNodeA[source.edge];
+    this.sourceB = graph.edgeNodeB[source.edge];
+    this.sourcePerMeter =
+      edgeMultiplier(graph, source.edge, treeWeight) / WALK_METERS_PER_SECOND;
+    this.sourceLength = graph.edgeLength[source.edge];
+
+    this.distance[this.sourceA] = source.metersFromA * this.sourcePerMeter;
+    this.distance[this.sourceB] =
+      (this.sourceLength - source.metersFromA) * this.sourcePerMeter;
+    this.reached.push(this.sourceA, this.sourceB);
+  }
+
+  solveApprox(dest: Snap): RouteResult | null {
+    const graph = this.graph;
+    const destA = graph.edgeNodeA[dest.edge];
+    const destB = graph.edgeNodeB[dest.edge];
+    const destPerMeter =
+      edgeMultiplier(graph, dest.edge, this.treeWeight) /
+      WALK_METERS_PER_SECOND;
+    const destLength = graph.edgeLength[dest.edge];
+
+    let bestTotal = Number.POSITIVE_INFINITY;
+    let bestDestNode = -1;
+    let bestSameEdge = false;
+    const consider = (total: number, node: number, sameEdge: boolean): void => {
+      if (total < bestTotal) {
+        bestTotal = total;
+        bestDestNode = node;
+        bestSameEdge = sameEdge;
+      }
+    };
+
+    if (this.source.edge === dest.edge) {
+      consider(
+        Math.abs(dest.metersFromA - this.source.metersFromA) *
+          this.sourcePerMeter,
+        -1,
+        true,
+      );
+    }
+
+    // Only a settled (closed) endpoint has a final g; a merely-reached one still holds a tentative
+    // distance that a resumed search may improve, so it can't shortcut here.
+    if (this.closed[destA] === 1) {
+      consider(
+        this.distance[destA] + dest.metersFromA * destPerMeter,
+        destA,
+        false,
+      );
+    }
+    if (this.closed[destB] === 1) {
+      consider(
+        this.distance[destB] + (destLength - dest.metersFromA) * destPerMeter,
+        destB,
+        false,
+      );
+    }
+
+    // Fast path: the dest edge is already settled from the explored region, so answer with no
+    // search at all.
+    if (bestTotal < Number.POSITIVE_INFINITY) {
+      return reconstruct(
+        graph,
+        this.source,
+        dest,
+        this.parentEdge,
+        bestDestNode,
+        bestSameEdge,
+      );
+    }
+
+    // The heuristic and its per-node cache are only needed for the search below, so they are built
+    // after the fast path to keep a settled-dest drag frame allocation-free.
+    const walkCoeff = walkSecondsCoeff(graph, this.treeWeight);
+    const credit = ferryCredit(
+      graph,
+      this.treeWeight,
+      this.ferryWeight,
+      this.allowFerries,
+    );
+    const heuristicCache = new Float64Array(graph.nodeCount).fill(-1);
+    const heuristicOf = (node: number): number => {
+      if (heuristicCache[node] < 0) {
+        const straight =
+          walkCoeff *
+          haversineMeters(
+            graph.originLat + graph.nodeQy[node] * graph.scale,
+            graph.originLng + graph.nodeQx[node] * graph.scale,
+            dest.point.lat,
+            dest.point.lng,
+          );
+        heuristicCache[node] = Math.max(0, straight - credit);
+      }
+      return heuristicCache[node];
+    };
+
+    // Resume the frontier toward this dest: reseed the heap from every open reached node.
+    const heap = new NodeHeap(1024);
+    for (const id of this.reached) {
+      if (this.closed[id] === 0) {
+        heap.push(this.distance[id] + heuristicOf(id), id);
+      }
+    }
+
+    while (heap.length > 0) {
+      const key = heap.peekKey();
+      const node = heap.pop();
+      if (this.closed[node] === 1) {
+        continue;
+      }
+      // Lazy deletion: a stale entry has a key above the node's now-final f-value.
+      if (key > this.distance[node] + heuristicOf(node)) {
+        continue;
+      }
+      this.closed[node] = 1;
+
+      if (node === destA) {
+        consider(
+          this.distance[destA] + dest.metersFromA * destPerMeter,
+          destA,
+          false,
+        );
+      }
+      if (node === destB) {
+        consider(
+          this.distance[destB] + (destLength - dest.metersFromA) * destPerMeter,
+          destB,
+          false,
+        );
+      }
+      // Expand the settled node before any goal stop, so a later drag can still route through a dest
+      // endpoint that was closed on this call.
+      for (let slot = graph.csr[node]; slot < graph.csr[node + 1]; slot++) {
+        const edge = graph.adjacency[slot];
+        if (!this.allowFerries && edgeKind(graph, edge) === "ferry") {
+          continue;
+        }
+        const neighbour = otherEnd(graph, edge, node);
+        if (this.closed[neighbour] === 1) {
+          continue;
+        }
+        const relaxed =
+          this.distance[node] +
+          effSeconds(
+            graph,
+            edge,
+            this.treeWeight,
+            this.ferryWeight,
+            this.allowFerries,
+          );
+        if (relaxed < this.distance[neighbour]) {
+          if (this.distance[neighbour] === Number.POSITIVE_INFINITY) {
+            this.reached.push(neighbour);
+          }
+          this.distance[neighbour] = relaxed;
+          this.parentEdge[neighbour] = edge;
+          heap.push(relaxed + heuristicOf(neighbour), neighbour);
+        }
+      }
+
+      // Approximate goal test: stop once a dest endpoint has settled (and been expanded above).
+      if (bestTotal < Number.POSITIVE_INFINITY) {
+        return reconstruct(
+          graph,
+          this.source,
+          dest,
+          this.parentEdge,
+          bestDestNode,
+          bestSameEdge,
+        );
+      }
+    }
+
+    return bestTotal < Number.POSITIVE_INFINITY
+      ? reconstruct(
+          graph,
+          this.source,
+          dest,
+          this.parentEdge,
+          bestDestNode,
+          bestSameEdge,
+        )
+      : null;
+  }
+}
+
+// The same route travelled the other way: swap the two snaps, reverse the step list and flip each
+// step's travel direction, and reverse the stitched path. Length, walk, ETA, and cover are
+// direction-independent and carry over unchanged.
+export function reverseResult(result: RouteResult): RouteResult {
+  const steps = result.steps
+    .slice()
+    .reverse()
+    .map((step) => ({ ...step, forward: !step.forward }));
+  const lats = result.path.lats.slice().reverse();
+  const lngs = result.path.lngs.slice().reverse();
+  return {
+    path: { lats, lngs },
+    steps,
+    lengthMeters: result.lengthMeters,
+    walkMeters: result.walkMeters,
+    travelSeconds: result.travelSeconds,
+    coverFraction: result.coverFraction,
+    start: result.dest,
+    dest: result.start,
   };
 }

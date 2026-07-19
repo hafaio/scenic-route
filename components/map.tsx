@@ -33,6 +33,7 @@ interface MapViewProps {
   routeDest: { lat: number; lng: number } | null;
   routeStart: { lat: number; lng: number } | null;
   picking: boolean;
+  dragging: boolean; // an endpoint marker is being dragged; the route reframe goes zoom-out-only
   onMapPick: (lat: number, lng: number) => void;
   onDisengageFollow: () => void;
   onEndpointDragMove: (
@@ -248,6 +249,7 @@ export default function MapView({
   routeDest,
   routeStart,
   picking,
+  dragging,
   onMapPick,
   onDisengageFollow,
   onEndpointDragMove,
@@ -307,6 +309,7 @@ export default function MapView({
         result={routeResult}
         dest={routeDest}
         start={routeStart}
+        dragging={dragging}
         onDisengageFollow={onDisengageFollow}
         onEndpointDragMove={onEndpointDragMove}
         onEndpointDrag={onEndpointDrag}
