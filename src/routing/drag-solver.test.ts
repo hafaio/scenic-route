@@ -3,6 +3,7 @@ import {
   edgeMultiplier,
   effSeconds,
   FERRY_FLOOR,
+  type RouteWeights,
   WALK_METERS_PER_SECOND,
 } from "./cost";
 import {
@@ -23,6 +24,19 @@ const SCALE = 1e-6;
 const NAME_NONE = 0xffff;
 const KIND_SIDEWALK = 0;
 const KIND_FERRY = 4;
+
+const weights = (
+  tree: number,
+  ferry: number,
+  allowFerries: boolean,
+): RouteWeights => ({
+  tree,
+  ferry,
+  landmark: 0,
+  art: 0,
+  highway: 0,
+  allowFerries,
+});
 
 interface NodeSpec {
   lat: number;
@@ -118,6 +132,11 @@ function buildGraph(nodes: NodeSpec[], edges: EdgeSpec[]): RoutingGraph {
     edgeNameId,
     edgeKindSide,
     maxCover: maxCoverByte / 255,
+    edgeLandmark: new Uint8Array(edgeCount),
+    edgeArt: new Uint8Array(edgeCount),
+    edgeHighway: new Uint8Array(edgeCount),
+    maxLandmark: 0,
+    maxArt: 0,
     edgeDurationSeconds,
     ferryEdges: Uint32Array.from(ferryEdges),
     names: [],
@@ -155,10 +174,11 @@ function dijkstraCost(
   const distance = new Float64Array(nodeCount).fill(Number.POSITIVE_INFINITY);
   const settled = new Uint8Array(nodeCount);
 
+  const routeWeights = weights(treeWeight, ferryWeight, allowFerries);
   const startA = graph.edgeNodeA[start.edge];
   const startB = graph.edgeNodeB[start.edge];
   const startPerMeter =
-    edgeMultiplier(graph, start.edge, treeWeight) / WALK_METERS_PER_SECOND;
+    edgeMultiplier(graph, start.edge, routeWeights) / WALK_METERS_PER_SECOND;
   const startLength = graph.edgeLength[start.edge];
   distance[startA] = start.metersFromA * startPerMeter;
   distance[startB] = (startLength - start.metersFromA) * startPerMeter;
@@ -166,7 +186,7 @@ function dijkstraCost(
   const destA = graph.edgeNodeA[dest.edge];
   const destB = graph.edgeNodeB[dest.edge];
   const destPerMeter =
-    edgeMultiplier(graph, dest.edge, treeWeight) / WALK_METERS_PER_SECOND;
+    edgeMultiplier(graph, dest.edge, routeWeights) / WALK_METERS_PER_SECOND;
   const destLength = graph.edgeLength[dest.edge];
 
   let best = Number.POSITIVE_INFINITY;
@@ -189,9 +209,7 @@ function dijkstraCost(
     settled[node] = 1;
     for (let slot = graph.csr[node]; slot < graph.csr[node + 1]; slot++) {
       const edge = graph.adjacency[slot];
-      const relaxed =
-        distance[node] +
-        effSeconds(graph, edge, treeWeight, ferryWeight, allowFerries);
+      const relaxed = distance[node] + effSeconds(graph, edge, routeWeights);
       const neighbour = otherEnd(graph, edge, node);
       if (relaxed < distance[neighbour]) {
         distance[neighbour] = relaxed;
@@ -223,7 +241,11 @@ function effectiveCostOf(
     } else {
       cost +=
         (step.lengthMeters / WALK_METERS_PER_SECOND) *
-        edgeMultiplier(graph, step.edge, treeWeight);
+        edgeMultiplier(
+          graph,
+          step.edge,
+          weights(treeWeight, ferryWeight, false),
+        );
     }
   }
   return cost;
@@ -445,9 +467,7 @@ test("solveApprox is optimal with ferries off (matches the Dijkstra oracle)", ()
       const solved = new RouteSolver(
         grid.graph,
         start,
-        treeWeight,
-        0,
-        false,
+        weights(treeWeight, 0, false),
       ).solveApprox(dest);
       const label = `${from}->${to} tw=${treeWeight}`;
       expect(solved, label).not.toBeNull();
@@ -481,9 +501,7 @@ test("one reused solver stays optimal across a sequence of dests", () => {
     const solver = new RouteSolver(
       star.graph,
       star.source,
-      treeWeight,
-      0,
-      false,
+      weights(treeWeight, 0, false),
     );
     for (let index = 0; index < star.dests.length; index++) {
       const dest = star.dests[index];
@@ -519,9 +537,7 @@ test("a reused solver stays optimal dragging through already-settled dests", () 
     const solver = new RouteSolver(
       grid.graph,
       gridSnap(0),
-      treeWeight,
-      0,
-      false,
+      weights(treeWeight, 0, false),
     );
     for (const to of sequence) {
       clearEdgePathCache();
@@ -552,9 +568,11 @@ test("a reused solver stays optimal dragging through already-settled dests", () 
 test("reverseResult flips orientation and preserves the scalar totals", () => {
   const start = gridSnap(0);
   const dest = gridSnap(14);
-  const forward = new RouteSolver(grid.graph, start, 0.6, 0, false).solveApprox(
-    dest,
-  );
+  const forward = new RouteSolver(
+    grid.graph,
+    start,
+    weights(0.6, 0, false),
+  ).solveApprox(dest);
   expect(forward).not.toBeNull();
   const reversed = reverseResult(forward as RouteResult);
 
@@ -600,9 +618,7 @@ test("with ferries on solveApprox is connected and near-optimal", () => {
     const solved = new RouteSolver(
       ferryGrid.graph,
       start,
-      0.6,
-      0.8,
-      true,
+      weights(0.6, 0.8, true),
     ).solveApprox(dest);
     const label = `${from}->${to}`;
     expect(solved, label).not.toBeNull();
