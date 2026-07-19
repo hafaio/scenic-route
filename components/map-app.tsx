@@ -179,6 +179,14 @@ export default function MapApp() {
   // path and identical paths never redraw the map.
   const routeCacheRef = useRef<RouteCache | null>(null);
   routeCacheRef.current ??= new RouteCache();
+  // True while an endpoint marker is mid-drag, so the live recompute holds the drawn route instead of
+  // flashing a loading state on every frame.
+  const draggingRef = useRef<boolean>(false);
+
+  // Defaults to destination-pick when the routing panel is open with no destination; arming a field
+  // from the panel overrides which end the next tap sets.
+  const effectivePickTarget: "start" | "dest" | null =
+    pickTarget ?? (routingOpen && dest === null ? "dest" : null);
 
   useEffect(() => {
     const stored = window.localStorage.getItem(TREE_WEIGHT_KEY);
@@ -242,6 +250,13 @@ export default function MapApp() {
       : locationError === "unavailable"
         ? "Couldn't get your location. Make sure location services are on."
         : null;
+
+  // Mirror any location error into the dismissible banner so every visitor sees it, not just admins.
+  useEffect(() => {
+    if (locationHint) {
+      setBanner(locationHint);
+    }
+  }, [locationHint]);
 
   const uid = auth.kind === "signedIn" ? auth.info.user.uid : null;
   const isAdmin = auth.kind === "signedIn" && auth.info.admin;
@@ -344,7 +359,7 @@ export default function MapApp() {
       previous.start.lng !== request.start.lng;
     let cancelled = false;
     const frame = requestAnimationFrame(() => {
-      if (isNewTarget) {
+      if (isNewTarget && !draggingRef.current) {
         setRouteState({ kind: "loading" });
       }
       loadRouting().then(
@@ -507,16 +522,46 @@ export default function MapApp() {
     [],
   );
 
-  // A bare map tap sets the armed field's location; with nothing armed it does nothing.
+  // Each frame of an endpoint drag: move that end's coordinate so the route recomputes live, keeping
+  // the prior label (a reverse geocode would spam the network) until the drag settles.
+  const handleEndpointDragMove = useCallback(
+    (which: "start" | "dest", lat: number, lng: number) => {
+      draggingRef.current = true;
+      handleDisengageFollow();
+      if (which === "start") {
+        setManualStart((previous) => ({
+          lat,
+          lng,
+          label: previous?.label ?? null,
+        }));
+      } else {
+        setDest((previous) => ({ lat, lng, label: previous?.label ?? null }));
+      }
+    },
+    [handleDisengageFollow],
+  );
+
+  // Drop of a dragged endpoint: settle that end and reverse-geocode its label.
+  const handleEndpointDrag = useCallback(
+    (which: "start" | "dest", lat: number, lng: number) => {
+      draggingRef.current = false;
+      handleDisengageFollow();
+      applyPick(which, lat, lng);
+    },
+    [applyPick, handleDisengageFollow],
+  );
+
+  // A map tap sets the effective pick target's location; with nothing armed and a destination already
+  // set, it does nothing.
   const handleMapPick = useCallback(
     (lat: number, lng: number) => {
-      if (!pickTarget) {
+      if (!effectivePickTarget) {
         return;
       }
-      applyPick(pickTarget, lat, lng);
+      applyPick(effectivePickTarget, lat, lng);
       setPickTarget(null);
     },
-    [pickTarget, applyPick],
+    [effectivePickTarget, applyPick],
   );
 
   const handleLogHere = useCallback(async () => {
@@ -658,7 +703,13 @@ export default function MapApp() {
         : null,
     [routeResult, directions, userLocation],
   );
-  const routeStart = routeResult ? routeResult.start.point : null;
+  // Start marker position: the snapped route start, or the manual start before a route exists. A
+  // live-location-only start gets no dot — the location marker already shows it.
+  const routeStart = routeResult
+    ? routeResult.start.point
+    : manualStart
+      ? { lat: manualStart.lat, lng: manualStart.lng }
+      : null;
   // The destination marker appears the moment a destination exists; the line follows live once both
   // endpoints resolve and the search lands.
   const routeDest = dest ? { lat: dest.lat, lng: dest.lng } : null;
@@ -675,9 +726,11 @@ export default function MapApp() {
         routeResult={routeResult}
         routeDest={routeDest}
         routeStart={routeStart}
-        picking={pickTarget !== null}
+        picking={effectivePickTarget !== null}
         onMapPick={handleMapPick}
         onDisengageFollow={handleDisengageFollow}
+        onEndpointDragMove={handleEndpointDragMove}
+        onEndpointDrag={handleEndpointDrag}
         onPinSelect={handlePinSelect}
       />
       <Toolbar
@@ -733,7 +786,7 @@ export default function MapApp() {
           destSet={dest !== null}
           needsStart={(manualStart ?? userLocation) === null}
           hasLiveLocation={userLocation !== null}
-          pickTarget={pickTarget}
+          pickTarget={effectivePickTarget}
           status={routeState.kind}
           errorMessage={routeState.kind === "error" ? routeState.message : null}
           summary={

@@ -35,6 +35,12 @@ interface MapViewProps {
   picking: boolean;
   onMapPick: (lat: number, lng: number) => void;
   onDisengageFollow: () => void;
+  onEndpointDragMove: (
+    which: "start" | "dest",
+    lat: number,
+    lng: number,
+  ) => void;
+  onEndpointDrag: (which: "start" | "dest", lat: number, lng: number) => void;
   onPinSelect: (pin: Pin) => void;
 }
 
@@ -244,6 +250,8 @@ export default function MapView({
   picking,
   onMapPick,
   onDisengageFollow,
+  onEndpointDragMove,
+  onEndpointDrag,
   onPinSelect,
 }: MapViewProps) {
   const markers = useMemo(
@@ -300,6 +308,8 @@ export default function MapView({
         dest={routeDest}
         start={routeStart}
         onDisengageFollow={onDisengageFollow}
+        onEndpointDragMove={onEndpointDragMove}
+        onEndpointDrag={onEndpointDrag}
       />
       {picking ? <PickCatcher onMapPick={onMapPick} /> : null}
       <DoubleTapZoom following={following} picking={picking} />

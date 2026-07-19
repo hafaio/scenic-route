@@ -27,9 +27,10 @@ export const savedIcon = L.divIcon({
   tooltipAnchor: [0, -34],
 });
 
-export const draftIcon = L.divIcon({
+// The route start: a static dot (no pulse ring — it's a fixed endpoint, not the live location).
+export const startIcon = L.divIcon({
   className: "",
-  html: '<div class="scenic-draft-pin"><div class="scenic-draft-pin-ring"></div><div class="scenic-draft-pin-dot"></div></div>',
+  html: '<div class="scenic-draft-pin"><div class="scenic-draft-pin-dot"></div></div>',
   iconSize: [28, 28],
   iconAnchor: [14, 14],
 });
