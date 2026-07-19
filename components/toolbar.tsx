@@ -19,10 +19,10 @@ import ThemeToggle from "./theme-toggle";
 interface ToolbarProps {
   auth: AuthState;
   pinCount: number;
-  activeOverlay: OverlayId | null;
+  activeOverlays: ReadonlySet<OverlayId>;
   routing: boolean;
   refreshingClaims: boolean;
-  onSelectOverlay: (id: OverlayId | null) => void;
+  onToggleOverlay: (id: OverlayId) => void;
   onToggleRouting: () => void;
   onSignIn: () => void;
   onSignOut: () => void | Promise<void>;
@@ -49,10 +49,10 @@ function initialFor(email: string | null): string {
 export default function Toolbar({
   auth,
   pinCount,
-  activeOverlay,
+  activeOverlays,
   routing,
   refreshingClaims,
-  onSelectOverlay,
+  onToggleOverlay,
   onToggleRouting,
   onSignIn,
   onSignOut,
@@ -96,7 +96,7 @@ export default function Toolbar({
   return (
     <div className="absolute top-3 right-3 z-[1000] flex items-center gap-2">
       <RouteToggle active={routing} onToggle={onToggleRouting} />
-      <LayersControl activeOverlay={activeOverlay} onSelect={onSelectOverlay} />
+      <LayersControl active={activeOverlays} onToggle={onToggleOverlay} />
       <ThemeToggle />
       <div ref={menuRef} className="relative">
         <button
