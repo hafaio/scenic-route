@@ -1,59 +1,83 @@
-// The slider costs each metre by the sun it sees, clipped at a data-derived floor:
-//   multiplier = max(1 - w*maxCover, 1 - w*cover)
-// where maxCover is the greenest edge in the whole graph. At w = 0 every metre costs 1 (shortest
-// path); at w = 1 it is 1 - cover, the unshaded fraction, so a 60%-shaded metre counts as 0.4 of one
-// and the search minimises time in the sun. The floor equals the cost of the greenest *possible* edge,
-// so it never clips a real one (every cover <= maxCover): the cost stays the clean, undistorted
-// 1 - w*cover with a full gradient, yet nothing is ever free (the greenest edge still costs
-// 1 - w*maxCover > 0 while maxCover < 1), so no wandering — and it is the tightest admissible A*
-// heuristic coefficient. INVARIANT: this holds only while maxCover < 1. If the data ever carries a
-// fully shaded edge (cover = 1), the floor hits 0 at w = 1 — that edge becomes free and the heuristic
-// collapses — and the fix is to switch to a lexicographic (unshaded, distance) cost, whose distance
-// tiebreak handles the free edge (see scratchpad/lexico-analysis.md).
+// Cost is effective seconds: an edge's raw travel time times a product of scenic factors. Each
+// walked metre is discounted toward a floor by the shade, the landmarks and the public art it passes
+// (a factor 1 - w*attr per element) and made dearer by a nearby highway or elevated rail (a penalty
+// factor 1 + w*attr); a ferry's crossing time is discounted by the ferry weight. Every attribute
+// byte is at most its graph-wide max, which the ingest clamps below 1, so every discount factor stays
+// positive and the product never reaches 0 — no metre is ever free, so the search never wanders. The
+// A* heuristic scales straight-line distance by `minMultiplier`, the product of each discount at its
+// max (the penalty only raises cost): a lower bound on any edge's multiplier, so the estimate never
+// overestimates and the search stays optimal. INVARIANT: this holds only while each discount's max
+// attribute stays < 1; the ingest's 254 byte ceiling guarantees it.
 
 import { edgeKind, type RoutingGraph } from "./graph";
 
 export const WALK_METERS_PER_SECOND = 1.4;
 
-// w must stay <= 1: the floor 1 - w*maxCover goes negative past w = 1/maxCover (~1.07 today), and a
-// negative edge cost breaks Dijkstra/A*. The slider spans [0, 1] (w = 1 is the clean "minimise
-// unshaded metres" point) and defaults a little below the top, for a mild shade bias by default.
+// Every weight spans [0, 1]. w must stay <= 1 or a discount floor (1 - w*max) can go negative, and a
+// negative edge cost breaks Dijkstra/A*. Defaults sit a little in from the extremes for a mild bias.
 export const MAX_TREE_WEIGHT = 1;
 export const DEFAULT_TREE_WEIGHT = 0.8;
-
-// The ferry weight discounts a ferry's crossing time the way the tree weight discounts a sunny
-// metre: at 0 a ferry costs its full duration, at 1 it costs FERRY_FLOOR of it (never free, so the
-// search cannot loop a ferry for a heuristic credit). The slider spans [0, 1] but defaults low — a
-// stronger default over-favours ferries and yields odd detour routes.
+// A ferry costs FERRY_FLOOR of its duration at w = 1 (never free, so the search cannot loop a ferry
+// for a heuristic credit). Defaults low — a stronger default over-favours ferries into odd detours.
 export const MAX_FERRY_WEIGHT = 1;
 export const DEFAULT_FERRY_WEIGHT = 0.1;
 export const FERRY_FLOOR = 1e-3;
+// Landmark and public-art discounts, and the highway/rail penalty. Modest defaults, tunable by eye.
+export const MAX_LANDMARK_WEIGHT = 1;
+export const DEFAULT_LANDMARK_WEIGHT = 0.3;
+export const MAX_ART_WEIGHT = 1;
+export const DEFAULT_ART_WEIGHT = 0.3;
+export const MAX_HIGHWAY_WEIGHT = 1;
+export const DEFAULT_HIGHWAY_WEIGHT = 0.5;
 
 // A cover gap (0..255) at or under this reads as "too close to call" (~5% cover) — the threshold
 // Phase 3 directions use before bothering to name a greener side.
 export const SIDE_TIE_BYTES = 12;
+
+// The full cost context a search runs against: the five scenic weights and the ferry gate.
+export interface RouteWeights {
+  tree: number;
+  ferry: number;
+  landmark: number;
+  art: number;
+  highway: number;
+  allowFerries: boolean;
+}
 
 // This edge's own cover, 0..1. In v2 the side is topology, so an edge carries a single value.
 export function edgeCover(graph: RoutingGraph, edge: number): number {
   return graph.edgeCover[edge] / 255;
 }
 
+// The walking multiplier: the three discount factors (shade, landmarks, art — each 1 - w*attr) times
+// the nuisance penalty (1 + w*attr). At every weight 0 this is 1 (the shortest path); a fully shaded,
+// landmarked metre far from any highway approaches the floor. No per-factor clip is needed — each
+// attribute is <= its graph max, so each discount factor is already >= its `minMultiplier` term.
 export function edgeMultiplier(
   graph: RoutingGraph,
   edge: number,
-  treeWeight: number,
+  weights: RouteWeights,
 ): number {
-  return Math.max(
-    1 - treeWeight * graph.maxCover,
-    1 - treeWeight * edgeCover(graph, edge),
-  );
+  const tree = 1 - weights.tree * (graph.edgeCover[edge] / 255);
+  const landmark = 1 - weights.landmark * (graph.edgeLandmark[edge] / 255);
+  const art = 1 - weights.art * (graph.edgeArt[edge] / 255);
+  const highway = 1 + weights.highway * (graph.edgeHighway[edge] / 255);
+  return tree * landmark * art * highway;
 }
 
-// The least any metre can cost at this weight — the greenest edge, 1 - w*maxCover. The A* heuristic
-// scales straight-line distance by this so it never overestimates and the search stays optimal; being
-// the graph's true minimum, it is also the tightest such coefficient.
-export function minMultiplier(graph: RoutingGraph, treeWeight: number): number {
-  return 1 - treeWeight * graph.maxCover;
+// The least a walked metre's multiplier can be: the product of each discount at the graph's max
+// attribute (the penalty only raises cost, so its minimum factor is 1). A lower bound on every edge's
+// multiplier — possibly loose, since one edge need not max all three at once — so the A* heuristic
+// that scales straight-line distance by it never overestimates. Positive because each max < 1.
+export function minMultiplier(
+  graph: RoutingGraph,
+  weights: RouteWeights,
+): number {
+  return (
+    (1 - weights.tree * graph.maxCover) *
+    (1 - weights.landmark * graph.maxLandmark) *
+    (1 - weights.art * graph.maxArt)
+  );
 }
 
 // The undiscounted travel time of an edge: a ferry's baked crossing-plus-wait seconds, or a walked
@@ -66,65 +90,58 @@ export function rawSeconds(graph: RoutingGraph, edge: number): number {
   }
 }
 
-// Cost is effective seconds: raw time times a clipped discount. A ferry discounts by the ferry
-// weight (unusable when ferries are barred); every other kind by the tree multiplier. No edge is
-// both a ferry and shaded (ferries carry cover 0), so the general product of multipliers collapses
-// to this one kind branch; a future biking mode adds a third element to that product.
+// Cost is effective seconds: raw time times the clipped discount. A ferry discounts by the ferry
+// weight (unusable when ferries are barred); every walked edge by the scenic multiplier above.
 export function effSeconds(
   graph: RoutingGraph,
   edge: number,
-  treeWeight: number,
-  ferryWeight: number,
-  allowFerries: boolean,
+  weights: RouteWeights,
 ): number {
   if (edgeKind(graph, edge) === "ferry") {
-    if (!allowFerries) {
+    if (!weights.allowFerries) {
       return Number.POSITIVE_INFINITY;
     } else {
       return (
-        graph.edgeDurationSeconds[edge] * Math.max(FERRY_FLOOR, 1 - ferryWeight)
+        graph.edgeDurationSeconds[edge] *
+        Math.max(FERRY_FLOOR, 1 - weights.ferry)
       );
     }
   } else {
     return (
       (graph.edgeLength[edge] / WALK_METERS_PER_SECOND) *
-      edgeMultiplier(graph, edge, treeWeight)
+      edgeMultiplier(graph, edge, weights)
     );
   }
 }
 
-// The least seconds a walked metre can cost — the greenest edge's multiplier over walking speed.
-// The A* heuristic scales straight-line distance by this: a lower bound on remaining walking time.
+// The least seconds a walked metre can cost — the min multiplier over walking speed. The A* heuristic
+// scales straight-line distance by this: a lower bound on remaining walking time.
 export function walkSecondsCoeff(
   graph: RoutingGraph,
-  treeWeight: number,
+  weights: RouteWeights,
 ): number {
-  return minMultiplier(graph, treeWeight) / WALK_METERS_PER_SECOND;
+  return minMultiplier(graph, weights) / WALK_METERS_PER_SECOND;
 }
 
-// The most seconds a route can save by riding ferries instead of walking their spans, bounded to
-// the two best ferries. Per ferry, shortcut = max(0, walk-time of its span - its effective time);
-// summing the two largest covers any route using <= 2 ferries (every realistic NYC ferry OD, up to
-// Staten Island -> Governors Island). Subtracting it from the walking heuristic keeps A* admissible
-// without letting a many-ferry fantasy path make the estimate exceed the truth. Zero when ferries
-// are barred or the graph has none. Costs one pass over the ~36 ferry edges, run once per search.
+// The most seconds a route can save by riding ferries instead of walking their spans, bounded to the
+// two best ferries. Per ferry, shortcut = max(0, walk-time of its span - its effective time); summing
+// the two largest covers any route using <= 2 ferries (every realistic NYC ferry OD). Subtracting it
+// from the walking heuristic keeps A* admissible without letting a many-ferry fantasy path make the
+// estimate exceed the truth. Zero when ferries are barred or the graph has none.
 export function ferryCredit(
   graph: RoutingGraph,
-  treeWeight: number,
-  ferryWeight: number,
-  allowFerries: boolean,
+  weights: RouteWeights,
 ): number {
-  if (!allowFerries) {
+  if (!weights.allowFerries) {
     return 0;
   }
-  const coeff = walkSecondsCoeff(graph, treeWeight);
+  const coeff = walkSecondsCoeff(graph, weights);
   let bestShortcut = 0;
   let secondShortcut = 0;
   for (const edge of graph.ferryEdges) {
     const shortcut = Math.max(
       0,
-      coeff * graph.edgeLength[edge] -
-        effSeconds(graph, edge, treeWeight, ferryWeight, allowFerries),
+      coeff * graph.edgeLength[edge] - effSeconds(graph, edge, weights),
     );
     if (shortcut > bestShortcut) {
       secondShortcut = bestShortcut;

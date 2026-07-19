@@ -11,6 +11,7 @@ import {
   edgeMultiplier,
   effSeconds,
   ferryCredit,
+  type RouteWeights,
   rawSeconds,
   WALK_METERS_PER_SECOND,
   walkSecondsCoeff,
@@ -344,9 +345,7 @@ export function findRoute(
   graph: RoutingGraph,
   start: Snap,
   dest: Snap,
-  treeWeight: number,
-  ferryWeight: number,
-  allowFerries: boolean,
+  weights: RouteWeights,
 ): RouteResult | null {
   const nodeCount = graph.nodeCount;
   const distance = new Float64Array(nodeCount).fill(Number.POSITIVE_INFINITY);
@@ -354,9 +353,9 @@ export function findRoute(
   const heuristic = new Float64Array(nodeCount).fill(-1);
 
   // The walking floor (seconds per straight-line metre) and the bounded ferry credit both depend on
-  // the two weights, so they are computed once here and reused for every node's estimate.
-  const walkCoeff = walkSecondsCoeff(graph, treeWeight);
-  const credit = ferryCredit(graph, treeWeight, ferryWeight, allowFerries);
+  // the weights, so they are computed once here and reused for every node's estimate.
+  const walkCoeff = walkSecondsCoeff(graph, weights);
+  const credit = ferryCredit(graph, weights);
   const heuristicOf = (node: number): number => {
     if (heuristic[node] < 0) {
       const straight =
@@ -377,13 +376,13 @@ export function findRoute(
   const startA = graph.edgeNodeA[start.edge];
   const startB = graph.edgeNodeB[start.edge];
   const startPerMeter =
-    edgeMultiplier(graph, start.edge, treeWeight) / WALK_METERS_PER_SECOND;
+    edgeMultiplier(graph, start.edge, weights) / WALK_METERS_PER_SECOND;
   const startLength = graph.edgeLength[start.edge];
 
   const destA = graph.edgeNodeA[dest.edge];
   const destB = graph.edgeNodeB[dest.edge];
   const destPerMeter =
-    edgeMultiplier(graph, dest.edge, treeWeight) / WALK_METERS_PER_SECOND;
+    edgeMultiplier(graph, dest.edge, weights) / WALK_METERS_PER_SECOND;
   const destLength = graph.edgeLength[dest.edge];
 
   let bestTotal = Number.POSITIVE_INFINITY;
@@ -440,13 +439,11 @@ export function findRoute(
     for (let slot = graph.csr[node]; slot < graph.csr[node + 1]; slot++) {
       const edge = graph.adjacency[slot];
       // A ferry is boardable only when ferries are allowed; otherwise skip it so no route uses one.
-      if (!allowFerries && edgeKind(graph, edge) === "ferry") {
+      if (!weights.allowFerries && edgeKind(graph, edge) === "ferry") {
         continue;
       }
       const neighbour = otherEnd(graph, edge, node);
-      const relaxed =
-        distance[node] +
-        effSeconds(graph, edge, treeWeight, ferryWeight, allowFerries);
+      const relaxed = distance[node] + effSeconds(graph, edge, weights);
       if (relaxed < distance[neighbour]) {
         distance[neighbour] = relaxed;
         parentEdge[neighbour] = edge;
@@ -479,9 +476,7 @@ export function findRoute(
 export class RouteSolver {
   private readonly graph: RoutingGraph;
   private readonly source: Snap;
-  private readonly treeWeight: number;
-  private readonly ferryWeight: number;
-  private readonly allowFerries: boolean;
+  private readonly weights: RouteWeights;
 
   private readonly distance: Float64Array; // best-known g (effective seconds) from source
   private readonly parentEdge: Int32Array;
@@ -493,18 +488,10 @@ export class RouteSolver {
   private readonly sourcePerMeter: number;
   private readonly sourceLength: number;
 
-  constructor(
-    graph: RoutingGraph,
-    source: Snap,
-    treeWeight: number,
-    ferryWeight: number,
-    allowFerries: boolean,
-  ) {
+  constructor(graph: RoutingGraph, source: Snap, weights: RouteWeights) {
     this.graph = graph;
     this.source = source;
-    this.treeWeight = treeWeight;
-    this.ferryWeight = ferryWeight;
-    this.allowFerries = allowFerries;
+    this.weights = weights;
 
     const nodeCount = graph.nodeCount;
     this.distance = new Float64Array(nodeCount).fill(Number.POSITIVE_INFINITY);
@@ -514,7 +501,7 @@ export class RouteSolver {
     this.sourceA = graph.edgeNodeA[source.edge];
     this.sourceB = graph.edgeNodeB[source.edge];
     this.sourcePerMeter =
-      edgeMultiplier(graph, source.edge, treeWeight) / WALK_METERS_PER_SECOND;
+      edgeMultiplier(graph, source.edge, weights) / WALK_METERS_PER_SECOND;
     this.sourceLength = graph.edgeLength[source.edge];
 
     this.distance[this.sourceA] = source.metersFromA * this.sourcePerMeter;
@@ -528,8 +515,7 @@ export class RouteSolver {
     const destA = graph.edgeNodeA[dest.edge];
     const destB = graph.edgeNodeB[dest.edge];
     const destPerMeter =
-      edgeMultiplier(graph, dest.edge, this.treeWeight) /
-      WALK_METERS_PER_SECOND;
+      edgeMultiplier(graph, dest.edge, this.weights) / WALK_METERS_PER_SECOND;
     const destLength = graph.edgeLength[dest.edge];
 
     let bestTotal = Number.POSITIVE_INFINITY;
@@ -584,13 +570,8 @@ export class RouteSolver {
 
     // The heuristic and its per-node cache are only needed for the search below, so they are built
     // after the fast path to keep a settled-dest drag frame allocation-free.
-    const walkCoeff = walkSecondsCoeff(graph, this.treeWeight);
-    const credit = ferryCredit(
-      graph,
-      this.treeWeight,
-      this.ferryWeight,
-      this.allowFerries,
-    );
+    const walkCoeff = walkSecondsCoeff(graph, this.weights);
+    const credit = ferryCredit(graph, this.weights);
     const heuristicCache = new Float64Array(graph.nodeCount).fill(-1);
     const heuristicOf = (node: number): number => {
       if (heuristicCache[node] < 0) {
@@ -645,7 +626,7 @@ export class RouteSolver {
       // endpoint that was closed on this call.
       for (let slot = graph.csr[node]; slot < graph.csr[node + 1]; slot++) {
         const edge = graph.adjacency[slot];
-        if (!this.allowFerries && edgeKind(graph, edge) === "ferry") {
+        if (!this.weights.allowFerries && edgeKind(graph, edge) === "ferry") {
           continue;
         }
         const neighbour = otherEnd(graph, edge, node);
@@ -653,14 +634,7 @@ export class RouteSolver {
           continue;
         }
         const relaxed =
-          this.distance[node] +
-          effSeconds(
-            graph,
-            edge,
-            this.treeWeight,
-            this.ferryWeight,
-            this.allowFerries,
-          );
+          this.distance[node] + effSeconds(graph, edge, this.weights);
         if (relaxed < this.distance[neighbour]) {
           if (this.distance[neighbour] === Number.POSITIVE_INFINITY) {
             this.reached.push(neighbour);

@@ -5,6 +5,7 @@
 // runs into human maneuvers.
 
 import { edgeName, edgePath, type RoutingGraph, type SideLabel } from "./graph";
+import type { PassedPoi } from "./pois";
 import type { RouteResult, RouteStep } from "./search";
 import { prettifyStreetName } from "./street-names";
 
@@ -17,7 +18,16 @@ export type Turn =
   | null;
 
 export interface Maneuver {
-  kind: "start" | "continue" | "turn" | "cross" | "path" | "ferry" | "arrive";
+  kind:
+    | "start"
+    | "continue"
+    | "turn"
+    | "cross"
+    | "path"
+    | "ferry"
+    | "arrive"
+    | "landmark" // a POI passed along the route, spliced in between the walking maneuvers
+    | "art";
   text: string; // assembled, prettified, ready to render
   name: string | null; // prettified street name
   side: SideLabel;
@@ -320,12 +330,78 @@ function classifyTurn(delta: number): { turn: Turn; word: string } {
   return { turn: "around", word: "Turn around" };
 }
 
+// A passed POI as its own maneuver: "Pass <name>", anchored at the POI, sharing the step it is
+// nearest so the render can key on it. It carries no distance and no turn.
+function poiManeuver(poi: PassedPoi): Maneuver {
+  return {
+    kind: poi.kind,
+    text: `Pass ${poi.name}`,
+    name: poi.name,
+    side: null,
+    turn: null,
+    lengthMeters: 0,
+    stepRange: [poi.stepIndex, poi.stepIndex],
+    at: poi.at,
+  };
+}
+
+// Splice each passed POI in after the maneuver whose run contains its nearest step, so a landmark or
+// artwork shows up at the point of the walk where you actually reach it. Ties within one maneuver are
+// ordered by step; identical names within a maneuver collapse to the first.
+function interleavePois(
+  maneuvers: Maneuver[],
+  passed: readonly PassedPoi[],
+): Maneuver[] {
+  if (passed.length === 0) {
+    return maneuvers;
+  }
+  const following = new Map<number, PassedPoi[]>();
+  for (const poi of passed) {
+    let host = 0;
+    for (let index = 0; index < maneuvers.length; index++) {
+      if (maneuvers[index].stepRange[0] <= poi.stepIndex) {
+        host = index;
+      } else {
+        break;
+      }
+    }
+    const bucket = following.get(host);
+    if (bucket) {
+      bucket.push(poi);
+    } else {
+      following.set(host, [poi]);
+    }
+  }
+  const merged: Maneuver[] = [];
+  for (let index = 0; index < maneuvers.length; index++) {
+    merged.push(maneuvers[index]);
+    const bucket = following.get(index);
+    if (!bucket) {
+      continue;
+    }
+    bucket.sort((left, right) => left.alongMeters - right.alongMeters);
+    const seen = new Set<string>();
+    for (const poi of bucket) {
+      if (seen.has(poi.name)) {
+        continue;
+      }
+      seen.add(poi.name);
+      merged.push(poiManeuver(poi));
+    }
+  }
+  return merged;
+}
+
 export function buildDirections(
   graph: RoutingGraph,
   result: RouteResult,
   {
     collapseLinearCrossings = false,
-  }: { collapseLinearCrossings?: boolean } = {},
+    passed = [],
+  }: {
+    collapseLinearCrossings?: boolean;
+    passed?: readonly PassedPoi[];
+  } = {},
 ): Maneuver[] {
   const runs = buildRuns(graph, result.steps);
   const maneuvers: Maneuver[] = [];
@@ -511,5 +587,5 @@ export function buildDirections(
     at: runEnd(finalRun),
   });
 
-  return maneuvers;
+  return interleavePois(maneuvers, passed);
 }

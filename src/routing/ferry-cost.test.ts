@@ -3,6 +3,7 @@ import {
   edgeMultiplier,
   effSeconds,
   FERRY_FLOOR,
+  type RouteWeights,
   WALK_METERS_PER_SECOND,
 } from "./cost";
 import {
@@ -18,6 +19,19 @@ const SCALE = 1e-6;
 const NAME_NONE = 0xffff;
 const KIND_SIDEWALK = 0;
 const KIND_FERRY = 4;
+
+const weights = (
+  tree: number,
+  ferry: number,
+  allowFerries: boolean,
+): RouteWeights => ({
+  tree,
+  ferry,
+  landmark: 0,
+  art: 0,
+  highway: 0,
+  allowFerries,
+});
 
 interface NodeSpec {
   lat: number;
@@ -114,6 +128,11 @@ function buildGraph(nodes: NodeSpec[], edges: EdgeSpec[]): RoutingGraph {
     edgeNameId,
     edgeKindSide,
     maxCover: maxCoverByte / 255,
+    edgeLandmark: new Uint8Array(edgeCount),
+    edgeArt: new Uint8Array(edgeCount),
+    edgeHighway: new Uint8Array(edgeCount),
+    maxLandmark: 0,
+    maxArt: 0,
     edgeDurationSeconds,
     ferryEdges: Uint32Array.from(ferryEdges),
     names: [],
@@ -152,10 +171,11 @@ function dijkstraCost(
   const distance = new Float64Array(nodeCount).fill(Number.POSITIVE_INFINITY);
   const settled = new Uint8Array(nodeCount);
 
+  const routeWeights = weights(treeWeight, ferryWeight, allowFerries);
   const startA = graph.edgeNodeA[start.edge];
   const startB = graph.edgeNodeB[start.edge];
   const startPerMeter =
-    edgeMultiplier(graph, start.edge, treeWeight) / WALK_METERS_PER_SECOND;
+    edgeMultiplier(graph, start.edge, routeWeights) / WALK_METERS_PER_SECOND;
   const startLength = graph.edgeLength[start.edge];
   distance[startA] = start.metersFromA * startPerMeter;
   distance[startB] = (startLength - start.metersFromA) * startPerMeter;
@@ -163,7 +183,7 @@ function dijkstraCost(
   const destA = graph.edgeNodeA[dest.edge];
   const destB = graph.edgeNodeB[dest.edge];
   const destPerMeter =
-    edgeMultiplier(graph, dest.edge, treeWeight) / WALK_METERS_PER_SECOND;
+    edgeMultiplier(graph, dest.edge, routeWeights) / WALK_METERS_PER_SECOND;
   const destLength = graph.edgeLength[dest.edge];
 
   let best = Number.POSITIVE_INFINITY;
@@ -186,9 +206,7 @@ function dijkstraCost(
     settled[node] = 1;
     for (let slot = graph.csr[node]; slot < graph.csr[node + 1]; slot++) {
       const edge = graph.adjacency[slot];
-      const relaxed =
-        distance[node] +
-        effSeconds(graph, edge, treeWeight, ferryWeight, allowFerries);
+      const relaxed = distance[node] + effSeconds(graph, edge, routeWeights);
       const neighbour = otherEnd(graph, edge, node);
       if (relaxed < distance[neighbour]) {
         distance[neighbour] = relaxed;
@@ -221,7 +239,11 @@ function effectiveCostOf(
     } else {
       cost +=
         (step.lengthMeters / WALK_METERS_PER_SECOND) *
-        edgeMultiplier(graph, step.edge, treeWeight);
+        edgeMultiplier(
+          graph,
+          step.edge,
+          weights(treeWeight, ferryWeight, false),
+        );
     }
   }
   return cost;
@@ -334,9 +356,7 @@ test("A* effective cost matches the Dijkstra oracle across the weight matrix", (
             scenario.graph,
             scenario.start,
             scenario.dest,
-            treeWeight,
-            ferryWeight,
-            allowFerries,
+            weights(treeWeight, ferryWeight, allowFerries),
           );
           expect(result).not.toBeNull();
           const cost = effectiveCostOf(
@@ -363,9 +383,7 @@ test("the big-shortcut route boards the ferry when it is allowed", () => {
       graphA,
       snapAtNode(graphA, 0, walkEdgeA0),
       snapAtNode(graphA, 1, walkEdgeA1),
-      1,
-      ferryWeight,
-      true,
+      weights(1, ferryWeight, true),
     );
     expect(hasFerryStep(result)).toBe(true);
   }
@@ -376,9 +394,7 @@ test("the two-ferry route boards both ferries when they are allowed", () => {
     graphB,
     snapAtNode(graphB, 0, walkEdgeB0),
     snapAtNode(graphB, 3, walkEdgeB3),
-    1,
-    0.4,
-    true,
+    weights(1, 0.4, true),
   );
   const ferrySteps = (result?.steps ?? []).filter(
     (step) => step.kind === "ferry",
@@ -394,9 +410,7 @@ test("barred ferries are never boarded and the walk is ferry-weight-independent"
         scenario.graph,
         scenario.start,
         scenario.dest,
-        1,
-        ferryWeight,
-        false,
+        weights(1, ferryWeight, false),
       );
       expect(result).not.toBeNull();
       expect(hasFerryStep(result)).toBe(false);
