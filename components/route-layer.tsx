@@ -11,13 +11,21 @@ import {
 } from "../src/routing/graph";
 import type { RouteResult, RouteStep } from "../src/routing/search";
 import type { Snap } from "../src/routing/snap";
-import { draftIcon, savedIcon } from "./map-icons";
+import { savedIcon, startIcon } from "./map-icons";
 
 interface RouteLayerProps {
   result: RouteResult | null;
   dest: { lat: number; lng: number } | null; // the tapped/searched destination
   start: { lat: number; lng: number } | null; // the snapped start, for the dot
   onDisengageFollow: () => void;
+  // Live position of a dragged endpoint, each frame: re-routes without reverse-geocoding.
+  onEndpointDragMove: (
+    which: "start" | "dest",
+    lat: number,
+    lng: number,
+  ) => void;
+  // Drop of a dragged endpoint: settles that end and reverse-geocodes its label.
+  onEndpointDrag: (which: "start" | "dest", lat: number, lng: number) => void;
 }
 
 const TILE_SIZE = 256;
@@ -285,6 +293,8 @@ export default function RouteLayer({
   dest,
   start,
   onDisengageFollow,
+  onEndpointDragMove,
+  onEndpointDrag,
 }: RouteLayerProps) {
   const map = useMap();
   const [graph, setGraph] = useState<RoutingGraph | null>(null);
@@ -362,10 +372,38 @@ export default function RouteLayer({
   return (
     <>
       {start ? (
-        <Marker position={[start.lat, start.lng]} icon={draftIcon} />
+        <Marker
+          position={[start.lat, start.lng]}
+          icon={startIcon}
+          draggable
+          eventHandlers={{
+            drag: (event) => {
+              const { lat, lng } = event.target.getLatLng();
+              onEndpointDragMove("start", lat, lng);
+            },
+            dragend: (event) => {
+              const { lat, lng } = event.target.getLatLng();
+              onEndpointDrag("start", lat, lng);
+            },
+          }}
+        />
       ) : null}
       {dest ? (
-        <Marker position={[dest.lat, dest.lng]} icon={savedIcon} />
+        <Marker
+          position={[dest.lat, dest.lng]}
+          icon={savedIcon}
+          draggable
+          eventHandlers={{
+            drag: (event) => {
+              const { lat, lng } = event.target.getLatLng();
+              onEndpointDragMove("dest", lat, lng);
+            },
+            dragend: (event) => {
+              const { lat, lng } = event.target.getLatLng();
+              onEndpointDrag("dest", lat, lng);
+            },
+          }}
+        />
       ) : null}
       {showConnector && dest && snappedDest ? (
         <Polyline
