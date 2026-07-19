@@ -194,9 +194,12 @@ export default function MapApp() {
   // Bumped on drop to re-run the route effect for the exact recompute, since a start drop leaves the
   // resolved endpoints unchanged and nothing else would re-trigger it.
   const [routeRefreshNonce, setRouteRefreshNonce] = useState<number>(0);
-  // Mirrors routeState.kind === "ready" so a recompute never flashes a spinner over an already-drawn
-  // route; kept in sync by the effect below.
+  // Mirrors routeState.kind === "ready", so a recompute can still apply an unchanged cache result when
+  // nothing is drawn yet (else the loading state would strand); kept in sync by the effect below.
   const hasReadyRouteRef = useRef<boolean>(false);
+  // The nonce the route effect last acted on, so a recompute can tell a drop (nonce bumped, lands
+  // silently) from a fresh target (a new destination or start, which flashes the loading spinner).
+  const lastAppliedNonceRef = useRef<number>(0);
 
   // Defaults to destination-pick when the routing panel is open with no destination; arming a field
   // from the panel overrides which end the next tap sets.
@@ -357,9 +360,9 @@ export default function MapApp() {
 
   // Live recompute: whenever a resolvable start and a destination both exist, (re)find the route,
   // keyed on the endpoints and the tree weight and rAF-coalesced so a slider drag computes at most
-  // once per frame. The loading flash shows only for a new endpoint pair with nothing drawn yet; a
-  // slider move re-costs in place. Writes only routeState/routedForRef (neither a dep).
-  // biome-ignore lint/correctness/useExhaustiveDependencies: routeRefreshNonce is a re-trigger only (a drop bumps it to force the exact recompute); it is intentionally not read in the body
+  // once per frame. The loading flash shows for a fresh endpoint pair unless the recompute came from
+  // an endpoint drop (which holds the drawn route until the exact one lands); a slider move re-costs in
+  // place. Writes only routeState/routedForRef (neither a dep).
   useEffect(() => {
     if (!resolvedStart || !dest) {
       setRouteState({ kind: "idle" });
@@ -379,7 +382,11 @@ export default function MapApp() {
       previous.start.lng !== request.start.lng;
     let cancelled = false;
     const frame = requestAnimationFrame(() => {
-      if (isNewTarget && !draggingRef.current && !hasReadyRouteRef.current) {
+      // A drop bumps routeRefreshNonce; that recompute lands silently so the drawn route holds until
+      // the exact one is ready. Any other trigger (a new destination or start) shows the spinner.
+      const isDropRefresh = routeRefreshNonce !== lastAppliedNonceRef.current;
+      lastAppliedNonceRef.current = routeRefreshNonce;
+      if (isNewTarget && !draggingRef.current && !isDropRefresh) {
         setRouteState({ kind: "loading" });
       }
       loadRouting().then(
@@ -763,17 +770,20 @@ export default function MapApp() {
         : null,
     [routeResult, directions, userLocation],
   );
-  // Start marker position: the snapped route start, or the manual start before a route exists. A
-  // live-location-only start gets no dot — the location marker already shows it. WHILE the start is
-  // being dragged it must follow the cursor (manualStart), not the snapped route point — writing the
-  // snapped point back onto the marker mid-drag fights Leaflet's own drag and strands the gesture.
+  // Start marker position: the snapped route start, else the manual start, else — while the routing
+  // panel is open — the live location, so the start sits pre-dropped and draggable atop the location
+  // dot before any destination is picked (drag it to set a manual start; it tracks the fix until then).
+  // WHILE the start is being dragged it must follow the cursor (manualStart), not the snapped route
+  // point — writing the snapped point back onto the marker mid-drag fights Leaflet's drag and strands it.
   const draggingStart = dragging && dragWhichRef.current === "start";
   const routeStart =
     !draggingStart && routeResult
       ? routeResult.start.point
       : manualStart
         ? { lat: manualStart.lat, lng: manualStart.lng }
-        : null;
+        : routingOpen && userLocation
+          ? { lat: userLocation.lat, lng: userLocation.lng }
+          : null;
   // The destination marker appears the moment a destination exists; the line follows live once both
   // endpoints resolve and the search lands.
   const routeDest = dest ? { lat: dest.lat, lng: dest.lng } : null;
