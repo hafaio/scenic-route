@@ -5,7 +5,8 @@
 //! two boroughs it serves. The tile pyramid and the street chunks draw every walkable segment;
 //! this drops the vehicular-only ones, collapses the shape joints, and turns "which side" from a
 //! display choice into topology, so a router settles a cross-borough query in tens of
-//! milliseconds. See scripts/README.md.
+//! milliseconds. v4 bakes three scenic-factor bytes per edge (landmark and public-art amenity
+//! discounts, a highway/rail nuisance penalty) via `scenic.rs`. See scripts/README.md.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -16,6 +17,7 @@ use crate::binfmt::{self, SIDES, write_varint, zigzag};
 use crate::conflate::{self, ProtoEdge};
 use crate::corners::{self, EdgeEnd};
 use crate::geometry::{METERS_PER_DEGREE_LAT, round_half_up};
+use crate::scenic;
 use crate::sidewalks::{self, FLAG_NON_VEHICULAR};
 
 // STRT record flags (byte 23). FLAG_NON_VEHICULAR lives in sidewalks.rs, where the chunk offsets
@@ -51,9 +53,9 @@ const SIDE_SOUTH: u8 = 3;
 const SIDE_WEST: u8 = 4;
 const FLAG_GEOMETRY_RIGHT: u8 = 1 << 2; // this sidewalk lies right of its stored geometry direction
 
-const GRAPH_FORMAT: u16 = 3;
+const GRAPH_FORMAT: u16 = 4; // v4 widens the edge record to carry the three scenic-factor bytes
 const GRAPH_HEADER_BYTES: usize = 64;
-const EDGE_RECORD_BYTES: usize = 24;
+const EDGE_RECORD_BYTES: usize = 28; // 24 + landmark(24), art(25), highway(26), reserved(27)
 const NO_GEOMETRY: u32 = 0xFFFF_FFFF; // edge record byte 12 sentinel: straight a->b, no blob entry
 const UNNAMED: u16 = 0xFFFF;
 const DECIMETERS_PER_METER: f64 = 10.0; // the half-offset byte's unit, as the chunk uses
@@ -85,6 +87,9 @@ pub struct Args {
     pub streets: PathBuf,
     pub paths: Option<PathBuf>,
     pub ferries: Option<PathBuf>,
+    pub landmarks: Option<PathBuf>,
+    pub art: Option<PathBuf>,
+    pub highways: Option<PathBuf>,
     pub out: PathBuf,
 }
 
@@ -1578,6 +1583,69 @@ pub fn run(args: &Args) -> Fallible<()> {
         cursor[edge.b as usize] += 1;
     }
 
+    // The scenic-factor bytes (GRPH v4): a network-fan-out amenity DISCOUNT for landmark and
+    // public-art proximity, and an areal PENALTY for highway / elevated-rail nearness — one per-edge
+    // byte each, which a later phase reads into the routing cost. Computed here over the finished
+    // walking graph (nodes, edges and CSR are all final); a ferry edge carries none, zeroed at write.
+    let edge_a: Vec<u32> = v2_edges.iter().map(|edge| edge.a).collect();
+    let edge_b: Vec<u32> = v2_edges.iter().map(|edge| edge.b).collect();
+    let edge_len_m: Vec<f64> = v2_edges.iter().map(|edge| f64::from(edge.length)).collect();
+    let network = scenic::Network {
+        node_x: &node_lng,
+        node_y: &node_lat,
+        csr: &csr,
+        adjacency: &adjacency,
+        edge_a: &edge_a,
+        edge_b: &edge_b,
+        edge_len_m: &edge_len_m,
+        origin_lng,
+        origin_lat,
+        scale,
+        mpu_lng: meters_per_unit_lng,
+        mpu_lat: meters_per_unit_lat,
+    };
+    let landmark_bytes = match &args.landmarks {
+        Some(path) => {
+            let pois = binfmt::read_points(path, "LMRK", binfmt::LANDMARK_FORMAT)?;
+            let (bytes, stats) = scenic::poi_amenity(&network, &scenic::LANDMARK_PARAMS, &pois);
+            eprintln!(
+                "landmarks: {} points, {} snapped, max amenity byte {}",
+                pois.len(),
+                stats.snapped,
+                stats.max_byte
+            );
+            bytes
+        }
+        None => vec![0u8; edge_count],
+    };
+    let art_bytes = match &args.art {
+        Some(path) => {
+            let pois = binfmt::read_points(path, "ARTW", binfmt::ART_FORMAT)?;
+            let (bytes, stats) = scenic::poi_amenity(&network, &scenic::ART_PARAMS, &pois);
+            eprintln!(
+                "art: {} points, {} snapped, max amenity byte {}",
+                pois.len(),
+                stats.snapped,
+                stats.max_byte
+            );
+            bytes
+        }
+        None => vec![0u8; edge_count],
+    };
+    let highway_bytes = match &args.highways {
+        Some(path) => {
+            let lines = binfmt::read_polygons(path, "HWAY", binfmt::HIGHWAY_FORMAT)?;
+            let (bytes, max_byte) = scenic::highway_penalty(&network, &lines);
+            eprintln!(
+                "highways: {} nuisance lines, max penalty byte {}",
+                lines.len(),
+                max_byte
+            );
+            bytes
+        }
+        None => vec![0u8; edge_count],
+    };
+
     // Pre-write invariants: a stored-geometry edge begins and ends exactly on its node coordinates
     // (a sidewalk is baked corner-to-corner, a path keeps its pinned endpoints), so no geometry
     // overshoots the intersection; every edge is at least as long as its straight-line node
@@ -1715,6 +1783,14 @@ pub fn run(args: &Args) -> Fallible<()> {
         bytes[record + 21] = edge.half_offset;
         bytes[record + 22] = (edge.kind & KIND_MASK) | (edge.side << SIDE_SHIFT);
         bytes[record + 23] = edge.flags;
+        // Scenic-factor bytes (v4): a ferry passes no landmark, art, or highway, so it keeps the
+        // record's default zeros; every walking kind carries the baked discount/penalty attributes.
+        if edge.kind != KIND_FERRY {
+            bytes[record + 24] = landmark_bytes[edge_id];
+            bytes[record + 25] = art_bytes[edge_id];
+            bytes[record + 26] = highway_bytes[edge_id];
+        }
+        // byte 27 is reserved (kept zero).
     }
 
     put_u32(&mut bytes, name_offset, used_names.len() as u32);

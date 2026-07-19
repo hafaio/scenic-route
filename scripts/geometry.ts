@@ -9,6 +9,20 @@ import type { Coord } from "./socrata";
 export const HEADER_BYTES = 40;
 export const COORD_SCALE = 1e-6; // degrees per quantized unit, ~0.1 m
 
+export const EARTH_RADIUS_METERS = 6_371_008.8;
+
+// Great-circle distance in metres. Used where a source dedups or clips by a real ground radius.
+export function haversineMeters(from: Coord, to: Coord): number {
+  const fromLat = from.lat * (Math.PI / 180);
+  const toLat = to.lat * (Math.PI / 180);
+  const deltaLat = toLat - fromLat;
+  const deltaLng = (to.lng - from.lng) * (Math.PI / 180);
+  const chord =
+    Math.sin(deltaLat / 2) ** 2 +
+    Math.cos(fromLat) * Math.cos(toLat) * Math.sin(deltaLng / 2) ** 2;
+  return 2 * EARTH_RADIUS_METERS * Math.asin(Math.min(1, Math.sqrt(chord)));
+}
+
 export function zigzag(value: number): number {
   return ((value << 1) ^ (value >> 31)) >>> 0;
 }
@@ -130,6 +144,80 @@ export function encodeTrees(
   }
   writeHeader(bytes, view, "TREE", format, trees.length, originLng, originLat);
   return bytes.subarray(0, offset);
+}
+
+// A named point: a POI's coordinate and the label the client draws (empty when the source names none).
+export interface NamedPoint extends Coord {
+  name?: string;
+}
+
+// A point set with per-point names: the header, then the coordinate stream as zigzag-varint (x, y)
+// deltas in (y, x)-sorted order, then a trailing name blob — per point (in that same sorted order) a
+// u16 UTF-8 byte length and its bytes. The name blob is client-only (the overlay labels read it); the
+// Rust reader reads only `count` points from the header and ignores it, so the graph bake is
+// unaffected. The scenic-factor ingests (landmarks, public art) write their POIs with this.
+// layout: scripts/README.md
+export function encodePoints(
+  magic: string,
+  format: number,
+  points: readonly NamedPoint[],
+): Uint8Array {
+  let originLng = Number.POSITIVE_INFINITY;
+  let originLat = Number.POSITIVE_INFINITY;
+  for (const { lat, lng } of points) {
+    originLng = Math.min(originLng, lng);
+    originLat = Math.min(originLat, lat);
+  }
+
+  const encoder = new TextEncoder();
+  const quantized = points
+    .map(({ lat, lng, name }) => ({
+      x: Math.round((lng - originLng) / COORD_SCALE),
+      y: Math.round((lat - originLat) / COORD_SCALE),
+      name: encoder.encode(name ?? ""),
+    }))
+    .sort((left, right) => left.y - right.y || left.x - right.x);
+
+  // Two varints of at most five bytes each per point.
+  const pointBytes = new Uint8Array(HEADER_BYTES + points.length * 10);
+  const view = new DataView(pointBytes.buffer);
+  let offset = HEADER_BYTES;
+  let previousX = 0;
+  let previousY = 0;
+  for (const { x, y } of quantized) {
+    offset = writeVarint(pointBytes, offset, zigzag(x - previousX));
+    offset = writeVarint(pointBytes, offset, zigzag(y - previousY));
+    previousX = x;
+    previousY = y;
+  }
+  writeHeader(
+    pointBytes,
+    view,
+    magic,
+    format,
+    points.length,
+    originLng,
+    originLat,
+  );
+
+  let nameBlobLength = 0;
+  for (const { name } of quantized) {
+    nameBlobLength += 2 + name.length;
+  }
+  const nameBlob = new Uint8Array(nameBlobLength);
+  const nameView = new DataView(nameBlob.buffer);
+  let nameCursor = 0;
+  for (const { name } of quantized) {
+    nameView.setUint16(nameCursor, name.length, true);
+    nameCursor += 2;
+    nameBlob.set(name, nameCursor);
+    nameCursor += name.length;
+  }
+
+  const out = new Uint8Array(offset + nameBlobLength);
+  out.set(pointBytes.subarray(0, offset));
+  out.set(nameBlob, offset);
+  return out;
 }
 
 // layout: scripts/README.md

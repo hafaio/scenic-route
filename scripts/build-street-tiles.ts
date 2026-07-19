@@ -34,6 +34,9 @@ const TREE_DIR = join(PUBLIC_DIR, "trees");
 const CHUNK_DIR = join(PUBLIC_DIR, "streets");
 const ROUTING_DIR = join(PUBLIC_DIR, "routing");
 const STAMP_PATH = join(CANOPY_TILE_DIR, ".stamp");
+// Committed point/line sources served to the client verbatim for the map overlays (dots and lines).
+// Not rendered by the tiler, so they are copied straight across whenever their file is present.
+const SERVED_SOURCES = ["landmarks", "art", "ferries", "highways"] as const;
 const MANIFEST_PATH = join(
   import.meta.dirname,
   "..",
@@ -123,6 +126,17 @@ async function newestInputMtime(cities: City[]): Promise<number> {
       ...(city.paths ? [sourcePath("paths", city.paths.file)] : []),
     ]),
   ];
+  // The by-convention graph inputs (ferries + the scenic factors) are not in the manifest, so a
+  // change to one must still refresh the graph: include each that exists on disk.
+  const convention = cities.flatMap((city) =>
+    ["ferries", "landmarks", "art", "highways"].map((kind) =>
+      sourcePath(kind, `${city.id}.bin`),
+    ),
+  );
+  const present = await Promise.all(
+    convention.map(async (path) => ((await fileExists(path)) ? path : null)),
+  );
+  paths.push(...present.filter((path): path is string => path !== null));
   const stats = await Promise.all(paths.map((path) => stat(path)));
   return Math.max(...stats.map((entry) => entry.mtimeMs));
 }
@@ -140,8 +154,24 @@ async function isFresh(cities: City[]): Promise<boolean> {
   }
 }
 
+// Copies the served point/line sources (data/<kind>/<id>.bin -> public/<kind>/<id>.bin) verbatim for
+// the overlay layers. Independent of the tiler, so it runs even when the tile pyramids are fresh.
+async function serveSources(cities: City[]): Promise<void> {
+  for (const kind of SERVED_SOURCES) {
+    for (const city of cities) {
+      const source = sourcePath(kind, `${city.id}.bin`);
+      if (await fileExists(source)) {
+        const dir = join(PUBLIC_DIR, kind);
+        await mkdir(dir, { recursive: true });
+        await copyFile(source, join(dir, `${city.id}.bin`));
+      }
+    }
+  }
+}
+
 async function build(): Promise<void> {
   const cities: City[] = manifest.cities;
+  await serveSources(cities);
   if (await isFresh(cities)) {
     console.error("street overlays are up to date");
     return;
@@ -240,12 +270,19 @@ async function build(): Promise<void> {
     if (city.paths) {
       graphArgs.push("--paths", sourcePath("paths", city.paths.file));
     }
-    // The ferry graph is referenced by convention (data/ferries/<id>.bin), not the manifest — its
-    // versioned CityEntry schema would throw for existing cities if bumped — so it is passed only
-    // when the committed file is present.
-    const ferryFile = sourcePath("ferries", `${city.id}.bin`);
-    if (await fileExists(ferryFile)) {
-      graphArgs.push("--ferries", ferryFile);
+    // The ferry graph and the scenic-factor sources are referenced by convention
+    // (data/<kind>/<id>.bin), not the manifest — its versioned CityEntry schema would throw for
+    // existing cities if bumped — so each is passed only when its committed file is present.
+    for (const [flag, kind] of [
+      ["--ferries", "ferries"],
+      ["--landmarks", "landmarks"],
+      ["--art", "art"],
+      ["--highways", "highways"],
+    ] as const) {
+      const file = sourcePath(kind, `${city.id}.bin`);
+      if (await fileExists(file)) {
+        graphArgs.push(flag, file);
+      }
     }
     runTiler(graphArgs, false);
   }

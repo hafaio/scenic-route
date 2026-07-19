@@ -18,6 +18,7 @@ interface OverpassWay {
   id?: number;
   tags?: Record<string, string>;
   geometry?: OverpassPoint[];
+  center?: OverpassPoint; // present with `out center;` — a way's representative point
 }
 
 interface OverpassRelation {
@@ -249,4 +250,102 @@ export async function fetchOsmTrees(
     });
   }
   return trees;
+}
+
+// One OSM public-art point: its coordinate and the `name` tag when it carries one (many artworks do).
+export interface OsmArtwork extends Coord {
+  name?: string;
+}
+
+// OSM public-art points: tourism=artwork (murals, sculptures, statues, installations). A node is a
+// point; a way (a painted wall, a large installation) is taken at its center. Supplements the NYC
+// PDC public-art inventory, which is thin on murals. The art ingest clips these to land and dedups
+// them against the PDC works.
+export async function fetchOsmArtwork(
+  south: number,
+  west: number,
+  north: number,
+  east: number,
+): Promise<OsmArtwork[]> {
+  const box = `${south},${west},${north},${east}`;
+  const query =
+    `[out:json][timeout:${QUERY_TIMEOUT_SECONDS}];` +
+    `(node["tourism"="artwork"](${box});way["tourism"="artwork"](${box}););out center;`;
+  const elements = await overpassQuery("overpass-artwork", query);
+  const points: OsmArtwork[] = [];
+  for (const element of elements) {
+    if (
+      element.type === "node" &&
+      element.lat !== undefined &&
+      element.lon !== undefined
+    ) {
+      points.push({
+        lat: element.lat,
+        lng: element.lon,
+        name: element.tags?.name?.trim(),
+      });
+    } else if (element.type === "way" && element.center) {
+      points.push({
+        lat: element.center.lat,
+        lng: element.center.lon,
+        name: element.tags?.name?.trim(),
+      });
+    }
+  }
+  return points;
+}
+
+// One line walking near is unpleasant: a limited-access highway (or ramp), or ABOVE-GROUND rail. The
+// `kind` is kept for the ingest log; the routing penalty treats them the same. Never part of the
+// walking network — these are only rasterized into a proximity field, never routed.
+export interface NuisanceLine {
+  kind: "highway" | "rail";
+  points: Coord[];
+}
+
+const HIGHWAY_CLASSES = "^(motorway|trunk|motorway_link|trunk_link)$";
+const RAIL_CLASSES = "^(rail|subway|light_rail)$";
+
+// Highways and above-ground rail as polylines. Rail counts when it is not underground — surface,
+// open cut, or elevated are all unpleasant to walk beside (the Franklin Ave shuttle runs in an open
+// cut with no bridge/layer tag, so an "elevated only" filter dropped most of it). Only `tunnel=yes`
+// and below-grade covered sections (`layer` < 0) are excluded.
+export async function fetchNuisanceLines(
+  south: number,
+  west: number,
+  north: number,
+  east: number,
+): Promise<NuisanceLine[]> {
+  const box = `${south},${west},${north},${east}`;
+  const query =
+    `[out:json][timeout:${QUERY_TIMEOUT_SECONDS}];(` +
+    `way["highway"~"${HIGHWAY_CLASSES}"](${box});` +
+    `way["railway"~"${RAIL_CLASSES}"]["tunnel"!~"yes"](${box});` +
+    `);out geom;`;
+  const elements = await overpassQuery("overpass-nuisance", query);
+  const lines: NuisanceLine[] = [];
+  for (const element of elements) {
+    if (
+      element.type !== "way" ||
+      !element.geometry ||
+      element.geometry.length < 2
+    ) {
+      continue;
+    }
+    const tags = element.tags ?? {};
+    let kind: NuisanceLine["kind"] | null = null;
+    if (tags.highway !== undefined) {
+      kind = "highway";
+    } else if (tags.railway !== undefined && tags.tunnel !== "yes") {
+      const layer = Number.parseInt(tags.layer ?? "", 10);
+      // Keep everything not underground; a negative layer is a below-grade covered stretch, dropped.
+      if (!Number.isFinite(layer) || layer >= 0) {
+        kind = "rail";
+      }
+    }
+    if (kind !== null) {
+      lines.push({ kind, points: toCoords(element.geometry) });
+    }
+  }
+  return lines;
 }

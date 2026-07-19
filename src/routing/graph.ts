@@ -49,10 +49,16 @@ export interface RoutingGraph {
   edgeLength: Float32Array; // geodesic metres
   edgeGeomOffset: Uint32Array; // byte offset into the geometry blob; NO_GEOMETRY = straight a -> b
   edgeGeomCount: Uint16Array; // geometry vertices, 0 when no geometry
-  edgeCover: Uint8Array; // 0..255, this edge's own single value; 0 for a ferry
+  edgeCover: Uint8Array; // 0..254, this edge's own single value; 0 for a ferry
   edgeNameId: Uint16Array; // index into names, or NAME_NONE
   edgeKindSide: Uint8Array; // bits 0-2 kind, bits 3-5 side
   maxCover: number; // the greatest per-edge cover in the graph, 0..1; sets the cost clip floor
+
+  edgeLandmark: Uint8Array; // 0..254, this edge's landmark-amenity discount attribute; 0 for a ferry
+  edgeArt: Uint8Array; // 0..254, this edge's public-art discount attribute; 0 for a ferry
+  edgeHighway: Uint8Array; // 0..254, this edge's highway/rail nuisance penalty attribute; 0 for a ferry
+  maxLandmark: number; // the greatest per-edge landmark amenity, 0..1; sets that discount's clip floor
+  maxArt: number; // the greatest per-edge art amenity, 0..1; sets that discount's clip floor
 
   edgeHalfOffsetDm: Uint8Array; // decimetres to a sidewalk; 0 for crossings/links/paths/ferries
   edgeDurationSeconds: Float32Array; // a ferry edge's crossing-plus-wait seconds; 0 for every other kind
@@ -67,9 +73,9 @@ export interface RoutingGraph {
 }
 
 const MAGIC = "GRPH";
-const FORMAT_VERSION = 3;
+const FORMAT_VERSION = 4;
 const HEADER_BYTES = 64;
-const EDGE_RECORD_BYTES = 24;
+const EDGE_RECORD_BYTES = 28;
 const GRAPH_URL = "routing/nyc.bin"; // relative, so it picks up the deploy basePath
 const PATH_CACHE_LIMIT = 512;
 
@@ -121,8 +127,13 @@ export function decodeGraph(buffer: ArrayBuffer): RoutingGraph {
   const edgeHalfOffsetDm = new Uint8Array(edgeCount);
   const edgeDurationSeconds = new Float32Array(edgeCount);
   const edgeFlags = new Uint8Array(edgeCount);
+  const edgeLandmark = new Uint8Array(edgeCount);
+  const edgeArt = new Uint8Array(edgeCount);
+  const edgeHighway = new Uint8Array(edgeCount);
   const ferryEdges: number[] = [];
   let maxCoverByte = 0;
+  let maxLandmarkByte = 0;
+  let maxArtByte = 0;
   let minFerrySecPerMetre = Number.POSITIVE_INFINITY;
   for (let edge = 0; edge < edgeCount; edge++) {
     const record = offset + edge * EDGE_RECORD_BYTES;
@@ -150,8 +161,17 @@ export function decodeGraph(buffer: ArrayBuffer): RoutingGraph {
       edgeHalfOffsetDm[edge] = bytes[record + 21];
       maxCoverByte = Math.max(maxCoverByte, edgeCover[edge]);
     }
+    // The scenic-factor bytes are their own record slot, so a ferry's duration in bytes 20-21 does
+    // not collide; a ferry carries 0 in all three, so it never lifts a discount's max.
+    edgeLandmark[edge] = bytes[record + 24];
+    edgeArt[edge] = bytes[record + 25];
+    edgeHighway[edge] = bytes[record + 26];
+    maxLandmarkByte = Math.max(maxLandmarkByte, edgeLandmark[edge]);
+    maxArtByte = Math.max(maxArtByte, edgeArt[edge]);
   }
   const maxCover = maxCoverByte / 255;
+  const maxLandmark = maxLandmarkByte / 255;
+  const maxArt = maxArtByte / 255;
 
   const names = decodeNames(buffer, nameTableOffset);
   const geometry = new Uint8Array(buffer, geometryOffset, geometryLength);
@@ -181,6 +201,11 @@ export function decodeGraph(buffer: ArrayBuffer): RoutingGraph {
     edgeNameId,
     edgeKindSide,
     maxCover,
+    edgeLandmark,
+    edgeArt,
+    edgeHighway,
+    maxLandmark,
+    maxArt,
     edgeHalfOffsetDm,
     edgeDurationSeconds,
     ferryEdges: Uint32Array.from(ferryEdges),

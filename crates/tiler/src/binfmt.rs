@@ -13,6 +13,9 @@ pub const LAND_FORMAT: u16 = 1;
 pub const STREET_FORMAT: u16 = 5;
 pub const PATH_FORMAT: u16 = 1; // OSM pedestrian/park ways: STRT v5's layout, magic "PATH"
 pub const FERRY_FORMAT: u16 = 2; // the time-independent NYC ferry graph, magic "FERR"; v2 adds a route name id
+pub const LANDMARK_FORMAT: u16 = 1; // scenic POI points, the shared point layout, magic "LMRK"
+pub const ART_FORMAT: u16 = 1; // public-art POI points, the shared point layout, magic "ARTW"
+pub const HIGHWAY_FORMAT: u16 = 1; // highway/elevated-rail nuisance lines, the LAND polygon layout, magic "HWAY"
 
 pub const SIDES: usize = 2; // the two sidewalks a density blob carries per vertex, left then right
 pub const DECIMETERS_PER_METER: f64 = 10.0; // the crown byte's unit: a decimetre of crown radius
@@ -204,6 +207,31 @@ pub fn read_polygons(path: &Path, magic: &str, format: u16) -> Fallible<Vec<Poly
         polygons.push(polygon);
     }
     Ok(polygons)
+}
+
+/// A bare point set (the scenic POI sources: `LMRK` landmarks, `ARTW` public art). The shared
+/// point layout — the header, then `count` (lng, lat) varint deltas, no trailing payload. `tiler
+/// graph` snaps each to the nearest walking node and fans it out into a per-edge discount.
+pub fn read_points(path: &Path, magic: &str, format: u16) -> Fallible<Vec<Coord>> {
+    let bytes = fs::read(path)?;
+    check_magic(&bytes, magic, format, path)?;
+    let head = header(&bytes);
+    let mut cursor = Cursor {
+        bytes: &bytes,
+        offset: head.body,
+    };
+    let mut coords = Vec::with_capacity(head.count);
+    let mut x: i64 = 0;
+    let mut y: i64 = 0;
+    for _ in 0..head.count {
+        x += i64::from(cursor.varint());
+        y += i64::from(cursor.varint());
+        coords.push(Coord {
+            lng: head.origin_lng + x as f64 * head.scale,
+            lat: head.origin_lat + y as f64 * head.scale,
+        });
+    }
+    Ok(coords)
 }
 
 /// The street network, plus the file it came from: `tiler densities` patches the trailing
