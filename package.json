@@ -13,6 +13,7 @@
     "start": "next start",
     "set-admin": "bun run scripts/set-admin.ts",
     "build-tree-data": "bun run scripts/build-tree-data.ts",
+    "build-buildings": "bun run scripts/buildings.ts",
     "build-tiles": "bun run scripts/build-street-tiles.ts"
   },
   "dependencies": {
