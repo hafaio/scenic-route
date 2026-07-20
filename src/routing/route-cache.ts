@@ -78,6 +78,12 @@ export class RouteCache {
   private lastResult: RouteResult | null = null;
   private lastSignature: string | null = null;
 
+  // The search is injected so tests can pass a deterministic stub. It is NOT a global `mock.module`
+  // on purpose: a module mock leaks across bun test files (findRoute is shared by the oracle tests),
+  // and its teardown is version- and order-dependent. Production constructs `new RouteCache()` and
+  // gets the real findRoute.
+  constructor(private readonly search: typeof findRoute = findRoute) {}
+
   route(
     graph: RoutingGraph,
     start: Snap,
@@ -132,7 +138,7 @@ export class RouteCache {
 
     let sample: Sample;
     if (this.axis === null) {
-      const result = findRoute(graph, start, dest, current);
+      const result = this.search(graph, start, dest, current);
       sample = {
         value: current.tree,
         signature: pathSignature(result),
@@ -178,7 +184,7 @@ export class RouteCache {
     if (below && above && below.signature === above.signature) {
       return below; // the same path is optimal across the whole [below, above] interval
     }
-    const result = findRoute(graph, start, dest, weights);
+    const result = this.search(graph, start, dest, weights);
     const sample: Sample = {
       value: axisValue,
       signature: pathSignature(result),
