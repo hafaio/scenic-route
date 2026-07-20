@@ -11,6 +11,7 @@ import {
   FiUser,
 } from "react-icons/fi";
 import type { OverlayId } from "../src/overlays/registry";
+import ClockControl from "./clock-control";
 import LayersControl from "./layers-control";
 import type { AuthState } from "./map-app";
 import RouteToggle from "./route-toggle";
@@ -97,6 +98,7 @@ export default function Toolbar({
     <div className="absolute top-3 right-3 z-[1000] flex items-center gap-2">
       <RouteToggle active={routing} onToggle={onToggleRouting} />
       <LayersControl active={activeOverlays} onToggle={onToggleOverlay} />
+      <ClockControl />
       <ThemeToggle />
       <div ref={menuRef} className="relative">
         <button
