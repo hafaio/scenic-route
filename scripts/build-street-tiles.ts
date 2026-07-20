@@ -11,6 +11,11 @@ import { GENUS_COLORS, GENUS_COUNT } from "../src/tree-cover/genus";
 import manifest from "../src/tree-cover/manifest.json";
 import { rampAlpha, rampColor } from "../src/tree-cover/ramp";
 import { buildCommercial } from "./build-commercial";
+import {
+  computeShadeBuckets,
+  SHADE_MAX_SHADOW_METERS,
+  SHADE_MAX_ZOOM,
+} from "./shade-schedule";
 import { runTiler, tilerSources } from "./tiler";
 
 type City = (typeof manifest.cities)[number];
@@ -128,6 +133,7 @@ async function newestInputMtime(cities: City[]): Promise<number> {
     GENUS_PATH,
     import.meta.filename,
     join(import.meta.dirname, "build-commercial.ts"),
+    join(import.meta.dirname, "shade-schedule.ts"),
     ...(await tilerSources()),
     ...cities.flatMap((city) => [
       sourcePath("streets", city.streets.file),
@@ -244,6 +250,47 @@ async function build(): Promise<void> {
   // The commercial overlay's per-segment signals: snapped from the committed sources onto the STCK
   // chunks the tiler just wrote, so this must run after them. Own rm/mkdir of public/commercial.
   await buildCommercial();
+
+  // The shade overlay's shadow-tile pyramid, one per time-of-day bucket, cast from the building
+  // footprints by `tiler shade`. The sun schedule (suncalc) is computed here and passed as params;
+  // stale tiles are cleared first so a shrunk schedule leaves nothing behind.
+  const shadeBuckets = computeShadeBuckets();
+  const anyBuildings = (
+    await Promise.all(
+      cities.map((city) =>
+        fileExists(sourcePath("buildings", `${city.id}.bin`)),
+      ),
+    )
+  ).some(Boolean);
+  if (anyBuildings && shadeBuckets.length > 0) {
+    const shadeParams = join(tmpdir(), "scenic-shade-params.json");
+    await writeFile(
+      shadeParams,
+      JSON.stringify({
+        maxZoom: SHADE_MAX_ZOOM,
+        maxShadowMeters: SHADE_MAX_SHADOW_METERS,
+        buckets: shadeBuckets,
+      }),
+    );
+    await rm(join(PUBLIC_DIR, "tiles", "shade"), {
+      recursive: true,
+      force: true,
+    });
+    runTiler(
+      [
+        "shade",
+        "--manifest",
+        MANIFEST_PATH,
+        "--data",
+        DATA_DIR,
+        "--tiles",
+        join(PUBLIC_DIR, "tiles"),
+        "--params",
+        shadeParams,
+      ],
+      false,
+    );
+  }
 
   // The blurred LiDAR canopy pyramid, coloured by the shared ramp LUT: the map's cover fill. The
   // subcommand renders every manifest city that carries a canopy layer, so it runs once when any

@@ -17,24 +17,35 @@ jobs:
         with:
           lfs: true
       - uses: oven-sh/setup-bun@v2
+        with:
+          # Pin bun: an unpinned setup-bun tracks the latest release, and `bun test`'s cross-file
+          # `mock.module` teardown differs between versions — a newer bun leaks route-cache.test.ts's
+          # `./search` mock into the oracle tests. Pin to the version the suite is validated against.
+          bun-version: 1.3.14
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
       - run: bun install --frozen-lockfile
       - run: bun lint
+      - run: bun test src
+      # The tile render + static export is expensive (the shade pyramid alone is ~20 min) and its
+      # output is only consumed by the Pages deploy, so it runs only on that path. A push or PR stops
+      # at lint + tests.
       - if: inputs.upload-pages
         uses: actions/configure-pages@v5
         with:
           static_site_generator: next
-      - uses: actions/cache@v4
+      - if: inputs.upload-pages
+        uses: actions/cache@v4
         with:
           path: |
             .next/cache
           key: ${{ runner.os }}-nextjs-${{ hashFiles('bun.lock') }}-${{ hashFiles('**.[jt]s', '**.[jt]sx') }}
           restore-keys: |
             ${{ runner.os }}-nextjs-${{ hashFiles('bun.lock') }}-
-      - run: bun export
+      - if: inputs.upload-pages
+        run: bun export
       - if: inputs.upload-pages
         uses: actions/upload-pages-artifact@v3
         with:
