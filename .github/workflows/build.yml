@@ -28,7 +28,7 @@ jobs:
       # output is only consumed by the Pages deploy, so it runs only on that path. A push or PR stops
       # at lint + tests.
       - if: inputs.upload-pages
-        uses: actions/configure-pages@v5
+        uses: actions/configure-pages@v6
         with:
           static_site_generator: next
       - if: inputs.upload-pages
