@@ -23,6 +23,7 @@ import type { Pin, PinDraft } from "../src/pin";
 import { getResolvedDate, subscribeRouteTime } from "../src/route-time/store";
 import {
   DEFAULT_ART_WEIGHT,
+  DEFAULT_COMMERCIAL_WEIGHT,
   DEFAULT_FERRY_WEIGHT,
   DEFAULT_HIGHWAY_WEIGHT,
   DEFAULT_LANDMARK_WEIGHT,
@@ -81,6 +82,7 @@ const FERRY_ALLOW_KEY = "scenic-route:allow-ferries";
 const LANDMARK_WEIGHT_KEY = "scenic-route:landmark-weight";
 const ART_WEIGHT_KEY = "scenic-route:art-weight";
 const HIGHWAY_WEIGHT_KEY = "scenic-route:highway-weight";
+const COMMERCIAL_WEIGHT_KEY = "scenic-route:commercial-weight";
 const OVERLAY_KEY = "scenic-route:overlay";
 const SEARCH_BIAS_KEY = "scenic-route:search-bias"; // "false" opts out of biasing search to the user
 const RESNAP_METERS = 25; // a followed location must drift this far before the route recomputes
@@ -185,6 +187,9 @@ export default function MapApp() {
   const [highwayWeight, setHighwayWeight] = useState<number>(
     DEFAULT_HIGHWAY_WEIGHT,
   );
+  const [commercialWeight, setCommercialWeight] = useState<number>(
+    DEFAULT_COMMERCIAL_WEIGHT,
+  );
   // The signed sun/shade preference (−1 = prefer shade, +1 = prefer sun, 0 = off). `shadeTick` fires
   // as the resolved time (the global clock) moves, so the route re-costs against the sun's new
   // position; `shadeContextRef` records which tick the route cache was built against.
@@ -277,6 +282,7 @@ export default function MapApp() {
       [LANDMARK_WEIGHT_KEY, setLandmarkWeight],
       [ART_WEIGHT_KEY, setArtWeight],
       [HIGHWAY_WEIGHT_KEY, setHighwayWeight],
+      [COMMERCIAL_WEIGHT_KEY, setCommercialWeight],
     ] as const) {
       const stored = window.localStorage.getItem(key);
       if (stored !== null) {
@@ -535,6 +541,7 @@ export default function MapApp() {
             landmark: landmarkWeight,
             art: artWeight,
             highway: highwayWeight,
+            commercial: commercialWeight,
             shade: shadeWeight,
             allowFerries,
           };
@@ -606,6 +613,7 @@ export default function MapApp() {
     landmarkWeight,
     artWeight,
     highwayWeight,
+    commercialWeight,
     shadeWeight,
     shadeTick,
     allowFerries,
@@ -672,6 +680,11 @@ export default function MapApp() {
   const handleHighwayWeight = useCallback((weight: number) => {
     setHighwayWeight(weight);
     window.localStorage.setItem(HIGHWAY_WEIGHT_KEY, String(weight));
+  }, []);
+
+  const handleCommercialWeight = useCallback((weight: number) => {
+    setCommercialWeight(weight);
+    window.localStorage.setItem(COMMERCIAL_WEIGHT_KEY, String(weight));
   }, []);
 
   const handleShadeWeight = useCallback((weight: number) => {
@@ -1098,6 +1111,7 @@ export default function MapApp() {
           landmarkWeight={landmarkWeight}
           artWeight={artWeight}
           highwayWeight={highwayWeight}
+          commercialWeight={commercialWeight}
           shadeWeight={shadeWeight}
           directions={directions}
           progress={progress}
@@ -1109,6 +1123,7 @@ export default function MapApp() {
           onLandmarkWeight={handleLandmarkWeight}
           onArtWeight={handleArtWeight}
           onHighwayWeight={handleHighwayWeight}
+          onCommercialWeight={handleCommercialWeight}
           onShadeWeight={handleShadeWeight}
           onStartSelect={handleStartSelect}
           onDestSelect={handleDestSelect}

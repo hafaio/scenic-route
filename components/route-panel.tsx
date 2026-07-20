@@ -24,6 +24,7 @@ import {
   MdFlag,
   MdOutlineDirectionsWalk,
   MdPalette,
+  MdStorefront,
   MdSwapHoriz,
   MdTurnLeft,
   MdTurnRight,
@@ -36,6 +37,7 @@ import { PiBoatFill, PiTreeEvergreenFill } from "react-icons/pi";
 import type { GeocodeResult, SearchBias } from "../src/geocode";
 import {
   MAX_ART_WEIGHT,
+  MAX_COMMERCIAL_WEIGHT,
   MAX_FERRY_WEIGHT,
   MAX_HIGHWAY_WEIGHT,
   MAX_LANDMARK_WEIGHT,
@@ -72,6 +74,7 @@ interface RoutePanelProps {
   landmarkWeight: number;
   artWeight: number;
   highwayWeight: number;
+  commercialWeight: number;
   shadeWeight: number; // signed: −1 = prefer shade, +1 = prefer sun, 0 = off
   directions: Maneuver[] | null;
   progress: NavProgress | null; // live position along the route, or null when off-route/unlocated
@@ -83,6 +86,7 @@ interface RoutePanelProps {
   onLandmarkWeight: (weight: number) => void;
   onArtWeight: (weight: number) => void;
   onHighwayWeight: (weight: number) => void;
+  onCommercialWeight: (weight: number) => void;
   onShadeWeight: (weight: number) => void;
   onStartSelect: (result: GeocodeResult) => void;
   onDestSelect: (result: GeocodeResult) => void;
@@ -200,6 +204,7 @@ export default function RoutePanel({
   landmarkWeight,
   artWeight,
   highwayWeight,
+  commercialWeight,
   shadeWeight,
   directions,
   progress,
@@ -211,6 +216,7 @@ export default function RoutePanel({
   onLandmarkWeight,
   onArtWeight,
   onHighwayWeight,
+  onCommercialWeight,
   onShadeWeight,
   onStartSelect,
   onDestSelect,
@@ -300,6 +306,16 @@ export default function RoutePanel({
       onChange: onHighwayWeight,
       tint: "text-rose-600 dark:text-rose-400",
       color: "#ef4444",
+    },
+    {
+      key: "commercial",
+      label: "Commercial streets",
+      Icon: MdStorefront,
+      weight: commercialWeight,
+      max: MAX_COMMERCIAL_WEIGHT,
+      onChange: onCommercialWeight,
+      tint: "text-violet-600 dark:text-violet-400",
+      color: "#6d28d9",
     },
     {
       key: "ferry",

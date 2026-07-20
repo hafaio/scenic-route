@@ -14,12 +14,25 @@
 import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import manifest from "../src/tree-cover/manifest.json";
+import { encodePolygons } from "./geometry";
 import type { Bounds } from "./manifest";
 
 const PUBLIC_DIR = join(import.meta.dirname, "..", "public");
 const DATA_DIR = join(import.meta.dirname, "..", "data");
 const CHUNK_DIR = join(PUBLIC_DIR, "streets");
 const COMMERCIAL_DIR = join(PUBLIC_DIR, "commercial");
+// The qualifying-block centrelines for the ROUTING bake, one file per city (magic CMLN, the LAND
+// polygon layout — each segment is a single-ring "polygon"). `tiler graph` proximity-bakes these
+// into a per-edge commercial discount. Derived + gitignored, like the per-chunk signals above.
+const COMMERCIAL_LINES_DIR = join(PUBLIC_DIR, "commercial-lines");
+const COMMERCIAL_LINES_MAGIC = "CMLN";
+const COMMERCIAL_LINES_FORMAT = 1;
+
+// The routing bake reads its qualifying-block lines from here; build-street-tiles passes this path
+// to `tiler graph --commercial` when the file exists.
+export function commercialLinesPath(cityId: string): string {
+  return join(COMMERCIAL_LINES_DIR, `${cityId}.bin`);
+}
 
 const CHUNK_MAGIC = "STCK";
 const CHUNK_FORMAT = 3;
@@ -571,9 +584,49 @@ function encodeCommercial(chunk: Chunk, signals: Signals): Uint8Array {
   return bytes;
 }
 
+// The default gate the overlay applies client-side, mirrored here to pick the segments the routing
+// bake rewards: over-half commercial frontage, low-rise, and either an open street or seating fronting.
+function segmentQualifies(signals: Signals, index: number): boolean {
+  return (
+    signals.commercialFrac[index] / 255 >= GATE_COMMERCIAL_FRACTION &&
+    signals.medianHeight[index] <= GATE_LOW_RISE_METERS &&
+    (signals.flags[index] & 3) !== 0
+  );
+}
+
+// The qualifying segments' polylines as a CMLN line file: each becomes one single-ring polygon — the
+// exact LAND layout `tiler graph` reads via read_polygons — so the routing bake needs no new format.
+function encodeQualifyingLines(
+  segments: Segment[],
+  signals: Signals,
+): { bytes: Uint8Array; count: number } {
+  const lines: { lng: number; lat: number }[][][] = [];
+  for (let index = 0; index < segments.length; index++) {
+    if (!segmentQualifies(signals, index)) {
+      continue;
+    }
+    const { lngs, lats } = segments[index];
+    const ring: { lng: number; lat: number }[] = [];
+    for (let vertex = 0; vertex < lngs.length; vertex++) {
+      ring.push({ lng: lngs[vertex], lat: lats[vertex] });
+    }
+    lines.push([ring]);
+  }
+  return {
+    bytes: encodePolygons(
+      COMMERCIAL_LINES_MAGIC,
+      COMMERCIAL_LINES_FORMAT,
+      lines,
+    ),
+    count: lines.length,
+  };
+}
+
 export async function buildCommercial(): Promise<void> {
   await rm(COMMERCIAL_DIR, { recursive: true, force: true });
   await mkdir(COMMERCIAL_DIR, { recursive: true });
+  await rm(COMMERCIAL_LINES_DIR, { recursive: true, force: true });
+  await mkdir(COMMERCIAL_LINES_DIR, { recursive: true });
 
   for (const city of manifest.cities) {
     const started = performance.now();
@@ -595,18 +648,13 @@ export async function buildCommercial(): Promise<void> {
       );
     }
 
-    let passing = 0;
-    for (let index = 0; index < segments.length; index++) {
-      const commercial = signals.commercialFrac[index] / 255;
-      const flagged = (signals.flags[index] & 3) !== 0;
-      if (
-        commercial >= GATE_COMMERCIAL_FRACTION &&
-        signals.medianHeight[index] <= GATE_LOW_RISE_METERS &&
-        flagged
-      ) {
-        passing += 1;
-      }
-    }
+    // The qualifying-block lines the routing bake consumes: the same gate, emitted once per city.
+    const { bytes: lineBytes, count: passing } = encodeQualifyingLines(
+      segments,
+      signals,
+    );
+    await writeFile(commercialLinesPath(city.id), lineBytes);
+
     const seconds = ((performance.now() - started) / 1000).toFixed(1);
     console.error(
       `commercial: ${city.id} ${segments.length} segments in ${chunks.length} chunks, ${passing} pass the default gate (>=${GATE_COMMERCIAL_FRACTION} commercial, <=${GATE_LOW_RISE_METERS} m, open-street|seating), ${seconds}s`,

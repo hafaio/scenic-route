@@ -14,7 +14,15 @@ import { findRoute, type RouteResult } from "./search";
 import type { Snap } from "./snap";
 
 // The numeric weights that a slider can move; the allow-ferries gate is a discrete context, not an axis.
-const AXES = ["tree", "ferry", "landmark", "art", "highway", "shade"] as const;
+const AXES = [
+  "tree",
+  "ferry",
+  "landmark",
+  "art",
+  "highway",
+  "commercial",
+  "shade",
+] as const;
 type Axis = (typeof AXES)[number];
 
 // Weights are quantized to this many decimals before caching, so slider values equal in intent match
@@ -33,6 +41,7 @@ function quantizeWeights(weights: RouteWeights): RouteWeights {
     landmark: quantize(weights.landmark),
     art: quantize(weights.art),
     highway: quantize(weights.highway),
+    commercial: quantize(weights.commercial),
     shade: quantize(weights.shade),
     allowFerries: weights.allowFerries,
   };

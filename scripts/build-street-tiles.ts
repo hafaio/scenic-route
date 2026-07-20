@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { GENUS_COLORS, GENUS_COUNT } from "../src/tree-cover/genus";
 import manifest from "../src/tree-cover/manifest.json";
 import { rampAlpha, rampColor } from "../src/tree-cover/ramp";
-import { buildCommercial } from "./build-commercial";
+import { buildCommercial, commercialLinesPath } from "./build-commercial";
 import {
   computeShadeBuckets,
   SHADE_MAX_SHADOW_METERS,
@@ -362,6 +362,12 @@ async function build(): Promise<void> {
       if (await fileExists(file)) {
         graphArgs.push(flag, file);
       }
+    }
+    // The qualifying commercial-block lines are derived by buildCommercial (above), not a committed
+    // source, so they come from public/commercial-lines rather than sourcePath.
+    const commercialFile = commercialLinesPath(city.id);
+    if (await fileExists(commercialFile)) {
+      graphArgs.push("--commercial", commercialFile);
     }
     // The per-edge shade bake rides on the same graph invocation: it needs the city's building
     // footprints and the shared sun-position params, and writes one file per sun-position bin into

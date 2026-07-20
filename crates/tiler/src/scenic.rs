@@ -1,5 +1,5 @@
-//! The two scenic per-edge routing attributes, baked into GRPH v4 from the committed POI and
-//! nuisance sources. Both quantize to a 0..254 byte per edge (the 254 ceiling keeps a discount
+//! The scenic per-edge routing attributes, baked into GRPH v5 from the committed POI and nuisance
+//! sources plus the derived commercial-frontage lines. Each quantizes to a 0..254 byte per edge (the 254 ceiling keeps a discount
 //! edge from ever reading free — the cost model's `maxAttr < 1` invariant, as cover already relies
 //! on); a later phase reads the discount bytes as `1 - w*attr` and the penalty byte as `1 + w*attr`.
 //!
@@ -12,6 +12,9 @@
 //! - **Highway / elevated-rail nuisance — a PENALTY, by an areal proximity field.** Noise and grime
 //!   carry through the air regardless of the street grid, so this is Euclidean: each edge's penalty
 //!   is a Gaussian of its metre distance to the nearest nuisance line.
+//! - **Nice commercial frontage — a DISCOUNT, by the same proximity field over the qualifying blocks.**
+//!   A commercial street is walked ALONG, so a tight Euclidean σ keeps the reward on the block's own
+//!   sidewalks and off the parallel residential street a block over.
 
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
@@ -36,6 +39,9 @@ pub const ART_PARAMS: PoiParams = PoiParams {
 const POI_SNAP_RADIUS_METERS: f64 = 150.0;
 // The nuisance field's reach: walking within ~a σ of a highway or el is unpleasant.
 const HIGHWAY_SIGMA_METERS: f64 = 35.0;
+// The commercial-frontage reach: tight enough that the reward lands on the qualifying block's own
+// street and its sidewalks, not a parallel residential block ~a σ or two over.
+const COMMERCIAL_SIGMA_METERS: f64 = 20.0;
 
 pub struct PoiParams {
     pub sigma_meters: f64,
@@ -238,10 +244,24 @@ fn point_segment_dist2(px: f64, py: f64, ax: f64, ay: f64, bx: f64, by: f64) -> 
 }
 
 /// The per-edge nuisance-penalty byte: `e^{-(d/σ)²/2}` of the metre distance `d` from the edge to
-/// the nearest highway or elevated-rail segment. The edge is sampled at its two endpoints and its
-/// midpoint, and the nearest of the three stands for it — if any part runs near a highway, the
-/// edge is unpleasant. Each `Polygon` is one line as a single ring. Returns the bytes and their max.
+/// the nearest highway or elevated-rail segment. A later phase reads it as a `1 + w·attr` penalty.
 pub fn highway_penalty(net: &Network, lines: &[Polygon]) -> (Vec<u8>, u8) {
+    line_proximity(net, lines, HIGHWAY_SIGMA_METERS)
+}
+
+/// The per-edge commercial-frontage byte, the same proximity field as the highway penalty but over
+/// the qualifying commercial-block lines and read as a `1 - w·attr` DISCOUNT: an edge running along a
+/// nice commercial street reads high, so the router will prefer it. Tight σ keeps it off parallel blocks.
+pub fn commercial_amenity(net: &Network, lines: &[Polygon]) -> (Vec<u8>, u8) {
+    line_proximity(net, lines, COMMERCIAL_SIGMA_METERS)
+}
+
+/// The per-edge proximity byte to a set of lines: `e^{-(d/σ)²/2}` of the metre distance `d` from the
+/// edge to the nearest line segment. The edge is sampled at its two endpoints and its midpoint, and
+/// the nearest of the three stands for it — if any part runs near a line, the whole edge reads near.
+/// Each `Polygon` is one line as a single ring. The caller decides whether the byte is a discount or
+/// a penalty. Returns the bytes and their max.
+fn line_proximity(net: &Network, lines: &[Polygon], sigma_meters: f64) -> (Vec<u8>, u8) {
     let mut segments: Vec<(f64, f64, f64, f64)> = Vec::new();
     for polygon in lines {
         for ring in polygon {
@@ -252,7 +272,7 @@ pub fn highway_penalty(net: &Network, lines: &[Polygon]) -> (Vec<u8>, u8) {
             }
         }
     }
-    let search = HIGHWAY_SIGMA_METERS * FANOUT_SIGMAS;
+    let search = sigma_meters * FANOUT_SIGMAS;
     let cell = search.max(1.0);
     let mut grid: HashMap<(i32, i32), Vec<u32>> = HashMap::new();
     for (index, &(ax, ay, bx, by)) in segments.iter().enumerate() {
@@ -266,7 +286,7 @@ pub fn highway_penalty(net: &Network, lines: &[Polygon]) -> (Vec<u8>, u8) {
             }
         }
     }
-    let inv_two_sigma2 = 1.0 / (2.0 * HIGHWAY_SIGMA_METERS * HIGHWAY_SIGMA_METERS);
+    let inv_two_sigma2 = 1.0 / (2.0 * sigma_meters * sigma_meters);
 
     let mut bytes = vec![0u8; net.edge_count()];
     let mut max_byte = 0u8;

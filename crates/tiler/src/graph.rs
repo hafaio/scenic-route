@@ -54,9 +54,9 @@ const SIDE_SOUTH: u8 = 3;
 const SIDE_WEST: u8 = 4;
 const FLAG_GEOMETRY_RIGHT: u8 = 1 << 2; // this sidewalk lies right of its stored geometry direction
 
-const GRAPH_FORMAT: u16 = 4; // v4 widens the edge record to carry the three scenic-factor bytes
+const GRAPH_FORMAT: u16 = 5; // v5 fills the record's last byte with the commercial-frontage attribute
 const GRAPH_HEADER_BYTES: usize = 64;
-const EDGE_RECORD_BYTES: usize = 28; // 24 + landmark(24), art(25), highway(26), reserved(27)
+const EDGE_RECORD_BYTES: usize = 28; // 24 + landmark(24), art(25), highway(26), commercial(27)
 const NO_GEOMETRY: u32 = 0xFFFF_FFFF; // edge record byte 12 sentinel: straight a->b, no blob entry
 const UNNAMED: u16 = 0xFFFF;
 const DECIMETERS_PER_METER: f64 = 10.0; // the half-offset byte's unit, as the chunk uses
@@ -91,6 +91,7 @@ pub struct Args {
     pub landmarks: Option<PathBuf>,
     pub art: Option<PathBuf>,
     pub highways: Option<PathBuf>,
+    pub commercial: Option<PathBuf>,
     pub out: PathBuf,
     // The optional SHDE bake: building footprints, the shade sun-position params (the same file
     // `tiler shade` reads), and the directory the per-bin shade files are written to. All three or none.
@@ -1701,6 +1702,19 @@ pub fn run(args: &Args) -> Fallible<()> {
         }
         None => vec![0u8; edge_count],
     };
+    let commercial_bytes = match &args.commercial {
+        Some(path) => {
+            let lines = binfmt::read_polygons(path, "CMLN", binfmt::COMMERCIAL_FORMAT)?;
+            let (bytes, max_byte) = scenic::commercial_amenity(&network, &lines);
+            eprintln!(
+                "commercial: {} qualifying lines, max amenity byte {}",
+                lines.len(),
+                max_byte
+            );
+            bytes
+        }
+        None => vec![0u8; edge_count],
+    };
 
     // Pre-write invariants: a stored-geometry edge begins and ends exactly on its node coordinates
     // (a sidewalk is baked corner-to-corner, a path keeps its pinned endpoints), so no geometry
@@ -1839,14 +1853,14 @@ pub fn run(args: &Args) -> Fallible<()> {
         bytes[record + 21] = edge.half_offset;
         bytes[record + 22] = (edge.kind & KIND_MASK) | (edge.side << SIDE_SHIFT);
         bytes[record + 23] = edge.flags;
-        // Scenic-factor bytes (v4): a ferry passes no landmark, art, or highway, so it keeps the
-        // record's default zeros; every walking kind carries the baked discount/penalty attributes.
+        // Scenic-factor bytes (v5): a ferry passes no landmark, art, highway, or commercial frontage,
+        // so it keeps the record's default zeros; every walking kind carries the baked attributes.
         if edge.kind != KIND_FERRY {
             bytes[record + 24] = landmark_bytes[edge_id];
             bytes[record + 25] = art_bytes[edge_id];
             bytes[record + 26] = highway_bytes[edge_id];
+            bytes[record + 27] = commercial_bytes[edge_id];
         }
-        // byte 27 is reserved (kept zero).
     }
 
     put_u32(&mut bytes, name_offset, used_names.len() as u32);

@@ -757,7 +757,7 @@ Then `segment count` segments, back to back, each:
 
 Decoded by `components/street-score-layer.tsx`, which applies the offset in *pixels*.
 
-### `public/routing/{id}.bin` — the routing graph, magic `GRPH` (v4, derived, gitignored)
+### `public/routing/{id}.bin` — the routing graph, magic `GRPH` (v5, derived, gitignored)
 
 `tiler graph` contracts STRT into the graph the client routes on, then expands it into the edges a
 walker actually uses. When `--paths` is supplied it first **conflates** the OSM pedestrian/park
@@ -810,7 +810,7 @@ Header, 64 bytes:
 | offset | type | field |
 | --- | --- | --- |
 | 0 | u8[4] | magic `GRPH` |
-| 4 | u16 | format version = 4 |
+| 4 | u16 | format version = 5 |
 | 6 | u16 | header bytes = 64 |
 | 8 | u32 | node count N |
 | 12 | u32 | edge count E |
@@ -850,17 +850,20 @@ can view them as typed arrays without copying):
 | 24 | u8 | landmark amenity, 0–254 (a discount attribute; 0 for a ferry) |
 | 25 | u8 | public-art amenity, 0–254 (a discount attribute; 0 for a ferry) |
 | 26 | u8 | highway/rail nuisance, 0–254 (a penalty attribute; 0 for a ferry) |
-| 27 | u8 | reserved (0) |
+| 27 | u8 | commercial frontage, 0–254 (a discount attribute; 0 for a ferry) |
 
-Bytes 24–26 are the **scenic-factor attributes** baked by `scenic.rs` (v4). The landmark and art
+Bytes 24–27 are the **scenic-factor attributes** baked by `scenic.rs` (v5). The landmark and art
 bytes are a network **discount**: each POI (`LMRK`/`ARTW`) snaps to the nearest walking node and a
 bounded Dijkstra fan-out deposits a distance-decaying contribution on the edges it reaches, summed
 across POIs and saturated `1 − e^{−k·field}` (so a dense cluster stops stacking); the kernel is
 per-mood (landmarks wide, art tight). The highway byte is an areal **penalty**: a Gaussian of the
-edge's metre distance to the nearest highway or above-ground-rail line (`HWAY`). All three quantize to a
-0–254 ceiling so the client's `maxLandmark`/`maxArt` stay `< 1` (the cost model's admissibility
-invariant, as `maxCover` already relies on); a later phase reads the discounts as `1 − w·attr` and
-the penalty as `1 + w·attr`. A ferry carries none.
+edge's metre distance to the nearest highway or above-ground-rail line (`HWAY`). The commercial byte
+is the same proximity Gaussian over the qualifying commercial-block lines (`CMLN`, derived by
+`build-commercial.ts`), read instead as a **discount** with a tight σ so the reward lands on the
+block's own street and sidewalks. All four quantize to a 0–254 ceiling so the client's
+`maxLandmark`/`maxArt`/`maxCommercial` stay `< 1` (the cost model's admissibility invariant, as
+`maxCover` already relies on); a later phase reads the discounts as `1 − w·attr` and the penalty as
+`1 + w·attr`. A ferry carries none.
 
 A **ferry edge** (kind 4) has no tree cover and no sidewalk half-offset, so bytes 20–21 instead carry
 a little-endian **u16 of crossing-plus-wait seconds** (`rawTimeSeconds`, ≤ ~2200). Its **name id**
