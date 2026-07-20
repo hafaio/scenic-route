@@ -33,6 +33,7 @@ const weights = (
   landmark: 0,
   art: 0,
   highway: 0,
+  commercial: 0,
   shade: 0,
   allowFerries,
 });
@@ -134,8 +135,10 @@ function buildGraph(nodes: NodeSpec[], edges: EdgeSpec[]): RoutingGraph {
     edgeLandmark: new Uint8Array(edgeCount),
     edgeArt: new Uint8Array(edgeCount),
     edgeHighway: new Uint8Array(edgeCount),
+    edgeCommercial: new Uint8Array(edgeCount),
     maxLandmark: 0,
     maxArt: 0,
+    maxCommercial: 0,
     edgeShadeNow: null,
     maxAbsShadeNow: 0,
     edgeDurationSeconds,

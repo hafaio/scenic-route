@@ -15,6 +15,7 @@ const weights = (
   landmark: 0,
   art: 0,
   highway: 0,
+  commercial: 0,
   shade: 0,
   allowFerries,
 });

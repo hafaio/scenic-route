@@ -1,7 +1,8 @@
 // Cost is effective seconds: an edge's raw travel time times a product of scenic factors. Each
-// walked metre is discounted toward a floor by the tree cover, the landmarks and the public art it
-// passes (a factor 1 - w*attr per element) and made dearer by a nearby highway or elevated rail (a
-// penalty factor 1 + w*attr); a ferry's crossing time is discounted by the ferry weight. The sun/shade
+// walked metre is discounted toward a floor by the tree cover, the landmarks and public art it
+// passes, and the nice commercial frontage it runs along (a factor 1 - w*attr per element) and made
+// dearer by a nearby highway or elevated rail (a penalty factor 1 + w*attr); a ferry's crossing time
+// is discounted by the ferry weight. The sun/shade
 // axis is a single signed factor `1 - w*attr` whose weight `w in [-1, 1]` and edge attribute
 // `attr in (-1, 1)` are both signed (attr positive = net sunlit, negative = net shaded, for the
 // current sun): w > 0 discounts sun and penalizes shade, w < 0 flips it, w = 0 is neutral. Every
@@ -33,6 +34,9 @@ export const MAX_ART_WEIGHT = 1;
 export const DEFAULT_ART_WEIGHT = 0.1;
 export const MAX_HIGHWAY_WEIGHT = 1;
 export const DEFAULT_HIGHWAY_WEIGHT = 0.5;
+// A discount for edges fronting a nice commercial block. Modest default, tunable by eye.
+export const MAX_COMMERCIAL_WEIGHT = 1;
+export const DEFAULT_COMMERCIAL_WEIGHT = 0.1;
 // The signed sun/shade axis spans [-1, 1] (0 = no preference): positive prefers sun, negative prefers
 // shade. |w| <= 1 keeps the shade factor's floor (1 - |w|*maxAbsAttr) positive since maxAbsAttr < 1.
 export const MAX_SHADE_WEIGHT = 1;
@@ -42,13 +46,14 @@ export const DEFAULT_SHADE_WEIGHT = 0;
 // Phase 3 directions use before bothering to name a greener side.
 export const SIDE_TIE_BYTES = 12;
 
-// The full cost context a search runs against: the five scenic weights and the ferry gate.
+// The full cost context a search runs against: the scenic weights and the ferry gate.
 export interface RouteWeights {
   tree: number;
   ferry: number;
   landmark: number;
   art: number;
   highway: number;
+  commercial: number;
   shade: number; // signed sun/shade preference in [-1, 1]; positive prefers sun, negative shade
   allowFerries: boolean;
 }
@@ -58,10 +63,10 @@ export function edgeCover(graph: RoutingGraph, edge: number): number {
   return graph.edgeCover[edge] / 255;
 }
 
-// The walking multiplier: the tree-cover, landmark and art discounts (each 1 - w*attr) and the signed
-// sun/shade factor (1 - w*attr, attr and w both signed) times the nuisance penalty (1 + w*attr). At
-// every weight 0 this is 1 (the shortest path); a shaded, landmarked metre far from any highway
-// approaches the floor. No per-factor clip is needed — each unsigned attribute is <= its graph max, and
+// The walking multiplier: the tree-cover, landmark, art and commercial discounts (each 1 - w*attr) and
+// the signed sun/shade factor (1 - w*attr, attr and w both signed) times the nuisance penalty
+// (1 + w*attr). At every weight 0 this is 1 (the shortest path); a shaded, landmarked metre far from
+// any highway approaches the floor. No per-factor clip is needed — each unsigned attribute is <= its graph max, and
 // the shade factor is >= its `minMultiplier` term 1 - |w|*maxAbsAttr, so the product stays positive.
 export function edgeMultiplier(
   graph: RoutingGraph,
@@ -72,15 +77,17 @@ export function edgeMultiplier(
   const landmark = 1 - weights.landmark * (graph.edgeLandmark[edge] / 255);
   const art = 1 - weights.art * (graph.edgeArt[edge] / 255);
   const highway = 1 + weights.highway * (graph.edgeHighway[edge] / 255);
+  const commercial =
+    1 - weights.commercial * (graph.edgeCommercial[edge] / 255);
   // The signed shade attribute for the resolved sun position; 0 when no artifact is loaded or at night.
   const shadeAttr = graph.edgeShadeNow ? graph.edgeShadeNow[edge] : 0;
   const shade = 1 - weights.shade * shadeAttr;
-  return tree * landmark * art * highway * shade;
+  return tree * landmark * art * highway * commercial * shade;
 }
 
 // The least a walked metre's multiplier can be: the product of each discount at the graph's max
 // attribute (the penalty only raises cost, so its minimum factor is 1). A lower bound on every edge's
-// multiplier — possibly loose, since one edge need not max all three at once — so the A* heuristic
+// multiplier — possibly loose, since one edge need not max every discount at once — so the A* heuristic
 // that scales straight-line distance by it never overestimates. Positive because each max < 1.
 export function minMultiplier(
   graph: RoutingGraph,
@@ -90,6 +97,7 @@ export function minMultiplier(
     (1 - weights.tree * graph.maxCover) *
     (1 - weights.landmark * graph.maxLandmark) *
     (1 - weights.art * graph.maxArt) *
+    (1 - weights.commercial * graph.maxCommercial) *
     // The shade factor's per-edge floor: whichever sign of attr the weight discounts, at its max
     // magnitude. Positive because |shade| <= 1 and maxAbsShadeNow < 1.
     (1 - Math.abs(weights.shade) * graph.maxAbsShadeNow)
