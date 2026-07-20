@@ -17,6 +17,7 @@ pub const FERRY_FORMAT: u16 = 2; // the time-independent NYC ferry graph, magic 
 pub const LANDMARK_FORMAT: u16 = 1; // scenic POI points, the shared point layout, magic "LMRK"
 pub const ART_FORMAT: u16 = 1; // public-art POI points, the shared point layout, magic "ARTW"
 pub const HIGHWAY_FORMAT: u16 = 1; // highway/elevated-rail nuisance lines, the LAND polygon layout, magic "HWAY"
+pub const COMMERCIAL_FORMAT: u16 = 1; // qualifying commercial-block lines, the LAND polygon layout, magic "CMLN"
 
 pub const SIDES: usize = 2; // the two sidewalks a density blob carries per vertex, left then right
 pub const DECIMETERS_PER_METER: f64 = 10.0; // the crown byte's unit: a decimetre of crown radius

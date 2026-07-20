@@ -24,6 +24,7 @@ const noScenic = (over: Partial<RouteWeights> = {}): RouteWeights => ({
   landmark: 0,
   art: 0,
   highway: 0,
+  commercial: 0,
   shade: 0,
   allowFerries: false,
   ...over,
@@ -34,7 +35,7 @@ interface NodeSpec {
   lng: number;
 }
 
-// A walking edge with its four scenic attribute fractions (0..1); the ingest bytes are these × 255.
+// A walking edge with its five scenic attribute fractions (0..1); the ingest bytes are these × 255.
 interface EdgeSpec {
   a: number;
   b: number;
@@ -42,6 +43,7 @@ interface EdgeSpec {
   landmark?: number;
   art?: number;
   highway?: number;
+  commercial?: number;
 }
 
 function buildGraph(nodes: NodeSpec[], edges: EdgeSpec[]): RoutingGraph {
@@ -63,6 +65,7 @@ function buildGraph(nodes: NodeSpec[], edges: EdgeSpec[]): RoutingGraph {
   const edgeLandmark = new Uint8Array(edgeCount);
   const edgeArt = new Uint8Array(edgeCount);
   const edgeHighway = new Uint8Array(edgeCount);
+  const edgeCommercial = new Uint8Array(edgeCount);
   const edgeKindSide = new Uint8Array(edgeCount);
   const edgeDurationSeconds = new Float32Array(edgeCount);
   const edgeNameId = new Uint16Array(edgeCount).fill(NAME_NONE);
@@ -74,6 +77,7 @@ function buildGraph(nodes: NodeSpec[], edges: EdgeSpec[]): RoutingGraph {
   let maxCover = 0;
   let maxLandmark = 0;
   let maxArt = 0;
+  let maxCommercial = 0;
   for (let edge = 0; edge < edgeCount; edge++) {
     const spec = edges[edge];
     edgeNodeA[edge] = spec.a;
@@ -89,9 +93,11 @@ function buildGraph(nodes: NodeSpec[], edges: EdgeSpec[]): RoutingGraph {
     edgeLandmark[edge] = byte(spec.landmark);
     edgeArt[edge] = byte(spec.art);
     edgeHighway[edge] = byte(spec.highway);
+    edgeCommercial[edge] = byte(spec.commercial);
     maxCover = Math.max(maxCover, edgeCover[edge]);
     maxLandmark = Math.max(maxLandmark, edgeLandmark[edge]);
     maxArt = Math.max(maxArt, edgeArt[edge]);
+    maxCommercial = Math.max(maxCommercial, edgeCommercial[edge]);
     adjacency[spec.a].push(edge);
     adjacency[spec.b].push(edge);
   }
@@ -130,8 +136,10 @@ function buildGraph(nodes: NodeSpec[], edges: EdgeSpec[]): RoutingGraph {
     edgeLandmark,
     edgeArt,
     edgeHighway,
+    edgeCommercial,
     maxLandmark: maxLandmark / 255,
     maxArt: maxArt / 255,
+    maxCommercial: maxCommercial / 255,
     edgeShadeNow: null,
     maxAbsShadeNow: 0,
     edgeDurationSeconds,
@@ -358,6 +366,23 @@ test("a strong landmark weight steers the route onto a longer landmarked path", 
   // A full landmark weight makes the landmarked detour worth it.
   expect(
     upperTaken(findRoute(graph, start, dest, noScenic({ landmark: 1 }))),
+  ).toBe(true);
+});
+
+test("a strong commercial weight steers the route onto a nicer commercial street", () => {
+  // The upper path bows out (a real detour, ~35% longer) but fronts a nice commercial block; the
+  // lower is the short plain way. Like the landmark case, the discount must beat the extra distance.
+  const { graph, start, dest } = diamond(
+    { commercial: 0.9 },
+    {},
+    0.0028, // upper bows far out — the longer path
+    0.0002, // lower stays near the straight line — the shorter path
+  );
+  // No preference: the shorter lower path wins on distance alone.
+  expect(upperTaken(findRoute(graph, start, dest, noScenic()))).toBe(false);
+  // A full commercial weight makes the nicer commercial detour worth it.
+  expect(
+    upperTaken(findRoute(graph, start, dest, noScenic({ commercial: 1 }))),
   ).toBe(true);
 });
 

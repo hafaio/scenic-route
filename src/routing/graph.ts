@@ -57,8 +57,10 @@ export interface RoutingGraph {
   edgeLandmark: Uint8Array; // 0..254, this edge's landmark-amenity discount attribute; 0 for a ferry
   edgeArt: Uint8Array; // 0..254, this edge's public-art discount attribute; 0 for a ferry
   edgeHighway: Uint8Array; // 0..254, this edge's highway/rail nuisance penalty attribute; 0 for a ferry
+  edgeCommercial: Uint8Array; // 0..254, this edge's nice-commercial-frontage discount attribute; 0 for a ferry
   maxLandmark: number; // the greatest per-edge landmark amenity, 0..1; sets that discount's clip floor
   maxArt: number; // the greatest per-edge art amenity, 0..1; sets that discount's clip floor
+  maxCommercial: number; // the greatest per-edge commercial amenity, 0..1; sets that discount's clip floor
 
   // The signed shade attribute per edge for the resolved sun position, filled from the SHDE artifact by
   // computeEdgeShade; null when no artifact is loaded or the sun is below the horizon (no shade to bias).
@@ -78,7 +80,7 @@ export interface RoutingGraph {
 }
 
 const MAGIC = "GRPH";
-const FORMAT_VERSION = 4;
+const FORMAT_VERSION = 5;
 const HEADER_BYTES = 64;
 const EDGE_RECORD_BYTES = 28;
 const GRAPH_URL = "routing/nyc.bin"; // relative, so it picks up the deploy basePath
@@ -135,10 +137,12 @@ export function decodeGraph(buffer: ArrayBuffer): RoutingGraph {
   const edgeLandmark = new Uint8Array(edgeCount);
   const edgeArt = new Uint8Array(edgeCount);
   const edgeHighway = new Uint8Array(edgeCount);
+  const edgeCommercial = new Uint8Array(edgeCount);
   const ferryEdges: number[] = [];
   let maxCoverByte = 0;
   let maxLandmarkByte = 0;
   let maxArtByte = 0;
+  let maxCommercialByte = 0;
   let minFerrySecPerMetre = Number.POSITIVE_INFINITY;
   for (let edge = 0; edge < edgeCount; edge++) {
     const record = offset + edge * EDGE_RECORD_BYTES;
@@ -167,16 +171,19 @@ export function decodeGraph(buffer: ArrayBuffer): RoutingGraph {
       maxCoverByte = Math.max(maxCoverByte, edgeCover[edge]);
     }
     // The scenic-factor bytes are their own record slot, so a ferry's duration in bytes 20-21 does
-    // not collide; a ferry carries 0 in all three, so it never lifts a discount's max.
+    // not collide; a ferry carries 0 in all four, so it never lifts a discount's max.
     edgeLandmark[edge] = bytes[record + 24];
     edgeArt[edge] = bytes[record + 25];
     edgeHighway[edge] = bytes[record + 26];
+    edgeCommercial[edge] = bytes[record + 27];
     maxLandmarkByte = Math.max(maxLandmarkByte, edgeLandmark[edge]);
     maxArtByte = Math.max(maxArtByte, edgeArt[edge]);
+    maxCommercialByte = Math.max(maxCommercialByte, edgeCommercial[edge]);
   }
   const maxCover = maxCoverByte / 255;
   const maxLandmark = maxLandmarkByte / 255;
   const maxArt = maxArtByte / 255;
+  const maxCommercial = maxCommercialByte / 255;
 
   const names = decodeNames(buffer, nameTableOffset);
   const geometry = new Uint8Array(buffer, geometryOffset, geometryLength);
@@ -209,8 +216,10 @@ export function decodeGraph(buffer: ArrayBuffer): RoutingGraph {
     edgeLandmark,
     edgeArt,
     edgeHighway,
+    edgeCommercial,
     maxLandmark,
     maxArt,
+    maxCommercial,
     edgeShadeNow: null, // populated lazily once the SHDE artifact loads for the resolved sun position
     maxAbsShadeNow: 0,
     edgeHalfOffsetDm,
