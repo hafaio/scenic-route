@@ -10,15 +10,16 @@ import { NO_GEOMETRY, otherEnd, type RoutingGraph } from "./graph";
 import { findRoute, type RouteResult } from "./search";
 import { haversineMeters, type Snap } from "./snap";
 
-// Phase-3 oracle for the three new scenic factors (landmark and art discounts, the highway penalty).
-// The reference optimum is a self-contained Dijkstra over effective seconds rather than findRoute — a
-// stronger, independent check than comparing one A* against another.
+// Oracle for the signed sun/shade axis. The reference optimum is a self-contained Dijkstra over
+// effective seconds — not findRoute — so a mocked ./search elsewhere can't substitute it. The edge
+// attribute is the already-decoded signed value (positive = sunlit, negative = shaded), set straight
+// onto graph.edgeShadeNow as computeEdgeShade would.
 
 const SCALE = 1e-6;
 const NAME_NONE = 0xffff;
 const KIND_SIDEWALK = 0;
 
-const noScenic = (over: Partial<RouteWeights> = {}): RouteWeights => ({
+const noPref = (over: Partial<RouteWeights> = {}): RouteWeights => ({
   tree: 0,
   ferry: 0,
   landmark: 0,
@@ -34,14 +35,11 @@ interface NodeSpec {
   lng: number;
 }
 
-// A walking edge with its four scenic attribute fractions (0..1); the ingest bytes are these × 255.
+// A walking edge with its signed shade attribute in (-1, 1); positive is net sunlit, negative shaded.
 interface EdgeSpec {
   a: number;
   b: number;
-  cover?: number;
-  landmark?: number;
-  art?: number;
-  highway?: number;
+  shade?: number;
 }
 
 function buildGraph(nodes: NodeSpec[], edges: EdgeSpec[]): RoutingGraph {
@@ -59,21 +57,14 @@ function buildGraph(nodes: NodeSpec[], edges: EdgeSpec[]): RoutingGraph {
   const edgeNodeA = new Uint32Array(edgeCount);
   const edgeNodeB = new Uint32Array(edgeCount);
   const edgeLength = new Float32Array(edgeCount);
-  const edgeCover = new Uint8Array(edgeCount);
-  const edgeLandmark = new Uint8Array(edgeCount);
-  const edgeArt = new Uint8Array(edgeCount);
-  const edgeHighway = new Uint8Array(edgeCount);
+  const edgeShadeNow = new Float32Array(edgeCount);
   const edgeKindSide = new Uint8Array(edgeCount);
   const edgeDurationSeconds = new Float32Array(edgeCount);
   const edgeNameId = new Uint16Array(edgeCount).fill(NAME_NONE);
   const edgeGeomOffset = new Uint32Array(edgeCount).fill(NO_GEOMETRY);
   const edgeGeomCount = new Uint16Array(edgeCount);
   const adjacency: number[][] = Array.from({ length: nodeCount }, () => []);
-  const byte = (fraction: number | undefined): number =>
-    Math.min(254, Math.round((fraction ?? 0) * 255));
-  let maxCover = 0;
-  let maxLandmark = 0;
-  let maxArt = 0;
+  let maxAbsShadeNow = 0;
   for (let edge = 0; edge < edgeCount; edge++) {
     const spec = edges[edge];
     edgeNodeA[edge] = spec.a;
@@ -85,13 +76,8 @@ function buildGraph(nodes: NodeSpec[], edges: EdgeSpec[]): RoutingGraph {
       nodeLng(spec.b),
     );
     edgeKindSide[edge] = KIND_SIDEWALK;
-    edgeCover[edge] = byte(spec.cover);
-    edgeLandmark[edge] = byte(spec.landmark);
-    edgeArt[edge] = byte(spec.art);
-    edgeHighway[edge] = byte(spec.highway);
-    maxCover = Math.max(maxCover, edgeCover[edge]);
-    maxLandmark = Math.max(maxLandmark, edgeLandmark[edge]);
-    maxArt = Math.max(maxArt, edgeArt[edge]);
+    edgeShadeNow[edge] = spec.shade ?? 0;
+    maxAbsShadeNow = Math.max(maxAbsShadeNow, Math.abs(edgeShadeNow[edge]));
     adjacency[spec.a].push(edge);
     adjacency[spec.b].push(edge);
   }
@@ -123,17 +109,17 @@ function buildGraph(nodes: NodeSpec[], edges: EdgeSpec[]): RoutingGraph {
     edgeLength,
     edgeGeomOffset,
     edgeGeomCount,
-    edgeCover,
+    edgeCover: new Uint8Array(edgeCount),
     edgeNameId,
     edgeKindSide,
-    maxCover: maxCover / 255,
-    edgeLandmark,
-    edgeArt,
-    edgeHighway,
-    maxLandmark: maxLandmark / 255,
-    maxArt: maxArt / 255,
-    edgeShadeNow: null,
-    maxAbsShadeNow: 0,
+    maxCover: 0,
+    edgeLandmark: new Uint8Array(edgeCount),
+    edgeArt: new Uint8Array(edgeCount),
+    edgeHighway: new Uint8Array(edgeCount),
+    maxLandmark: 0,
+    maxArt: 0,
+    edgeShadeNow,
+    maxAbsShadeNow,
     edgeDurationSeconds,
     ferryEdges: new Uint32Array(0),
     names: [],
@@ -230,20 +216,13 @@ function effectiveCostOf(
   return cost;
 }
 
-// A diamond: from 0 to 3 by an upper path (node 1) or a lower path (node 2), plus the snap stubs at
-// each end. The two interior routes carry different scenic attributes so the weights steer the choice;
-// `upperLat`/`lowerLat` set how far each bows out, so one path can be made a genuine detour of the
-// other. 0->1->3 is the "upper", 0->2->3 the "lower".
+// The scenic-cost diamond: 0 -> 3 by an upper path (node 1) or a lower path (node 2), plus snap stubs.
 function diamond(
   upper: EdgeSpec,
   lower: EdgeSpec,
   upperLat = 0.001,
   lowerLat = 0.001,
-): {
-  graph: RoutingGraph;
-  start: Snap;
-  dest: Snap;
-} {
+): { graph: RoutingGraph; start: Snap; dest: Snap } {
   const nodes: NodeSpec[] = [
     { lat: 0, lng: 0 }, // 0 origin
     { lat: upperLat, lng: 0.0015 }, // 1 upper
@@ -253,12 +232,12 @@ function diamond(
     { lat: 0, lng: 0.0035 }, // 5 dest stub
   ];
   const edges: EdgeSpec[] = [
-    { a: 4, b: 0 }, // start stub (plain)
+    { a: 4, b: 0 }, // start stub (neutral)
     { a: 0, b: 1, ...upper },
     { a: 1, b: 3, ...upper },
     { a: 0, b: 2, ...lower },
     { a: 2, b: 3, ...lower },
-    { a: 3, b: 5 }, // dest stub (plain)
+    { a: 3, b: 5 }, // dest stub (neutral)
   ];
   const graph = buildGraph(nodes, edges);
   return {
@@ -275,104 +254,88 @@ function upperTaken(result: RouteResult | null): boolean {
   );
 }
 
-test("edgeMultiplier and minMultiplier reduce to the tree-only model when the new weights are zero", () => {
-  const { graph } = diamond({ cover: 0.6, landmark: 0.4 }, { highway: 0.5 });
-  for (let edge = 0; edge < graph.edgeCount; edge++) {
-    // No weights at all: every metre costs 1.
-    expect(edgeMultiplier(graph, edge, noScenic())).toBeCloseTo(1, 12);
-    // Only the tree weight: exactly 1 - w*cover, unchanged from before the product model.
-    const treeOnly = noScenic({ tree: 0.8 });
-    expect(edgeMultiplier(graph, edge, treeOnly)).toBeCloseTo(
-      1 - 0.8 * (graph.edgeCover[edge] / 255),
-      12,
-    );
-  }
-  expect(minMultiplier(graph, noScenic())).toBeCloseTo(1, 12);
-  expect(minMultiplier(graph, noScenic({ tree: 0.8 }))).toBeCloseTo(
-    1 - 0.8 * graph.maxCover,
-    12,
+test("a positive shade weight discounts sunlit edges and penalizes shaded ones", () => {
+  const { graph } = diamond({ shade: 0.5 }, { shade: -0.5 });
+  const sunlit = 1; // 0 -> 1, attr +0.5
+  const shaded = 3; // 0 -> 2, attr -0.5
+  const preferSun = noPref({ shade: 0.75 });
+  // Prefer-sun: the sunlit edge falls below 1 (a discount), the shaded edge rises above 1 (a penalty).
+  expect(edgeMultiplier(graph, sunlit, preferSun)).toBeCloseTo(
+    1 - 0.75 * 0.5,
+    6,
   );
+  expect(edgeMultiplier(graph, sunlit, preferSun)).toBeLessThan(1);
+  expect(edgeMultiplier(graph, shaded, preferSun)).toBeCloseTo(
+    1 + 0.75 * 0.5,
+    6,
+  );
+  expect(edgeMultiplier(graph, shaded, preferSun)).toBeGreaterThan(1);
 });
 
-test("edgeMultiplier is the product of the three discounts and the highway penalty", () => {
-  const { graph } = diamond(
-    { cover: 0.5, landmark: 0.4, art: 0.2, highway: 0.6 },
-    {},
+test("a negative shade weight flips: it discounts shaded edges and penalizes sunlit ones", () => {
+  const { graph } = diamond({ shade: 0.5 }, { shade: -0.5 });
+  const sunlit = 1;
+  const shaded = 3;
+  const preferShade = noPref({ shade: -0.75 });
+  // Prefer-shade: signs invert — the shaded edge is discounted, the sunlit edge penalized.
+  expect(edgeMultiplier(graph, shaded, preferShade)).toBeCloseTo(
+    1 - 0.75 * 0.5,
+    6,
   );
-  const weights = noScenic({
-    tree: 0.8,
-    landmark: 0.5,
-    art: 0.3,
-    highway: 0.7,
-  });
-  const edge = 1; // the upper 0->1 edge, which carries all four attributes
-  const expected =
-    (1 - 0.8 * (graph.edgeCover[edge] / 255)) *
-    (1 - 0.5 * (graph.edgeLandmark[edge] / 255)) *
-    (1 - 0.3 * (graph.edgeArt[edge] / 255)) *
-    (1 + 0.7 * (graph.edgeHighway[edge] / 255));
-  expect(edgeMultiplier(graph, edge, weights)).toBeCloseTo(expected, 12);
-  // The penalty makes this edge dearer than raw, the discounts alone would make it cheaper.
-  expect(edgeMultiplier(graph, edge, weights)).toBeGreaterThan(0);
+  expect(edgeMultiplier(graph, shaded, preferShade)).toBeLessThan(1);
+  expect(edgeMultiplier(graph, sunlit, preferShade)).toBeCloseTo(
+    1 + 0.75 * 0.5,
+    6,
+  );
+  expect(edgeMultiplier(graph, sunlit, preferShade)).toBeGreaterThan(1);
 });
 
-test("findRoute matches the Dijkstra optimum across scenic-weight combinations", () => {
-  // The lower path is shorter-feeling under a highway penalty (it has none); the upper is richer in
-  // landmarks and art. Sweeping the weights makes each route optimal in some regime.
-  const { graph, start, dest } = diamond(
-    { landmark: 0.8, art: 0.6 },
-    { highway: 0.7 },
-  );
-  const grid = [0, 0.5, 1];
+test("findRoute matches the Dijkstra optimum across both shade signs", () => {
+  // The upper path is sunlit, the lower shaded; sweeping the signed weight makes each route optimal in
+  // some regime, so agreement with the oracle exercises admissibility on both signs.
+  const { graph, start, dest } = diamond({ shade: 0.7 }, { shade: -0.7 });
+  const grid = [-1, -0.5, 0, 0.5, 1];
   let combinations = 0;
-  for (const tree of grid) {
-    for (const landmark of grid) {
-      for (const art of grid) {
-        for (const highway of grid) {
-          const weights = noScenic({ tree, landmark, art, highway });
-          const optimum = dijkstraCost(graph, start, dest, weights);
-          const result = findRoute(graph, start, dest, weights);
-          expect(result).not.toBeNull();
-          const cost = effectiveCostOf(graph, result as RouteResult, weights);
-          const label = `tree=${tree} lm=${landmark} art=${art} hw=${highway}`;
-          expect(Math.abs(cost - optimum), label).toBeLessThan(1e-3);
-          combinations += 1;
-        }
-      }
-    }
+  for (const shade of grid) {
+    const weights = noPref({ shade });
+    const optimum = dijkstraCost(graph, start, dest, weights);
+    const result = findRoute(graph, start, dest, weights);
+    expect(result).not.toBeNull();
+    const cost = effectiveCostOf(graph, result as RouteResult, weights);
+    expect(Math.abs(cost - optimum), `shade=${shade}`).toBeLessThan(1e-3);
+    combinations += 1;
   }
-  expect(combinations).toBe(81);
+  expect(combinations).toBe(5);
 });
 
-test("a strong landmark weight steers the route onto a longer landmarked path", () => {
-  // The upper path bows out far (a genuine detour, ~35% longer) but is rich in landmarks; the lower
-  // is the short plain way. The discount has to overcome real extra distance to be chosen.
+test("the signed shade weight steers the route toward sun or shade", () => {
+  // The upper path bows out far (a genuine detour) and is fully sunlit; the lower is the short shaded
+  // way. Prefer-sun should tip onto the longer sunlit detour; prefer-shade must never take it.
   const { graph, start, dest } = diamond(
-    { landmark: 0.9 },
-    {},
+    { shade: 0.9 },
+    { shade: -0.9 },
     0.0028, // upper bows far out — the longer path
     0.0002, // lower stays near the straight line — the shorter path
   );
   // No preference: the shorter lower path wins on distance alone.
-  expect(upperTaken(findRoute(graph, start, dest, noScenic()))).toBe(false);
-  // A full landmark weight makes the landmarked detour worth it.
-  expect(
-    upperTaken(findRoute(graph, start, dest, noScenic({ landmark: 1 }))),
-  ).toBe(true);
+  expect(upperTaken(findRoute(graph, start, dest, noPref()))).toBe(false);
+  // Full prefer-sun makes the sunlit detour worth it.
+  expect(upperTaken(findRoute(graph, start, dest, noPref({ shade: 1 })))).toBe(
+    true,
+  );
+  // Full prefer-shade keeps the short shaded path.
+  expect(upperTaken(findRoute(graph, start, dest, noPref({ shade: -1 })))).toBe(
+    false,
+  );
 });
 
-test("a highway weight steers the route away from a shorter nuisance path", () => {
-  // The upper path is the short way but runs by a highway; the lower is a longer plain detour.
-  const { graph, start, dest } = diamond(
-    { highway: 0.9 },
-    {},
-    0.0002, // upper is the shorter path...
-    0.001, // ...the lower a modestly longer detour the penalty can tip
-  );
-  // No penalty: the shorter upper path wins on distance.
-  expect(upperTaken(findRoute(graph, start, dest, noScenic()))).toBe(true);
-  // A full highway weight makes the nuisance path dear enough that the longer plain detour wins.
-  expect(
-    upperTaken(findRoute(graph, start, dest, noScenic({ highway: 1 }))),
-  ).toBe(false);
+test("minMultiplier stays strictly positive at the weight extremes", () => {
+  // maxAbsShadeNow at the decode ceiling 127/128, weight at either extreme: the floor is 1/128 > 0.
+  const { graph } = diamond({ shade: 0 }, { shade: 0 });
+  graph.maxAbsShadeNow = 127 / 128;
+  for (const shade of [1, -1]) {
+    const floor = minMultiplier(graph, noPref({ shade }));
+    expect(floor).toBeCloseTo(1 - 127 / 128, 12);
+    expect(floor).toBeGreaterThan(0);
+  }
 });

@@ -20,13 +20,16 @@ import {
   type OverlayId,
 } from "../src/overlays/registry";
 import type { Pin, PinDraft } from "../src/pin";
+import { getResolvedDate, subscribeRouteTime } from "../src/route-time/store";
 import {
   DEFAULT_ART_WEIGHT,
   DEFAULT_FERRY_WEIGHT,
   DEFAULT_HIGHWAY_WEIGHT,
   DEFAULT_LANDMARK_WEIGHT,
+  DEFAULT_SHADE_WEIGHT,
   DEFAULT_TREE_WEIGHT,
   MAX_FERRY_WEIGHT,
+  MAX_SHADE_WEIGHT,
   MAX_TREE_WEIGHT,
   type RouteWeights,
 } from "../src/routing/cost";
@@ -40,6 +43,7 @@ import {
   RouteSolver,
   reverseResult,
 } from "../src/routing/search";
+import { computeEdgeShade } from "../src/routing/shade";
 import { buildSnapIndex, type SnapIndex, snapPair } from "../src/routing/snap";
 import AboutDialog from "./about-dialog";
 import FollowToggle from "./follow-toggle";
@@ -72,6 +76,7 @@ type RouteState =
 
 const TREE_WEIGHT_KEY = "scenic-route:tree-weight";
 const FERRY_WEIGHT_KEY = "scenic-route:ferry-weight";
+const SHADE_WEIGHT_KEY = "scenic-route:shade-weight";
 const FERRY_ALLOW_KEY = "scenic-route:allow-ferries";
 const LANDMARK_WEIGHT_KEY = "scenic-route:landmark-weight";
 const ART_WEIGHT_KEY = "scenic-route:art-weight";
@@ -179,6 +184,12 @@ export default function MapApp() {
   const [highwayWeight, setHighwayWeight] = useState<number>(
     DEFAULT_HIGHWAY_WEIGHT,
   );
+  // The signed sun/shade preference (−1 = prefer shade, +1 = prefer sun, 0 = off). `shadeTick` fires
+  // as the resolved time (the global clock) moves, so the route re-costs against the sun's new
+  // position; `shadeContextRef` records which tick the route cache was built against.
+  const [shadeWeight, setShadeWeight] = useState<number>(DEFAULT_SHADE_WEIGHT);
+  const [shadeTick, setShadeTick] = useState<number>(0);
+  const shadeContextRef = useRef<number>(-1);
   // The decoded graph, kept so directions can be rebuilt from a route without a re-fetch.
   const [routingGraph, setRoutingGraph] = useState<RoutingGraph | null>(null);
   // The landmark and public-art points, loaded once directions are in use, so the turn-by-turn can
@@ -271,6 +282,28 @@ export default function MapApp() {
       }
     }
   }, []);
+
+  // The signed shade preference restores separately (its range is −1..1, not 0..1).
+  useEffect(() => {
+    const stored = window.localStorage.getItem(SHADE_WEIGHT_KEY);
+    if (stored !== null) {
+      const parsed = Number.parseFloat(stored);
+      if (Number.isFinite(parsed)) {
+        setShadeWeight(
+          Math.min(MAX_SHADE_WEIGHT, Math.max(-MAX_SHADE_WEIGHT, parsed)),
+        );
+      }
+    }
+  }, []);
+
+  // While a shade preference is active, follow the global clock: each tick re-costs the route against
+  // the sun's new position. The store only ticks in "now" mode or on a scrub, and only with a listener.
+  useEffect(() => {
+    if (shadeWeight === 0) {
+      return;
+    }
+    return subscribeRouteTime(() => setShadeTick((tick) => tick + 1));
+  }, [shadeWeight]);
 
   // Restore the persisted overlays from the comma-separated id list; unknown ids (a stale "trees"
   // from before the canopy switch) are dropped. A missing value leaves the canopy default; an empty
@@ -451,12 +484,38 @@ export default function MapApp() {
         setRouteState({ kind: "loading" });
       }
       loadRouting().then(
-        ({ graph, index }) => {
+        async ({ graph, index }) => {
           if (cancelled) {
             return;
           }
           setRoutingGraph((current) => current ?? graph);
           routedForRef.current = request;
+          // Keep the shade routing context current. loadRouting hands back one stable graph, so the
+          // per-edge attrs are recomputed only when the sun position (a clock tick) moves — a start/dest
+          // change alone reuses the attrs already on it. A tick drops both the weight-bracket cache and
+          // any in-flight drag solver they were built against. A missing or mismatched SHDE artifact is
+          // not fatal: routing drops the sun/shade bias for this time rather than failing. When shade is
+          // off, clear the field and the context so it costs nothing.
+          if (shadeWeight !== 0) {
+            if (shadeContextRef.current !== shadeTick) {
+              routeCacheRef.current = null;
+              dragSolverRef.current = null;
+              shadeContextRef.current = shadeTick;
+              try {
+                await computeEdgeShade(graph, getResolvedDate());
+              } catch {
+                graph.edgeShadeNow = null;
+                graph.maxAbsShadeNow = 0;
+              }
+              if (cancelled) {
+                return;
+              }
+            }
+          } else {
+            graph.edgeShadeNow = null;
+            graph.maxAbsShadeNow = 0;
+            shadeContextRef.current = -1;
+          }
           const pair = snapPair(graph, index, request.start, request.dest);
           const weights: RouteWeights = {
             tree: treeWeight,
@@ -464,6 +523,7 @@ export default function MapApp() {
             landmark: landmarkWeight,
             art: artWeight,
             highway: highwayWeight,
+            shade: shadeWeight,
             allowFerries,
           };
           if (!pair.ok) {
@@ -534,6 +594,8 @@ export default function MapApp() {
     landmarkWeight,
     artWeight,
     highwayWeight,
+    shadeWeight,
+    shadeTick,
     allowFerries,
     routeRefreshNonce,
   ]);
@@ -598,6 +660,11 @@ export default function MapApp() {
   const handleHighwayWeight = useCallback((weight: number) => {
     setHighwayWeight(weight);
     window.localStorage.setItem(HIGHWAY_WEIGHT_KEY, String(weight));
+  }, []);
+
+  const handleShadeWeight = useCallback((weight: number) => {
+    setShadeWeight(weight);
+    window.localStorage.setItem(SHADE_WEIGHT_KEY, String(weight));
   }, []);
 
   const handleDestSelect = useCallback((result: GeocodeResult) => {
@@ -999,6 +1066,7 @@ export default function MapApp() {
           landmarkWeight={landmarkWeight}
           artWeight={artWeight}
           highwayWeight={highwayWeight}
+          shadeWeight={shadeWeight}
           directions={directions}
           progress={progress}
           directionsOpen={directionsOpen}
@@ -1009,6 +1077,7 @@ export default function MapApp() {
           onLandmarkWeight={handleLandmarkWeight}
           onArtWeight={handleArtWeight}
           onHighwayWeight={handleHighwayWeight}
+          onShadeWeight={handleShadeWeight}
           onStartSelect={handleStartSelect}
           onDestSelect={handleDestSelect}
           onStartClear={handleClearStart}

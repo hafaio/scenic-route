@@ -30,6 +30,7 @@ import {
   MdTurnSlightLeft,
   MdTurnSlightRight,
   MdUTurnLeft,
+  MdWbSunny,
 } from "react-icons/md";
 import { PiBoatFill, PiTreeEvergreenFill } from "react-icons/pi";
 import type { GeocodeResult } from "../src/geocode";
@@ -38,6 +39,7 @@ import {
   MAX_FERRY_WEIGHT,
   MAX_HIGHWAY_WEIGHT,
   MAX_LANDMARK_WEIGHT,
+  MAX_SHADE_WEIGHT,
   MAX_TREE_WEIGHT,
 } from "../src/routing/cost";
 import {
@@ -69,6 +71,7 @@ interface RoutePanelProps {
   landmarkWeight: number;
   artWeight: number;
   highwayWeight: number;
+  shadeWeight: number; // signed: −1 = prefer shade, +1 = prefer sun, 0 = off
   directions: Maneuver[] | null;
   progress: NavProgress | null; // live position along the route, or null when off-route/unlocated
   directionsOpen: boolean;
@@ -79,6 +82,7 @@ interface RoutePanelProps {
   onLandmarkWeight: (weight: number) => void;
   onArtWeight: (weight: number) => void;
   onHighwayWeight: (weight: number) => void;
+  onShadeWeight: (weight: number) => void;
   onStartSelect: (result: GeocodeResult) => void;
   onDestSelect: (result: GeocodeResult) => void;
   onStartClear: () => void;
@@ -102,10 +106,24 @@ interface Factor {
   tint: string; // text colour for the icon and chip
   color: string; // the slider's fill/thumb colour (a CSS hex; matches the map overlay)
   disabled?: boolean;
+  signed?: boolean; // a bipolar −max..max slider (sun ↔ shade) rather than one-sided 0..max
 }
 
 const percent = (factor: Factor): number =>
   Math.round((factor.weight / factor.max) * 100);
+
+// The reading beside a factor's slider: a plain "%" for one-sided factors, a bipolar "sun / shade"
+// for the signed shade factor (0 reads as off).
+function factorReading(factor: Factor): string {
+  const value = percent(factor);
+  if (!factor.signed) {
+    return `${value}%`;
+  }
+  if (value === 0) {
+    return "off";
+  }
+  return value > 0 ? `${value}% sun` : `${-value}% shade`;
+}
 
 const METERS_PER_MILE = 1609.344;
 
@@ -180,6 +198,7 @@ export default function RoutePanel({
   landmarkWeight,
   artWeight,
   highwayWeight,
+  shadeWeight,
   directions,
   progress,
   directionsOpen,
@@ -190,6 +209,7 @@ export default function RoutePanel({
   onLandmarkWeight,
   onArtWeight,
   onHighwayWeight,
+  onShadeWeight,
   onStartSelect,
   onDestSelect,
   onStartClear,
@@ -237,6 +257,17 @@ export default function RoutePanel({
       onChange: onTreeWeight,
       tint: "text-brand-600 dark:text-brand-400",
       color: "#059669",
+    },
+    {
+      key: "shade",
+      label: "Sun or shade",
+      Icon: MdWbSunny,
+      weight: shadeWeight,
+      max: MAX_SHADE_WEIGHT,
+      onChange: onShadeWeight,
+      signed: true,
+      tint: "text-amber-600 dark:text-amber-400",
+      color: "#f59e0b",
     },
     {
       key: "landmark",
@@ -475,11 +506,13 @@ export default function RoutePanel({
                       />
                       {factor.label}
                     </span>
-                    <span className="tabular-nums">{percent(factor)}%</span>
+                    <span className="tabular-nums">
+                      {factorReading(factor)}
+                    </span>
                   </span>
                   <input
                     type="range"
-                    min={0}
+                    min={factor.signed ? -100 : 0}
                     max={100}
                     value={percent(factor)}
                     disabled={factor.disabled}
@@ -494,7 +527,10 @@ export default function RoutePanel({
                     style={
                       {
                         "--fill": factor.color,
-                        "--pct": `${percent(factor)}%`,
+                        // A signed slider fills from the centre, so map −100..100 to a 0..100 track.
+                        "--pct": factor.signed
+                          ? `${(percent(factor) + 100) / 2}%`
+                          : `${percent(factor)}%`,
                       } as CSSProperties
                     }
                   />

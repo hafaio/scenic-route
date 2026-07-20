@@ -254,7 +254,21 @@ async function build(): Promise<void> {
   // The shade overlay's shadow-tile pyramid, one per time-of-day bucket, cast from the building
   // footprints by `tiler shade`. The sun schedule (suncalc) is computed here and passed as params;
   // stale tiles are cleared first so a shrunk schedule leaves nothing behind.
+  // The sun-position params drive both the shade tile pyramid and the per-edge SHDE routing bake, so
+  // they are written once here and shared; null when the year yields no above-horizon bin.
   const shadeBuckets = computeShadeBuckets();
+  let shadeParamsPath: string | null = null;
+  if (shadeBuckets.length > 0) {
+    shadeParamsPath = join(tmpdir(), "scenic-shade-params.json");
+    await writeFile(
+      shadeParamsPath,
+      JSON.stringify({
+        maxZoom: SHADE_MAX_ZOOM,
+        maxShadowMeters: SHADE_MAX_SHADOW_METERS,
+        buckets: shadeBuckets,
+      }),
+    );
+  }
   const anyBuildings = (
     await Promise.all(
       cities.map((city) =>
@@ -262,16 +276,7 @@ async function build(): Promise<void> {
       ),
     )
   ).some(Boolean);
-  if (anyBuildings && shadeBuckets.length > 0) {
-    const shadeParams = join(tmpdir(), "scenic-shade-params.json");
-    await writeFile(
-      shadeParams,
-      JSON.stringify({
-        maxZoom: SHADE_MAX_ZOOM,
-        maxShadowMeters: SHADE_MAX_SHADOW_METERS,
-        buckets: shadeBuckets,
-      }),
-    );
+  if (anyBuildings && shadeParamsPath) {
     await rm(join(PUBLIC_DIR, "tiles", "shade"), {
       recursive: true,
       force: true,
@@ -286,7 +291,7 @@ async function build(): Promise<void> {
         "--tiles",
         join(PUBLIC_DIR, "tiles"),
         "--params",
-        shadeParams,
+        shadeParamsPath,
       ],
       false,
     );
@@ -357,6 +362,20 @@ async function build(): Promise<void> {
       if (await fileExists(file)) {
         graphArgs.push(flag, file);
       }
+    }
+    // The per-edge shade bake rides on the same graph invocation: it needs the city's building
+    // footprints and the shared sun-position params, and writes one file per sun-position bin into
+    // public/routing/shade (cleared by the ROUTING_DIR rm above) plus a bins.json manifest.
+    const buildingsFile = sourcePath("buildings", `${city.id}.bin`);
+    if (shadeParamsPath && (await fileExists(buildingsFile))) {
+      graphArgs.push(
+        "--buildings",
+        buildingsFile,
+        "--shade-params",
+        shadeParamsPath,
+        "--shade-dir",
+        join(ROUTING_DIR, "shade"),
+      );
     }
     runTiler(graphArgs, false);
   }

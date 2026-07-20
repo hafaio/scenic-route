@@ -49,7 +49,7 @@ struct Sample {
 /// One time-of-day bucket: the local clock minute it stands for (for the client manifest) and the
 /// sun-disk samples whose shadows accumulate into its penumbra.
 #[derive(Deserialize)]
-struct Bucket {
+pub(crate) struct Bucket {
     elevation: f64, // the bin's representative sun position, echoed to the client's schedule so it can
     azimuth: f64,   // map "now" to a bin; the geometry itself rides in `samples` and `intensity`
     intensity: f64, // solar intensity ~sin(elevation); scales the whole bin's shade darkness
@@ -58,10 +58,10 @@ struct Bucket {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct Params {
+pub(crate) struct Params {
     max_zoom: u32,
-    max_shadow_meters: f64, // a shadow is clipped to this, so a lone tower does not streak the city
-    buckets: Vec<Bucket>,
+    pub max_shadow_meters: f64, // a shadow is clipped to this, so a lone tower does not streak the city
+    pub buckets: Vec<Bucket>,
 }
 
 /// The client's schedule: which bin index stands for which sun position.
@@ -474,4 +474,320 @@ pub fn run(args: &Args) -> Fallible<()> {
         started.elapsed().as_secs_f64()
     );
     Ok(())
+}
+
+/// One bin's sun position, echoed into the SHDE artifact so the client's schedule maps "now" to a
+/// bin the same way the tile pyramid's `buckets.json` does.
+pub struct BinPosition {
+    pub elevation: f64,
+    pub azimuth: f64,
+}
+
+const SHADE_SAMPLE_METERS: f64 = 5.0; // spacing of the along-edge shade probes
+const SHADE_CELL_METERS: f64 = 5.0; // the coverage grid's cell size; halved-ish would just add cost
+const SHADE_COARSE_CELL_METERS: f64 = 8.0; // fallback cell for a bbox too large for a 5 m grid
+const SHADE_CELL_BUDGET: usize = 128_000_000; // ~128 MB per bin grid before the coarser cell kicks in
+
+/// A rasterized shadow-coverage grid for one bin over the edges' bounding box: `cells[r*cols+c]` is
+/// nonzero where the bin's shadow hulls cover that ~`cell`-metre cell. A point maps to its cell the
+/// same way `fill_polygons` places the hulls, so `shaded` reads the fill back in O(1); a point
+/// outside the grid is sunlit (a shadow beyond the edge extent never touches a sample).
+struct CoverageGrid {
+    cells: Vec<u8>,
+    cols: usize,
+    rows: usize,
+    west: f64,
+    south: f64,
+    meters_per_lng: f64,
+    cell: f64,
+}
+
+impl CoverageGrid {
+    fn shaded(&self, lng: f64, lat: f64) -> bool {
+        let col = (lng - self.west) * self.meters_per_lng / self.cell;
+        let row = (lat - self.south) * METERS_PER_DEGREE_LAT / self.cell;
+        if col < 0.0 || row < 0.0 || col > self.cols as f64 || row > self.rows as f64 {
+            false
+        } else {
+            // A probe on the east/north bbox edge lands exactly on cols/rows; fold it into the last
+            // cell rather than reading out of bounds (every probe is an edge vertex inside the bbox).
+            let col = (col as usize).min(self.cols - 1);
+            let row = (row as usize).min(self.rows - 1);
+            self.cells[row * self.cols + col] != 0
+        }
+    }
+}
+
+/// The fraction of an edge's polyline that lies in shadow: probe the endpoints and every
+/// ~SHADE_SAMPLE_METERS along it, counting the probes over a shaded cell. `None` for an empty
+/// polyline (a ferry or a degenerate edge), which the caller reads as no shade signal.
+fn edge_shaded_fraction(poly: &[Coord], grid: &CoverageGrid) -> Option<f64> {
+    if poly.is_empty() {
+        return None;
+    }
+    let mut shaded = 0usize;
+    let mut probes = 0usize;
+    let mut probe = |lng: f64, lat: f64| {
+        if grid.shaded(lng, lat) {
+            shaded += 1;
+        }
+        probes += 1;
+    };
+    probe(poly[0].lng, poly[0].lat);
+    for pair in poly.windows(2) {
+        let (from, to) = (pair[0], pair[1]);
+        let meters_per_lng = METERS_PER_DEGREE_LAT * ((from.lat + to.lat) / 2.0).to_radians().cos();
+        let east = (to.lng - from.lng) * meters_per_lng;
+        let north = (to.lat - from.lat) * METERS_PER_DEGREE_LAT;
+        let steps = (east.hypot(north) / SHADE_SAMPLE_METERS).ceil().max(1.0) as usize;
+        for step in 1..=steps {
+            let fraction = step as f64 / steps as f64;
+            probe(
+                from.lng + (to.lng - from.lng) * fraction,
+                from.lat + (to.lat - from.lat) * fraction,
+            );
+        }
+    }
+    Some(shaded as f64 / probes as f64)
+}
+
+/// i8 encoding of a shade attribute in [-1, 1]: 0 is neutral, positive is sunnier. The magnitude is
+/// capped at 127 (never -128), so the client's decoded `attr = byte / 128` has `|attr| <= 127/128 <
+/// 1`, keeping its admissible `1 - w*attr` strictly positive for `|w| <= 1`.
+fn encode_attr(attr: f64) -> i8 {
+    round_half_up(attr * 128.0).clamp(-127.0, 127.0) as i8
+}
+
+/// The edges' bounding box in metres and the cell-grid it induces, computed once and shared across
+/// bins (only the rasterized `cells` differ per bin). `None` when no edge carries geometry.
+struct GridSpec {
+    bounds: Bounds,
+    cols: usize,
+    rows: usize,
+    west: f64,
+    south: f64,
+    meters_per_lng: f64,
+    cell: f64,
+}
+
+fn grid_spec(edge_polys: &[Vec<Coord>]) -> Option<GridSpec> {
+    let mut west = f64::INFINITY;
+    let mut east = f64::NEG_INFINITY;
+    let mut south = f64::INFINITY;
+    let mut north = f64::NEG_INFINITY;
+    for poly in edge_polys {
+        for point in poly {
+            west = west.min(point.lng);
+            east = east.max(point.lng);
+            south = south.min(point.lat);
+            north = north.max(point.lat);
+        }
+    }
+    if !west.is_finite() {
+        return None;
+    }
+    let mid_lat = (south + north) / 2.0;
+    let meters_per_lng = METERS_PER_DEGREE_LAT * mid_lat.to_radians().cos();
+    let width_m = (east - west) * meters_per_lng;
+    let height_m = (north - south) * METERS_PER_DEGREE_LAT;
+    // A 5 m cell unless the bbox is large enough that its grid would blow the memory budget, in which
+    // case the coarser 8 m cell (~40% fewer cells) stands in.
+    let fine_cols = (width_m / SHADE_CELL_METERS).ceil().max(1.0) as usize;
+    let fine_rows = (height_m / SHADE_CELL_METERS).ceil().max(1.0) as usize;
+    let cell = if fine_cols.saturating_mul(fine_rows) > SHADE_CELL_BUDGET {
+        SHADE_COARSE_CELL_METERS
+    } else {
+        SHADE_CELL_METERS
+    };
+    let cols = (width_m / cell).ceil().max(1.0) as usize;
+    let rows = (height_m / cell).ceil().max(1.0) as usize;
+    Some(GridSpec {
+        bounds: Bounds {
+            west,
+            east,
+            south,
+            north,
+        },
+        cols,
+        rows,
+        west,
+        south,
+        meters_per_lng,
+        cell,
+    })
+}
+
+/// Per bin, per edge, the shade attribute the client routes on: for the bin's crisp center-sample
+/// shadow, `intensity * (1 - 2 * shadedFraction)` — sunlit edges positive, shaded negative, folded
+/// by the bin's solar intensity — encoded as an i8. Row-major `[bin * edge_count + edge]`.
+///
+/// The bin's ~867k shadow hulls are rasterized once into a coverage grid (cost ~ shadow area), then
+/// each edge sample is an O(1) grid read — versus a per-sample point-in-polygon test against the
+/// thousands of overlapping hulls a low sun throws.
+fn bake_edge_shade(
+    polygons: &[Polygon],
+    heights: &[f64],
+    bins: &[Bucket],
+    max_shadow_meters: f64,
+    edge_polys: &[Vec<Coord>],
+) -> (Vec<i8>, Vec<BinPosition>) {
+    let edge_count = edge_polys.len();
+    let positions = bins
+        .iter()
+        .map(|bucket| BinPosition {
+            elevation: bucket.elevation,
+            azimuth: bucket.azimuth,
+        })
+        .collect();
+    let Some(spec) = grid_spec(edge_polys) else {
+        // No edge carries geometry (all ferries/empty): every attribute is neutral.
+        return (vec![0i8; bins.len() * edge_count], positions);
+    };
+
+    let mut rows: Vec<(usize, Vec<i8>)> = bins
+        .par_iter()
+        .enumerate()
+        .map(|(bin, bucket)| {
+            // The bin's center sample (index 0) is the crisp hard shadow; the ring samples that give
+            // the tile penumbra are not used, so an edge is cleanly in or out of shadow.
+            let hulls: Vec<Polygon> = match bucket.samples.first() {
+                Some(sample) => polygons
+                    .iter()
+                    .zip(heights)
+                    .filter_map(|(footprint, height)| {
+                        shadow_hull(footprint, *height, sample, max_shadow_meters)
+                    })
+                    .collect(),
+                None => Vec::new(),
+            };
+            // Rasterize every hull into the grid once, mapping lng/lat to continuous cell coordinates
+            // exactly as `CoverageGrid::shaded` reads them back.
+            let mut cells = vec![0u8; spec.cols * spec.rows];
+            geometry::fill_polygons(
+                &mut cells,
+                spec.cols,
+                spec.rows,
+                &geometry::flatten(&hulls),
+                &spec.bounds,
+                |lng, lat| {
+                    (
+                        (lng - spec.west) * spec.meters_per_lng / spec.cell,
+                        (lat - spec.south) * METERS_PER_DEGREE_LAT / spec.cell,
+                    )
+                },
+            );
+            let grid = CoverageGrid {
+                cells,
+                cols: spec.cols,
+                rows: spec.rows,
+                west: spec.west,
+                south: spec.south,
+                meters_per_lng: spec.meters_per_lng,
+                cell: spec.cell,
+            };
+            let row = edge_polys
+                .iter()
+                .map(|poly| match edge_shaded_fraction(poly, &grid) {
+                    Some(fraction) => encode_attr(bucket.intensity * (1.0 - 2.0 * fraction)),
+                    None => encode_attr(0.0),
+                })
+                .collect();
+            (bin, row)
+        })
+        .collect();
+    rows.sort_by_key(|(bin, _)| *bin);
+
+    let mut attr_bytes: Vec<i8> = Vec::with_capacity(bins.len() * edge_count);
+    for (_, row) in rows {
+        attr_bytes.extend_from_slice(&row);
+    }
+    (attr_bytes, positions)
+}
+
+/// The per-edge, per-bin shade routing attributes for one city: read the buildings, then bake the
+/// i8 grid over `edge_polys` (each an edge's polyline in DEGREES, in GRPH `v2_edges` order; an empty
+/// vec — a ferry or degenerate edge — bakes to the neutral 0). Returns the row-major attr bytes and
+/// the bins' sun positions, both in bin order.
+pub fn edge_shade_attrs(
+    buildings_path: &Path,
+    bins: &[Bucket],
+    max_shadow_meters: f64,
+    edge_polys: &[Vec<Coord>],
+) -> Fallible<(Vec<i8>, Vec<BinPosition>)> {
+    let (polygons, heights) = binfmt::read_buildings(buildings_path)?;
+    Ok(bake_edge_shade(
+        &polygons,
+        &heights,
+        bins,
+        max_shadow_meters,
+        edge_polys,
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn coord(lng: f64, lat: f64) -> Coord {
+        Coord { lng, lat }
+    }
+
+    // One 100 m building near (-74, 40.7) and two bins whose center sample throws a 500 m shadow due
+    // north; an edge in that shadow reads negative, one to the south reads positive, and the second
+    // bin's unit intensity exercises both encoding clamps.
+    #[test]
+    fn bakes_signed_shade_attributes() {
+        let building: Polygon = vec![vec![
+            coord(-74.0000, 40.7000),
+            coord(-73.9999, 40.7000),
+            coord(-73.9999, 40.7001),
+            coord(-74.0000, 40.7001),
+        ]];
+        let heights = vec![100.0];
+        // The center sample throws a 500 m shadow due north (1 / tan folded into shadow_per_height).
+        let north_shadow = || Sample {
+            east: 0.0,
+            north: 1.0,
+            shadow_per_height: 5.0,
+        };
+        let bins = vec![
+            Bucket {
+                elevation: 30.0,
+                azimuth: 180.0,
+                intensity: 0.8,
+                samples: vec![north_shadow()],
+            },
+            Bucket {
+                elevation: 60.0,
+                azimuth: 200.0,
+                intensity: 1.0,
+                samples: vec![north_shadow()],
+            },
+        ];
+        let shaded_edge = vec![coord(-73.99995, 40.7020), coord(-73.99993, 40.7021)];
+        let sunlit_edge = vec![coord(-73.99995, 40.6900), coord(-73.99993, 40.6901)];
+        let ferry_edge: Vec<Coord> = Vec::new();
+        let edge_polys = vec![shaded_edge, sunlit_edge, ferry_edge];
+
+        let (attr, positions) = bake_edge_shade(&[building], &heights, &bins, 500.0, &edge_polys);
+
+        assert_eq!(positions.len(), 2);
+        assert_eq!(attr.len(), bins.len() * edge_polys.len());
+        assert!(
+            attr.iter().all(|&byte| byte >= -127),
+            "-128 is never emitted"
+        );
+
+        let edge_count = edge_polys.len();
+        let at = |bin: usize, edge: usize| attr[bin * edge_count + edge];
+        // bin 0 (intensity 0.8): the shaded edge reads negative, the sunlit one positive.
+        assert!(at(0, 0) < 0, "shaded edge should read negative");
+        assert!(at(0, 1) > 0, "sunlit edge should read positive");
+        // The empty ferry polyline bakes to exactly neutral.
+        assert_eq!(at(0, 2), 0);
+        // bin 1 (intensity 1.0): a fully shaded edge saturates to -127, a fully sunlit one to +127,
+        // keeping the decoded magnitude under 1.
+        assert_eq!(at(1, 0), -127);
+        assert_eq!(at(1, 1), 127);
+    }
 }

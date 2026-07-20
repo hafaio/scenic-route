@@ -60,6 +60,11 @@ export interface RoutingGraph {
   maxLandmark: number; // the greatest per-edge landmark amenity, 0..1; sets that discount's clip floor
   maxArt: number; // the greatest per-edge art amenity, 0..1; sets that discount's clip floor
 
+  // The signed shade attribute per edge for the resolved sun position, filled from the SHDE artifact by
+  // computeEdgeShade; null when no artifact is loaded or the sun is below the horizon (no shade to bias).
+  edgeShadeNow: Float32Array | null;
+  maxAbsShadeNow: number; // max |edgeShadeNow|, 0..1 (0 when null); the shade factor's clip-floor input
+
   edgeHalfOffsetDm: Uint8Array; // decimetres to a sidewalk; 0 for crossings/links/paths/ferries
   edgeDurationSeconds: Float32Array; // a ferry edge's crossing-plus-wait seconds; 0 for every other kind
   ferryEdges: Uint32Array; // ids of the ferry edges, for the A* ferry-credit heuristic
@@ -206,6 +211,8 @@ export function decodeGraph(buffer: ArrayBuffer): RoutingGraph {
     edgeHighway,
     maxLandmark,
     maxArt,
+    edgeShadeNow: null, // populated lazily once the SHDE artifact loads for the resolved sun position
+    maxAbsShadeNow: 0,
     edgeHalfOffsetDm,
     edgeDurationSeconds,
     ferryEdges: Uint32Array.from(ferryEdges),

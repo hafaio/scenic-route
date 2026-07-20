@@ -31,7 +31,7 @@ const USAGE: &str = "usage:
   tiler canopy --manifest <file.json> --ramp <file.bin> --data <dir> --tiles <dir>
   tiler shade --manifest <file.json> --data <dir> --tiles <dir> --params <file.json>
   tiler genus --manifest <file.json> --palette <file.bin> --data <dir> --tiles <dir>
-  tiler graph --streets <file.bin> [--paths <file.bin>] [--ferries <file.bin>] [--landmarks <file.bin>] [--art <file.bin>] [--highways <file.bin>] --out <file.bin>
+  tiler graph --streets <file.bin> [--paths <file.bin>] [--ferries <file.bin>] [--landmarks <file.bin>] [--art <file.bin>] [--highways <file.bin>] [--buildings <file.bin> --shade-params <file.json> --shade-dir <dir>] --out <file.bin>
 ";
 
 fn flags(mut args: impl Iterator<Item = String>) -> Fallible<HashMap<String, String>> {
@@ -93,6 +93,9 @@ fn run() -> Fallible<()> {
             art: flags.get("art").map(PathBuf::from),
             highways: flags.get("highways").map(PathBuf::from),
             out: path(&flags, "out")?,
+            buildings: flags.get("buildings").map(PathBuf::from),
+            shade_params: flags.get("shade-params").map(PathBuf::from),
+            shade_dir: flags.get("shade-dir").map(PathBuf::from),
         }),
         _ => Err(format!("unknown command \"{command}\"\n{USAGE}").into()),
     }
