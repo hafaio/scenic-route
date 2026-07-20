@@ -7,6 +7,7 @@ import {
   MdDirectionsCar,
   MdPalette,
   MdStorefront,
+  MdWbShade,
 } from "react-icons/md";
 import { PiBoatFill, PiTreeFill, PiTreeStructureFill } from "react-icons/pi";
 import TreeLegend from "../../components/tree-legend";
@@ -27,6 +28,9 @@ const GenusLayer = dynamic(() => import("../../components/genus-layer"), {
 const DiningLayer = dynamic(() => import("../../components/dining-layer"), {
   ssr: false,
 });
+const ShadeLayer = dynamic(() => import("../../components/shade-layer"), {
+  ssr: false,
+});
 const PoiLayer = dynamic(() => import("../../components/poi-layer"), {
   ssr: false,
 });
@@ -41,7 +45,8 @@ export type OverlayId =
   | "art"
   | "ferries"
   | "highways"
-  | "commercial";
+  | "commercial"
+  | "shade";
 
 export interface OverlayDef {
   id: OverlayId;
@@ -85,6 +90,12 @@ export const OVERLAYS: readonly OverlayDef[] = [
       <MdStorefront className="h-4 w-4 text-violet-600" aria-hidden="true" />
     ),
     render: () => <DiningLayer />,
+  },
+  {
+    id: "shade",
+    label: "Shade",
+    icon: <MdWbShade className="h-4 w-4 text-slate-500" aria-hidden="true" />,
+    render: () => <ShadeLayer />,
   },
   {
     id: "landmarks",

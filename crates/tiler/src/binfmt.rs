@@ -9,6 +9,7 @@ use crate::Fallible;
 
 pub const TREE_FORMAT: u16 = 3; // v3 adds a genus byte per tree; v2 added the crown byte
 pub const CANOPY_FORMAT: u16 = 1; // the measured 2017 LiDAR canopy, the shared polygon layout under magic CNPY
+pub const BLDG_FORMAT: u16 = 1; // building footprints with trailing roof-height/base-elevation u16s, magic BLDG
 pub const LAND_FORMAT: u16 = 1;
 pub const STREET_FORMAT: u16 = 5;
 pub const PATH_FORMAT: u16 = 1; // OSM pedestrian/park ways: STRT v5's layout, magic "PATH"
@@ -174,15 +175,10 @@ pub fn read_trees(path: &Path) -> Fallible<Trees> {
     })
 }
 
-pub fn read_polygons(path: &Path, magic: &str, format: u16) -> Fallible<Vec<Polygon>> {
-    let bytes = fs::read(path)?;
-    check_magic(&bytes, magic, format, path)?;
-    let head = header(&bytes);
-    let mut cursor = Cursor {
-        bytes: &bytes,
-        offset: head.body,
-    };
-
+// The shared polygon body: `count` polygons, each a u16 ring count then per-ring a u32 vertex
+// count and the zigzag-varint lng/lat deltas. Advances the cursor to the byte after the body, so
+// a caller with trailing regions (BLDG's heights) can read on from there.
+fn decode_polygons(cursor: &mut Cursor, head: &Header) -> Vec<Polygon> {
     let mut polygons = Vec::with_capacity(head.count);
     for _ in 0..head.count {
         let rings = usize::from(u16_at(cursor.bytes, cursor.offset));
@@ -206,7 +202,55 @@ pub fn read_polygons(path: &Path, magic: &str, format: u16) -> Fallible<Vec<Poly
         }
         polygons.push(polygon);
     }
-    Ok(polygons)
+    polygons
+}
+
+pub fn read_polygons(path: &Path, magic: &str, format: u16) -> Fallible<Vec<Polygon>> {
+    let bytes = fs::read(path)?;
+    check_magic(&bytes, magic, format, path)?;
+    let head = header(&bytes);
+    let mut cursor = Cursor {
+        bytes: &bytes,
+        offset: head.body,
+    };
+    Ok(decode_polygons(&mut cursor, &head))
+}
+
+/// BLDG v1: building footprints in the shared polygon layout, then two trailing parallel u16
+/// regions in polygon order — first roof heights in decimetres, then base elevations (ignored).
+/// A MultiPolygon was split into one footprint per part upstream, each part repeating its height,
+/// so the returned footprints and metre heights are aligned one-to-one. Returns the footprints
+/// and each polygon's roof height in metres.
+pub fn read_buildings(path: &Path) -> Fallible<(Vec<Polygon>, Vec<f64>)> {
+    let bytes = fs::read(path)?;
+    check_magic(&bytes, "BLDG", BLDG_FORMAT, path)?;
+    let head = header(&bytes);
+    let mut cursor = Cursor {
+        bytes: &bytes,
+        offset: head.body,
+    };
+    let polygons = decode_polygons(&mut cursor, &head);
+    // The heights then the base elevations are the two fixed-size trailing regions, one u16 each
+    // per polygon, after the variable-length body the cursor just walked.
+    let heights_start = cursor.offset;
+    let elevations_start = heights_start + head.count * 2;
+    let end = elevations_start + head.count * 2;
+    if bytes.len() < end {
+        return Err(format!(
+            "{} is truncated: {} bytes, {} needed for {} height and elevation u16s",
+            path.display(),
+            bytes.len(),
+            end,
+            head.count
+        )
+        .into());
+    }
+    let heights = (0..head.count)
+        .map(|polygon| {
+            f64::from(u16_at(&bytes, heights_start + polygon * 2)) / DECIMETERS_PER_METER
+        })
+        .collect();
+    Ok((polygons, heights))
 }
 
 /// A bare point set (the scenic POI sources: `LMRK` landmarks, `ARTW` public art). The shared
