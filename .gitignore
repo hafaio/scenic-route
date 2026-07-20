@@ -13,12 +13,16 @@
 # map overlays, rendered from data/streets/*.bin by `bun run build-tiles`
 /public/tiles/
 /public/streets/
+/public/commercial/
 /public/routing/
 /public/trees/
 /public/landmarks/
 /public/art/
 /public/ferries/
 /public/highways/
+/public/dining/
+/public/openstreets/
+/public/landuse/
 
 # raw source reads cached by `bun run build-tree-data`; --refresh to go back to the network
 /.cache/

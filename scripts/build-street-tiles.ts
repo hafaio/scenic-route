@@ -10,6 +10,7 @@ import { join } from "node:path";
 import { GENUS_COLORS, GENUS_COUNT } from "../src/tree-cover/genus";
 import manifest from "../src/tree-cover/manifest.json";
 import { rampAlpha, rampColor } from "../src/tree-cover/ramp";
+import { buildCommercial } from "./build-commercial";
 import { runTiler, tilerSources } from "./tiler";
 
 type City = (typeof manifest.cities)[number];
@@ -32,11 +33,22 @@ const GENUS_TILE_DIR = join(PUBLIC_DIR, "tiles", "genus");
 // where the raster pyramid stops. Copied verbatim from data/trees/*.bin (the TREE v3 blob).
 const TREE_DIR = join(PUBLIC_DIR, "trees");
 const CHUNK_DIR = join(PUBLIC_DIR, "streets");
+// The commercial overlay's precomputed per-segment signals, one file per STCK chunk, written by
+// scripts/build-commercial.ts after the chunks exist. Derived, gitignored, like the chunks.
+const COMMERCIAL_DIR = join(PUBLIC_DIR, "commercial");
 const ROUTING_DIR = join(PUBLIC_DIR, "routing");
 const STAMP_PATH = join(CANOPY_TILE_DIR, ".stamp");
 // Committed point/line sources served to the client verbatim for the map overlays (dots and lines).
 // Not rendered by the tiler, so they are copied straight across whenever their file is present.
-const SERVED_SOURCES = ["landmarks", "art", "ferries", "highways"] as const;
+const SERVED_SOURCES = [
+  "landmarks",
+  "art",
+  "ferries",
+  "highways",
+  "dining",
+  "openstreets",
+  "landuse",
+] as const;
 const MANIFEST_PATH = join(
   import.meta.dirname,
   "..",
@@ -115,6 +127,7 @@ async function newestInputMtime(cities: City[]): Promise<number> {
     RAMP_PATH,
     GENUS_PATH,
     import.meta.filename,
+    join(import.meta.dirname, "build-commercial.ts"),
     ...(await tilerSources()),
     ...cities.flatMap((city) => [
       sourcePath("streets", city.streets.file),
@@ -129,9 +142,18 @@ async function newestInputMtime(cities: City[]): Promise<number> {
   // The by-convention graph inputs (ferries + the scenic factors) are not in the manifest, so a
   // change to one must still refresh the graph: include each that exists on disk.
   const convention = cities.flatMap((city) =>
-    ["ferries", "landmarks", "art", "highways"].map((kind) =>
-      sourcePath(kind, `${city.id}.bin`),
-    ),
+    [
+      "ferries",
+      "landmarks",
+      "art",
+      "highways",
+      // The commercial overlay's precomputed signals are snapped from these; a re-ingest of any must
+      // refresh the build so build-commercial re-runs.
+      "landuse",
+      "dining",
+      "openstreets",
+      "buildings",
+    ].map((kind) => sourcePath(kind, `${city.id}.bin`)),
   );
   const present = await Promise.all(
     convention.map(async (path) => ((await fileExists(path)) ? path : null)),
@@ -147,6 +169,7 @@ async function isFresh(cities: City[]): Promise<boolean> {
     await stat(GENUS_TILE_DIR);
     await stat(TREE_DIR);
     await stat(CHUNK_DIR);
+    await stat(COMMERCIAL_DIR);
     await stat(ROUTING_DIR);
     return stamp.mtimeMs >= (await newestInputMtime(cities));
   } catch {
@@ -217,6 +240,10 @@ async function build(): Promise<void> {
     chunksArgs.push("--paths", sourcePath("paths", withPaths.paths.file));
   }
   runTiler(chunksArgs, false);
+
+  // The commercial overlay's per-segment signals: snapped from the committed sources onto the STCK
+  // chunks the tiler just wrote, so this must run after them. Own rm/mkdir of public/commercial.
+  await buildCommercial();
 
   // The blurred LiDAR canopy pyramid, coloured by the shared ramp LUT: the map's cover fill. The
   // subcommand renders every manifest city that carries a canopy layer, so it runs once when any

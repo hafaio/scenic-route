@@ -2,7 +2,12 @@
 
 import dynamic from "next/dynamic";
 import type { ReactNode } from "react";
-import { MdAccountBalance, MdDirectionsCar, MdPalette } from "react-icons/md";
+import {
+  MdAccountBalance,
+  MdDirectionsCar,
+  MdPalette,
+  MdStorefront,
+} from "react-icons/md";
 import { PiBoatFill, PiTreeFill, PiTreeStructureFill } from "react-icons/pi";
 import TreeLegend from "../../components/tree-legend";
 
@@ -19,6 +24,9 @@ const CanopyLayer = dynamic(() => import("../../components/canopy-layer"), {
 const GenusLayer = dynamic(() => import("../../components/genus-layer"), {
   ssr: false,
 });
+const DiningLayer = dynamic(() => import("../../components/dining-layer"), {
+  ssr: false,
+});
 const PoiLayer = dynamic(() => import("../../components/poi-layer"), {
   ssr: false,
 });
@@ -32,7 +40,8 @@ export type OverlayId =
   | "landmarks"
   | "art"
   | "ferries"
-  | "highways";
+  | "highways"
+  | "commercial";
 
 export interface OverlayDef {
   id: OverlayId;
@@ -51,6 +60,8 @@ const LANDMARK_COLOR = "#f59e0b"; // amber-500
 const ART_COLOR = "#d946ef"; // fuchsia-500
 const FERRY_COLOR = "#2563eb"; // blue-600, the route layer's ferry-leg colour
 const HIGHWAY_COLOR = "#ef4444"; // red-500
+// The "cute commercial" overlay is a heat field with its own violet ramp (in dining-layer.tsx); only
+// its menu glyph is tinted here, to violet-600, so the switcher still reads as the layer's colour code.
 
 // The single source of truth for the overlay switcher: this ordered array drives both the layers
 // control menu and what the map mounts. Adding a layer (highways, ferries, building-shade) is one
@@ -66,6 +77,14 @@ export const OVERLAYS: readonly OverlayDef[] = [
         <StreetScoreLayer />
       </>
     ),
+  },
+  {
+    id: "commercial",
+    label: "Commercial",
+    icon: (
+      <MdStorefront className="h-4 w-4 text-violet-600" aria-hidden="true" />
+    ),
+    render: () => <DiningLayer />,
   },
   {
     id: "landmarks",
