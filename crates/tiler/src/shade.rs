@@ -199,6 +199,24 @@ fn shadow_hull(
     (hull.len() >= 3).then_some(vec![hull])
 }
 
+/// Every building's shadow hull for one sun-disk sample — each footprint that casts anything,
+/// projected. ~867k hulls per sample. Shared by the display pyramid and the per-edge bake so the
+/// shadow model has exactly one implementation.
+fn hulls_for_sample(
+    polygons: &[Polygon],
+    heights: &[f64],
+    sample: &Sample,
+    max_shadow_meters: f64,
+) -> Vec<Polygon> {
+    polygons
+        .iter()
+        .zip(heights)
+        .filter_map(|(footprint, height)| {
+            shadow_hull(footprint, *height, sample, max_shadow_meters)
+        })
+        .collect()
+}
+
 /// Every building's shadow hull for one bucket, one sample set per sun-disk sample. ~867k hulls
 /// per sample; built fresh per bucket, which the loop keeps to one bucket alive at a time.
 fn build_sample_sets(shade: &CityShade, bucket: &Bucket, max_shadow_meters: f64) -> Vec<SampleSet> {
@@ -206,14 +224,8 @@ fn build_sample_sets(shade: &CityShade, bucket: &Bucket, max_shadow_meters: f64)
         .samples
         .iter()
         .map(|sample| {
-            let hulls: Vec<Polygon> = shade
-                .polygons
-                .iter()
-                .zip(&shade.heights)
-                .filter_map(|(footprint, height)| {
-                    shadow_hull(footprint, *height, sample, max_shadow_meters)
-                })
-                .collect();
+            let hulls =
+                hulls_for_sample(&shade.polygons, &shade.heights, sample, max_shadow_meters);
             let set = geometry::flatten(&hulls);
             let grid = PolygonGrid::new(&set);
             SampleSet { set, grid }
@@ -650,14 +662,8 @@ fn bake_edge_shade(
         .map(|(bin, bucket)| {
             // The bin's center sample (index 0) is the crisp hard shadow; the ring samples that give
             // the tile penumbra are not used, so an edge is cleanly in or out of shadow.
-            let hulls: Vec<Polygon> = match bucket.samples.first() {
-                Some(sample) => polygons
-                    .iter()
-                    .zip(heights)
-                    .filter_map(|(footprint, height)| {
-                        shadow_hull(footprint, *height, sample, max_shadow_meters)
-                    })
-                    .collect(),
+            let hulls = match bucket.samples.first() {
+                Some(sample) => hulls_for_sample(polygons, heights, sample, max_shadow_meters),
                 None => Vec::new(),
             };
             // Rasterize every hull into the grid once, mapping lng/lat to continuous cell coordinates
