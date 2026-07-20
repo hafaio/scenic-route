@@ -14,6 +14,10 @@ fetches. None of these files is ever served to a browser. Layouts are documented
 | `paths/nyc.bin` | OSM pedestrian/park ways (footway, path, greenway, steps…) and park drives (roads closed to through motor traffic), with the canopy cover at every vertex | **OpenStreetMap** |
 | `ferries/nyc.bin` | the time-independent ferry graph (stops, crossings, per-segment crossing+wait time and drawing geometry) — OSM- and canopy-independent | NYC DOT Staten Island Ferry GTFS + NYC Ferry (Hornblower) GTFS |
 | `ferries/siferry-gtfs.zip`, `ferries/nycferry-gtfs.zip` | the two raw GTFS feeds, frozen so a later time-of-day pass can re-derive from the exact feeds a build read | NYC DOT + NYC Ferry (Hornblower) |
+| `landmarks/nyc.bin` | ~1,530 designated landmark sites (points) — the "passes a landmark" routing discount | NYC LPC Individual Landmark Sites (`buis-pvji`) |
+| `art/nyc.bin` | public-art points (murals, sculpture, installations) — the "passes public art" routing discount | NYC PDC Outdoor Public Art Inventory (`2pg3-gcaa`) + **OpenStreetMap** (`tourism=artwork`) |
+| `highways/nyc.bin` | limited-access highways and above-ground rail as polylines — the highway/rail proximity *penalty* | **OpenStreetMap** |
+| `buildings/nyc.bin` | 867,920 building footprints, each with its roof height and base (ground) elevation — the source for the future building-shade factor (not yet read by routing) | NYC Building Footprints (`5zhs-2jue`) |
 
 All of these are tracked in **Git LFS** (see `.gitattributes`).
 
@@ -29,6 +33,11 @@ The code in this repository is MIT. The data here is not all MIT, and the differ
 extract of OSM geometry — a *Derivative Database* in ODbL's terms — so its share-alike clause applies
 to it: reuse it, and what you build from it stays open under the same terms. `trees/nyc.bin` also
 folds in OSM `natural=tree` points alongside the NYC ForMS census, so the same ODbL terms reach it.
+The same reaches **`art/nyc.bin`** (which folds in OSM `tourism=artwork`) and **`highways/nyc.bin`**
+(highways and rail extracted wholesale from OSM).
+
+`landmarks/nyc.bin` and `buildings/nyc.bin` are pure **NYC Open Data** (no OSM), so they carry no
+share-alike obligation — see below.
 
 The rendered map is a different matter. Tiles and street chunks are *Produced Works*, which ODbL
 covers with attribution alone — which the app gives, in the Leaflet attribution control.

@@ -275,3 +275,60 @@ export function encodePolygons(
   );
   return bytes.subarray(0, offset);
 }
+
+// A building footprint carrying the roof height the shade model raises the wall to, plus the ground
+// elevation its base sits at (for terrain-aware shade). Both ride through the encoder parallel to
+// the polygon: a MultiPolygon with disjoint parts becomes several entries, each repeating that
+// building's height and base elevation.
+export interface HeightedBuilding {
+  polygon: Polygon;
+  heightMeters: number;
+  baseElevationMeters: number;
+}
+
+// The metres of positive bias added to a base elevation before it is quantized, so the harbour's
+// slightly-negative ground (min ~ -3 m) survives the unsigned u16 store. A reader recovers the true
+// elevation as `decimetres / 10 - ELEVATION_BIAS_METERS`.
+export const ELEVATION_BIAS_METERS = 100;
+
+// The building footprints, magic `BLDG`: the encodePolygons body (a header, then per-polygon
+// varint-delta rings), then TWO parallel trailing regions of one u16 little-endian per polygon, in
+// the same polygon order and mirroring how encodeTrees keeps its crown and genus regions parallel:
+// first the roof height in decimetres, then the base (ground) elevation in decimetres biased by
+// +ELEVATION_BIAS_METERS so a below-sea-level base stays non-negative. The header count is the
+// number of polygons. layout: scripts/README.md
+export function encodeBuildings(
+  format: number,
+  buildings: readonly HeightedBuilding[],
+): Uint8Array {
+  const polygons = buildings.map((building) => building.polygon);
+  const body = encodePolygons("BLDG", format, polygons);
+  const trailing = new Uint8Array(buildings.length * 4);
+  const trailingView = new DataView(trailing.buffer);
+  for (let index = 0; index < buildings.length; index++) {
+    const heightDecimetres = Math.round(
+      buildings[index].heightMeters * DECIMETERS_PER_METER,
+    );
+    trailingView.setUint16(
+      index * 2,
+      Math.min(65535, Math.max(0, heightDecimetres)),
+      true,
+    );
+  }
+  const baseOffset = buildings.length * 2;
+  for (let index = 0; index < buildings.length; index++) {
+    const biasedDecimetres = Math.round(
+      (buildings[index].baseElevationMeters + ELEVATION_BIAS_METERS) *
+        DECIMETERS_PER_METER,
+    );
+    trailingView.setUint16(
+      baseOffset + index * 2,
+      Math.min(65535, Math.max(0, biasedDecimetres)),
+      true,
+    );
+  }
+  const out = new Uint8Array(body.length + trailing.length);
+  out.set(body);
+  out.set(trailing, body.length);
+  return out;
+}
