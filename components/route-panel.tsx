@@ -268,7 +268,7 @@ export default function RoutePanel({
     },
     {
       key: "shade",
-      label: "Sun or shade",
+      label: "Prefer sun or shade",
       Icon: MdWbSunny,
       weight: shadeWeight,
       max: MAX_SHADE_WEIGHT,
@@ -309,7 +309,7 @@ export default function RoutePanel({
     },
     {
       key: "commercial",
-      label: "Commercial streets",
+      label: "Prefer commercial streets",
       Icon: MdStorefront,
       weight: commercialWeight,
       max: MAX_COMMERCIAL_WEIGHT,
