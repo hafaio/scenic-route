@@ -82,6 +82,7 @@ const LANDMARK_WEIGHT_KEY = "scenic-route:landmark-weight";
 const ART_WEIGHT_KEY = "scenic-route:art-weight";
 const HIGHWAY_WEIGHT_KEY = "scenic-route:highway-weight";
 const OVERLAY_KEY = "scenic-route:overlay";
+const SEARCH_BIAS_KEY = "scenic-route:search-bias"; // "false" opts out of biasing search to the user
 const RESNAP_METERS = 25; // a followed location must drift this far before the route recomputes
 // How close to the route a POI must be to count as passed.
 const LANDMARK_PASS_METERS = 40;
@@ -190,6 +191,10 @@ export default function MapApp() {
   const [shadeWeight, setShadeWeight] = useState<number>(DEFAULT_SHADE_WEIGHT);
   const [shadeTick, setShadeTick] = useState<number>(0);
   const shadeContextRef = useRef<number>(-1);
+  // Whether to send the live location to the geocoder so nearby results rank first. On by default;
+  // the toolbar menu toggle opts out, and it persists to localStorage below.
+  const [shareLocationForSearch, setShareLocationForSearch] =
+    useState<boolean>(true);
   // The decoded graph, kept so directions can be rebuilt from a route without a re-fetch.
   const [routingGraph, setRoutingGraph] = useState<RoutingGraph | null>(null);
   // The landmark and public-art points, loaded once directions are in use, so the turn-by-turn can
@@ -312,6 +317,13 @@ export default function MapApp() {
     const stored = window.localStorage.getItem(OVERLAY_KEY);
     if (stored !== null) {
       setActiveOverlays(new Set(stored.split(",").filter(isOverlayId)));
+    }
+  }, []);
+
+  useEffect(() => {
+    const stored = window.localStorage.getItem(SEARCH_BIAS_KEY);
+    if (stored !== null) {
+      setShareLocationForSearch(stored !== "false");
     }
   }, []);
 
@@ -667,6 +679,23 @@ export default function MapApp() {
     window.localStorage.setItem(SHADE_WEIGHT_KEY, String(weight));
   }, []);
 
+  const handleToggleSearchBias = useCallback(() => {
+    setShareLocationForSearch((share) => {
+      const next = !share;
+      window.localStorage.setItem(SEARCH_BIAS_KEY, String(next));
+      return next;
+    });
+  }, []);
+
+  // The point handed to the geocoder to rank nearby results, or null when opted out or unlocated.
+  const searchBias = useMemo(
+    () =>
+      shareLocationForSearch && userLocation
+        ? { lat: userLocation.lat, lng: userLocation.lng }
+        : null,
+    [shareLocationForSearch, userLocation],
+  );
+
   const handleDestSelect = useCallback((result: GeocodeResult) => {
     setDest({ lat: result.lat, lng: result.lng, label: result.displayName });
     setPickTarget(null);
@@ -1007,6 +1036,8 @@ export default function MapApp() {
         logHereDisabled={userLocation === null}
         logHereBusy={logging}
         logHereHint={locationHint}
+        shareLocationForSearch={shareLocationForSearch}
+        onToggleSearchBias={handleToggleSearchBias}
       />
       <FollowToggle active={following} onToggle={handleToggleFollow} />
       {/* the active overlays' floating keys (genus only today); bottom-left keeps them clear of the
@@ -1048,6 +1079,7 @@ export default function MapApp() {
           destSet={dest !== null}
           needsStart={(manualStart ?? userLocation) === null}
           hasLiveLocation={userLocation !== null}
+          searchBias={searchBias}
           pickTarget={effectivePickTarget}
           status={routeState.kind}
           errorMessage={routeState.kind === "error" ? routeState.message : null}

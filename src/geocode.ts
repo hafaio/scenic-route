@@ -132,15 +132,28 @@ export async function reverseGeocode(
   return result;
 }
 
+// A location to rank nearby results first (Photon's `lat`/`lon` proximity bias), on top of the city
+// bbox clamp. Passed only when the user has opted in to sharing their location for search.
+export interface SearchBias {
+  lat: number;
+  lng: number;
+}
+
 export async function searchAddress(
   query: string,
-  signal?: AbortSignal,
+  options: { bias?: SearchBias | null; signal?: AbortSignal } = {},
 ): Promise<GeocodeResult[]> {
+  const { bias, signal } = options;
   const trimmed = query.trim();
   if (!trimmed) {
     return [];
   }
-  const cached = searchCache.get(trimmed);
+  // The bias reorders results, so it is part of the cache identity; rounded to ~100 m so GPS jitter
+  // doesn't defeat the cache while the ranking stays representative of the user's neighbourhood.
+  const cacheKey = bias
+    ? `${trimmed}@${bias.lat.toFixed(3)},${bias.lng.toFixed(3)}`
+    : trimmed;
+  const cached = searchCache.get(cacheKey);
   if (cached) {
     return cached;
   }
@@ -149,6 +162,10 @@ export async function searchAddress(
   url.searchParams.set("limit", String(MAX_SEARCH_RESULTS));
   url.searchParams.set("lang", "en");
   url.searchParams.set("bbox", PHOTON_BBOX);
+  if (bias) {
+    url.searchParams.set("lat", String(bias.lat));
+    url.searchParams.set("lon", String(bias.lng));
+  }
   const response = await fetch(url.toString(), { signal });
   if (!response.ok) {
     throw new Error(`Photon search failed: ${response.status}`);
@@ -186,6 +203,6 @@ export async function searchAddress(
       type: props.osm_value ?? props.type ?? "place",
     });
   }
-  setBounded(searchCache, trimmed, results);
+  setBounded(searchCache, cacheKey, results);
   return results;
 }

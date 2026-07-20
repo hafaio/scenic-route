@@ -33,7 +33,7 @@ import {
   MdWbSunny,
 } from "react-icons/md";
 import { PiBoatFill, PiTreeEvergreenFill } from "react-icons/pi";
-import type { GeocodeResult } from "../src/geocode";
+import type { GeocodeResult, SearchBias } from "../src/geocode";
 import {
   MAX_ART_WEIGHT,
   MAX_FERRY_WEIGHT,
@@ -57,6 +57,7 @@ interface RoutePanelProps {
   destSet: boolean;
   needsStart: boolean; // no location and no manual start yet
   hasLiveLocation: boolean; // a live fix exists, so the "My location" row can be offered
+  searchBias: SearchBias | null; // ranks search results near the user, or null when not shared
   pickTarget: "start" | "dest" | null;
   status: "idle" | "loading" | "ready" | "error";
   errorMessage: string | null;
@@ -188,6 +189,7 @@ export default function RoutePanel({
   destSet,
   needsStart,
   hasLiveLocation,
+  searchBias,
   pickTarget,
   status,
   errorMessage,
@@ -430,6 +432,7 @@ export default function RoutePanel({
             onArmPick={onArmStart}
             currentLocationLabel={hasLiveLocation ? "My location" : null}
             onUseCurrentLocation={onUseCurrentLocation}
+            searchBias={searchBias}
           />
           <LocationField
             label={destLabel}
@@ -442,6 +445,7 @@ export default function RoutePanel({
             onSelect={onDestSelect}
             onClear={onDestClear}
             onArmPick={onArmDest}
+            searchBias={searchBias}
           />
         </div>
 
