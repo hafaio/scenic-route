@@ -4,9 +4,17 @@
 // and `bun export`. The rendering itself is crates/tiler; this decides whether it needs to run
 // and hands it the colour ramp. See scripts/README.md.
 
-import { copyFile, mkdir, rm, stat, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import {
+  copyFile,
+  mkdir,
+  readFile,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { GENUS_COLORS, GENUS_COUNT } from "../src/tree-cover/genus";
 import manifest from "../src/tree-cover/manifest.json";
 import { rampAlpha, rampColor } from "../src/tree-cover/ramp";
@@ -126,7 +134,11 @@ async function fileExists(path: string): Promise<boolean> {
   }
 }
 
-async function newestInputMtime(cities: City[]): Promise<number> {
+// The content hash of every input the tiler reads: a rebuild is skipped only when they are all
+// byte-identical to the last run. Content, NOT mtime — a fresh checkout (CI) or a `touch` rewrites
+// mtimes without changing the bytes, which would otherwise force a needless full rebuild and, worse,
+// leave a cache of the derived tiles unusable across CI runs. The stamp file stores this hash.
+async function inputsHash(cities: City[]): Promise<string> {
   const paths = [
     MANIFEST_PATH,
     RAMP_PATH,
@@ -146,7 +158,7 @@ async function newestInputMtime(cities: City[]): Promise<number> {
     ]),
   ];
   // The by-convention graph inputs (ferries + the scenic factors) are not in the manifest, so a
-  // change to one must still refresh the graph: include each that exists on disk.
+  // change to one must still refresh the build: include each that exists on disk.
   const convention = cities.flatMap((city) =>
     [
       "ferries",
@@ -165,19 +177,30 @@ async function newestInputMtime(cities: City[]): Promise<number> {
     convention.map(async (path) => ((await fileExists(path)) ? path : null)),
   );
   paths.push(...present.filter((path): path is string => path !== null));
-  const stats = await Promise.all(paths.map((path) => stat(path)));
-  return Math.max(...stats.map((entry) => entry.mtimeMs));
+
+  // Repo-relative path + a separator + the bytes of each input, in a stable order, so the digest is
+  // deterministic and location-independent (the same on a laptop and a CI runner).
+  const root = join(import.meta.dirname, "..");
+  const hash = createHash("sha256");
+  for (const path of paths.sort()) {
+    hash.update(relative(root, path));
+    hash.update("\0");
+    hash.update(await readFile(path));
+  }
+  return hash.digest("hex");
 }
 
-async function isFresh(cities: City[]): Promise<boolean> {
+async function isFresh(hash: string): Promise<boolean> {
   try {
-    const stamp = await stat(STAMP_PATH);
-    await stat(GENUS_TILE_DIR);
-    await stat(TREE_DIR);
-    await stat(CHUNK_DIR);
-    await stat(COMMERCIAL_DIR);
-    await stat(ROUTING_DIR);
-    return stamp.mtimeMs >= (await newestInputMtime(cities));
+    const [stamp] = await Promise.all([
+      readFile(STAMP_PATH, "utf8"),
+      stat(GENUS_TILE_DIR),
+      stat(TREE_DIR),
+      stat(CHUNK_DIR),
+      stat(COMMERCIAL_DIR),
+      stat(ROUTING_DIR),
+    ]);
+    return stamp.trim() === hash;
   } catch {
     return false;
   }
@@ -201,7 +224,8 @@ async function serveSources(cities: City[]): Promise<void> {
 async function build(): Promise<void> {
   const cities: City[] = manifest.cities;
   await serveSources(cities);
-  if (await isFresh(cities)) {
+  const hash = await inputsHash(cities);
+  if (await isFresh(hash)) {
     console.error("street overlays are up to date");
     return;
   }
@@ -385,7 +409,7 @@ async function build(): Promise<void> {
     }
     runTiler(graphArgs, false);
   }
-  await writeFile(STAMP_PATH, "");
+  await writeFile(STAMP_PATH, hash);
 }
 
 await build();
