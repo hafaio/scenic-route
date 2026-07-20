@@ -1,8 +1,12 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { FiCrosshair, FiNavigation, FiX } from "react-icons/fi";
-import { type GeocodeResult, searchAddress } from "../src/geocode";
+import {
+  type GeocodeResult,
+  type SearchBias,
+  searchAddress,
+} from "../src/geocode";
 
 const SEARCH_DEBOUNCE_MS = 300;
 const BLUR_CLOSE_MS = 120; // let a result click land before the blur closes the list
@@ -21,6 +25,8 @@ interface LocationFieldProps {
   // When both are set, a "My location" row is prepended and the list opens on focus even when empty.
   currentLocationLabel?: string | null;
   onUseCurrentLocation?: () => void;
+  // Ranks results near this point first; null when the user hasn't shared their location for search.
+  searchBias?: SearchBias | null;
 }
 
 export default function LocationField({
@@ -36,6 +42,7 @@ export default function LocationField({
   onArmPick,
   currentLocationLabel,
   onUseCurrentLocation,
+  searchBias,
 }: LocationFieldProps) {
   // The in-progress typing; null means "not editing", so the box mirrors the committed label instead.
   const [draft, setDraft] = useState<string | null>(null);
@@ -46,6 +53,11 @@ export default function LocationField({
   const value = draft ?? label ?? "";
   const showCurrentRow = Boolean(currentLocationLabel && onUseCurrentLocation);
   const dropdownOpen = open && (showCurrentRow || results.length > 0);
+
+  // Read the latest bias without it being an effect dependency, so a drifting GPS fix doesn't re-run
+  // the search mid-type; the next keystroke picks up the current location.
+  const biasRef = useRef(searchBias);
+  biasRef.current = searchBias;
 
   // Debounced forward geocode driven off the draft only; the in-flight request is aborted when the
   // draft changes so a slow response can't overwrite a newer one. A null/empty draft searches nothing.
@@ -58,7 +70,10 @@ export default function LocationField({
     }
     const controller = new AbortController();
     const timer = window.setTimeout(() => {
-      searchAddress(trimmed, controller.signal)
+      searchAddress(trimmed, {
+        bias: biasRef.current,
+        signal: controller.signal,
+      })
         .then((hits) => {
           setResults(hits);
           setActiveIndex(-1);
