@@ -73,8 +73,10 @@ export default function AboutDialog({ onClose }: AboutDialogProps) {
         <div className="mt-5 text-sm leading-relaxed text-slate-600 dark:text-slate-300">
           <p>
             Scenic Route finds nicer ways to walk across New York. Use
-            Directions to plan out a path, or switch between the map overlays to
-            explore tree canopy and genus around you.
+            Directions to plan a path — weighting it toward tree cover, sun or
+            shade, landmarks, public art, nice commercial streets and ferries,
+            and away from highways — or switch between the map overlays to
+            explore what's around you.
           </p>
         </div>
 
@@ -98,6 +100,30 @@ export default function AboutDialog({ onClose }: AboutDialogProps) {
             <Source
               label="Paths & street trees"
               detail="OpenStreetMap contributors (ODbL)"
+            />
+            <Source
+              label="Ferries"
+              detail="Staten Island Ferry (NYC DOT) & NYC Ferry GTFS"
+            />
+            <Source
+              label="Landmarks"
+              detail="LPC Individual Landmark Sites · NYC Open Data"
+            />
+            <Source
+              label="Public art"
+              detail="PDC Outdoor Public Art · NYC Open Data, and OpenStreetMap"
+            />
+            <Source
+              label="Highways & rail"
+              detail="OpenStreetMap contributors (ODbL)"
+            />
+            <Source
+              label="Building shade"
+              detail="NYC Building Footprints · NYC Open Data"
+            />
+            <Source
+              label="Commercial streets"
+              detail="PLUTO, Dining Out & Open Streets · NYC Open Data, and OpenStreetMap"
             />
             <Source label="Basemap" detail="CARTO · OpenStreetMap" />
           </ul>
