@@ -2,7 +2,6 @@
 
 import { useEffect, useRef, useState } from "react";
 import { MdAccessTime } from "react-icons/md";
-import * as SunCalc from "suncalc";
 import {
   getResolvedHour,
   getTimeMode,
@@ -10,31 +9,17 @@ import {
   setTimeMode,
   subscribeRouteTime,
 } from "../src/route-time/store";
-import manifest from "../src/tree-cover/manifest.json";
 
 // The map's global time-of-day control, a toolbar icon like the others. Time is a global property, not
 // tied to any one overlay — the shade layer follows it now, ferry schedules will later. Clicking the
 // clock opens a popover with a "Now" button (track the live wall clock) and a slider to scrub any time
 // today; the icon lights when a non-now time is set. All state lives in the shared route-time store.
 
-const sun = SunCalc as unknown as {
-  getTimes: (
-    date: Date,
-    lat: number,
-    lng: number,
-  ) => { sunrise: Date; sunset: Date };
-};
-const [city] = manifest.cities;
-const LAT = (city.bounds.north + city.bounds.south) / 2;
-const LNG = (city.bounds.east + city.bounds.west) / 2;
-
 const STEP_HOUR = 0.25;
-const DEFAULT_MIN_HOUR = 6;
-const DEFAULT_MAX_HOUR = 19;
-
-function localHour(date: Date): number {
-  return date.getHours() + date.getMinutes() / 60;
-}
+// A fixed 1 AM–11 PM span, the same year-round: the clock drives more than shade, so the scrubber
+// always covers the same wide day rather than tracking the season's daylight.
+const MIN_HOUR = 1;
+const MAX_HOUR = 23;
 
 // Format a float hour as a 12-hour clock label like "3:00 PM".
 function formatHour(hour: number): string {
@@ -52,20 +37,6 @@ export default function ClockControl() {
   // Re-render on any store change (mode, custom time, or the once-a-minute "now" tick).
   const [, bump] = useState(0);
   useEffect(() => subscribeRouteTime(() => bump((value) => value + 1)), []);
-
-  const [range, setRange] = useState<{ min: number; max: number }>({
-    min: DEFAULT_MIN_HOUR,
-    max: DEFAULT_MAX_HOUR,
-  });
-  useEffect(() => {
-    const times = sun.getTimes(new Date(), LAT, LNG);
-    const sunrise = localHour(times.sunrise);
-    const sunset = localHour(times.sunset);
-    setRange({
-      min: Number.isFinite(sunrise) ? Math.floor(sunrise) : DEFAULT_MIN_HOUR,
-      max: Number.isFinite(sunset) ? Math.ceil(sunset) : DEFAULT_MAX_HOUR,
-    });
-  }, []);
 
   // Close the popover on an outside click or Escape, mirroring the toolbar menu.
   useEffect(() => {
@@ -141,8 +112,8 @@ export default function ClockControl() {
             </button>
             <input
               type="range"
-              min={range.min}
-              max={range.max}
+              min={MIN_HOUR}
+              max={MAX_HOUR}
               step={STEP_HOUR}
               value={hour}
               onChange={(event) =>
