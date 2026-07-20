@@ -15,10 +15,8 @@ import {
 import { type RouteResult, RouteSolver, reverseResult } from "./search";
 import { haversineMeters, type Snap } from "./snap";
 
-// The oracle here is a self-contained Dijkstra over effective seconds, not findRoute: route-cache.test.ts
-// mock.modules "./search" process-wide, so a newly added test file that imports findRoute receives that
-// stub. RouteSolver and reverseResult are unaffected, and a Dijkstra optimum is a stronger reference
-// than another A* anyway — the same approach ferry-cost.test.ts takes.
+// The oracle here is a self-contained Dijkstra over effective seconds, not findRoute — a stronger,
+// independent reference than another A*, the same approach ferry-cost.test.ts and scenic-cost.test.ts take.
 
 const SCALE = 1e-6;
 const NAME_NONE = 0xffff;

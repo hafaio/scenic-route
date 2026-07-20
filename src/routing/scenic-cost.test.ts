@@ -11,10 +11,8 @@ import { findRoute, type RouteResult } from "./search";
 import { haversineMeters, type Snap } from "./snap";
 
 // Phase-3 oracle for the three new scenic factors (landmark and art discounts, the highway penalty).
-// The reference optimum is a self-contained Dijkstra over effective seconds — not findRoute — so
-// route-cache.test.ts's process-wide `mock.module("./search")` cannot substitute it. That the ferry
-// oracle uses real findRoute in the same run shows bun isolates the mock per file, but a Dijkstra is
-// the stronger reference anyway.
+// The reference optimum is a self-contained Dijkstra over effective seconds rather than findRoute — a
+// stronger, independent check than comparing one A* against another.
 
 const SCALE = 1e-6;
 const NAME_NONE = 0xffff;

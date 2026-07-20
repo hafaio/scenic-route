@@ -15,6 +15,7 @@ mod graph;
 mod manifest;
 mod raster;
 mod scenic;
+mod shade;
 mod sidewalks;
 
 use std::collections::HashMap;
@@ -28,6 +29,7 @@ const USAGE: &str = "usage:
   tiler densities --params <file.json>
   tiler chunks --manifest <file.json> --data <dir> --chunks <dir> [--paths <file.bin>]
   tiler canopy --manifest <file.json> --ramp <file.bin> --data <dir> --tiles <dir>
+  tiler shade --manifest <file.json> --data <dir> --tiles <dir> --params <file.json>
   tiler genus --manifest <file.json> --palette <file.bin> --data <dir> --tiles <dir>
   tiler graph --streets <file.bin> [--paths <file.bin>] [--ferries <file.bin>] [--landmarks <file.bin>] [--art <file.bin>] [--highways <file.bin>] --out <file.bin>
 ";
@@ -70,6 +72,12 @@ fn run() -> Fallible<()> {
             ramp: path(&flags, "ramp")?,
             data: path(&flags, "data")?,
             tiles: path(&flags, "tiles")?,
+        }),
+        "shade" => shade::run(&shade::Args {
+            manifest: path(&flags, "manifest")?,
+            data: path(&flags, "data")?,
+            tiles: path(&flags, "tiles")?,
+            params: path(&flags, "params")?,
         }),
         "genus" => genus::run(&genus::Args {
             manifest: path(&flags, "manifest")?,
