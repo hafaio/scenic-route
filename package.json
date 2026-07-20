@@ -14,6 +14,10 @@
     "set-admin": "bun run scripts/set-admin.ts",
     "build-tree-data": "bun run scripts/build-tree-data.ts",
     "build-buildings": "bun run scripts/buildings.ts",
+    "build-dining": "bun run scripts/dining.ts",
+    "build-openstreets": "bun run scripts/openstreets.ts",
+    "build-landuse": "bun run scripts/landuse.ts",
+    "build-commercial": "bun run scripts/build-commercial.ts",
     "build-tiles": "bun run scripts/build-street-tiles.ts"
   },
   "dependencies": {

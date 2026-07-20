@@ -222,6 +222,11 @@ in its own band.
 | art | NYC PDC Outdoor Public Art Inventory (Socrata `2pg3-gcaa`) + OSM `tourism=artwork` via Overpass | public art and murals (OSM carries the murals the PDC set is thin on), deduped by proximity; a committed POI source, magic `ARTW` — its own routing discount, distinct scenery from landmarks; see "Binary layouts" |
 | highways | OSM limited-access highways (`motorway`/`trunk` + ramps) and above-ground rail (surface, open cut, or elevated — anything not `tunnel`), via Overpass | the lines walking near is unpleasant, as polylines; a committed source, magic `HWAY` — a later phase turns proximity into a routing *penalty*; never routed; see "Binary layouts" |
 | buildings | NYC Building Footprints, Socrata `5zhs-2jue` (`feature_code=2100` with a positive `height_roof`, feet→metres) | 867,920 footprints with their roof heights; a committed source, magic `BLDG` — the input a later **building-shade** factor will raise walls from and cast shadows with; not yet read by routing; see "Binary layouts" |
+| landuse | NYC PLUTO, Socrata `64uk-42ks` (lots with `landuse` 1..5) | 788,591 tax lots, each with a land-use class byte; a committed source, magic `PLUT` — the commercial-vs-residential signal for the **commercial-area** overlay; see "Binary layouts" |
+| dining | NYC Dining Out `fpeh-f7ci` + OSM `outdoor_seating` via Overpass | outdoor-dining points; a committed source, magic `DINE` — a "cute" signal for the commercial overlay |
+| openstreets | NYC DOT Open Streets `uiay-nctu` (non-school), sampled every ~10 m | Open Streets corridor points; a committed source, magic `OSTR` — a "cute" signal for the commercial overlay |
+
+The commercial overlay's per-segment signals are then precomputed at **build time** by `scripts/build-commercial.ts` (run after `tiler chunks`): it snaps `landuse`/`buildings`/`dining`/`openstreets` onto each street segment by *frontage* (perpendicular, projection in-span) and writes `public/commercial/{x}/{y}.bin` (magic `CMRC`, 3 bytes/segment: commercial fraction, median roof height, flags for open-street/seating), one file per `STCK` chunk, gitignored. The overlay reads those and applies the gate (>50% commercial AND low-rise AND (open-street OR seating)) client-side, so its thresholds stay tunable without a rebuild.
 
 Only walkable road types are kept. Highways, ramps, driveways, ferry routes, u-turns and
 non-physical segments are not part of the network a person walks. Bridges and tunnels come in
@@ -539,6 +544,12 @@ out from it, and deposits a network-distance-decaying discount on the edges it r
 mildly prefers routes that pass near them; it reads only `count` points from the header and **ignores
 the name blob**, which is client-only (the map overlay draws the names as labels). The blobs are served
 verbatim to `public/{landmarks,art}/<id>.bin` for the overlay.
+
+**`data/dining/<id>.bin` (`DINE`)** and **`data/openstreets/<id>.bin` (`OSTR`)** use the same point
+layout (name blob empty), for the commercial overlay's "cute" signals. **`data/landuse/<id>.bin`
+(`PLUT`)** is the point layout with a **trailing class byte per point** (the land-use digit 1..5) in
+place of the name blob, via `encodeClassifiedPoints` — mirroring how `TREE` appends parallel per-point
+bytes. All three are consumed only at build time by `scripts/build-commercial.ts` (see "The sources").
 
 ### `data/highways/<id>.bin` — the nuisance lines, magic `HWAY` (v1)
 

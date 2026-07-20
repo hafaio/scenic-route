@@ -295,6 +295,49 @@ export async function fetchOsmArtwork(
   return points;
 }
 
+// One OSM outdoor-seating point: its coordinate and the `name` tag when it carries one (most cafés do).
+export interface OsmSeating extends Coord {
+  name?: string;
+}
+
+// OSM outdoor-seating points: outdoor_seating=yes (cafés, restaurants, bars with pavement tables). A
+// node is a point; a way (a building or seating area outline) is taken at its center. Supplements the
+// NYC Dining Out café-licence inventory. The dining ingest clips these to land and dedups them
+// against the licensed cafés.
+export async function fetchOutdoorSeating(
+  south: number,
+  west: number,
+  north: number,
+  east: number,
+): Promise<OsmSeating[]> {
+  const box = `${south},${west},${north},${east}`;
+  const query =
+    `[out:json][timeout:${QUERY_TIMEOUT_SECONDS}];` +
+    `nwr["outdoor_seating"="yes"](${box});out center tags;`;
+  const elements = await overpassQuery("overpass-outdoor-seating", query);
+  const points: OsmSeating[] = [];
+  for (const element of elements) {
+    if (
+      element.type === "node" &&
+      element.lat !== undefined &&
+      element.lon !== undefined
+    ) {
+      points.push({
+        lat: element.lat,
+        lng: element.lon,
+        name: element.tags?.name?.trim(),
+      });
+    } else if (element.type === "way" && element.center) {
+      points.push({
+        lat: element.center.lat,
+        lng: element.center.lon,
+        name: element.tags?.name?.trim(),
+      });
+    }
+  }
+  return points;
+}
+
 // One line walking near is unpleasant: a limited-access highway (or ramp), or ABOVE-GROUND rail. The
 // `kind` is kept for the ingest log; the routing penalty treats them the same. Never part of the
 // walking network — these are only rasterized into a proximity field, never routed.

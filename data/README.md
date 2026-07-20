@@ -18,6 +18,9 @@ fetches. None of these files is ever served to a browser. Layouts are documented
 | `art/nyc.bin` | public-art points (murals, sculpture, installations) — the "passes public art" routing discount | NYC PDC Outdoor Public Art Inventory (`2pg3-gcaa`) + **OpenStreetMap** (`tourism=artwork`) |
 | `highways/nyc.bin` | limited-access highways and above-ground rail as polylines — the highway/rail proximity *penalty* | **OpenStreetMap** |
 | `buildings/nyc.bin` | 867,920 building footprints, each with its roof height and base (ground) elevation — the source for the future building-shade factor (not yet read by routing) | NYC Building Footprints (`5zhs-2jue`) |
+| `landuse/nyc.bin` | 788,591 tax lots, each tagged with its land-use class (1-3 residential, 4 mixed, 5 commercial) — the commercial-vs-residential signal for the "commercial area" overlay | NYC PLUTO (`64uk-42ks`) |
+| `dining/nyc.bin` | outdoor-dining points (licensed sidewalk/roadway cafés + OSM `outdoor_seating`) — a "cute" signal for the commercial overlay | NYC Dining Out (`fpeh-f7ci`) + **OpenStreetMap** |
+| `openstreets/nyc.bin` | non-school Open Streets corridors, sampled every ~10 m along each — a "cute" signal for the commercial overlay | NYC DOT Open Streets (`uiay-nctu`) |
 
 All of these are tracked in **Git LFS** (see `.gitattributes`).
 
@@ -33,11 +36,12 @@ The code in this repository is MIT. The data here is not all MIT, and the differ
 extract of OSM geometry — a *Derivative Database* in ODbL's terms — so its share-alike clause applies
 to it: reuse it, and what you build from it stays open under the same terms. `trees/nyc.bin` also
 folds in OSM `natural=tree` points alongside the NYC ForMS census, so the same ODbL terms reach it.
-The same reaches **`art/nyc.bin`** (which folds in OSM `tourism=artwork`) and **`highways/nyc.bin`**
-(highways and rail extracted wholesale from OSM).
+The same reaches **`art/nyc.bin`** (which folds in OSM `tourism=artwork`), **`highways/nyc.bin`**
+(highways and rail extracted wholesale from OSM), and **`dining/nyc.bin`** (which folds in OSM
+`outdoor_seating`).
 
-`landmarks/nyc.bin` and `buildings/nyc.bin` are pure **NYC Open Data** (no OSM), so they carry no
-share-alike obligation — see below.
+`landmarks/nyc.bin`, `buildings/nyc.bin`, `landuse/nyc.bin`, and `openstreets/nyc.bin` are pure
+**NYC Open Data** (no OSM), so they carry no share-alike obligation — see below.
 
 The rendered map is a different matter. Tiles and street chunks are *Produced Works*, which ODbL
 covers with attribution alone — which the app gives, in the Leaflet attribution control.

@@ -146,6 +146,56 @@ export function encodeTrees(
   return bytes.subarray(0, offset);
 }
 
+// A point carrying a small class byte: e.g. a land-use lot at its coordinate, tagged with its
+// PLUTO land-use digit. The class rides through the sort with each point, so byte i classes point i.
+export interface ClassifiedPoint extends Coord {
+  klass: number; // 0..255, the per-point class the trailing byte stores
+}
+
+// A classified point set (e.g. magic `PLUT`): the header, then the coordinate stream as zigzag-varint
+// (x, y) deltas in (y, x)-sorted order, then ONE trailing class byte per point in that same sorted
+// order — mirroring how encodeTrees keeps its crown and genus regions parallel to the coordinates.
+// The header count is the number of points. layout: scripts/README.md
+export function encodeClassifiedPoints(
+  magic: string,
+  format: number,
+  points: readonly ClassifiedPoint[],
+): Uint8Array {
+  let originLng = Number.POSITIVE_INFINITY;
+  let originLat = Number.POSITIVE_INFINITY;
+  for (const { lat, lng } of points) {
+    originLng = Math.min(originLng, lng);
+    originLat = Math.min(originLat, lat);
+  }
+
+  const quantized = points
+    .map(({ lat, lng, klass }) => ({
+      x: Math.round((lng - originLng) / COORD_SCALE),
+      y: Math.round((lat - originLat) / COORD_SCALE),
+      klass,
+    }))
+    .sort((left, right) => left.y - right.y || left.x - right.x);
+
+  // Two varints of at most five bytes each per point, then one class byte each.
+  const bytes = new Uint8Array(HEADER_BYTES + points.length * 11);
+  const view = new DataView(bytes.buffer);
+  let offset = HEADER_BYTES;
+  let previousX = 0;
+  let previousY = 0;
+  for (const { x, y } of quantized) {
+    offset = writeVarint(bytes, offset, zigzag(x - previousX));
+    offset = writeVarint(bytes, offset, zigzag(y - previousY));
+    previousX = x;
+    previousY = y;
+  }
+  for (const { klass } of quantized) {
+    bytes[offset] = klass;
+    offset += 1;
+  }
+  writeHeader(bytes, view, magic, format, points.length, originLng, originLat);
+  return bytes.subarray(0, offset);
+}
+
 // A named point: a POI's coordinate and the label the client draws (empty when the source names none).
 export interface NamedPoint extends Coord {
   name?: string;
