@@ -28,9 +28,9 @@ export const DEFAULT_FERRY_WEIGHT = 0.1;
 export const FERRY_FLOOR = 1e-3;
 // Landmark and public-art discounts, and the highway/rail penalty. Modest defaults, tunable by eye.
 export const MAX_LANDMARK_WEIGHT = 1;
-export const DEFAULT_LANDMARK_WEIGHT = 0.3;
+export const DEFAULT_LANDMARK_WEIGHT = 0.1;
 export const MAX_ART_WEIGHT = 1;
-export const DEFAULT_ART_WEIGHT = 0.3;
+export const DEFAULT_ART_WEIGHT = 0.1;
 export const MAX_HIGHWAY_WEIGHT = 1;
 export const DEFAULT_HIGHWAY_WEIGHT = 0.5;
 // The signed sun/shade axis spans [-1, 1] (0 = no preference): positive prefers sun, negative prefers
