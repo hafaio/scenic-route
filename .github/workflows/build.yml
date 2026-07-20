@@ -17,6 +17,11 @@ jobs:
         with:
           lfs: true
       - uses: oven-sh/setup-bun@v2
+        with:
+          # Pin bun: an unpinned setup-bun tracks the latest release, and `bun test`'s cross-file
+          # `mock.module` teardown differs between versions — a newer bun leaks route-cache.test.ts's
+          # `./search` mock into the oracle tests. Pin to the version the suite is validated against.
+          bun-version: 1.3.14
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
