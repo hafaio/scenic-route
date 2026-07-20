@@ -30,6 +30,7 @@ const weights = (
   landmark: 0,
   art: 0,
   highway: 0,
+  shade: 0,
   allowFerries,
 });
 
@@ -133,6 +134,8 @@ function buildGraph(nodes: NodeSpec[], edges: EdgeSpec[]): RoutingGraph {
     edgeHighway: new Uint8Array(edgeCount),
     maxLandmark: 0,
     maxArt: 0,
+    edgeShadeNow: null,
+    maxAbsShadeNow: 0,
     edgeDurationSeconds,
     ferryEdges: Uint32Array.from(ferryEdges),
     names: [],

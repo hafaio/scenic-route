@@ -18,6 +18,7 @@ use crate::conflate::{self, ProtoEdge};
 use crate::corners::{self, EdgeEnd};
 use crate::geometry::{METERS_PER_DEGREE_LAT, round_half_up};
 use crate::scenic;
+use crate::shade;
 use crate::sidewalks::{self, FLAG_NON_VEHICULAR};
 
 // STRT record flags (byte 23). FLAG_NON_VEHICULAR lives in sidewalks.rs, where the chunk offsets
@@ -91,6 +92,11 @@ pub struct Args {
     pub art: Option<PathBuf>,
     pub highways: Option<PathBuf>,
     pub out: PathBuf,
+    // The optional SHDE bake: building footprints, the shade sun-position params (the same file
+    // `tiler shade` reads), and the directory the per-bin shade files are written to. All three or none.
+    pub buildings: Option<PathBuf>,
+    pub shade_params: Option<PathBuf>,
+    pub shade_dir: Option<PathBuf>,
 }
 
 /// One edge, before and after contraction: the polyline runs a -> b with its endpoints pinned to
@@ -569,6 +575,56 @@ fn intern_name(
         interned.insert(name.to_string(), id);
         id
     }
+}
+
+// The SHDE artifact, one file per sun-position bin so the client fetches only the ~2 bins a given
+// time needs: `<dir>/bins.json` lists the bins (index + sun position) and the edge count, and
+// `<dir>/<index>.bin` carries that bin's `edge_count` i8 attributes (0 neutral, positive sunnier,
+// `attr = byte / 128`). The dir is wiped first so a shrunk bin set leaves no stale files. Each bin
+// file is a 12-byte header (magic "SHDB", u16 version, u16 pad, u32 edgeCount) then the i8 row,
+// little-endian; `edge_count` matches the GRPH edge count. Layout: scripts/README.md.
+fn write_shade(
+    dir: &std::path::Path,
+    edge_count: usize,
+    positions: &[shade::BinPosition],
+    attrs: &[i8],
+) -> Fallible<()> {
+    match fs::remove_dir_all(dir) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    fs::create_dir_all(dir)?;
+
+    let bins: Vec<serde_json::Value> = positions
+        .iter()
+        .enumerate()
+        .map(|(index, position)| {
+            serde_json::json!({
+                "index": index,
+                "elevation": position.elevation,
+                "azimuth": position.azimuth,
+            })
+        })
+        .collect();
+    let manifest = serde_json::json!({ "edgeCount": edge_count, "bins": bins });
+    fs::write(dir.join("bins.json"), serde_json::to_vec(&manifest)?)?;
+
+    const HEADER_BYTES: usize = 12;
+    for index in 0..positions.len() {
+        let row = &attrs[index * edge_count..index * edge_count + edge_count];
+        let mut bytes = vec![0u8; HEADER_BYTES + row.len()];
+        bytes[0..4].copy_from_slice(b"SHDB");
+        put_u16(&mut bytes, 4, 1); // version
+        // byte 6 is a u16 pad (kept zero).
+        put_u32(&mut bytes, 8, edge_count as u32);
+        // The i8 row reinterpreted into the byte buffer (two's complement, same width).
+        for (slot, &attr) in row.iter().enumerate() {
+            bytes[HEADER_BYTES + slot] = attr as u8;
+        }
+        fs::write(dir.join(format!("{index}.bin")), &bytes)?;
+    }
+    Ok(())
 }
 
 pub fn run(args: &Args) -> Fallible<()> {
@@ -1822,6 +1878,54 @@ pub fn run(args: &Args) -> Fallible<()> {
     }
     fs::write(&args.out, &bytes)?;
 
+    // The SHDE artifact (optional): a signed shade attribute per edge per sun-position bin, keyed off
+    // the same finalized `v2_edges` order the client reads GRPH records in. Each edge's polyline is
+    // recovered in degrees exactly as the pre-write geometry check does — a ferry bakes to neutral,
+    // a stored-geometry edge uses its blob, a geometry-less edge its straight node-to-node line.
+    if let (Some(buildings_path), Some(shade_params_path), Some(shade_dir_path)) =
+        (&args.buildings, &args.shade_params, &args.shade_dir)
+    {
+        let to_coord = |quantized_x: i32, quantized_y: i32| binfmt::Coord {
+            lng: origin_lng + f64::from(quantized_x) * scale,
+            lat: origin_lat + f64::from(quantized_y) * scale,
+        };
+        let edge_polys: Vec<Vec<binfmt::Coord>> = v2_edges
+            .iter()
+            .map(|edge| {
+                if edge.kind == KIND_FERRY {
+                    Vec::new()
+                } else if edge.geom == NO_GEOMETRY {
+                    vec![
+                        to_coord(node_lng[edge.a as usize], node_lat[edge.a as usize]),
+                        to_coord(node_lng[edge.b as usize], node_lat[edge.b as usize]),
+                    ]
+                } else {
+                    let (poly_x, poly_y) = &geometry_polys[edge.geom as usize];
+                    poly_x
+                        .iter()
+                        .zip(poly_y)
+                        .map(|(&quantized_x, &quantized_y)| to_coord(quantized_x, quantized_y))
+                        .collect()
+                }
+            })
+            .collect();
+
+        let params: shade::Params = serde_json::from_slice(&fs::read(shade_params_path)?)?;
+        let (attr_bytes, positions) = shade::edge_shade_attrs(
+            buildings_path,
+            &params.buckets,
+            params.max_shadow_meters,
+            &edge_polys,
+        )?;
+        assert_eq!(attr_bytes.len(), positions.len() * v2_edges.len());
+        write_shade(shade_dir_path, edge_count, &positions, &attr_bytes)?;
+        eprintln!(
+            "shade: {} bins x {edge_count} edges baked to {}",
+            positions.len(),
+            shade_dir_path.display()
+        );
+    }
+
     let total_km: f64 = v2_edges
         .iter()
         .map(|edge| f64::from(edge.length))
@@ -1875,4 +1979,50 @@ pub fn run(args: &Args) -> Fallible<()> {
     });
     println!("{}", serde_json::to_string(&stats)?);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn writes_per_bin_shade_files() {
+        let dir = std::env::temp_dir().join(format!("tiler-shade-test-{}", std::process::id()));
+        let positions = vec![
+            shade::BinPosition {
+                elevation: 10.0,
+                azimuth: 100.0,
+            },
+            shade::BinPosition {
+                elevation: 20.0,
+                azimuth: 200.0,
+            },
+        ];
+        let edge_count = 3;
+        // Two bins x three edges, row-major; bin 1's row is the last three.
+        let attrs: Vec<i8> = vec![1, -2, 3, -4, 5, -6];
+        write_shade(&dir, edge_count, &positions, &attrs).expect("write");
+
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(dir.join("bins.json")).expect("bins.json")).unwrap();
+        assert_eq!(manifest["edgeCount"], 3);
+        assert_eq!(manifest["bins"].as_array().unwrap().len(), 2);
+        assert_eq!(manifest["bins"][1]["index"], 1);
+        assert_eq!(manifest["bins"][1]["azimuth"], 200.0);
+
+        let bin1 = fs::read(dir.join("1.bin")).expect("1.bin");
+        assert_eq!(&bin1[0..4], b"SHDB");
+        assert_eq!(u16::from_le_bytes([bin1[4], bin1[5]]), 1);
+        assert_eq!(
+            u32::from_le_bytes([bin1[8], bin1[9], bin1[10], bin1[11]]),
+            3
+        );
+        assert_eq!(bin1.len(), 12 + 3);
+        assert_eq!(
+            [bin1[12] as i8, bin1[13] as i8, bin1[14] as i8],
+            [-4, 5, -6]
+        );
+
+        fs::remove_dir_all(&dir).expect("cleanup");
+    }
 }
