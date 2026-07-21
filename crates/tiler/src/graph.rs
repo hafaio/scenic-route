@@ -603,6 +603,8 @@ fn write_shade(
         .map(|(index, position)| {
             serde_json::json!({
                 "index": index,
+                "season": position.season,
+                "hourAngle": position.hour_angle,
                 "elevation": position.elevation,
                 "azimuth": position.azimuth,
             })
@@ -2004,10 +2006,14 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("tiler-shade-test-{}", std::process::id()));
         let positions = vec![
             shade::BinPosition {
+                season: 0,
+                hour_angle: -45.0,
                 elevation: 10.0,
                 azimuth: 100.0,
             },
             shade::BinPosition {
+                season: 2,
+                hour_angle: 15.0,
                 elevation: 20.0,
                 azimuth: 200.0,
             },
@@ -2023,6 +2029,8 @@ mod tests {
         assert_eq!(manifest["bins"].as_array().unwrap().len(), 2);
         assert_eq!(manifest["bins"][1]["index"], 1);
         assert_eq!(manifest["bins"][1]["azimuth"], 200.0);
+        assert_eq!(manifest["bins"][1]["season"], 2);
+        assert_eq!(manifest["bins"][1]["hourAngle"], 15.0);
 
         let bin1 = fs::read(dir.join("1.bin")).expect("1.bin");
         assert_eq!(&bin1[0..4], b"SHDB");
