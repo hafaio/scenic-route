@@ -1,11 +1,16 @@
 // The SHDE data: a per-edge signed sun/shade attribute baked for a grid of sun positions, so the
 // router can bias toward sun or shade for the resolved time of day. A given day's sun only sweeps a
 // handful of the (declination, hourAngle) bins, so the attributes ship as one small file PER BIN,
-// fetched lazily on demand, alongside a manifest of the bins. `computeEdgeShade` resolves a Date to a
-// sun position, loads and blends the two hour-angle-nearest bins in its season band, and writes the
-// per-edge attribute onto the graph; below the horizon there is no shade to bias, so it clears the
-// field. The bin selection mirrors components/shade-layer.tsx (both via src/shade/sun.ts), so the
-// router agrees with the shade overlay.
+// fetched lazily on demand, alongside a manifest of the bins.
+//
+// A route is not walked at a single instant: the sun keeps moving as you go, and on a long walk the
+// shadows at the far end differ from those at the start. So `computeEdgeShade` does not resolve one sun
+// position — it builds a `ShadeField`, a schedule of blended bins across ELAPSED WALKING TIME from the
+// departure instant. The router asks the field for an edge's attribute at the elapsed time it reaches
+// that edge, so a metre walked an hour in is costed against the sun an hour later. Below the horizon at
+// some elapsed time there is no shade to bias, so the field returns 0 there; a departure already past
+// sunset yields no field at all. The bin selection mirrors components/shade-layer.tsx (both via
+// src/shade/sun.ts), so the router agrees with the shade overlay at the departure instant.
 
 import * as SunCalc from "suncalc";
 import { declinationOf, hourAngleOf, seasonBand } from "../shade/sun";
@@ -17,6 +22,12 @@ const FORMAT_VERSION = 1;
 const HEADER_BYTES = 12; // magic(4) + u16 version + u16 pad + u32 edgeCount
 const BINS_URL = "routing/shade/bins.json"; // relative, so it picks up the deploy basePath
 const HORIZON_DEG = 0.5; // at or below this the sun is down and there is no shade to bias
+
+// The elapsed-time schedule: sun positions are sampled every SCHEDULE_STEP_SECONDS (the sun moves
+// ~1.25° across one step, well under a bin's span) out to SCHEDULE_HORIZON_SECONDS — a walk longer than
+// this (~20 km at 1.4 m/s) freezes the sun at the horizon, a negligible tail.
+const SCHEDULE_STEP_SECONDS = 300;
+const SCHEDULE_HORIZON_SECONDS = 4 * 3600;
 
 const binUrl = (index: number): string => `routing/shade/${index}.bin`;
 
@@ -47,6 +58,69 @@ export interface ShadeBin {
 export interface ShadeBins {
   edgeCount: number; // must equal the routing graph's edge count
   bins: ShadeBin[];
+}
+
+// The per-edge signed shade attribute a route is costed against, as a function of how long into the
+// walk the edge is reached. `attrAt` returns a value in (-1, 1) — positive net sunlit, negative net
+// shaded; `maxAbs` bounds |attr| over every edge and elapsed time the field can return, the input to
+// the cost model's admissible clip floor.
+export interface ShadeField {
+  attrAt(edge: number, elapsedSeconds: number): number;
+  readonly maxAbs: number;
+}
+
+// The route-time field: a blend of two hour-angle-nearest bins per elapsed-time bucket. Holds only the
+// referenced bin rows and the bucket tables it needs — not the graph — so it doesn't pin a large scope.
+class ScheduledShadeField implements ShadeField {
+  constructor(
+    private readonly attrs: Int8Array[], // the referenced bin rows, in bucket-reference order
+    private readonly binA: Int32Array, // per bucket: index into `attrs`, or -1 for a night bucket
+    private readonly binB: Int32Array, // per bucket: the second blended bin's index into `attrs`
+    private readonly weightA: Float64Array, // per bucket: bin A's blend weight, already divided by 128
+    private readonly weightB: Float64Array, // per bucket: bin B's blend weight, already divided by 128
+    private readonly lastBucket: number, // clamp elapsed time to this bucket (the schedule horizon)
+    readonly maxAbs: number,
+  ) {}
+
+  attrAt(edge: number, elapsedSeconds: number): number {
+    const clamped = elapsedSeconds > 0 ? elapsedSeconds : 0;
+    let bucket = Math.round(clamped / SCHEDULE_STEP_SECONDS);
+    if (bucket > this.lastBucket) {
+      bucket = this.lastBucket;
+    }
+    const indexA = this.binA[bucket];
+    if (indexA < 0) {
+      return 0; // the sun is down at this point in the walk
+    }
+    return (
+      this.attrs[indexA][edge] * this.weightA[bucket] +
+      this.attrs[this.binB[bucket]][edge] * this.weightB[bucket]
+    );
+  }
+}
+
+// A time-invariant field over already-decoded signed floats in (-1, 1), for tests and any caller that
+// wants a fixed sun position rather than a walk-length schedule.
+class ConstantShadeField implements ShadeField {
+  constructor(
+    private readonly attrs: Float32Array,
+    readonly maxAbs: number,
+  ) {}
+
+  attrAt(edge: number): number {
+    return this.attrs[edge];
+  }
+}
+
+export function constantShadeField(attrs: Float32Array): ShadeField {
+  let maxAbs = 0;
+  for (const value of attrs) {
+    const magnitude = Math.abs(value);
+    if (magnitude > maxAbs) {
+      maxAbs = magnitude;
+    }
+  }
+  return new ConstantShadeField(attrs, maxAbs);
 }
 
 let binsPromise: Promise<ShadeBins> | null = null;
@@ -123,39 +197,32 @@ function sunAt(date: Date): { elevation: number; azimuth: number } {
   };
 }
 
-// Resolve `date` to a sun position and write the per-edge signed shade attribute onto the graph. Below
-// the horizon there is no shade to bias, so the field is cleared to null / 0. Otherwise the two nearest
-// bins are loaded and blended inversely by angular distance (the closer bin weighs more); a convex
-// blend of two i8/128 rows keeps |attr| < 1, preserving the cost model's admissibility. Asserts the
-// bin manifest's edge count matches the graph's.
-export async function computeEdgeShade(
-  graph: RoutingGraph,
-  date: Date,
-): Promise<void> {
-  const { edgeCount, bins } = await loadShadeBins();
-  if (edgeCount !== graph.edgeCount) {
-    throw new Error(
-      `shade edge count ${edgeCount} != graph ${graph.edgeCount}`,
-    );
-  }
+// The two bins straddling a sun position by hour angle within its season band, and their inverse-
+// distance blend weights (each proportional to the OTHER's distance, so the closer bin dominates; they
+// sum to 1). A single bin, coincident bins, or a missing second all collapse to the nearest. Falls
+// back to the whole set only if the band has no baked bin (it always does while the sun is up). Null
+// when the given position is at or below the horizon.
+interface ShadeBlend {
+  nearest: ShadeBin;
+  second: ShadeBin;
+  nearestWeight: number;
+  secondWeight: number;
+}
 
-  const { elevation, azimuth } = sunAt(date);
-  if (elevation <= HORIZON_DEG || bins.length === 0) {
-    graph.edgeShadeNow = null;
-    graph.maxAbsShadeNow = 0;
-    return;
+function selectBlend(
+  bins: ShadeBin[],
+  elevation: number,
+  azimuth: number,
+): ShadeBlend | null {
+  if (elevation <= HORIZON_DEG) {
+    return null;
   }
-
-  // Map "now" to the sun's (declination, hourAngle) and blend the two bins straddling that hour angle
-  // within the season band, so scrubbing time slides smoothly and monotonically between them. Falls
-  // back to the whole set only if the band has no baked bin (it always does while the sun is up).
   const declination = declinationOf(elevation, azimuth, CENTRE_LAT);
   const hourAngle = hourAngleOf(elevation, azimuth, CENTRE_LAT, declination);
   const season = seasonBand(declination);
   const inBand = bins.filter((bin) => bin.season === season);
   const candidates = inBand.length > 0 ? inBand : bins;
 
-  // The two nearest bins by hour-angle distance.
   let nearest = candidates[0];
   let second: ShadeBin | null = null;
   let nearestDistance = Number.POSITIVE_INFINITY;
@@ -173,39 +240,117 @@ export async function computeEdgeShade(
     }
   }
 
-  // Inverse-distance blend: each bin's weight is proportional to the OTHER's distance, so the closer
-  // bin dominates. A single bin (secondDistance never leaves Infinity), two bins coincident with the
-  // sun (total 0), or a missing second all collapse to the nearest — a finite, nonzero total is what
-  // keeps the weights from going NaN.
-  let nearestWeight: number;
-  let secondWeight: number;
   const total = nearestDistance + secondDistance;
   if (second === null || total === 0 || !Number.isFinite(total)) {
-    nearestWeight = 1;
-    secondWeight = 0;
-    second = nearest;
-  } else {
-    nearestWeight = secondDistance / total;
-    secondWeight = nearestDistance / total;
+    return { nearest, second: nearest, nearestWeight: 1, secondWeight: 0 };
   }
+  return {
+    nearest,
+    second,
+    nearestWeight: secondDistance / total,
+    secondWeight: nearestDistance / total,
+  };
+}
 
-  const [nearestAttr, secondAttr] = await Promise.all([
-    loadShadeBin(nearest.index),
-    loadShadeBin(second.index),
-  ]);
+// Intern a bin index into the referenced-rows order, returning its position; used so the schedule
+// stores small positional indices and only the referenced bin rows are fetched.
+function intern(
+  positions: Map<number, number>,
+  order: number[],
+  index: number,
+): number {
+  const existing = positions.get(index);
+  if (existing !== undefined) {
+    return existing;
+  }
+  const position = order.length;
+  positions.set(index, position);
+  order.push(index);
+  return position;
+}
 
-  const shade = new Float32Array(edgeCount);
-  let maxAbs = 0;
-  for (let edge = 0; edge < edgeCount; edge++) {
-    const value =
-      (nearestAttr[edge] * nearestWeight + secondAttr[edge] * secondWeight) /
-      128;
-    shade[edge] = value;
-    const magnitude = Math.abs(value);
-    if (magnitude > maxAbs) {
-      maxAbs = magnitude;
+// Build the graph's route-time shade field for a departure instant. Samples the sun across elapsed
+// walking time, blending the two hour-angle-nearest bins per bucket, and fetches only the bins any
+// bucket references. Clears the field when the departure and the whole horizon are below the horizon
+// (nothing to bias) or no bins are baked. Asserts the bin manifest's edge count matches the graph's.
+export async function computeEdgeShade(
+  graph: RoutingGraph,
+  date: Date,
+): Promise<void> {
+  const { edgeCount, bins } = await loadShadeBins();
+  if (edgeCount !== graph.edgeCount) {
+    throw new Error(
+      `shade edge count ${edgeCount} != graph ${graph.edgeCount}`,
+    );
+  }
+  if (bins.length === 0) {
+    graph.shade = null;
+    return;
+  }
+  // A stale or pre-season/hourAngle bake passes the edge-count check but lacks the fields selectBlend
+  // keys on: the season filter empties and every hour-angle distance is NaN, so it silently collapses to
+  // bins[0] (the faintest near-horizon bin) at every time — the slider goes inert. Fail loudly instead.
+  for (const bin of bins) {
+    if (!Number.isFinite(bin.hourAngle) || !Number.isInteger(bin.season)) {
+      throw new Error(
+        "shade bins.json lacks season/hourAngle (stale artifact?) — rebuild public/routing/shade",
+      );
     }
   }
-  graph.edgeShadeNow = shade;
-  graph.maxAbsShadeNow = maxAbs;
+
+  const lastBucket = Math.floor(
+    SCHEDULE_HORIZON_SECONDS / SCHEDULE_STEP_SECONDS,
+  );
+  const bucketCount = lastBucket + 1;
+  const binA = new Int32Array(bucketCount).fill(-1); // -1 marks a night bucket
+  const binB = new Int32Array(bucketCount);
+  const weightA = new Float64Array(bucketCount);
+  const weightB = new Float64Array(bucketCount);
+  const positions = new Map<number, number>();
+  const order: number[] = []; // bin indices in reference order, the axis of `attrs`
+  let anyDay = false;
+  for (let bucket = 0; bucket <= lastBucket; bucket++) {
+    const when = new Date(
+      date.getTime() + bucket * SCHEDULE_STEP_SECONDS * 1000,
+    );
+    const { elevation, azimuth } = sunAt(when);
+    const blend = selectBlend(bins, elevation, azimuth);
+    if (!blend) {
+      continue; // night bucket: binA stays -1, attrAt returns 0
+    }
+    anyDay = true;
+    binA[bucket] = intern(positions, order, blend.nearest.index);
+    binB[bucket] = intern(positions, order, blend.second.index);
+    weightA[bucket] = blend.nearestWeight / 128;
+    weightB[bucket] = blend.secondWeight / 128;
+  }
+  if (!anyDay) {
+    graph.shade = null;
+    return;
+  }
+
+  const attrs = await Promise.all(order.map(loadShadeBin));
+  let maxAbs = 0;
+  for (const row of attrs) {
+    if (row.length !== edgeCount) {
+      throw new Error(
+        `shade bin edge count ${row.length} != graph ${edgeCount}`,
+      );
+    }
+    for (let edge = 0; edge < row.length; edge++) {
+      const magnitude = Math.abs(row[edge]);
+      if (magnitude > maxAbs) {
+        maxAbs = magnitude;
+      }
+    }
+  }
+  graph.shade = new ScheduledShadeField(
+    attrs,
+    binA,
+    binB,
+    weightA,
+    weightB,
+    lastBucket,
+    maxAbs / 128,
+  );
 }

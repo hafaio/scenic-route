@@ -8,12 +8,13 @@ import {
 } from "./cost";
 import { NO_GEOMETRY, otherEnd, type RoutingGraph } from "./graph";
 import { findRoute, type RouteResult } from "./search";
+import { constantShadeField, type ShadeField } from "./shade";
 import { haversineMeters, type Snap } from "./snap";
 
 // Oracle for the signed sun/shade axis. The reference optimum is a self-contained Dijkstra over
 // effective seconds — not findRoute — so a mocked ./search elsewhere can't substitute it. The edge
-// attribute is the already-decoded signed value (positive = sunlit, negative = shaded), set straight
-// onto graph.edgeShadeNow as computeEdgeShade would.
+// attribute is the already-decoded signed value (positive = sunlit, negative = shaded), wrapped in a
+// constant (time-invariant) shade field as computeEdgeShade's field is for a fixed sun position.
 
 const SCALE = 1e-6;
 const NAME_NONE = 0xffff;
@@ -58,14 +59,13 @@ function buildGraph(nodes: NodeSpec[], edges: EdgeSpec[]): RoutingGraph {
   const edgeNodeA = new Uint32Array(edgeCount);
   const edgeNodeB = new Uint32Array(edgeCount);
   const edgeLength = new Float32Array(edgeCount);
-  const edgeShadeNow = new Float32Array(edgeCount);
+  const edgeShade = new Float32Array(edgeCount);
   const edgeKindSide = new Uint8Array(edgeCount);
   const edgeDurationSeconds = new Float32Array(edgeCount);
   const edgeNameId = new Uint16Array(edgeCount).fill(NAME_NONE);
   const edgeGeomOffset = new Uint32Array(edgeCount).fill(NO_GEOMETRY);
   const edgeGeomCount = new Uint16Array(edgeCount);
   const adjacency: number[][] = Array.from({ length: nodeCount }, () => []);
-  let maxAbsShadeNow = 0;
   for (let edge = 0; edge < edgeCount; edge++) {
     const spec = edges[edge];
     edgeNodeA[edge] = spec.a;
@@ -77,8 +77,7 @@ function buildGraph(nodes: NodeSpec[], edges: EdgeSpec[]): RoutingGraph {
       nodeLng(spec.b),
     );
     edgeKindSide[edge] = KIND_SIDEWALK;
-    edgeShadeNow[edge] = spec.shade ?? 0;
-    maxAbsShadeNow = Math.max(maxAbsShadeNow, Math.abs(edgeShadeNow[edge]));
+    edgeShade[edge] = spec.shade ?? 0;
     adjacency[spec.a].push(edge);
     adjacency[spec.b].push(edge);
   }
@@ -121,8 +120,7 @@ function buildGraph(nodes: NodeSpec[], edges: EdgeSpec[]): RoutingGraph {
     maxLandmark: 0,
     maxArt: 0,
     maxCommercial: 0,
-    edgeShadeNow,
-    maxAbsShadeNow,
+    shade: constantShadeField(edgeShade),
     edgeDurationSeconds,
     ferryEdges: new Uint32Array(0),
     names: [],
@@ -332,10 +330,72 @@ test("the signed shade weight steers the route toward sun or shade", () => {
   );
 });
 
+test("the sun advancing over a long walk flips a late route decision", () => {
+  // A long stem into a symmetric fork: 0 -> 1 (a ~1.3 km walk, ~900 s) then either the upper branch
+  // (1 -> 2 -> 4) or the lower (1 -> 3 -> 4), equal length so shade alone decides. The fork is reached
+  // ~900 s in, long after the departure instant.
+  const nodes: NodeSpec[] = [
+    { lat: 0, lng: 0 }, // 0 start
+    { lat: 0, lng: 0.015 }, // 1 fork
+    { lat: 0.001, lng: 0.018 }, // 2 upper
+    { lat: -0.001, lng: 0.018 }, // 3 lower
+    { lat: 0, lng: 0.021 }, // 4 destination
+    { lat: 0, lng: 0.0215 }, // 5 dest stub
+  ];
+  const edges: EdgeSpec[] = [
+    { a: 0, b: 1 }, // stem
+    { a: 1, b: 2 }, // upper in
+    { a: 2, b: 4 }, // upper out
+    { a: 1, b: 3 }, // lower in
+    { a: 3, b: 4 }, // lower out
+    { a: 4, b: 5 }, // dest stub (neutral)
+  ];
+  const graph = buildGraph(nodes, edges);
+  const start = snapAtNode(graph, 0, 0);
+  const dest = snapAtNode(graph, 4, 5);
+  const upperEdges = new Set([1, 2]);
+  const lowerEdges = new Set([3, 4]);
+
+  // At departure the upper branch is sunlit; the sun flips it after FLIP_SECONDS, well before the fork
+  // is reached. A prefer-sun walker who ignored elapsed time would take the upper branch; one who
+  // advances the sun by the ~900 s it takes to reach the fork should take the now-sunlit lower branch.
+  const FLIP_SECONDS = 500;
+  const attrOf = (edge: number, elapsedSeconds: number): number => {
+    const upperSunlit = elapsedSeconds < FLIP_SECONDS;
+    if (upperEdges.has(edge)) {
+      return upperSunlit ? 0.5 : -0.5;
+    }
+    if (lowerEdges.has(edge)) {
+      return upperSunlit ? -0.5 : 0.5;
+    }
+    return 0;
+  };
+  const timeVarying: ShadeField = {
+    attrAt: attrOf,
+    maxAbs: 0.5,
+  };
+  // The departure snapshot frozen for the whole walk — the old, single-sun-position behaviour.
+  const departure = constantShadeField(
+    Float32Array.from(edges, (_edge, index) => attrOf(index, 0)),
+  );
+
+  const preferSun = noPref({ shade: 1 });
+
+  graph.shade = departure;
+  const frozen = findRoute(graph, start, dest, preferSun);
+  expect(frozen?.steps.some((step) => upperEdges.has(step.edge))).toBe(true);
+  expect(frozen?.steps.some((step) => lowerEdges.has(step.edge))).toBe(false);
+
+  graph.shade = timeVarying;
+  const advanced = findRoute(graph, start, dest, preferSun);
+  expect(advanced?.steps.some((step) => lowerEdges.has(step.edge))).toBe(true);
+  expect(advanced?.steps.some((step) => upperEdges.has(step.edge))).toBe(false);
+});
+
 test("minMultiplier stays strictly positive at the weight extremes", () => {
-  // maxAbsShadeNow at the decode ceiling 127/128, weight at either extreme: the floor is 1/128 > 0.
+  // The field's maxAbs at the decode ceiling 127/128, weight at either extreme: the floor is 1/128 > 0.
   const { graph } = diamond({ shade: 0 }, { shade: 0 });
-  graph.maxAbsShadeNow = 127 / 128;
+  graph.shade = constantShadeField(new Float32Array([127 / 128]));
   for (const shade of [1, -1]) {
     const floor = minMultiplier(graph, noPref({ shade }));
     expect(floor).toBeCloseTo(1 - 127 / 128, 12);

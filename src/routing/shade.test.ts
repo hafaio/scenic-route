@@ -29,7 +29,9 @@ function sunAt(date: Date): { elevation: number; azimuth: number } {
 const HEADER_BYTES = 12;
 const EDGE_COUNT = 4;
 const DAY = new Date("2026-07-19T16:30:00Z"); // ~12:30 EDT, sun well up over NYC
-const NIGHT = new Date("2026-07-19T06:00:00Z"); // ~02:00 EDT, sun below the horizon
+// ~23:00 EDT: dark at departure and still dark 4 h on, so the whole elapsed-time schedule is night
+// (a departure whose forward window reached sunrise would bake a non-null, part-daylight field).
+const NIGHT = new Date("2026-07-20T03:00:00Z");
 
 // Encode one SHDB bin file: magic + u16 version + u16 pad + u32 edgeCount, then edgeCount signed bytes.
 function buildBin(attrs: number[]): ArrayBuffer {
@@ -114,8 +116,7 @@ afterAll(() => {
 function makeGraph(edgeCount: number): RoutingGraph {
   return {
     edgeCount,
-    edgeShadeNow: null,
-    maxAbsShadeNow: 0,
+    shade: null,
   } as unknown as RoutingGraph;
 }
 
@@ -124,34 +125,49 @@ test("loadShadeBin decodes a bin file to its signed attributes", async () => {
   expect(Array.from(attr)).toEqual([10, -20, 40, 0]);
 });
 
-test("computeEdgeShade awaits and blends the two nearest bins inversely by distance", async () => {
+test("computeEdgeShade blends the two nearest bins inversely by distance at departure", async () => {
   expect(daySun.elevation).toBeGreaterThan(0.5); // precondition: the sun is up, so a blend is computed
 
   const graph = makeGraph(EDGE_COUNT);
   await computeEdgeShade(graph, DAY);
 
-  expect(graph.edgeShadeNow).not.toBeNull();
-  const shade = graph.edgeShadeNow as Float32Array;
-  // Bins 0 and 1 straddle the sun at equal distance, so the blend is their average, /128.
+  expect(graph.shade).not.toBeNull();
+  const shade = graph.shade as NonNullable<RoutingGraph["shade"]>;
+  // At the departure instant (elapsed 0) bins 0 and 1 straddle the sun at equal distance, so the blend
+  // is their average, /128.
   const expected = [20, -30, 50, 50].map((value) => value / 128);
   for (let edge = 0; edge < expected.length; edge++) {
-    expect(shade[edge]).toBeCloseTo(expected[edge], 6);
+    expect(shade.attrAt(edge, 0)).toBeCloseTo(expected[edge], 6);
   }
-  // maxAbsShadeNow is the running max abs of the blend; a convex blend of i8/128 stays < 1.
-  expect(graph.maxAbsShadeNow).toBeCloseTo(50 / 128, 6);
-  expect(graph.maxAbsShadeNow).toBeLessThan(1);
+  // maxAbs is over every loaded bin row (0 and 1), not the departure blend: bin 1's 100 is the largest
+  // magnitude. A convex blend of i8/128 stays < 1, so the admissible floor is safe.
+  expect(shade.maxAbs).toBeCloseTo(100 / 128, 6);
+  expect(shade.maxAbs).toBeLessThan(1);
 });
 
-test("computeEdgeShade clears the field below the horizon", async () => {
-  expect(sunAt(NIGHT).elevation).toBeLessThanOrEqual(0.5); // precondition: it is night
+test("computeEdgeShade advances the sun with elapsed walking time", async () => {
+  const graph = makeGraph(EDGE_COUNT);
+  await computeEdgeShade(graph, DAY);
+  const shade = graph.shade as NonNullable<RoutingGraph["shade"]>;
+
+  // Edge 3 reads 0 in bin 0 (the later, larger-hour-angle bin) and 100 in bin 1. As the walk elapses
+  // the sun's hour angle grows toward bin 0, so the blend shifts off bin 1 toward 0 — a metre reached
+  // an hour in is costed against a later sun than one reached at the start.
+  const atStart = shade.attrAt(3, 0);
+  const anHourIn = shade.attrAt(3, 3600);
+  expect(atStart).toBeCloseTo(50 / 128, 6);
+  expect(anHourIn).toBeLessThan(atStart - 0.05);
+  expect(anHourIn).toBeGreaterThanOrEqual(0);
+});
+
+test("computeEdgeShade clears the field when the whole walk is below the horizon", async () => {
+  expect(sunAt(NIGHT).elevation).toBeLessThanOrEqual(0.5); // precondition: it is night at departure
 
   const graph = makeGraph(EDGE_COUNT);
-  graph.edgeShadeNow = new Float32Array([0.5, -0.5, 0.5, -0.5]); // stale daytime field, to prove reset
-  graph.maxAbsShadeNow = 0.5;
+  graph.shade = { attrAt: () => 0.5, maxAbs: 0.5 }; // stale daytime field, to prove reset
   await computeEdgeShade(graph, NIGHT);
 
-  expect(graph.edgeShadeNow).toBeNull();
-  expect(graph.maxAbsShadeNow).toBe(0);
+  expect(graph.shade).toBeNull();
 });
 
 test("computeEdgeShade asserts the manifest edge count matches the graph", async () => {

@@ -244,6 +244,9 @@ export default function MapApp() {
   // Mirrors routeState.kind === "ready", so a recompute can still apply an unchanged cache result when
   // nothing is drawn yet (else the loading state would strand); kept in sync by the effect below.
   const hasReadyRouteRef = useRef<boolean>(false);
+  // The drawn route's trip seconds, kept in sync below. A start-drag solves backward from the dest, so
+  // it anchors the sun at this arrival time; null (nothing drawn yet) falls back to the departure sun.
+  const lastTravelSecondsRef = useRef<number | null>(null);
   // The nonce the route effect last acted on, so a recompute can tell a drop (nonce bumped, lands
   // silently) from a fresh target (a new destination or start, which flashes the loading spinner).
   const lastAppliedNonceRef = useRef<number>(0);
@@ -468,6 +471,8 @@ export default function MapApp() {
 
   useEffect(() => {
     hasReadyRouteRef.current = routeState.kind === "ready";
+    lastTravelSecondsRef.current =
+      routeState.kind === "ready" ? routeState.result.travelSeconds : null;
   }, [routeState]);
 
   // Live recompute: whenever a resolvable start and a destination both exist, (re)find the route,
@@ -521,17 +526,19 @@ export default function MapApp() {
               shadeContextRef.current = shadeTick;
               try {
                 await computeEdgeShade(graph, getResolvedDate());
-              } catch {
-                graph.edgeShadeNow = null;
-                graph.maxAbsShadeNow = 0;
+              } catch (error) {
+                // A missing or malformed SHDE artifact is not fatal — routing just drops the sun/shade
+                // bias for this time. Surface it so a stale local bake (the usual cause) is visible in
+                // the console rather than leaving the slider silently inert.
+                console.error("shade routing disabled:", error);
+                graph.shade = null;
               }
               if (cancelled) {
                 return;
               }
             }
           } else {
-            graph.edgeShadeNow = null;
-            graph.maxAbsShadeNow = 0;
+            graph.shade = null;
             shadeContextRef.current = -1;
           }
           const pair = snapPair(graph, index, request.start, request.dest);
@@ -551,11 +558,18 @@ export default function MapApp() {
             // Mid-drag: reuse a per-gesture solver rooted at the held endpoint for an approximate
             // route each frame; the drop recomputes exactly. Start-drags solve from the dest and flip.
             const which = dragWhichRef.current;
-            const solver = (dragSolverRef.current ??= new RouteSolver(
-              graph,
-              which === "dest" ? pair.start : pair.dest,
-              weights,
-            ));
+            // A start-drag solves backward from the dest, so it anchors the sun at the drawn route's
+            // arrival time and counts it backward; a dest-drag solves forward from the true start.
+            const solver = (dragSolverRef.current ??=
+              which === "dest"
+                ? new RouteSolver(graph, pair.start, weights)
+                : new RouteSolver(
+                    graph,
+                    pair.dest,
+                    weights,
+                    lastTravelSecondsRef.current ?? 0,
+                    -1,
+                  ));
             const moving = which === "dest" ? pair.dest : pair.start;
             const solved = solver.solveApprox(moving);
             const result =

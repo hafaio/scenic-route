@@ -12,7 +12,12 @@ import {
   otherEnd,
   type RoutingGraph,
 } from "./graph";
-import { type RouteResult, RouteSolver, reverseResult } from "./search";
+import {
+  findRoute,
+  type RouteResult,
+  RouteSolver,
+  reverseResult,
+} from "./search";
 import { haversineMeters, type Snap } from "./snap";
 
 // The oracle here is a self-contained Dijkstra over effective seconds, not findRoute — a stronger,
@@ -139,8 +144,7 @@ function buildGraph(nodes: NodeSpec[], edges: EdgeSpec[]): RoutingGraph {
     maxLandmark: 0,
     maxArt: 0,
     maxCommercial: 0,
-    edgeShadeNow: null,
-    maxAbsShadeNow: 0,
+    shade: null,
     edgeDurationSeconds,
     ferryEdges: Uint32Array.from(ferryEdges),
     names: [],
@@ -644,4 +648,95 @@ test("with ferries on solveApprox is connected and near-optimal", () => {
   }
   // At least one route actually rides the ferry, so the ferry path is exercised.
   expect(boarded).toBeGreaterThan(0);
+});
+
+test("a start-drag anchors the sun at arrival and counts it backward", () => {
+  // A long stem into a symmetric fork: the fork is reached ~900 s in, so the two branches are walked
+  // near the END of the trip. The sun flips which branch is sunlit at 500 s, so the branches — walked
+  // well after the flip — belong to the "after" regime. A start-drag solves BACKWARD from the dest, so
+  // it must anchor the sun at the arrival time and count it back to price those near-dest branches
+  // correctly, rather than treating elapsed-from-dest as time since departure.
+  const walk = (a: number, b: number): EdgeSpec => ({
+    a,
+    b,
+    ferry: false,
+    cover: 0,
+    durationSeconds: 0,
+  });
+  const nodes: NodeSpec[] = [
+    { lat: 0, lng: 0 }, // 0 start
+    { lat: 0, lng: 0.015 }, // 1 fork, ~900 s from the start
+    { lat: 0.001, lng: 0.018 }, // 2 upper
+    { lat: -0.001, lng: 0.018 }, // 3 lower
+    { lat: 0, lng: 0.021 }, // 4 dest
+    { lat: 0, lng: 0.0215 }, // 5 dest stub
+  ];
+  const edges: EdgeSpec[] = [
+    walk(0, 1),
+    walk(1, 2),
+    walk(2, 4),
+    walk(1, 3),
+    walk(3, 4),
+    walk(4, 5),
+  ];
+  const graph = buildGraph(nodes, edges);
+  const start = snapAtNode(graph, 0, 0);
+  const dest = snapAtNode(graph, 4, 5);
+  const upper = new Set([1, 2]);
+  const lower = new Set([3, 4]);
+  const usesLower = (result: RouteResult | null): boolean =>
+    (result?.steps ?? []).some((step) => lower.has(step.edge));
+  const usesUpper = (result: RouteResult | null): boolean =>
+    (result?.steps ?? []).some((step) => upper.has(step.edge));
+
+  const FLIP_SECONDS = 500;
+  const attrOf = (edge: number, elapsedSeconds: number): number => {
+    const upperSunlit = elapsedSeconds < FLIP_SECONDS;
+    if (upper.has(edge)) {
+      return upperSunlit ? 0.5 : -0.5;
+    }
+    if (lower.has(edge)) {
+      return upperSunlit ? -0.5 : 0.5;
+    }
+    return 0;
+  };
+  graph.shade = { attrAt: attrOf, maxAbs: 0.5 };
+  const preferSun: RouteWeights = {
+    tree: 0,
+    ferry: 0,
+    landmark: 0,
+    art: 0,
+    highway: 0,
+    commercial: 0,
+    shade: 1,
+    allowFerries: false,
+  };
+
+  // Ground truth: a fresh forward A* from the true start reaches the fork ~900 s in and walks the
+  // branches after the flip, so it takes the lower (by-then sunlit) branch.
+  const truth = findRoute(graph, start, dest, preferSun);
+  expect(usesLower(truth)).toBe(true);
+  expect(usesUpper(truth)).toBe(false);
+  const arrival = (truth as RouteResult).travelSeconds;
+
+  // The start-drag solver: rooted at the dest, sun anchored at the arrival time and counted backward.
+  // It prices the near-dest branches in the after-flip regime and agrees with the ground truth.
+  const backward = new RouteSolver(
+    graph,
+    dest,
+    preferSun,
+    arrival,
+    -1,
+  ).solveApprox(start);
+  expect(usesLower(backward)).toBe(true);
+  expect(usesUpper(backward)).toBe(false);
+
+  // Without the anchor (elapsed-from-dest read as time since departure) the near-dest branches are
+  // priced in the wrong, pre-flip regime, so the same search wrongly takes the upper branch — proving
+  // the anchor and backward direction change the outcome.
+  const naive = new RouteSolver(graph, dest, preferSun, 0, 1).solveApprox(
+    start,
+  );
+  expect(usesUpper(naive)).toBe(true);
+  expect(usesLower(naive)).toBe(false);
 });

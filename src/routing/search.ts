@@ -349,6 +349,9 @@ export function findRoute(
 ): RouteResult | null {
   const nodeCount = graph.nodeCount;
   const distance = new Float64Array(nodeCount).fill(Number.POSITIVE_INFINITY);
+  // Raw walking seconds along each node's min-cost path — the ACTUAL time elapsed, not the weighted
+  // cost, so the shade field advances the sun by how long the walk really takes to get here.
+  const elapsed = new Float64Array(nodeCount);
   const parentEdge = new Int32Array(nodeCount).fill(-1);
   const heuristic = new Float64Array(nodeCount).fill(-1);
 
@@ -381,9 +384,12 @@ export function findRoute(
 
   const destA = graph.edgeNodeA[dest.edge];
   const destB = graph.edgeNodeB[dest.edge];
-  const destPerMeter =
-    edgeMultiplier(graph, dest.edge, weights) / WALK_METERS_PER_SECOND;
   const destLength = graph.edgeLength[dest.edge];
+  // The dest edge is a partial walked at the very end, so its shade is the sun at the arrival time —
+  // the elapsed raw seconds of the endpoint the route reaches it through.
+  const destPerMeterAt = (node: number): number =>
+    edgeMultiplier(graph, dest.edge, weights, elapsed[node]) /
+    WALK_METERS_PER_SECOND;
 
   let bestTotal = Number.POSITIVE_INFINITY;
   let bestDestNode = -1; // the edge endpoint the winning route reaches the dest edge through
@@ -409,6 +415,9 @@ export function findRoute(
   const heap = new NodeHeap(1024);
   distance[startA] = start.metersFromA * startPerMeter;
   distance[startB] = (startLength - start.metersFromA) * startPerMeter;
+  // Seed the elapsed clock with the raw time to walk each half of the start edge to its node.
+  elapsed[startA] = start.metersFromA / WALK_METERS_PER_SECOND;
+  elapsed[startB] = (startLength - start.metersFromA) / WALK_METERS_PER_SECOND;
   heap.push(distance[startA] + heuristicOf(startA), startA);
   heap.push(distance[startB] + heuristicOf(startB), startB);
 
@@ -426,11 +435,16 @@ export function findRoute(
     settled += 1;
 
     if (node === destA) {
-      consider(distance[destA] + dest.metersFromA * destPerMeter, destA, false);
+      consider(
+        distance[destA] + dest.metersFromA * destPerMeterAt(destA),
+        destA,
+        false,
+      );
     }
     if (node === destB) {
       consider(
-        distance[destB] + (destLength - dest.metersFromA) * destPerMeter,
+        distance[destB] +
+          (destLength - dest.metersFromA) * destPerMeterAt(destB),
         destB,
         false,
       );
@@ -443,9 +457,11 @@ export function findRoute(
         continue;
       }
       const neighbour = otherEnd(graph, edge, node);
-      const relaxed = distance[node] + effSeconds(graph, edge, weights);
+      const relaxed =
+        distance[node] + effSeconds(graph, edge, weights, elapsed[node]);
       if (relaxed < distance[neighbour]) {
         distance[neighbour] = relaxed;
+        elapsed[neighbour] = elapsed[node] + rawSeconds(graph, edge);
         parentEdge[neighbour] = edge;
         heap.push(relaxed + heuristicOf(neighbour), neighbour);
       }
@@ -471,14 +487,24 @@ export function findRoute(
 // live endpoint dragging. It keeps the g-values, parent tree, and closed set from one call to the
 // next and never reopens a closed node — the deliberate approximation that makes reuse cheap. When a
 // dragged dest lands in already-explored territory it answers with no search at all; otherwise it
-// resumes the frontier toward the new goal. Exact when the heuristic is consistent (ferries off),
-// near-optimal with ferries on.
+// resumes the frontier toward the new goal. Exact when the heuristic is consistent (ferries off and
+// no shade), near-optimal otherwise.
+//
+// The elapsed clock counts raw walking seconds from the source, but the sun runs on WALL-CLOCK time
+// from the fixed departure. A dest-drag roots at the true start, so departure is elapsed 0 and the sun
+// counts forward (sunAnchorSeconds 0, sunDirection +1). A start-drag roots at the DEST and reverses the
+// path, so the source is where you ARRIVE: pin sunAnchorSeconds to the last route's trip time and count
+// the sun BACKWARD (sunDirection -1), so a node reached partway back from the dest is costed against
+// the sun at its true forward time. The anchor is a stale estimate the release's fresh A* corrects.
 export class RouteSolver {
   private readonly graph: RoutingGraph;
   private readonly source: Snap;
   private readonly weights: RouteWeights;
+  private readonly sunAnchorSeconds: number; // forward wall-clock seconds since departure AT the source
+  private readonly sunDirection: number; // +1 counts the sun forward from the source, -1 backward
 
   private readonly distance: Float64Array; // best-known g (effective seconds) from source
+  private readonly elapsed: Float64Array; // raw walking seconds from source along the min-cost path
   private readonly parentEdge: Int32Array;
   private readonly closed: Uint8Array; // 1 once a node has been settled; never reopened
   private readonly reached: number[] = []; // every node ever given a finite distance
@@ -488,35 +514,67 @@ export class RouteSolver {
   private readonly sourcePerMeter: number;
   private readonly sourceLength: number;
 
-  constructor(graph: RoutingGraph, source: Snap, weights: RouteWeights) {
+  constructor(
+    graph: RoutingGraph,
+    source: Snap,
+    weights: RouteWeights,
+    sunAnchorSeconds = 0,
+    sunDirection: 1 | -1 = 1,
+  ) {
     this.graph = graph;
     this.source = source;
     this.weights = weights;
+    this.sunAnchorSeconds = sunAnchorSeconds;
+    this.sunDirection = sunDirection;
 
     const nodeCount = graph.nodeCount;
     this.distance = new Float64Array(nodeCount).fill(Number.POSITIVE_INFINITY);
+    this.elapsed = new Float64Array(nodeCount);
     this.parentEdge = new Int32Array(nodeCount).fill(-1);
     this.closed = new Uint8Array(nodeCount);
 
     this.sourceA = graph.edgeNodeA[source.edge];
     this.sourceB = graph.edgeNodeB[source.edge];
+    // The source edge is a partial walked at the source's wall-clock time (departure for a dest-drag,
+    // arrival for a start-drag), so price it against the sun at the anchor.
     this.sourcePerMeter =
-      edgeMultiplier(graph, source.edge, weights) / WALK_METERS_PER_SECOND;
+      edgeMultiplier(
+        graph,
+        source.edge,
+        weights,
+        Math.max(0, sunAnchorSeconds),
+      ) / WALK_METERS_PER_SECOND;
     this.sourceLength = graph.edgeLength[source.edge];
 
     this.distance[this.sourceA] = source.metersFromA * this.sourcePerMeter;
     this.distance[this.sourceB] =
       (this.sourceLength - source.metersFromA) * this.sourcePerMeter;
+    // The elapsed clock is anchored at the source, so it is stable across dest drags — every reused
+    // node's raw time from the source is the same no matter where the moving endpoint goes.
+    this.elapsed[this.sourceA] = source.metersFromA / WALK_METERS_PER_SECOND;
+    this.elapsed[this.sourceB] =
+      (this.sourceLength - source.metersFromA) / WALK_METERS_PER_SECOND;
     this.reached.push(this.sourceA, this.sourceB);
+  }
+
+  // A node's forward wall-clock seconds since departure: the anchor plus the raw time from the source,
+  // signed by the search direction, floored at departure. This is what the sun-dependent shade reads.
+  private sunElapsed(node: number): number {
+    const seconds =
+      this.sunAnchorSeconds + this.sunDirection * this.elapsed[node];
+    return seconds > 0 ? seconds : 0;
   }
 
   solveApprox(dest: Snap): RouteResult | null {
     const graph = this.graph;
     const destA = graph.edgeNodeA[dest.edge];
     const destB = graph.edgeNodeB[dest.edge];
-    const destPerMeter =
-      edgeMultiplier(graph, dest.edge, this.weights) / WALK_METERS_PER_SECOND;
     const destLength = graph.edgeLength[dest.edge];
+    // The dest edge is a partial walked at the moving endpoint: cost it against the sun at that node's
+    // forward wall-clock time.
+    const destPerMeterAt = (node: number): number =>
+      edgeMultiplier(graph, dest.edge, this.weights, this.sunElapsed(node)) /
+      WALK_METERS_PER_SECOND;
 
     let bestTotal = Number.POSITIVE_INFINITY;
     let bestDestNode = -1;
@@ -542,14 +600,15 @@ export class RouteSolver {
     // distance that a resumed search may improve, so it can't shortcut here.
     if (this.closed[destA] === 1) {
       consider(
-        this.distance[destA] + dest.metersFromA * destPerMeter,
+        this.distance[destA] + dest.metersFromA * destPerMeterAt(destA),
         destA,
         false,
       );
     }
     if (this.closed[destB] === 1) {
       consider(
-        this.distance[destB] + (destLength - dest.metersFromA) * destPerMeter,
+        this.distance[destB] +
+          (destLength - dest.metersFromA) * destPerMeterAt(destB),
         destB,
         false,
       );
@@ -610,14 +669,15 @@ export class RouteSolver {
 
       if (node === destA) {
         consider(
-          this.distance[destA] + dest.metersFromA * destPerMeter,
+          this.distance[destA] + dest.metersFromA * destPerMeterAt(destA),
           destA,
           false,
         );
       }
       if (node === destB) {
         consider(
-          this.distance[destB] + (destLength - dest.metersFromA) * destPerMeter,
+          this.distance[destB] +
+            (destLength - dest.metersFromA) * destPerMeterAt(destB),
           destB,
           false,
         );
@@ -634,12 +694,15 @@ export class RouteSolver {
           continue;
         }
         const relaxed =
-          this.distance[node] + effSeconds(graph, edge, this.weights);
+          this.distance[node] +
+          effSeconds(graph, edge, this.weights, this.sunElapsed(node));
         if (relaxed < this.distance[neighbour]) {
           if (this.distance[neighbour] === Number.POSITIVE_INFINITY) {
             this.reached.push(neighbour);
           }
           this.distance[neighbour] = relaxed;
+          this.elapsed[neighbour] =
+            this.elapsed[node] + rawSeconds(graph, edge);
           this.parentEdge[neighbour] = edge;
           heap.push(relaxed + heuristicOf(neighbour), neighbour);
         }
