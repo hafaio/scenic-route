@@ -4,6 +4,10 @@ import L from "leaflet";
 import { useEffect } from "react";
 import { useMap } from "react-leaflet";
 import { genusColor } from "../src/tree-cover/genus";
+import {
+  getEnabledGenera,
+  subscribeGenusFilter,
+} from "../src/tree-cover/genus-filter";
 import manifest from "../src/tree-cover/manifest.json";
 
 // The crisp half of the genus overlay. Below MIN_ZOOM the pre-rendered raster tiles carry it —
@@ -199,6 +203,9 @@ class TreeDotsGrid extends L.GridLayer {
     const zoom = coords.z;
     const originX = coords.x * TILE_SIZE;
     const originY = coords.y * TILE_SIZE;
+    // The legend's current selection; a tree of a disabled genus is skipped so the live dots match
+    // the raster half. Read once per tile, not per tree.
+    const enabled = getEnabledGenera();
     const centre = map.unproject(
       L.point(originX + TILE_SIZE / 2, originY + TILE_SIZE / 2),
       zoom,
@@ -232,6 +239,9 @@ class TreeDotsGrid extends L.GridLayer {
           continue;
         }
         for (const tree of cell) {
+          if (!enabled.has(trees.genus[tree])) {
+            continue;
+          }
           const point = map.project(
             L.latLng(trees.lats[tree], trees.lngs[tree]),
             zoom,
@@ -290,7 +300,16 @@ export default function TreeDotsLayer() {
     for (const layer of layers) {
       layer.addTo(map);
     }
+
+    // Redraw every loaded tile when the legend toggles a genus, so the dots follow the selection.
+    const unsubscribe = subscribeGenusFilter(() => {
+      for (const layer of layers) {
+        layer.redraw();
+      }
+    });
+
     return () => {
+      unsubscribe();
       for (const layer of layers) {
         layer.remove();
       }

@@ -505,10 +505,15 @@ point *i*:
 
 v1 was points only; v2 added the crown byte; v3 appends the genus byte.
 
-The genus overlay renders this file two ways: `tiler genus` bakes a raster pyramid of
+The genus overlay renders this file two ways: `tiler genus` bakes raster pyramids of
 genus-coloured dots (`public/tiles/genus`, z9–14, the zoomed-out view), and the blob itself is
 served at `public/trees/<id>.bin` so the client (`components/tree-dots-layer.tsx`) draws the dots
 live as crisp canvas discs from z15 up, where an upscaled raster tile would blur.
+
+So the legend can toggle one genus at a time, the pyramid is split by genus: `public/tiles/genus/<id>`
+(id 0–11) holds only that genus's trees on a transparent tile. The client stacks one layer per
+enabled genus, so the standard all-genera view is all twelve stacked and toggling a genus adds or
+removes a single layer; the live dots (`components/tree-dots-layer.tsx`) filter by the same selection.
 
 ### `data/land/<id>.bin` — the land mask, magic `LAND`
 
