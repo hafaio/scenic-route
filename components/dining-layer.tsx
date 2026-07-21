@@ -3,6 +3,7 @@
 import L from "leaflet";
 import { useEffect } from "react";
 import { useMap } from "react-leaflet";
+import { decodeStreetChunk } from "../src/streets/chunk";
 import manifest from "../src/tree-cover/manifest.json";
 
 // The "commercial" overlay. It highlights whole blocks, not points. The heavy work — snapping ~800k
@@ -33,10 +34,7 @@ const VECTOR_MIN_ZOOM = 13;
 // The z12 STCK street chunks (geometry) and their CMRC signal siblings, fetched lazily per chunk as
 // the display tiles over them are drawn. Relative, so they pick up the deploy's basePath.
 const CHUNK_URL = "streets/{x}/{y}.bin";
-const CHUNK_MAGIC = "STCK";
-const CHUNK_FORMAT = 3;
 const CHUNK_ZOOM = 12;
-const SIDES = 2; // density bytes per street vertex in the chunk; skipped, this overlay reads geometry
 
 const COMMERCIAL_URL = "commercial/{x}/{y}.bin";
 const COMMERCIAL_MAGIC = "CMRC";
@@ -110,58 +108,6 @@ interface TileData {
   signals: Signals;
 }
 
-function readVarint(bytes: Uint8Array, cursor: { offset: number }): number {
-  let value = 0;
-  let shift = 0;
-  let byte = 0;
-  do {
-    byte = bytes[cursor.offset];
-    cursor.offset += 1;
-    value |= (byte & 0x7f) << shift;
-    shift += 7;
-  } while (byte & 0x80);
-  return (value >>> 1) ^ -(value & 1);
-}
-
-// Decode one STCK v3 street chunk into its segment geometry. Mirrors street-score-layer's decoder,
-// minus the density/offset fields the highlighter has no use for; the density bytes are still stepped
-// over so the cursor stays aligned.
-function decodeChunk(buffer: ArrayBuffer): Segment[] {
-  const bytes = new Uint8Array(buffer);
-  const view = new DataView(buffer);
-  const magic = String.fromCharCode(bytes[0], bytes[1], bytes[2], bytes[3]);
-  const version = view.getUint16(4, true);
-  if (magic !== CHUNK_MAGIC || version !== CHUNK_FORMAT) {
-    throw new Error(`not a v${CHUNK_FORMAT} street chunk`);
-  }
-
-  const count = view.getUint32(8, true);
-  const originLng = view.getFloat64(16, true);
-  const originLat = view.getFloat64(24, true);
-  const scale = view.getFloat64(32, true);
-  const cursor = { offset: view.getUint16(6, true) };
-
-  const segments: Segment[] = [];
-  for (let segment = 0; segment < count; segment++) {
-    const vertices = view.getUint16(cursor.offset, true);
-    // byte cursor.offset + 2 is the sidewalk offset in decimetres, unused by the highlighter
-    cursor.offset += 3;
-    const lngs = new Float64Array(vertices);
-    const lats = new Float64Array(vertices);
-    let quantizedX = 0;
-    let quantizedY = 0;
-    for (let vertex = 0; vertex < vertices; vertex++) {
-      quantizedX += readVarint(bytes, cursor);
-      quantizedY += readVarint(bytes, cursor);
-      lngs[vertex] = originLng + quantizedX * scale;
-      lats[vertex] = originLat + quantizedY * scale;
-    }
-    cursor.offset += SIDES * vertices; // skip the per-vertex density bytes
-    segments.push({ lngs, lats });
-  }
-  return segments;
-}
-
 // Decode one CMRC signal chunk: the 12-byte header, then 3 bytes per segment in STCK order. Returns
 // three parallel byte arrays, index-aligned with the sibling STCK chunk's segments.
 function decodeCommercial(buffer: ArrayBuffer): Signals {
@@ -177,6 +123,11 @@ function decodeCommercial(buffer: ArrayBuffer): Signals {
   const medianHeight = new Uint8Array(count);
   const flags = new Uint8Array(count);
   let offset = view.getUint16(6, true);
+  // The fixed count * 3-byte body must fit, or the reads below would run off the end and pull
+  // `undefined` (coerced to 0) into the signals instead of failing loudly on a truncated chunk.
+  if (offset + count * COMMERCIAL_BYTES_PER_SEGMENT > bytes.length) {
+    throw new Error("commercial chunk truncated");
+  }
   for (let segment = 0; segment < count; segment++) {
     commercialFrac[segment] = bytes[offset];
     medianHeight[segment] = bytes[offset + 1];
@@ -204,7 +155,13 @@ function loadChunk(tileX: number, tileY: number): Promise<Segment[]> {
   const request = fetch(url)
     .then(async (response) => {
       if (response.ok) {
-        return decodeChunk(await response.arrayBuffer());
+        // Decode the full STCK segments, then keep only the geometry — the transient densities /
+        // offset are collected, since this overlay caches its segments and highlights whole blocks.
+        const buffer = await response.arrayBuffer();
+        return decodeStreetChunk(buffer).map((segment) => ({
+          lngs: segment.lngs,
+          lats: segment.lats,
+        }));
       } else if (response.status === 404) {
         return [];
       } else {
