@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import * as SunCalc from "suncalc";
+import { declinationOf, hourAngleOf, seasonBand } from "../shade/sun";
 import manifest from "../tree-cover/manifest.json";
 import type { RoutingGraph } from "./graph";
 import { computeEdgeShade, loadShadeBin, type ShadeBins } from "./shade";
@@ -25,8 +26,6 @@ function sunAt(date: Date): { elevation: number; azimuth: number } {
   };
 }
 
-const normAzimuth = (azimuth: number): number => ((azimuth % 360) + 360) % 360;
-
 const HEADER_BYTES = 12;
 const EDGE_COUNT = 4;
 const DAY = new Date("2026-07-19T16:30:00Z"); // ~12:30 EDT, sun well up over NYC
@@ -47,9 +46,18 @@ function buildBin(attrs: number[]): ArrayBuffer {
   return buffer;
 }
 
-// The sun for DAY, so two bins can straddle it symmetrically (equal angular distance) and a third can
-// sit far off; the nearest two are then bins 0 and 1, blended 50/50.
+// The sun for DAY, in the (declination, hourAngle) the bins are keyed on: two bins in its season band
+// straddle its hour angle symmetrically (equal distance) and a third sits far off in the same band;
+// the nearest two by hour angle are then bins 0 and 1, blended 50/50.
 const daySun = sunAt(DAY);
+const dayDecl = declinationOf(daySun.elevation, daySun.azimuth, CENTRE_LAT);
+const dayHour = hourAngleOf(
+  daySun.elevation,
+  daySun.azimuth,
+  CENTRE_LAT,
+  dayDecl,
+);
+const daySeason = seasonBand(dayDecl);
 const binFiles: Record<number, ArrayBuffer> = {
   0: buildBin([10, -20, 40, 0]),
   1: buildBin([30, -40, 60, 100]),
@@ -60,18 +68,24 @@ const binsJson: ShadeBins = {
   bins: [
     {
       index: 0,
+      season: daySeason,
+      hourAngle: dayHour + 5,
       elevation: daySun.elevation,
-      azimuth: normAzimuth(daySun.azimuth + 5),
+      azimuth: daySun.azimuth,
     },
     {
       index: 1,
+      season: daySeason,
+      hourAngle: dayHour - 5,
       elevation: daySun.elevation,
-      azimuth: normAzimuth(daySun.azimuth - 5),
+      azimuth: daySun.azimuth,
     },
     {
       index: 2,
-      elevation: daySun.elevation + 30,
-      azimuth: normAzimuth(daySun.azimuth + 150),
+      season: daySeason,
+      hourAngle: dayHour + 150,
+      elevation: daySun.elevation,
+      azimuth: daySun.azimuth,
     },
   ],
 };

@@ -6,6 +6,7 @@ import {
   getResolvedHour,
   getTimeMode,
   setCustomHour,
+  setPickerOpen,
   setTimeMode,
   subscribeRouteTime,
 } from "../src/route-time/store";
@@ -37,6 +38,13 @@ export default function ClockControl() {
   // Re-render on any store change (mode, custom time, or the once-a-minute "now" tick).
   const [, bump] = useState(0);
   useEffect(() => subscribeRouteTime(() => bump((value) => value + 1)), []);
+
+  // Tell time-dependent overlays the popover is open, so they can prefetch the day's tiles while the
+  // slider is in use and drop them again on close.
+  useEffect(() => {
+    setPickerOpen(open);
+    return () => setPickerOpen(false);
+  }, [open]);
 
   // Close the popover on an outside click or Escape, mirroring the toolbar menu.
   useEffect(() => {
