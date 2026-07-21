@@ -1,7 +1,11 @@
-//! `tiler genus`: renders data/trees/<id>.bin into a per-tree genus map at
-//! public/tiles/genus/{z}/{x}/{y}.webp. Each tree is drawn as a filled disc sized by its crown and
-//! coloured by its genus — no kernel and no blend, so overlapping trees layer rather than average
-//! and every genus colour stays crisp instead of muddying. See scripts/README.md.
+//! `tiler genus`: renders data/trees/<id>.bin into a per-tree genus map. Each tree is drawn as a
+//! filled disc sized by its crown and coloured by its genus — no kernel and no blend, so overlapping
+//! trees layer rather than average and every genus colour stays crisp instead of muddying.
+//!
+//! To let the legend toggle one genus at a time, the pyramid is SPLIT by genus: each genus id gets
+//! its own transparent pyramid at public/tiles/genus/{id}/{z}/{x}/{y}.webp holding only that genus's
+//! trees. The client stacks one layer per enabled genus, so the standard all-genera view is all
+//! twelve stacked and toggling a genus adds or removes a single layer. See scripts/README.md.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -108,8 +112,9 @@ fn over(pixels: &mut [u8], pixel: usize, rgb: [u8; 3], source_alpha: f64) {
 /// Draw one city's trees onto a tile, each a genus-coloured disc. Returns whether any pixel was
 /// painted. The tile's metre-space box is grown by the largest dot's reach, so a tree just off the
 /// edge whose disc spills in is still drawn; each disc is clipped to the tile and its rim feathered
-/// over a pixel so the dots do not read as jagged squares.
-fn paint(pixels: &mut [u8], genus: &Genus, palette: &[u8], tile: &Tile) -> bool {
+/// over a pixel so the dots do not read as jagged squares. `only` restricts the draw to a single
+/// genus id, since each genus is baked into its own pyramid.
+fn paint(pixels: &mut [u8], genus: &Genus, palette: &[u8], tile: &Tile, only: u8) -> bool {
     let zoom = tile.zoom;
     let origin_x = f64::from(tile.x) * TILE_SIZE as f64;
     let origin_y = f64::from(tile.y) * TILE_SIZE as f64;
@@ -136,6 +141,9 @@ fn paint(pixels: &mut [u8], genus: &Genus, palette: &[u8], tile: &Tile) -> bool 
         max_y,
         reach,
         |mx, my, crown_m, genus_id| {
+            if only != genus_id {
+                return;
+            }
             let centre_px = lng_to_pixel_x(genus.projection.lng(mx), zoom) - origin_x;
             let centre_py = lat_to_pixel_y(genus.projection.lat(my), zoom) - origin_y;
             let radius = (crown_m / meters_per_pixel).clamp(MIN_DOT_PX, MAX_DOT_PX);
@@ -166,39 +174,48 @@ fn paint(pixels: &mut [u8], genus: &Genus, palette: &[u8], tile: &Tile) -> bool 
     painted
 }
 
+/// Render every genus's tile at one position: one transparent tile per genus, each painting only
+/// its own trees into the same reused buffer (zeroed between them), a tile that lands on nothing
+/// written as the shared blank so the client never 404s.
 fn render(
     genera: &[Option<Genus>],
     palette: &[u8],
     blank: &[u8],
-    directory: &Path,
+    variants: &[(PathBuf, u8)],
     tile: &Tile,
 ) -> Fallible<Stats> {
     let mut pixels = vec![0u8; TILE_SIZE * TILE_SIZE * 4];
-    let mut painted = false;
-    for member in &tile.members {
-        if let Some(genus) = &genera[*member] {
-            painted |= paint(&mut pixels, genus, palette, tile);
+    let mut stats = Stats::default();
+    for (directory, only) in variants {
+        pixels.fill(0);
+        let mut painted = false;
+        for member in &tile.members {
+            if let Some(genus) = &genera[*member] {
+                painted |= paint(&mut pixels, genus, palette, tile, *only);
+            }
         }
-    }
 
-    let rendered = if painted {
-        Some(encode_webp(&pixels)?)
-    } else {
-        None
-    };
-    let webp = rendered.as_deref().unwrap_or(blank);
-    fs::write(
-        directory
-            .join(tile.zoom.to_string())
-            .join(tile.x.to_string())
-            .join(format!("{}.webp", tile.y)),
-        webp,
-    )?;
-    Ok(Stats {
-        tiles: 1,
-        painted: usize::from(painted),
-        bytes: webp.len(),
-    })
+        let rendered = if painted {
+            Some(encode_webp(&pixels)?)
+        } else {
+            None
+        };
+        let webp = rendered.as_deref().unwrap_or(blank);
+        fs::write(
+            directory
+                .join(tile.zoom.to_string())
+                .join(tile.x.to_string())
+                .join(format!("{}.webp", tile.y)),
+            webp,
+        )?;
+        stats = stats
+            + Stats {
+                tiles: 1,
+                painted: usize::from(painted),
+                bytes: webp.len(),
+            };
+    }
+    Ok(stats)
 }
 
 pub fn run(args: &Args) -> Fallible<()> {
@@ -231,24 +248,34 @@ pub fn run(args: &Args) -> Fallible<()> {
         }
     }
 
+    // One transparent pyramid per genus id under public/tiles/genus, each holding only that genus,
+    // so the client can stack the enabled ones and toggle each on its own.
+    let variants: Vec<(PathBuf, u8)> = (0..GENUS_BINS)
+        .map(|id| (args.tiles.join(id.to_string()), id as u8))
+        .collect();
+
     let plan = plan_tiles(&manifest.cities, GENUS_MAX_ZOOM);
-    for tile in &plan {
-        fs::create_dir_all(
-            args.tiles
-                .join(tile.zoom.to_string())
-                .join(tile.x.to_string()),
-        )?;
+    for (directory, _) in &variants {
+        for tile in &plan {
+            fs::create_dir_all(
+                directory
+                    .join(tile.zoom.to_string())
+                    .join(tile.x.to_string()),
+            )?;
+        }
     }
     let blank = encode_webp(&vec![0u8; TILE_SIZE * TILE_SIZE * 4])?;
 
     eprintln!(
-        "rendering {} genus tiles across {} threads",
+        "rendering {} genus tiles ({} plan tiles x {} variants) across {} threads",
+        plan.len() * variants.len(),
         plan.len(),
+        variants.len(),
         rayon::current_num_threads()
     );
     let stats = plan
         .par_iter()
-        .map(|tile| render(&genera, &palette, &blank, &args.tiles, tile))
+        .map(|tile| render(&genera, &palette, &blank, &variants, tile))
         .try_reduce(Stats::default, |left, right| Ok(left + right))?;
 
     eprintln!(
