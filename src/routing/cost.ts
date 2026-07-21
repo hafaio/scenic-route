@@ -4,8 +4,8 @@
 // dearer by a nearby highway or elevated rail (a penalty factor 1 + w*attr); a ferry's crossing time
 // is discounted by the ferry weight. The sun/shade
 // axis is a single signed factor `1 - w*attr` whose weight `w in [-1, 1]` and edge attribute
-// `attr in (-1, 1)` are both signed (attr positive = net sunlit, negative = net shaded, for the
-// current sun): w > 0 discounts sun and penalizes shade, w < 0 flips it, w = 0 is neutral. Every
+// `attr in (-1, 1)` are both signed (attr positive = net sunlit, negative = net shaded, for the sun at
+// the moment the edge is reached): w > 0 discounts sun and penalizes shade, w < 0 flips it, w = 0 is neutral. Every
 // unsigned attribute byte is at most its graph-wide max, which the ingest clamps below 1, so every
 // discount factor stays positive and the product never reaches 0 — no metre is ever free, so the
 // search never wanders. The A* heuristic scales straight-line distance by `minMultiplier`, the product
@@ -68,10 +68,13 @@ export function edgeCover(graph: RoutingGraph, edge: number): number {
 // (1 + w*attr). At every weight 0 this is 1 (the shortest path); a shaded, landmarked metre far from
 // any highway approaches the floor. No per-factor clip is needed — each unsigned attribute is <= its graph max, and
 // the shade factor is >= its `minMultiplier` term 1 - |w|*maxAbsAttr, so the product stays positive.
+// `elapsedSeconds` is how far into the walk the edge is reached; the shade field advances the sun by it,
+// so the same edge costs differently early vs late in a long route. It defaults to the departure instant.
 export function edgeMultiplier(
   graph: RoutingGraph,
   edge: number,
   weights: RouteWeights,
+  elapsedSeconds = 0,
 ): number {
   const tree = 1 - weights.tree * (graph.edgeCover[edge] / 255);
   const landmark = 1 - weights.landmark * (graph.edgeLandmark[edge] / 255);
@@ -79,8 +82,9 @@ export function edgeMultiplier(
   const highway = 1 + weights.highway * (graph.edgeHighway[edge] / 255);
   const commercial =
     1 - weights.commercial * (graph.edgeCommercial[edge] / 255);
-  // The signed shade attribute for the resolved sun position; 0 when no artifact is loaded or at night.
-  const shadeAttr = graph.edgeShadeNow ? graph.edgeShadeNow[edge] : 0;
+  // The signed shade attribute for the sun at this point in the walk; 0 when no artifact is loaded or at
+  // night. The field ignores elapsed time for a fixed sun position (constant field, tests).
+  const shadeAttr = graph.shade ? graph.shade.attrAt(edge, elapsedSeconds) : 0;
   const shade = 1 - weights.shade * shadeAttr;
   return tree * landmark * art * highway * commercial * shade;
 }
@@ -98,9 +102,9 @@ export function minMultiplier(
     (1 - weights.landmark * graph.maxLandmark) *
     (1 - weights.art * graph.maxArt) *
     (1 - weights.commercial * graph.maxCommercial) *
-    // The shade factor's per-edge floor: whichever sign of attr the weight discounts, at its max
-    // magnitude. Positive because |shade| <= 1 and maxAbsShadeNow < 1.
-    (1 - Math.abs(weights.shade) * graph.maxAbsShadeNow)
+    // The shade factor's per-edge floor: whichever sign of attr the weight discounts, at the field's
+    // max magnitude over every edge and elapsed time. Positive because |shade| <= 1 and maxAbs < 1.
+    (1 - Math.abs(weights.shade) * (graph.shade ? graph.shade.maxAbs : 0))
   );
 }
 
@@ -116,10 +120,13 @@ export function rawSeconds(graph: RoutingGraph, edge: number): number {
 
 // Cost is effective seconds: raw time times the clipped discount. A ferry discounts by the ferry
 // weight (unusable when ferries are barred); every walked edge by the scenic multiplier above.
+// `elapsedSeconds` — how far into the walk the edge is reached — advances the sun for the shade factor;
+// it defaults to the departure instant (a ferry's cost is time-independent, so it ignores it).
 export function effSeconds(
   graph: RoutingGraph,
   edge: number,
   weights: RouteWeights,
+  elapsedSeconds = 0,
 ): number {
   if (edgeKind(graph, edge) === "ferry") {
     if (!weights.allowFerries) {
@@ -133,7 +140,7 @@ export function effSeconds(
   } else {
     return (
       (graph.edgeLength[edge] / WALK_METERS_PER_SECOND) *
-      edgeMultiplier(graph, edge, weights)
+      edgeMultiplier(graph, edge, weights, elapsedSeconds)
     );
   }
 }

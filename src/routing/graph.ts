@@ -3,6 +3,8 @@
 // over the fetched buffer; the strided edge records are copied once into parallel typed arrays so
 // the search loop touches only flat arrays.
 
+import type { ShadeField } from "./shade";
+
 // A no-geometry edge (a crossing, a link, or a straight ferry) stores this sentinel in its geometry
 // offset; its polyline is the straight line between its two node coordinates.
 export const NO_GEOMETRY = 0xffffffff;
@@ -62,10 +64,11 @@ export interface RoutingGraph {
   maxArt: number; // the greatest per-edge art amenity, 0..1; sets that discount's clip floor
   maxCommercial: number; // the greatest per-edge commercial amenity, 0..1; sets that discount's clip floor
 
-  // The signed shade attribute per edge for the resolved sun position, filled from the SHDE artifact by
-  // computeEdgeShade; null when no artifact is loaded or the sun is below the horizon (no shade to bias).
-  edgeShadeNow: Float32Array | null;
-  maxAbsShadeNow: number; // max |edgeShadeNow|, 0..1 (0 when null); the shade factor's clip-floor input
+  // The route-time signed shade field, filled from the SHDE artifact by computeEdgeShade: the per-edge
+  // sun/shade attribute as a function of elapsed walking time, so a metre is costed against the sun at
+  // the moment it is reached. Null when no artifact is loaded or the sun is below the horizon for the
+  // whole walk (no shade to bias); its maxAbs (0..1) is the shade factor's clip-floor input.
+  shade: ShadeField | null;
 
   edgeHalfOffsetDm: Uint8Array; // decimetres to a sidewalk; 0 for crossings/links/paths/ferries
   edgeDurationSeconds: Float32Array; // a ferry edge's crossing-plus-wait seconds; 0 for every other kind
@@ -220,8 +223,7 @@ export function decodeGraph(buffer: ArrayBuffer): RoutingGraph {
     maxLandmark,
     maxArt,
     maxCommercial,
-    edgeShadeNow: null, // populated lazily once the SHDE artifact loads for the resolved sun position
-    maxAbsShadeNow: 0,
+    shade: null, // populated lazily once the SHDE artifact loads, keyed on the departure instant
     edgeHalfOffsetDm,
     edgeDurationSeconds,
     ferryEdges: Uint32Array.from(ferryEdges),
