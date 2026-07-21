@@ -8,6 +8,7 @@ import { createHash } from "node:crypto";
 import {
   copyFile,
   mkdir,
+  readdir,
   readFile,
   rm,
   stat,
@@ -139,13 +140,19 @@ async function fileExists(path: string): Promise<boolean> {
 // mtimes without changing the bytes, which would otherwise force a needless full rebuild and, worse,
 // leave a cache of the derived tiles unusable across CI runs. The stamp file stores this hash.
 async function inputsHash(cities: City[]): Promise<string> {
+  // Every build script, not just this one and the two it calls by name: build-commercial and others
+  // import shared helpers (geometry.ts, land.ts, …) whose output the tiles depend on, so hashing the
+  // whole scripts/ dir is what actually closes the "edit a helper, stay falsely fresh" hole. Over-
+  // inclusive (an unrelated script forces a rebuild) but never false-fresh, and it matches the CI
+  // cache key's `scripts/*.ts` glob.
+  const scripts = (await readdir(import.meta.dirname))
+    .filter((file) => file.endsWith(".ts"))
+    .map((file) => join(import.meta.dirname, file));
   const paths = [
     MANIFEST_PATH,
     RAMP_PATH,
     GENUS_PATH,
-    import.meta.filename,
-    join(import.meta.dirname, "build-commercial.ts"),
-    join(import.meta.dirname, "shade-schedule.ts"),
+    ...scripts,
     ...(await tilerSources()),
     ...cities.flatMap((city) => [
       sourcePath("streets", city.streets.file),
