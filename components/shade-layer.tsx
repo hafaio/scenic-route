@@ -147,14 +147,24 @@ export default function ShadeLayer() {
       if (target === activeIndex) {
         return;
       }
-      const previous = layers.get(activeIndex);
+      const previousIndex = activeIndex;
+      const previous = layers.get(previousIndex);
       if (target >= 0) {
         layerFor(target).setOpacity(1);
       }
+      activeIndex = target;
       if (previous) {
         previous.setOpacity(0);
+        // Drop the faded-out bin once its crossfade is done, so scrubbing the clock doesn't leave a
+        // hidden TileLayer (and its tiles) alive per bin visited. Keep it if it became active again
+        // mid-fade (a quick scrub back), and skip after unmount (the cleanup already removed it).
+        window.setTimeout(() => {
+          if (!cancelled && activeIndex !== previousIndex) {
+            previous.remove();
+            layers.delete(previousIndex);
+          }
+        }, FADE_MS);
       }
-      activeIndex = target;
     };
 
     loadSchedule().then((loaded) => {
