@@ -287,6 +287,26 @@ function loadChunkModel(tileX: number, tileY: number): Promise<ChunkModel> {
   return request;
 }
 
+// Tile draws run one at a time — browser JS is single-threaded and each createTile draw callback runs
+// synchronously to completion — so the drawing scratch buffers are reused across every tile instead of
+// allocated per tile. Lazily created; a canvas is resized only if the device pixel ratio changes.
+let bandScratch: HTMLCanvasElement | null = null;
+let rasterScratch: HTMLCanvasElement | null = null;
+let rasterImage: ImageData | null = null;
+
+function sizedCanvas(
+  canvas: HTMLCanvasElement | null,
+  width: number,
+  height: number,
+): HTMLCanvasElement {
+  const reused = canvas ?? document.createElement("canvas");
+  if (reused.width !== width || reused.height !== height) {
+    reused.width = width; // assigning either dimension also resets the canvas to transparent
+    reused.height = height;
+  }
+  return reused;
+}
+
 class CommercialGrid extends L.GridLayer {
   private onMap = false;
   private readonly discarded = new WeakSet<HTMLElement>();
@@ -376,13 +396,16 @@ class CommercialGrid extends L.GridLayer {
     ratio: number,
   ): void {
     const padded = TILE_SIZE + 2 * BLUR_PAD;
-    const offscreen = document.createElement("canvas");
-    offscreen.width = padded * ratio;
-    offscreen.height = padded * ratio;
+    bandScratch = sizedCanvas(bandScratch, padded * ratio, padded * ratio);
+    const offscreen = bandScratch;
     const offContext = offscreen.getContext("2d");
     if (!offContext) {
       return;
     }
+    // Reused across tiles, so undo the previous tile's transform and clear its pixels first.
+    offContext.setTransform(1, 0, 0, 1, 0, 0);
+    offContext.filter = "none";
+    offContext.clearRect(0, 0, offscreen.width, offscreen.height);
     offContext.scale(ratio, ratio);
     offContext.translate(BLUR_PAD, BLUR_PAD);
     offContext.filter = `blur(${BAND_BLUR_PX}px)`;
@@ -552,7 +575,9 @@ class CommercialGrid extends L.GridLayer {
       }
     }
 
-    const image = new ImageData(RASTER_GRID, RASTER_GRID);
+    rasterImage ??= new ImageData(RASTER_GRID, RASTER_GRID);
+    const image = rasterImage;
+    image.data.fill(0); // reused across tiles: clear the previous tile's marked cells first
     const [red, green, blue] = VIOLET_RGB.split(",").map((part) =>
       Number.parseInt(part, 10),
     );
@@ -567,13 +592,11 @@ class CommercialGrid extends L.GridLayer {
       image.data[offset + 2] = blue;
       image.data[offset + 3] = alpha;
     }
-    const scratch = document.createElement("canvas");
-    scratch.width = RASTER_GRID;
-    scratch.height = RASTER_GRID;
-    scratch.getContext("2d")?.putImageData(image, 0, 0);
+    rasterScratch = sizedCanvas(rasterScratch, RASTER_GRID, RASTER_GRID);
+    rasterScratch.getContext("2d")?.putImageData(image, 0, 0);
     context.imageSmoothingEnabled = true;
     context.imageSmoothingQuality = "high";
-    context.drawImage(scratch, 0, 0, TILE_SIZE, TILE_SIZE);
+    context.drawImage(rasterScratch, 0, 0, TILE_SIZE, TILE_SIZE);
   }
 }
 
