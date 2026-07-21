@@ -30,8 +30,8 @@ const MIN_ZOOM = 10;
 const MAX_ZOOM = 20;
 const VECTOR_MIN_ZOOM = 13;
 
-// The z12 STCK street chunks (geometry) and their CMRC signal siblings, both fetched per tile over the
-// city bounds when the overlay is toggled on. Relative, so they pick up the deploy's basePath.
+// The z12 STCK street chunks (geometry) and their CMRC signal siblings, fetched lazily per chunk as
+// the display tiles over them are drawn. Relative, so they pick up the deploy's basePath.
 const CHUNK_URL = "streets/{x}/{y}.bin";
 const CHUNK_MAGIC = "STCK";
 const CHUNK_FORMAT = 3;
@@ -87,10 +87,11 @@ interface Segment {
   lats: Float64Array;
 }
 
-// The per-city model, built once when the layer is added: every segment over the city, whether it
-// passes the client gate (aligned by index), and the longest segment (to size the draw's scratch
-// arrays). No snapping happens here — the signals are precomputed, so there is no on-toggle stall.
-interface Model {
+// One z12 chunk's model, built lazily the first time a display tile needs that chunk: the chunk's
+// segments, whether each passes the client gate (aligned by index), and the longest segment (to size
+// the draw's scratch arrays). No snapping happens here — the signals are precomputed — so building a
+// chunk is cheap and there is no on-toggle stall.
+interface ChunkModel {
   segments: Segment[];
   qualifies: Uint8Array;
   longest: number;
@@ -270,89 +271,62 @@ async function loadTile(tileX: number, tileY: number): Promise<TileData> {
   };
 }
 
-// The z12 slippy-tile range covering a lat/lng box: standard web-mercator, north maps to the smaller
-// tile y. Loading every chunk in this range is ~32 tiles / ~6.4 MiB for NYC.
-function tileRange(bounds: {
-  south: number;
-  west: number;
-  north: number;
-  east: number;
-}): { minX: number; maxX: number; minY: number; maxY: number } {
-  const scale = 2 ** CHUNK_ZOOM;
-  const lngToX = (lng: number): number =>
-    Math.floor(((lng + 180) / 360) * scale);
-  const latToY = (lat: number): number => {
-    const radians = (lat * Math.PI) / 180;
-    return Math.floor(
-      ((1 - Math.log(Math.tan(radians) + 1 / Math.cos(radians)) / Math.PI) /
-        2) *
-        scale,
-    );
-  };
-  return {
-    minX: lngToX(bounds.west),
-    maxX: lngToX(bounds.east),
-    minY: latToY(bounds.north),
-    maxY: latToY(bounds.south),
-  };
+// The z12 chunks a display tile covers. At z>=12 a tile sits inside a single chunk (its ancestor at
+// CHUNK_ZOOM). Below z12 one tile spans a 2^(12-z) square of chunks — 4 at z11, 16 at z10 — so the
+// raster overview pulls in only the handful under it, not the whole city.
+function coveringChunks(coords: L.Coords): { x: number; y: number }[] {
+  if (coords.z >= CHUNK_ZOOM) {
+    const shift = coords.z - CHUNK_ZOOM;
+    return [{ x: coords.x >> shift, y: coords.y >> shift }];
+  }
+  const span = 1 << (CHUNK_ZOOM - coords.z);
+  const baseX = coords.x << (CHUNK_ZOOM - coords.z);
+  const baseY = coords.y << (CHUNK_ZOOM - coords.z);
+  const chunkList: { x: number; y: number }[] = [];
+  for (let offsetX = 0; offsetX < span; offsetX++) {
+    for (let offsetY = 0; offsetY < span; offsetY++) {
+      chunkList.push({ x: baseX + offsetX, y: baseY + offsetY });
+    }
+  }
+  return chunkList;
 }
 
-// One in-flight model per city, keyed by its id, shared by every tile.
-const models = new Map<string, Promise<Model>>();
+// One in-flight model per z12 chunk, keyed by its tile coords, shared by every display tile over it.
+const chunkModels = new Map<string, Promise<ChunkModel>>();
 
-// Load every tile over the city bounds and reduce to the model: the flat segment array plus a
-// per-segment `qualifies` byte from the CLIENT gate (commercial >50% AND low-rise AND open-street |
-// seating). No snapping — the signals are precomputed — so this is cheap and does not stall on toggle.
-function loadModel(
-  cityId: string,
-  bounds: { south: number; west: number; north: number; east: number },
-): Promise<Model> {
-  const pending = models.get(cityId);
+// Load one chunk's geometry and signals and reduce to its model: the segment array plus a per-segment
+// `qualifies` byte from the CLIENT gate (commercial >50% AND low-rise AND open-street | seating). No
+// snapping — the signals are precomputed — so this is cheap and does not stall on toggle.
+function loadChunkModel(tileX: number, tileY: number): Promise<ChunkModel> {
+  const key = `${tileX}/${tileY}`;
+  const pending = chunkModels.get(key);
   if (pending) {
     return pending;
   }
-  const { minX, maxX, minY, maxY } = tileRange(bounds);
-  const requests: Promise<TileData>[] = [];
-  for (let tileX = minX; tileX <= maxX; tileX++) {
-    for (let tileY = minY; tileY <= maxY; tileY++) {
-      requests.push(loadTile(tileX, tileY));
-    }
-  }
-  const request = Promise.all(requests)
-    .then((tiles) => {
-      let total = 0;
-      for (const tile of tiles) {
-        total += tile.segments.length;
-      }
-      const segments: Segment[] = [];
-      const qualifies = new Uint8Array(total);
+  const request = loadTile(tileX, tileY)
+    .then(({ segments, signals }) => {
+      const qualifies = new Uint8Array(segments.length);
       let longest = 0;
-      let at = 0;
-      for (const { segments: tileSegments, signals } of tiles) {
-        for (let index = 0; index < tileSegments.length; index++) {
-          const segment = tileSegments[index];
-          segments.push(segment);
-          longest = Math.max(longest, segment.lngs.length);
-          const commercial = signals.commercialFrac[index] / 255;
-          const flagged =
-            (signals.flags[index] & (FLAG_OPEN_STREET | FLAG_SEATING)) !== 0;
-          if (
-            commercial >= COMMERCIAL_FRACTION &&
-            signals.medianHeight[index] <= LOW_RISE_METERS &&
-            flagged
-          ) {
-            qualifies[at] = 1;
-          }
-          at += 1;
+      for (let index = 0; index < segments.length; index++) {
+        longest = Math.max(longest, segments[index].lngs.length);
+        const commercial = signals.commercialFrac[index] / 255;
+        const flagged =
+          (signals.flags[index] & (FLAG_OPEN_STREET | FLAG_SEATING)) !== 0;
+        if (
+          commercial >= COMMERCIAL_FRACTION &&
+          signals.medianHeight[index] <= LOW_RISE_METERS &&
+          flagged
+        ) {
+          qualifies[index] = 1;
         }
       }
       return { segments, qualifies, longest };
     })
     .catch((error: unknown) => {
-      models.delete(cityId);
+      chunkModels.delete(key);
       throw error;
     });
-  models.set(cityId, request);
+  chunkModels.set(key, request);
   return request;
 }
 
@@ -360,16 +334,7 @@ class CommercialGrid extends L.GridLayer {
   private onMap = false;
   private readonly discarded = new WeakSet<HTMLElement>();
 
-  constructor(
-    private readonly cityId: string,
-    private readonly bounds: {
-      south: number;
-      west: number;
-      north: number;
-      east: number;
-    },
-    options: L.GridLayerOptions,
-  ) {
+  constructor(options: L.GridLayerOptions) {
     super(options);
     this.on({
       add: () => {
@@ -390,8 +355,13 @@ class CommercialGrid extends L.GridLayer {
     tile.width = TILE_SIZE * ratio;
     tile.height = TILE_SIZE * ratio;
 
-    loadModel(this.cityId, this.bounds).then(
-      (model) => {
+    const requests = coveringChunks(coords).map(({ x, y }) =>
+      loadChunkModel(x, y),
+    );
+    Promise.all(requests).then(
+      (models) => {
+        // The tile is handed back before its chunks arrive, so by now the layer can be off the map
+        // and the tile dropped: nothing to draw into, no Leaflet to report to.
         if (!this.stillDrawable(tile)) {
           return;
         }
@@ -399,9 +369,9 @@ class CommercialGrid extends L.GridLayer {
         if (context) {
           context.scale(ratio, ratio);
           if (coords.z >= VECTOR_MIN_ZOOM) {
-            this.drawVector(context, model, coords, ratio);
+            this.drawVector(context, models, coords, ratio);
           } else {
-            this.drawRaster(context, model, coords);
+            this.drawRaster(context, models, coords);
           }
         }
         done(undefined, tile);
@@ -485,12 +455,11 @@ class CommercialGrid extends L.GridLayer {
   // feathered) once.
   private drawVector(
     context: CanvasRenderingContext2D,
-    model: Model,
+    models: ChunkModel[],
     coords: L.Coords,
     ratio: number,
   ): void {
     const map = this._map;
-    const { segments, qualifies, longest } = model;
     const originX = coords.x * TILE_SIZE;
     const originY = coords.y * TILE_SIZE;
     const width = Math.max(
@@ -501,45 +470,52 @@ class CommercialGrid extends L.GridLayer {
 
     const band = new Path2D();
     let hasBand = false;
+    const longest = models.reduce(
+      (most, model) => Math.max(most, model.longest),
+      0,
+    );
     const xs = new Float64Array(longest);
     const ys = new Float64Array(longest);
 
-    for (let index = 0; index < segments.length; index++) {
-      if (qualifies[index] === 0) {
-        continue;
+    for (const { segments, qualifies } of models) {
+      for (let index = 0; index < segments.length; index++) {
+        if (qualifies[index] === 0) {
+          continue;
+        }
+        const { lngs, lats } = segments[index];
+        let left = Number.POSITIVE_INFINITY;
+        let right = Number.NEGATIVE_INFINITY;
+        let low = Number.POSITIVE_INFINITY;
+        let high = Number.NEGATIVE_INFINITY;
+        for (let vertex = 0; vertex < lngs.length; vertex++) {
+          const point = map.project(
+            L.latLng(lats[vertex], lngs[vertex]),
+            coords.z,
+          );
+          xs[vertex] = point.x - originX;
+          ys[vertex] = point.y - originY;
+          left = Math.min(left, xs[vertex]);
+          right = Math.max(right, xs[vertex]);
+          low = Math.min(low, ys[vertex]);
+          high = Math.max(high, ys[vertex]);
+        }
+        // A chunk covers a whole z12 tile, so most of its segments miss this display tile. A segment
+        // can cross the tile between two vertices both outside it, so the test is on its box, not its
+        // vertices.
+        const overlaps =
+          right >= -margin &&
+          left <= TILE_SIZE + margin &&
+          high >= -margin &&
+          low <= TILE_SIZE + margin;
+        if (!overlaps) {
+          continue;
+        }
+        band.moveTo(xs[0], ys[0]);
+        for (let vertex = 1; vertex < lngs.length; vertex++) {
+          band.lineTo(xs[vertex], ys[vertex]);
+        }
+        hasBand = true;
       }
-      const { lngs, lats } = segments[index];
-      let left = Number.POSITIVE_INFINITY;
-      let right = Number.NEGATIVE_INFINITY;
-      let low = Number.POSITIVE_INFINITY;
-      let high = Number.NEGATIVE_INFINITY;
-      for (let vertex = 0; vertex < lngs.length; vertex++) {
-        const point = map.project(
-          L.latLng(lats[vertex], lngs[vertex]),
-          coords.z,
-        );
-        xs[vertex] = point.x - originX;
-        ys[vertex] = point.y - originY;
-        left = Math.min(left, xs[vertex]);
-        right = Math.max(right, xs[vertex]);
-        low = Math.min(low, ys[vertex]);
-        high = Math.max(high, ys[vertex]);
-      }
-      // The chunks cover the whole city, so most segments miss this tile. A segment can cross the
-      // tile between two vertices both outside it, so the test is on its box, not its vertices.
-      const overlaps =
-        right >= -margin &&
-        left <= TILE_SIZE + margin &&
-        high >= -margin &&
-        low <= TILE_SIZE + margin;
-      if (!overlaps) {
-        continue;
-      }
-      band.moveTo(xs[0], ys[0]);
-      for (let vertex = 1; vertex < lngs.length; vertex++) {
-        band.lineTo(xs[vertex], ys[vertex]);
-      }
-      hasBand = true;
     }
 
     if (hasBand) {
@@ -551,11 +527,10 @@ class CommercialGrid extends L.GridLayer {
   // up smoothed — a soft violet wash that carries the city overview. Binary on/off, like the band.
   private drawRaster(
     context: CanvasRenderingContext2D,
-    model: Model,
+    models: ChunkModel[],
     coords: L.Coords,
   ): void {
     const map = this._map;
-    const { segments, qualifies } = model;
     const originX = coords.x * TILE_SIZE;
     const originY = coords.y * TILE_SIZE;
     const grid = new Uint8Array(RASTER_GRID * RASTER_GRID);
@@ -574,46 +549,49 @@ class CommercialGrid extends L.GridLayer {
       }
     };
 
-    for (let index = 0; index < segments.length; index++) {
-      if (qualifies[index] === 0) {
-        continue;
-      }
-      const { lngs, lats } = segments[index];
-      let previousX = 0;
-      let previousY = 0;
-      for (let vertex = 0; vertex < lngs.length; vertex++) {
-        const point = map.project(
-          L.latLng(lats[vertex], lngs[vertex]),
-          coords.z,
-        );
-        const pixelX = point.x - originX;
-        const pixelY = point.y - originY;
-        if (vertex === 0) {
-          previousX = pixelX;
-          previousY = pixelY;
-          mark(pixelX, pixelY);
+    for (const { segments, qualifies } of models) {
+      for (let index = 0; index < segments.length; index++) {
+        if (qualifies[index] === 0) {
           continue;
         }
-        // Walk the piece in half-cell steps so every cell it crosses is marked, including off-tile
-        // ones within the margin (a block on the seam should tint both tiles). Cheap: cells are small.
-        const spanX = pixelX - previousX;
-        const spanY = pixelY - previousY;
-        const length = Math.hypot(spanX, spanY);
-        const steps = Math.max(1, Math.ceil(length / (RASTER_CELL_PX / 2)));
-        for (let step = 1; step <= steps; step++) {
-          const walkX = previousX + (spanX * step) / steps;
-          const walkY = previousY + (spanY * step) / steps;
-          if (
-            walkX >= -margin &&
-            walkX <= TILE_SIZE + margin &&
-            walkY >= -margin &&
-            walkY <= TILE_SIZE + margin
-          ) {
-            mark(walkX, walkY);
+        const { lngs, lats } = segments[index];
+        let previousX = 0;
+        let previousY = 0;
+        for (let vertex = 0; vertex < lngs.length; vertex++) {
+          const point = map.project(
+            L.latLng(lats[vertex], lngs[vertex]),
+            coords.z,
+          );
+          const pixelX = point.x - originX;
+          const pixelY = point.y - originY;
+          if (vertex === 0) {
+            previousX = pixelX;
+            previousY = pixelY;
+            mark(pixelX, pixelY);
+            continue;
           }
+          // Walk the piece in half-cell steps so every cell it crosses is marked, including off-tile
+          // ones within the margin (a block on the seam should tint both tiles). Cheap: cells are
+          // small.
+          const spanX = pixelX - previousX;
+          const spanY = pixelY - previousY;
+          const length = Math.hypot(spanX, spanY);
+          const steps = Math.max(1, Math.ceil(length / (RASTER_CELL_PX / 2)));
+          for (let step = 1; step <= steps; step++) {
+            const walkX = previousX + (spanX * step) / steps;
+            const walkY = previousY + (spanY * step) / steps;
+            if (
+              walkX >= -margin &&
+              walkX <= TILE_SIZE + margin &&
+              walkY >= -margin &&
+              walkY <= TILE_SIZE + margin
+            ) {
+              mark(walkX, walkY);
+            }
+          }
+          previousX = pixelX;
+          previousY = pixelY;
         }
-        previousX = pixelX;
-        previousY = pixelY;
       }
     }
 
@@ -654,14 +632,14 @@ export default function DiningLayer() {
 
     const layers = manifest.cities.map((city) => {
       const { south, west, north, east } = city.bounds;
-      return new CommercialGrid(city.id, city.bounds, {
+      return new CommercialGrid({
         pane: PANE_NAME,
         bounds: L.latLngBounds([south, west], [north, east]),
         minZoom: MIN_ZOOM,
         maxZoom: MAX_ZOOM,
-        // Each tile projects every qualifying segment — too heavy to redo mid-pinch. Defer tile
-        // creation until the gesture settles, and keep a wider ring so a pan after a zoom doesn't
-        // immediately re-draw.
+        // Each tile projects every qualifying segment in its covering chunk(s) — too heavy to redo
+        // mid-pinch. Defer tile creation until the gesture settles, and keep a wider ring so a pan
+        // after a zoom doesn't immediately re-draw.
         updateWhenZooming: false,
         keepBuffer: 4,
       });
