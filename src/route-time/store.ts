@@ -9,6 +9,7 @@ export type TimeMode = "now" | "custom";
 
 let mode: TimeMode = "now";
 let customHour = 12; // local clock hour (float) used in "custom" mode
+let pickerOpen = false; // the clock popover is open — the user may be scrubbing time
 const listeners = new Set<() => void>();
 let ticker: ReturnType<typeof setInterval> | null = null;
 
@@ -80,6 +81,21 @@ export function getResolvedHour(): number {
   }
   const now = new Date();
   return now.getHours() + now.getMinutes() / 60;
+}
+
+// Whether the clock popover is open. Time-dependent overlays watch this to prefetch the day's tiles
+// while the user is scrubbing, then drop them when it closes; it rides the same listener set, so a
+// subscriber sees open/close alongside the time changes it already reacts to.
+export function isPickerOpen(): boolean {
+  return pickerOpen;
+}
+
+export function setPickerOpen(open: boolean): void {
+  if (open === pickerOpen) {
+    return;
+  }
+  pickerOpen = open;
+  notify();
 }
 
 export function subscribeRouteTime(listener: () => void): () => void {

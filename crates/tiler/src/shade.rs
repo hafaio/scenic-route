@@ -17,9 +17,20 @@ use crate::binfmt::{self, Coord, Polygon};
 use crate::geometry::{self, METERS_PER_DEGREE_LAT, PolygonGrid, PolygonSet, round_half_up};
 use crate::manifest::{Bounds, City, Manifest};
 use crate::raster::{
-    MIN_ALPHA, TILE_SIZE, Tile, encode_webp, lat_to_pixel_y, lng_to_pixel_x, pixel_x_to_lng,
-    pixel_y_to_lat, plan_tiles,
+    MIN_ALPHA, TILE_SIZE, Tile, encode_webp_quality, lat_to_pixel_y, lng_to_pixel_x,
+    pixel_x_to_lng, pixel_y_to_lat, plan_tiles,
 };
+
+// The shade tiles are one flat slate tint (constant RGB, all the variation in alpha), so a low WebP
+// quality shaves the colour plane at no visible cost — a minor gain, since the alpha carries the
+// bytes; SHADE_ALPHA_STEP below is the real size lever.
+const SHADE_WEBP_QUALITY: f32 = 50.0;
+
+// The alpha — the one channel that varies — is quantised to this step before encoding, so the smooth
+// penumbra collapses into flat bands that WebP's lossless alpha stores in long runs. This is what
+// keeps the deep z15 level (two thirds of the pyramid) inside the deploy's size budget: step 8 (~32
+// levels, ~3% opacity granularity) roughly a third off the pyramid, fine enough to stay invisible.
+const SHADE_ALPHA_STEP: u16 = 8;
 
 // Shadow edges are hard, so the fill is antialiased by rasterizing each sample at 4x and averaging
 // the block back down — a pixel half inside a hull reads 0.5. Same pattern as canopy.
@@ -46,12 +57,16 @@ struct Sample {
     shadow_per_height: f64,
 }
 
-/// One time-of-day bucket: the local clock minute it stands for (for the client manifest) and the
-/// sun-disk samples whose shadows accumulate into its penumbra.
+/// One bin of the (declination, hourAngle) grid: its season/hour keys (echoed to the client so it can
+/// map "now" to a bin), the representative sun position, and the sun-disk samples whose shadows
+/// accumulate into its penumbra.
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct Bucket {
-    elevation: f64, // the bin's representative sun position, echoed to the client's schedule so it can
-    azimuth: f64,   // map "now" to a bin; the geometry itself rides in `samples` and `intensity`
+    season: usize,   // the declination band this bin sits in — its season key
+    hour_angle: f64, // the sun's hour angle (degrees, 0 at solar noon) — its time-of-day key
+    elevation: f64, // the bin's representative sun position, echoed to the client's schedule alongside
+    azimuth: f64,   // season/hourAngle; the geometry itself rides in `samples` and `intensity`
     intensity: f64, // solar intensity ~sin(elevation); scales the whole bin's shade darkness
     samples: Vec<Sample>,
 }
@@ -64,10 +79,14 @@ pub(crate) struct Params {
     pub buckets: Vec<Bucket>,
 }
 
-/// The client's schedule: which bin index stands for which sun position.
+/// The client's schedule: which bin index stands for which grid cell (season, hourAngle) and sun
+/// position. The client selects on season/hourAngle; the position is carried for labelling/debugging.
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct BucketEntry {
     index: usize,
+    season: usize,
+    hour_angle: f64,
     elevation: f64,
     azimuth: f64,
 }
@@ -164,57 +183,109 @@ fn convex_hull(points: &[Coord]) -> Vec<Coord> {
     hull
 }
 
-/// The shadow one building casts for one sample: the convex hull of the footprint's outer ring
-/// together with that ring displaced down the shadow by `min(max_shadow, height * shadowPerHeight)`
-/// metres. For a rectangular footprint the hull is the exact swept shadow; for an L it slightly
-/// over-fills the concavity, which is acceptable. None when the building has no footprint or casts
-/// nothing (zero height or a sun at the zenith).
-fn shadow_hull(
+// A footprint whose convex hull over-fills it by less than this (m²) is swept as that single hull:
+// the over-fill is well under a pixel at the finest zoom, and one polygon keeps the spatial grid
+// small. Only a genuine concavity above this — a courtyard, an L-block — is swept exactly, since the
+// exact sweep costs a polygon per edge, and a low sun stretches each into a long grid-heavy sliver.
+const MIN_CONCAVITY_M2: f64 = 200.0;
+
+/// Twice the area a ring encloses, by the shoelace sum, unsigned so either winding works. Used only
+/// to weigh a footprint against its convex hull.
+fn double_area(ring: &[Coord]) -> f64 {
+    let mut sum = 0.0;
+    let mut previous = ring.len() - 1;
+    for current in 0..ring.len() {
+        sum += (ring[previous].lng - ring[current].lng) * (ring[previous].lat + ring[current].lat);
+        previous = current;
+    }
+    sum.abs()
+}
+
+/// Append the shadow one building casts for one sample to `out`: the footprint's outer ring swept
+/// down the shadow by `min(max_shadow, height * shadowPerHeight)` metres. A ring that its convex hull
+/// barely over-fills (a rectangle, a small notch) is swept as the single convex hull of the ring and
+/// its translate — exact for a convex ring, sub-pixel-close otherwise, and one cheap polygon. A real
+/// concavity is instead swept EXACTLY as the Minkowski sum of the ring with that displacement — the
+/// union of the ring, its translate, and one parallelogram per edge, which the rasteriser composites
+/// for free since it unions the polygons it fills — so its notch is left unshaded rather than filled
+/// in. Nothing is appended when the building has no footprint or casts nothing (zero height or a sun
+/// at the zenith).
+fn append_shadow(
     footprint: &Polygon,
     height: f64,
     sample: &Sample,
     max_shadow_meters: f64,
-) -> Option<Polygon> {
-    let outer = footprint.first()?;
+    out: &mut Vec<Polygon>,
+) {
+    let Some(outer) = footprint.first() else {
+        return;
+    };
     if outer.len() < 3 || height <= 0.0 {
-        return None;
+        return;
     }
     let distance = (height * sample.shadow_per_height).min(max_shadow_meters);
     if distance <= 0.0 {
-        return None;
+        return;
     }
     // The east-west scale at the footprint's latitude; city-scale, so its first vertex stands in.
     let meters_per_lng = METERS_PER_DEGREE_LAT * outer[0].lat.to_radians().cos();
     let d_lng = distance * sample.east / meters_per_lng;
     let d_lat = distance * sample.north / METERS_PER_DEGREE_LAT;
-    let mut points: Vec<Coord> = Vec::with_capacity(outer.len() * 2);
-    for vertex in outer {
-        points.push(*vertex);
-        points.push(Coord {
-            lng: vertex.lng + d_lng,
-            lat: vertex.lat + d_lat,
-        });
+    let shift = |vertex: &Coord| Coord {
+        lng: vertex.lng + d_lng,
+        lat: vertex.lat + d_lat,
+    };
+
+    let footprint_hull = convex_hull(outer);
+    let concavity_m2 = 0.5
+        * (double_area(&footprint_hull) - double_area(outer))
+        * METERS_PER_DEGREE_LAT
+        * meters_per_lng;
+    if concavity_m2 < MIN_CONCAVITY_M2 {
+        let mut points: Vec<Coord> = Vec::with_capacity(outer.len() * 2);
+        for vertex in outer {
+            points.push(*vertex);
+            points.push(shift(vertex));
+        }
+        let hull = convex_hull(&points);
+        if hull.len() >= 3 {
+            out.push(vec![hull]);
+        }
+        return;
     }
-    let hull = convex_hull(&points);
-    (hull.len() >= 3).then_some(vec![hull])
+
+    out.push(vec![outer.clone()]);
+    out.push(vec![outer.iter().map(shift).collect()]);
+    for pair in outer.windows(2) {
+        out.push(vec![vec![
+            pair[0],
+            pair[1],
+            shift(&pair[1]),
+            shift(&pair[0]),
+        ]]);
+    }
+    // `windows` omits the closing edge when the ring is not explicitly closed; sweep it too.
+    if let (Some(first), Some(last)) = (outer.first(), outer.last())
+        && (first.lng != last.lng || first.lat != last.lat)
+    {
+        out.push(vec![vec![*last, *first, shift(first), shift(last)]]);
+    }
 }
 
-/// Every building's shadow hull for one sun-disk sample — each footprint that casts anything,
-/// projected. ~867k hulls per sample. Shared by the display pyramid and the per-edge bake so the
-/// shadow model has exactly one implementation.
+/// Every building's shadow for one sun-disk sample — each footprint that casts anything, swept.
+/// Around ~867k footprints per sample (a convex one is a single polygon, a concave one a few more).
+/// Shared by the display pyramid and the per-edge bake so the shadow model has one implementation.
 fn hulls_for_sample(
     polygons: &[Polygon],
     heights: &[f64],
     sample: &Sample,
     max_shadow_meters: f64,
 ) -> Vec<Polygon> {
-    polygons
-        .iter()
-        .zip(heights)
-        .filter_map(|(footprint, height)| {
-            shadow_hull(footprint, *height, sample, max_shadow_meters)
-        })
-        .collect()
+    let mut hulls: Vec<Polygon> = Vec::with_capacity(polygons.len());
+    for (footprint, height) in polygons.iter().zip(heights) {
+        append_shadow(footprint, *height, sample, max_shadow_meters, &mut hulls);
+    }
+    hulls
 }
 
 /// Every building's shadow hull for one bucket, one sample set per sun-disk sample. ~867k hulls
@@ -347,7 +418,9 @@ fn paint(pixels: &mut [u8], fraction: &[f32], intensity: f64) -> bool {
         if *value <= 0.0 {
             continue;
         }
-        let alpha = round_half_up(f64::from(*value) * intensity * MAX_SHADE_ALPHA) as u8;
+        let exact = round_half_up(f64::from(*value) * intensity * MAX_SHADE_ALPHA) as u16;
+        let alpha =
+            (((exact + SHADE_ALPHA_STEP / 2) / SHADE_ALPHA_STEP) * SHADE_ALPHA_STEP).min(255) as u8;
         if alpha < MIN_ALPHA {
             continue;
         }
@@ -385,7 +458,7 @@ fn render(
             bytes: 0,
         });
     }
-    let encoded = encode_webp(&pixels)?;
+    let encoded = encode_webp_quality(&pixels, SHADE_WEBP_QUALITY)?;
     fs::write(
         directory
             .join(tile.zoom.to_string())
@@ -468,6 +541,8 @@ pub fn run(args: &Args) -> Fallible<()> {
         .enumerate()
         .map(|(index, bucket)| BucketEntry {
             index,
+            season: bucket.season,
+            hour_angle: bucket.hour_angle,
             elevation: bucket.elevation,
             azimuth: bucket.azimuth,
         })
@@ -488,9 +563,11 @@ pub fn run(args: &Args) -> Fallible<()> {
     Ok(())
 }
 
-/// One bin's sun position, echoed into the SHDE artifact so the client's schedule maps "now" to a
-/// bin the same way the tile pyramid's `buckets.json` does.
+/// One bin's grid cell and sun position, echoed into the SHDE artifact so the router maps "now" to a
+/// bin the same way the tile pyramid's `buckets.json` does — on season/hourAngle, not raw position.
 pub struct BinPosition {
+    pub season: usize,
+    pub hour_angle: f64,
     pub elevation: f64,
     pub azimuth: f64,
 }
@@ -647,6 +724,8 @@ fn bake_edge_shade(
     let positions = bins
         .iter()
         .map(|bucket| BinPosition {
+            season: bucket.season,
+            hour_angle: bucket.hour_angle,
             elevation: bucket.elevation,
             azimuth: bucket.azimuth,
         })
@@ -758,12 +837,16 @@ mod tests {
         };
         let bins = vec![
             Bucket {
+                season: 0,
+                hour_angle: -30.0,
                 elevation: 30.0,
                 azimuth: 180.0,
                 intensity: 0.8,
                 samples: vec![north_shadow()],
             },
             Bucket {
+                season: 3,
+                hour_angle: 0.0,
                 elevation: 60.0,
                 azimuth: 200.0,
                 intensity: 1.0,

@@ -123,8 +123,15 @@ pub(crate) fn rasterize_land(
 // are a cosmetic overlay; the densities the routing and street lines read live in the .bin
 // blobs, not in these pixels, so lossy colour costs nothing real.
 pub(crate) fn encode_webp(pixels: &[u8]) -> Fallible<Vec<u8>> {
+    encode_webp_quality(pixels, WEBP_QUALITY)
+}
+
+/// As `encode_webp`, at a caller-chosen quality. The shade pyramid, a single flat slate tint varying
+/// only in alpha, tolerates a much lower quality than the colour overlays, which is most of how it
+/// keeps its deep z15 level within the deploy's size budget.
+pub(crate) fn encode_webp_quality(pixels: &[u8], quality: f32) -> Fallible<Vec<u8>> {
     let encoder = webp::Encoder::from_rgba(pixels, TILE_SIZE as u32, TILE_SIZE as u32);
-    Ok(encoder.encode(WEBP_QUALITY).to_vec())
+    Ok(encoder.encode(quality).to_vec())
 }
 
 /// Cities can share a tile at low zoom, so tiles are keyed globally and every city touching one

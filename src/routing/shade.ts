@@ -1,12 +1,14 @@
 // The SHDE data: a per-edge signed sun/shade attribute baked for a grid of sun positions, so the
 // router can bias toward sun or shade for the resolved time of day. A given day's sun only sweeps a
-// handful of the ~56 (elevation, azimuth) bins, so the attributes ship as one small file PER BIN,
+// handful of the (declination, hourAngle) bins, so the attributes ship as one small file PER BIN,
 // fetched lazily on demand, alongside a manifest of the bins. `computeEdgeShade` resolves a Date to a
-// sun position, loads and blends the two nearest bins, and writes the per-edge attribute onto the
-// graph; below the horizon there is no shade to bias, so it clears the field. The bin metric and sun
-// convention mirror components/shade-layer.tsx exactly, so the router agrees with the shade overlay.
+// sun position, loads and blends the two hour-angle-nearest bins in its season band, and writes the
+// per-edge attribute onto the graph; below the horizon there is no shade to bias, so it clears the
+// field. The bin selection mirrors components/shade-layer.tsx (both via src/shade/sun.ts), so the
+// router agrees with the shade overlay.
 
 import * as SunCalc from "suncalc";
+import { declinationOf, hourAngleOf, seasonBand } from "../shade/sun";
 import manifest from "../tree-cover/manifest.json";
 import type { RoutingGraph } from "./graph";
 
@@ -32,9 +34,12 @@ const [city] = manifest.cities;
 const CENTRE_LAT = (city.bounds.north + city.bounds.south) / 2;
 const CENTRE_LNG = (city.bounds.east + city.bounds.west) / 2;
 
-// One baked sun-position bin: its file index and the (elevation, azimuth) it stands for, in degrees.
+// One baked bin: its file index, its (declination, hourAngle) grid cell (what a time is mapped on),
+// and the sun position (degrees) it stands for.
 export interface ShadeBin {
   index: number;
+  season: number;
+  hourAngle: number;
   elevation: number;
   azimuth: number;
 }
@@ -118,25 +123,6 @@ function sunAt(date: Date): { elevation: number; azimuth: number } {
   };
 }
 
-// Angular distance on the sky between a sun position and a bin, matching shade-layer's nearestBin
-// metric (azimuth scaled by cos(mean elevation) so it counts for less when the sun is high). Returned
-// as the true distance, not its square, so it can weight an inverse-distance blend.
-function angularDistance(
-  elevation: number,
-  azimuth: number,
-  bin: ShadeBin,
-): number {
-  let deltaAzimuth = Math.abs(bin.azimuth - azimuth);
-  if (deltaAzimuth > 180) {
-    deltaAzimuth = 360 - deltaAzimuth;
-  }
-  const scaled =
-    deltaAzimuth *
-    Math.cos((((elevation + bin.elevation) / 2) * Math.PI) / 180);
-  const deltaElevation = bin.elevation - elevation;
-  return Math.hypot(deltaElevation, scaled);
-}
-
 // Resolve `date` to a sun position and write the per-edge signed shade attribute onto the graph. Below
 // the horizon there is no shade to bias, so the field is cleared to null / 0. Otherwise the two nearest
 // bins are loaded and blended inversely by angular distance (the closer bin weighs more); a convex
@@ -160,13 +146,22 @@ export async function computeEdgeShade(
     return;
   }
 
-  // The two nearest bins by angular distance.
-  let nearest = bins[0];
+  // Map "now" to the sun's (declination, hourAngle) and blend the two bins straddling that hour angle
+  // within the season band, so scrubbing time slides smoothly and monotonically between them. Falls
+  // back to the whole set only if the band has no baked bin (it always does while the sun is up).
+  const declination = declinationOf(elevation, azimuth, CENTRE_LAT);
+  const hourAngle = hourAngleOf(elevation, azimuth, CENTRE_LAT, declination);
+  const season = seasonBand(declination);
+  const inBand = bins.filter((bin) => bin.season === season);
+  const candidates = inBand.length > 0 ? inBand : bins;
+
+  // The two nearest bins by hour-angle distance.
+  let nearest = candidates[0];
   let second: ShadeBin | null = null;
   let nearestDistance = Number.POSITIVE_INFINITY;
   let secondDistance = Number.POSITIVE_INFINITY;
-  for (const bin of bins) {
-    const distance = angularDistance(elevation, azimuth, bin);
+  for (const bin of candidates) {
+    const distance = Math.abs(bin.hourAngle - hourAngle);
     if (distance < nearestDistance) {
       secondDistance = nearestDistance;
       second = nearest;
