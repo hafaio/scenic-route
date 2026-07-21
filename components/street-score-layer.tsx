@@ -3,27 +3,18 @@
 import L from "leaflet";
 import { useEffect } from "react";
 import { useMap } from "react-leaflet";
+import {
+  decodeStreetChunk,
+  type StreetSegment as Segment,
+} from "../src/streets/chunk";
 import manifest from "../src/tree-cover/manifest.json";
 import { ROAD_OPACITY, rampCss } from "../src/tree-cover/ramp";
-
-interface Segment {
-  lngs: Float64Array;
-  lats: Float64Array;
-  // The canopy cover at each vertex, 0..255 for a covered fraction of 0..1: both sidewalks,
-  // left then right, interleaved. A segment with no offset carries the same value in both.
-  densities: Uint8Array;
-  // Half the distance between the two sidewalks, in metres. Zero for a path or a boardwalk,
-  // which *is* the walking surface and is drawn as a single line on its centreline.
-  offsetMeters: number;
-}
 
 // One chunk per z12 tile, fetched lazily. layout: scripts/README.md
 // Relative, so it picks up the basePath the deploy injects; the app is a single-route SPA.
 const CHUNK_URL = "streets/{x}/{y}.bin";
-const CHUNK_FORMAT = 3;
 const CHUNK_ZOOM = 12;
 const SIDES = 2;
-const METERS_PER_DECIMETER = 0.1;
 
 const TILE_SIZE = 256;
 const EQUATOR_METERS_PER_PIXEL = 156_543.033_92; // web mercator, at the equator, at z0
@@ -88,59 +79,6 @@ function leftNormals(
   }
 }
 
-function readVarint(bytes: Uint8Array, cursor: { offset: number }): number {
-  let value = 0;
-  let shift = 0;
-  let byte = 0;
-  do {
-    byte = bytes[cursor.offset];
-    cursor.offset += 1;
-    value |= (byte & 0x7f) << shift;
-    shift += 7;
-  } while (byte & 0x80);
-  return (value >>> 1) ^ -(value & 1);
-}
-
-function decodeChunk(buffer: ArrayBuffer): Segment[] {
-  const bytes = new Uint8Array(buffer);
-  const view = new DataView(buffer);
-  const magic = String.fromCharCode(bytes[0], bytes[1], bytes[2], bytes[3]);
-  const version = view.getUint16(4, true);
-  if (magic !== "STCK" || version !== CHUNK_FORMAT) {
-    throw new Error(`not a v${CHUNK_FORMAT} street chunk`);
-  }
-
-  const count = view.getUint32(8, true);
-  const originLng = view.getFloat64(16, true);
-  const originLat = view.getFloat64(24, true);
-  const scale = view.getFloat64(32, true);
-  const cursor = { offset: view.getUint16(6, true) };
-
-  const segments: Segment[] = [];
-  for (let segment = 0; segment < count; segment++) {
-    const vertices = view.getUint16(cursor.offset, true);
-    const offsetMeters = bytes[cursor.offset + 2] * METERS_PER_DECIMETER;
-    cursor.offset += 3;
-    const lngs = new Float64Array(vertices);
-    const lats = new Float64Array(vertices);
-    let quantizedX = 0;
-    let quantizedY = 0;
-    for (let vertex = 0; vertex < vertices; vertex++) {
-      quantizedX += readVarint(bytes, cursor);
-      quantizedY += readVarint(bytes, cursor);
-      lngs[vertex] = originLng + quantizedX * scale;
-      lats[vertex] = originLat + quantizedY * scale;
-    }
-    const densities = bytes.slice(
-      cursor.offset,
-      cursor.offset + SIDES * vertices,
-    );
-    cursor.offset += SIDES * vertices;
-    segments.push({ lngs, lats, densities, offsetMeters });
-  }
-  return segments;
-}
-
 // One in-flight fetch per chunk, shared by every tile that needs it. A 404 is an answer —
 // the tile is all water, and caches as empty — but any other failure drops the entry, so
 // the next tile over this chunk goes back for it.
@@ -157,7 +95,7 @@ function loadChunk(tileX: number, tileY: number): Promise<Segment[]> {
     const request = fetch(url)
       .then(async (response) => {
         if (response.ok) {
-          return decodeChunk(await response.arrayBuffer());
+          return decodeStreetChunk(await response.arrayBuffer());
         } else if (response.status === 404) {
           return [];
         } else {
