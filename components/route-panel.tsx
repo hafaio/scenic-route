@@ -50,6 +50,7 @@ import {
   type Maneuver,
 } from "../src/routing/directions";
 import type { NavProgress } from "../src/routing/nav-progress";
+import type { RouteFactors } from "../src/routing/search";
 import LocationField from "./location-field";
 
 interface RoutePanelProps {
@@ -66,7 +67,7 @@ interface RoutePanelProps {
   summary: {
     walkMeters: number; // walking-only distance; the mileage shown excludes any ferry crossing
     travelSeconds: number;
-    coverFraction: number;
+    factors: RouteFactors; // per-factor mean intensities, rendered as chips for the active sliders
   } | null;
   treeWeight: number;
   ferryWeight: number;
@@ -132,18 +133,15 @@ function factorReading(factor: Factor): string {
 
 const METERS_PER_MILE = 1609.344;
 
+// Distance and time only; the per-factor makeup is shown as chips (factorChips below), no longer folded
+// into an ambiguous single "% shaded".
 function summarize(
-  summary: {
-    walkMeters: number;
-    travelSeconds: number;
-    coverFraction: number;
-  },
+  summary: { walkMeters: number; travelSeconds: number },
   hasFerry: boolean,
 ): string {
   const miles = summary.walkMeters / METERS_PER_MILE;
   const minutes = Math.max(1, Math.round(summary.travelSeconds / 60));
-  const shaded = Math.round(summary.coverFraction * 100);
-  const base = `${miles.toFixed(1)} mi · ${minutes} min · ${shaded}% shaded`;
+  const base = `${miles.toFixed(1)} mi · ${minutes} min`;
   return hasFerry ? `${base} · ferry` : base;
 }
 
@@ -330,6 +328,10 @@ export default function RoutePanel({
       disabled: !allowFerries,
     },
   ];
+  // Every scenic factor gets a summary chip — the slider's own icon and tint with the route's mean
+  // intensity for it — shown regardless of weight, for reference. Ferry is presence-only (the "· ferry"
+  // suffix), so it stays out of the chip row.
+  const factorChips = factors.filter((factor) => factor.key !== "ferry");
   const hasFerry =
     directions?.some((maneuver) => maneuver.kind === "ferry") ?? false;
   const pickHint =
@@ -573,9 +575,27 @@ export default function RoutePanel({
           </p>
         ) : null}
         {status === "ready" && summary ? (
-          <p className="mt-3 text-sm font-semibold text-slate-800 dark:text-slate-100">
-            {summarize(summary, hasFerry)}
-          </p>
+          <div className="mt-3">
+            <p className="text-sm font-semibold text-slate-800 dark:text-slate-100">
+              {summarize(summary, hasFerry)}
+            </p>
+            {factorChips.length > 0 ? (
+              <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1">
+                {factorChips.map((factor) => (
+                  <span
+                    key={factor.key}
+                    className={`inline-flex items-center gap-1 text-xs font-semibold ${factor.tint}`}
+                  >
+                    <factor.Icon className="h-3.5 w-3.5" aria-hidden={true} />
+                    {Math.round(
+                      summary.factors[factor.key as keyof RouteFactors] * 100,
+                    )}
+                    %
+                  </span>
+                ))}
+              </div>
+            ) : null}
+          </div>
         ) : null}
         {status === "error" && errorMessage ? (
           <p className="mt-3 text-sm font-medium text-rose-600 dark:text-rose-400">

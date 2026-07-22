@@ -586,7 +586,7 @@ test("reverseResult flips orientation and preserves the scalar totals", () => {
 
   expect(reversed.lengthMeters).toBe((forward as RouteResult).lengthMeters);
   expect(reversed.walkMeters).toBe((forward as RouteResult).walkMeters);
-  expect(reversed.coverFraction).toBe((forward as RouteResult).coverFraction);
+  expect(reversed.factors).toBe((forward as RouteResult).factors);
   expect(reversed.travelSeconds).toBe((forward as RouteResult).travelSeconds);
   expect(reversed.start).toBe(dest);
   expect(reversed.dest).toBe(start);
