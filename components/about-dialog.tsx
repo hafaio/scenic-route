@@ -70,13 +70,22 @@ export default function AboutDialog({ onClose }: AboutDialogProps) {
           </button>
         </div>
 
-        <div className="mt-5 text-sm leading-relaxed text-slate-600 dark:text-slate-300">
+        <div className="mt-5 space-y-3 text-sm leading-relaxed text-slate-600 dark:text-slate-300">
           <p>
             Scenic Route finds nicer ways to walk across New York. Use
             Directions to plan a path — weighting it toward tree cover, sun or
             shade, landmarks, public art, nice commercial streets and ferries,
             and away from highways — or switch between the map overlays to
             explore what's around you.
+          </p>
+          <p>
+            To use it, tap the layers button to toggle overlays like tree canopy
+            or building shade, and drag the clock to see how shade shifts
+            through the day. Open Directions to set a start and destination,
+            then open the sliders to bias the route toward what you care about —
+            the summary shows how much of each the route picks up. Drag either
+            endpoint on the map to nudge the route, and drop it to lock the new
+            point in.
           </p>
         </div>
 
