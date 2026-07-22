@@ -7,11 +7,15 @@
 
 import { GENUS_COUNT } from "./genus";
 
-// The enabled ids as an immutable snapshot: a toggle swaps in a NEW Set rather than mutating this
-// one, so useSyncExternalStore sees a fresh reference exactly when the selection changes.
-let enabled: ReadonlySet<number> = new Set(
+// Every genus id, the default "show everything" selection. A stable reference, so re-selecting all
+// hands useSyncExternalStore the same snapshot it started with.
+const ALL_GENERA: ReadonlySet<number> = new Set(
   Array.from({ length: GENUS_COUNT }, (_, id) => id),
 );
+
+// The enabled ids as an immutable snapshot: a toggle swaps in a NEW Set rather than mutating this
+// one, so useSyncExternalStore sees a fresh reference exactly when the selection changes.
+let enabled: ReadonlySet<number> = ALL_GENERA;
 const listeners = new Set<() => void>();
 
 function notify(): void {
@@ -31,6 +35,13 @@ export function toggleGenus(id: number): void {
     next.add(id);
   }
   enabled = next;
+  notify();
+}
+
+// Show every genus at once or hide them all — the legend header's single button, which turns
+// everything off while any genus is on and back on once none are.
+export function setAllGenera(on: boolean): void {
+  enabled = on ? ALL_GENERA : new Set();
   notify();
 }
 
