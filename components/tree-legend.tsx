@@ -4,6 +4,7 @@ import { useSyncExternalStore } from "react";
 import { genusCss, OTHER_GENUS_ID } from "../src/tree-cover/genus";
 import {
   getEnabledGenera,
+  setAllGenera,
   subscribeGenusFilter,
   toggleGenus,
 } from "../src/tree-cover/genus-filter";
@@ -28,11 +29,24 @@ export default function TreeLegend() {
   const rows = genus.table.map((entry, id) => ({ id, common: entry.common }));
   rows.push({ id: OTHER_GENUS_ID, common: "Other" });
 
+  // One button flips the whole selection: with any genus on it clears them, with none on it
+  // restores the full set — a fast way back from a single-genus view to the all-genera texture.
+  const anyOn = enabled.size > 0;
+
   return (
     <div className="rounded-2xl bg-white/85 px-3 py-2.5 shadow-lg ring-1 ring-black/5 backdrop-blur-md dark:bg-slate-800/80 dark:ring-white/10">
-      <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
-        Tree genus
-      </p>
+      <div className="mb-1.5 flex items-center justify-between gap-3">
+        <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+          Tree genus
+        </p>
+        <button
+          type="button"
+          onClick={() => setAllGenera(!anyOn)}
+          className="text-[11px] font-semibold uppercase tracking-wide text-slate-400 transition hover:text-slate-600 dark:text-slate-500 dark:hover:text-slate-300"
+        >
+          {anyOn ? "Clear" : "All"}
+        </button>
+      </div>
       <ul className="grid grid-cols-2 gap-x-3 gap-y-0.5">
         {rows.map((row) => {
           const on = enabled.has(row.id);
