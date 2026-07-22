@@ -1,10 +1,22 @@
 # Scenic Route
 
-A web app for tagging and annotating places along the way.
+Nicer ways to walk across New York. The map is the app: it opens at `/` for
+everyone and routes on foot, biasing the path toward tree cover, sun or shade,
+landmarks, public art, nice commercial streets and ferries — and away from
+highways.
 
-The map is the app: it opens at `/` for everyone, with a basemap and a tree-cover
-overlay. Signing in as an admin adds the Firebase-backed pins — drop them at your
-location and attach freeform notes.
+## Using it
+
+- Tap the **layers** button to toggle overlays like tree canopy or building
+  shade, and drag the **clock** to see how shade shifts through the day.
+- Open **Directions**, set a start and destination, then open the sliders to
+  bias the route toward what you care about — the summary reports how much of
+  each the route picks up.
+- **Drag** either endpoint on the map to nudge the route, and drop it to lock
+  the new point in.
+
+Signing in as an admin adds Firebase-backed pins — drop them at your location
+and attach freeform notes.
 
 ## Development
 
