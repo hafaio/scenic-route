@@ -38,13 +38,27 @@ export interface RouteStep {
   lengthMeters: number; // walked length; partial on the end edges
 }
 
+// Length-weighted mean of each scenic attribute over the walked route (ferry spans excluded), keyed to
+// match the panel's slider factors. Each is 0..1: `shade` is *sun* exposure (the positive, i.e. sunlit,
+// part of the signed shade attribute, normalized by the field's peak intensity so a fully-sunlit route
+// reads ~100%), to contrast with the trees' canopy; the rest are the mean of that edge attribute. The
+// summary renders a chip per factor.
+export interface RouteFactors {
+  tree: number;
+  shade: number; // sun exposure, not shade — see above
+  landmark: number;
+  art: number;
+  highway: number;
+  commercial: number;
+}
+
 export interface RouteResult {
   path: { lats: Float64Array; lngs: Float64Array }; // stitched, end-edge partials trimmed at the snaps
   steps: RouteStep[];
   lengthMeters: number; // total trip distance, walking plus ferry spans (nav-progress and the path rely on it)
   walkMeters: number; // walking-only distance, ferry spans excluded — the mileage the summary shows
   travelSeconds: number; // reported ETA: sum of undiscounted raw seconds over the chosen steps
-  coverFraction: number; // length-weighted mean cover, over the walked length only (ferries excluded)
+  factors: RouteFactors; // length-weighted mean scenic attributes over the walked length
   start: Snap;
   dest: Snap;
 }
@@ -311,19 +325,49 @@ function reconstruct(
   }
 
   let lengthMeters = 0;
-  let walkLengthMeters = 0; // ferry spans excluded, so shade % is over the walked route only
-  let coverLengthMeters = 0;
+  let walkLengthMeters = 0; // ferry spans excluded, so the factor means are over the walked route only
   let travelSeconds = 0; // undiscounted ETA: walked time by span, ferry time by its baked duration
+  // Raw seconds elapsed at the *start* of each step, so the sun sampled for the sun-exposure mean matches
+  // what routing costed the edge against (advances during walked spans and ferry crossings alike).
+  let elapsedSeconds = 0;
+  // Normalize sun exposure by the field's peak intensity, so a fully-sunlit-at-peak-sun edge reads ~100%
+  // rather than being scaled down by the sun's (elevation-dependent) intensity. 0 disables the sun chip.
+  const shadeMaxAbs = graph.shade ? graph.shade.maxAbs : 0;
+  const sums = {
+    tree: 0,
+    shade: 0,
+    landmark: 0,
+    art: 0,
+    highway: 0,
+    commercial: 0,
+  };
   for (const step of steps) {
     lengthMeters += step.lengthMeters;
     if (step.kind === "ferry") {
-      travelSeconds += rawSeconds(graph, step.edge);
+      const seconds = rawSeconds(graph, step.edge);
+      travelSeconds += seconds;
+      elapsedSeconds += seconds;
     } else {
-      walkLengthMeters += step.lengthMeters;
-      coverLengthMeters += step.cover * step.lengthMeters;
-      travelSeconds += step.lengthMeters / WALK_METERS_PER_SECOND;
+      const { edge, lengthMeters: stepMeters } = step;
+      walkLengthMeters += stepMeters;
+      sums.tree += step.cover * stepMeters;
+      sums.landmark += (graph.edgeLandmark[edge] / 255) * stepMeters;
+      sums.art += (graph.edgeArt[edge] / 255) * stepMeters;
+      sums.highway += (graph.edgeHighway[edge] / 255) * stepMeters;
+      sums.commercial += (graph.edgeCommercial[edge] / 255) * stepMeters;
+      // Sun exposure only: the positive (sunlit) part of the signed shade attribute at this point in the
+      // walk. 0 when shaded, at night, or with no artifact loaded.
+      const shadeAttr = graph.shade
+        ? graph.shade.attrAt(edge, elapsedSeconds)
+        : 0;
+      sums.shade += Math.max(0, shadeAttr) * stepMeters;
+      const seconds = stepMeters / WALK_METERS_PER_SECOND;
+      travelSeconds += seconds;
+      elapsedSeconds += seconds;
     }
   }
+  const mean = (total: number): number =>
+    walkLengthMeters > 0 ? total / walkLengthMeters : 0;
 
   return {
     path: {
@@ -334,8 +378,14 @@ function reconstruct(
     lengthMeters,
     walkMeters: walkLengthMeters,
     travelSeconds,
-    coverFraction:
-      walkLengthMeters > 0 ? coverLengthMeters / walkLengthMeters : 0,
+    factors: {
+      tree: mean(sums.tree),
+      shade: shadeMaxAbs > 0 ? mean(sums.shade) / shadeMaxAbs : 0,
+      landmark: mean(sums.landmark),
+      art: mean(sums.art),
+      highway: mean(sums.highway),
+      commercial: mean(sums.commercial),
+    },
     start,
     dest,
   };
@@ -735,7 +785,7 @@ export class RouteSolver {
 }
 
 // The same route travelled the other way: swap the two snaps, reverse the step list and flip each
-// step's travel direction, and reverse the stitched path. Length, walk, ETA, and cover are
+// step's travel direction, and reverse the stitched path. Length, walk, ETA, and the factor means are
 // direction-independent and carry over unchanged.
 export function reverseResult(result: RouteResult): RouteResult {
   const steps = result.steps
@@ -750,7 +800,7 @@ export function reverseResult(result: RouteResult): RouteResult {
     lengthMeters: result.lengthMeters,
     walkMeters: result.walkMeters,
     travelSeconds: result.travelSeconds,
-    coverFraction: result.coverFraction,
+    factors: result.factors,
     start: result.dest,
     dest: result.start,
   };

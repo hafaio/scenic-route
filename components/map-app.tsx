@@ -1115,7 +1115,7 @@ export default function MapApp() {
               ? {
                   walkMeters: routeState.result.walkMeters,
                   travelSeconds: routeState.result.travelSeconds,
-                  coverFraction: routeState.result.coverFraction,
+                  factors: routeState.result.factors,
                 }
               : null
           }
