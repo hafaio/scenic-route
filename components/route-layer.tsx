@@ -35,6 +35,9 @@ const PANE_Z_INDEX = 450; // above tiles (~200), below markers (~600)
 const MIN_ZOOM = 3;
 const MAX_ZOOM = 20;
 
+// Keep a dragged endpoint this far from the viewport edge; Leaflet auto-pans the map to hold it there.
+const DRAG_AUTOPAN_PADDING: [number, number] = [80, 80];
+
 // The line reads as a route ribbon: ~4.5 px at z16, growing with zoom like the street layer, drawn
 // as a neutral slate core inside a white casing. A neutral route reads clearly over the canopy — or
 // any future overlay — without competing with its colour, and the white halo lifts it off the map.
@@ -348,18 +351,14 @@ export default function RouteLayer({
   }, [drawSteps]);
 
   // Frame a fresh destination once its route lands; slider recomputes leave the camera alone. While an
-  // endpoint is dragged the reframe only zooms out to keep the route in view — never the aggressive
-  // zoom-in that fights the drag.
+  // endpoint is dragged we leave the camera to the marker's own autoPan (below) — any programmatic
+  // view change mid-drag desyncs the pin from the cursor — and just remember the dest so releasing the
+  // drag doesn't snap-reframe the settled route.
   useEffect(() => {
     if (!result || !dest) {
       return;
     }
     if (dragging) {
-      const bounds = routeBounds(result);
-      if (!map.getBounds().contains(bounds)) {
-        map.fitBounds(bounds, { padding: [64, 96], animate: false });
-      }
-      // Mark the current dest framed so releasing the drag doesn't snap-reframe the settled route.
       framedDest.current = dest;
       return;
     }
@@ -389,6 +388,8 @@ export default function RouteLayer({
           position={[start.lat, start.lng]}
           icon={startIcon}
           draggable
+          autoPan
+          autoPanPadding={DRAG_AUTOPAN_PADDING}
           // Above the live-location marker (which renders later at the same spot) so the start always
           // owns the drag gesture; otherwise the location marker can swallow it and strand the drag.
           zIndexOffset={1000}
@@ -409,6 +410,8 @@ export default function RouteLayer({
           position={[dest.lat, dest.lng]}
           icon={savedIcon}
           draggable
+          autoPan
+          autoPanPadding={DRAG_AUTOPAN_PADDING}
           eventHandlers={{
             drag: (event) => {
               const { lat, lng } = event.target.getLatLng();
