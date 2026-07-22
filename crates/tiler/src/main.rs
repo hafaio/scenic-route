@@ -9,7 +9,7 @@ mod chunks;
 mod conflate;
 mod corners;
 mod densities;
-mod genus;
+mod genus_field;
 mod geometry;
 mod graph;
 mod manifest;
@@ -30,7 +30,7 @@ const USAGE: &str = "usage:
   tiler chunks --manifest <file.json> --data <dir> --chunks <dir> [--paths <file.bin>]
   tiler canopy --manifest <file.json> --ramp <file.bin> --data <dir> --tiles <dir>
   tiler shade --manifest <file.json> --data <dir> --tiles <dir> --params <file.json>
-  tiler genus --manifest <file.json> --palette <file.bin> --data <dir> --tiles <dir>
+  tiler genus-field --manifest <file.json> --data <dir> --tiles <dir>
   tiler graph --streets <file.bin> [--paths <file.bin>] [--ferries <file.bin>] [--landmarks <file.bin>] [--art <file.bin>] [--highways <file.bin>] [--commercial <file.bin>] [--buildings <file.bin> --shade-params <file.json> --shade-dir <dir>] --out <file.bin>
 ";
 
@@ -79,9 +79,8 @@ fn run() -> Fallible<()> {
             tiles: path(&flags, "tiles")?,
             params: path(&flags, "params")?,
         }),
-        "genus" => genus::run(&genus::Args {
+        "genus-field" => genus_field::run(&genus_field::Args {
             manifest: path(&flags, "manifest")?,
-            palette: path(&flags, "palette")?,
             data: path(&flags, "data")?,
             tiles: path(&flags, "tiles")?,
         }),
