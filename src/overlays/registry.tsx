@@ -22,7 +22,7 @@ const StreetScoreLayer = dynamic(
 const CanopyLayer = dynamic(() => import("../../components/canopy-layer"), {
   ssr: false,
 });
-const GenusLayer = dynamic(() => import("../../components/genus-layer"), {
+const GenusLayer = dynamic(() => import("../../components/genus-gl-layer"), {
   ssr: false,
 });
 const DiningLayer = dynamic(() => import("../../components/dining-layer"), {

@@ -134,6 +134,15 @@ pub(crate) fn encode_webp_quality(pixels: &[u8], quality: f32) -> Fallible<Vec<u
     Ok(encoder.encode(quality).to_vec())
 }
 
+/// Lossless WebP: for tiles whose channels carry DATA, not colour — the genus-field pyramid packs a
+/// per-genus density byte into each channel, which the client reads back exactly, so any lossy
+/// quantization would corrupt the numbers. Lossless still compresses these well because most tiles
+/// are mostly empty (transparent) and the packed densities are locally flat.
+pub(crate) fn encode_webp_lossless(pixels: &[u8]) -> Vec<u8> {
+    let encoder = webp::Encoder::from_rgba(pixels, TILE_SIZE as u32, TILE_SIZE as u32);
+    encoder.encode_lossless().to_vec()
+}
+
 /// Cities can share a tile at low zoom, so tiles are keyed globally and every city touching one
 /// paints into the same buffer rather than overwriting it. `max_zoom` is the pyramid's finest
 /// level — MAX_ZOOM for the canopy fill, one deeper for the genus dots, which upscale worse.

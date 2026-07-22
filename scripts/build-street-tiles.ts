@@ -16,7 +16,6 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
-import { GENUS_COLORS, GENUS_COUNT } from "../src/tree-cover/genus";
 import manifest from "../src/tree-cover/manifest.json";
 import { rampAlpha, rampColor } from "../src/tree-cover/ramp";
 import { buildCommercial, commercialLinesPath } from "./build-commercial";
@@ -40,9 +39,10 @@ const PUBLIC_DIR = join(import.meta.dirname, "..", "public");
 // The measured LiDAR canopy pyramid, rendered by `tiler canopy` from data/canopy/*.bin: the
 // map's cover fill, blurred and coloured by the shared ramp.
 const CANOPY_TILE_DIR = join(PUBLIC_DIR, "tiles", "canopy");
-// The per-genus blend pyramid, rendered by `tiler genus` from data/trees/*.bin: a proportional
-// mix of genus colours at each pixel, faded by the same cover curve as the canopy fill.
-const GENUS_TILE_DIR = join(PUBLIC_DIR, "tiles", "genus");
+// The client-shaded genus dominance pyramid, rendered by `tiler genus-field` from data/trees/*.bin:
+// four lossless data tiles per position, each carrying three genera's local crown density in R/G/B.
+// The WebGL overlay (components/genus-gl-layer.tsx) colours them at render time.
+const GENUS_FIELD_TILE_DIR = join(PUBLIC_DIR, "tiles", "genus-field");
 // The tree points themselves, served so the client can draw the crisp genus dots live from z15 up
 // where the raster pyramid stops. Copied verbatim from data/trees/*.bin (the TREE v3 blob).
 const TREE_DIR = join(PUBLIC_DIR, "trees");
@@ -77,16 +77,8 @@ const RAMP_PATH = join(
   "tree-cover",
   "ramp.ts",
 );
-const GENUS_PATH = join(
-  import.meta.dirname,
-  "..",
-  "src",
-  "tree-cover",
-  "genus.ts",
-);
-// Build glue, not an artifact: the tiler is handed fresh ones on every run.
+// Build glue, not an artifact: the tiler is handed a fresh one on every run.
 const RAMP_LUT_PATH = join(tmpdir(), "scenic-route-ramp.bin");
-const GENUS_PALETTE_LUT_PATH = join(tmpdir(), "scenic-route-genus-palette.bin");
 
 // RGBA for every density a field byte can hold. The ramp is a *TypeScript* module because the
 // client's street layer imports the very same one, which is what makes the block fill and the
@@ -104,22 +96,6 @@ async function writeRamp(): Promise<void> {
     table[offset + 3] = 255 * rampAlpha(density);
   }
   await writeFile(RAMP_LUT_PATH, table);
-}
-
-// The genus palette, one opaque RGBA entry per genus id, in the same order the TREE genus bytes
-// index. It is a TypeScript module for the same reason the ramp is: the legend swatches the client
-// draws read the very same GENUS_COLORS, so a blended tile and its key cannot drift.
-async function writeGenusPalette(): Promise<void> {
-  const table = new Uint8ClampedArray(GENUS_COUNT * 4);
-  for (let id = 0; id < GENUS_COUNT; id++) {
-    const { red, green, blue } = GENUS_COLORS[id];
-    const offset = id * 4;
-    table[offset] = red;
-    table[offset + 1] = green;
-    table[offset + 2] = blue;
-    table[offset + 3] = 255;
-  }
-  await writeFile(GENUS_PALETTE_LUT_PATH, table);
 }
 
 function sourcePath(directory: string, file: string): string {
@@ -151,7 +127,6 @@ async function inputsHash(cities: City[]): Promise<string> {
   const paths = [
     MANIFEST_PATH,
     RAMP_PATH,
-    GENUS_PATH,
     ...scripts,
     ...(await tilerSources()),
     ...cities.flatMap((city) => [
@@ -201,7 +176,7 @@ async function isFresh(hash: string): Promise<boolean> {
   try {
     const [stamp] = await Promise.all([
       readFile(STAMP_PATH, "utf8"),
-      stat(GENUS_TILE_DIR),
+      stat(GENUS_FIELD_TILE_DIR),
       stat(TREE_DIR),
       stat(CHUNK_DIR),
       stat(COMMERCIAL_DIR),
@@ -238,17 +213,16 @@ async function build(): Promise<void> {
   }
 
   await rm(CANOPY_TILE_DIR, { recursive: true, force: true });
-  await rm(GENUS_TILE_DIR, { recursive: true, force: true });
+  await rm(GENUS_FIELD_TILE_DIR, { recursive: true, force: true });
   await rm(TREE_DIR, { recursive: true, force: true });
   await rm(CHUNK_DIR, { recursive: true, force: true });
   await rm(ROUTING_DIR, { recursive: true, force: true });
   await mkdir(CANOPY_TILE_DIR, { recursive: true });
-  await mkdir(GENUS_TILE_DIR, { recursive: true });
+  await mkdir(GENUS_FIELD_TILE_DIR, { recursive: true });
   await mkdir(TREE_DIR, { recursive: true });
   await mkdir(CHUNK_DIR, { recursive: true });
   await mkdir(ROUTING_DIR, { recursive: true });
   await writeRamp();
-  await writeGenusPalette();
 
   // The tree points, served for the client's live genus dots: the TREE v3 blob copied verbatim,
   // one per city that carries a genus layer.
@@ -348,20 +322,18 @@ async function build(): Promise<void> {
     );
   }
 
-  // The per-tree genus map: each tree a crown-sized, genus-coloured disc, drawn with the shared
-  // palette. The subcommand renders every manifest city that carries a genus layer.
+  // The client-shaded genus dominance data pyramid, rendered from the trees. Lossless RGB density
+  // tiles the WebGL overlay colours live; no palette, since the client owns the colours.
   if (cities.some(hasGenusLayer)) {
     runTiler(
       [
-        "genus",
+        "genus-field",
         "--manifest",
         MANIFEST_PATH,
-        "--palette",
-        GENUS_PALETTE_LUT_PATH,
         "--data",
         DATA_DIR,
         "--tiles",
-        GENUS_TILE_DIR,
+        GENUS_FIELD_TILE_DIR,
       ],
       false,
     );
