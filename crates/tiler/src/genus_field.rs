@@ -1,11 +1,14 @@
-//! `tiler genus`: renders data/trees/<id>.bin into a per-tree genus map. Each tree is drawn as a
-//! filled disc sized by its crown and coloured by its genus — no kernel and no blend, so overlapping
-//! trees layer rather than average and every genus colour stays crisp instead of muddying.
+//! `tiler genus-field`: the low-zoom genus overlay as CLIENT-SHADED data tiles, replacing the split
+//! per-genus colour pyramids `tiler genus` bakes. Where those pre-colour each tree's disc and lean on
+//! the client to alpha-stack the enabled layers — which can only add ink, never renormalise — this
+//! bakes the raw material and defers the colouring: each tile channel carries ONE genus's local crown
+//! density (12 genera packed 4 to an RGBA tile, so 3 tiles cover them all), and the client's shader
+//! reads the enabled channels to pick the dominant genus, dither it against the runner-up, and fade
+//! by the total density. That moves the dominance decision from bake time to render time, so toggling
+//! a genus recolours live and a region hands off to its runner-up instead of going blank.
 //!
-//! To let the legend toggle one genus at a time, the pyramid is SPLIT by genus: each genus id gets
-//! its own transparent pyramid at public/tiles/genus/{id}/{z}/{x}/{y}.webp holding only that genus's
-//! trees. The client stacks one layer per enabled genus, so the standard all-genera view is all
-//! twelve stacked and toggling a genus adds or removes a single layer. See scripts/README.md.
+//! The tiles are DATA, not colour, so they are encoded lossless — a lossy byte would misread as a
+//! different density. See components/genus-gl-layer.tsx for the reader and scripts/README.md.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -14,43 +17,48 @@ use std::time::Instant;
 use rayon::prelude::*;
 
 use crate::Fallible;
-use crate::binfmt::{self, Trees};
+use crate::binfmt;
+use crate::binfmt::Trees;
 use crate::geometry::Projection;
 use crate::manifest::{City, Manifest};
 use crate::raster::{
-    EQUATOR_METERS_PER_PIXEL, MIN_ZOOM, TILE_SIZE, Tile, encode_webp, lat_to_pixel_y,
+    EQUATOR_METERS_PER_PIXEL, MIN_ZOOM, TILE_SIZE, Tile, encode_webp_lossless, lat_to_pixel_y,
     lng_to_pixel_x, pixel_x_to_lng, pixel_y_to_lat, plan_tiles,
 };
 
-// The raster half of the overlay only carries the zoomed-out view: from z15 up the client draws
-// the trees live as crisp canvas discs (components/tree-dots-layer.tsx), so the pyramid stops one
-// level below MAX_ZOOM rather than chasing the deep zooms a raster tile can only blur into.
+// Matches `tiler genus`: the raster half stops at z14 and the client's live dots take over at z15.
 const GENUS_MAX_ZOOM: u32 = 14;
 
-// A dot never shrinks below this, so a crown that is a fraction of a pixel when zoomed out still
-// shows, nor grows past the ceiling, so a lone giant crown at high zoom does not swell into a blob.
-// Between the two the dot is the crown's true radius in pixels, so bigger trees read bigger.
+// A crown's disc, in pixels, is clamped to this band just as the colour pyramid clamps it: a floor so
+// a sub-pixel crown at low zoom still deposits density, a ceiling so a lone giant crown does not smear.
 const MIN_DOT_PX: f64 = 1.5;
 const MAX_DOT_PX: f64 = 16.0;
-// How opaque one tree draws. Below 1 so a dense stand layers into a slightly richer patch and the
-// basemap still reads through the gaps, but high enough that each genus colour stays legible.
-const DOT_ALPHA: f64 = 0.85;
 
-/// The number of genus bins: 11 ranked genera plus an "Other" tail. Must equal GENUS_COUNT in
-/// src/tree-cover/genus.ts, the palette the tiler draws each tree with.
+/// The 11 ranked genera plus the "Other" tail — must equal GENUS_COUNT in src/tree-cover/genus.ts.
 const GENUS_BINS: usize = 12;
+/// Three genus densities pack into one tile's R, G, B; the alpha stays opaque. Data goes in RGB, NOT
+/// alpha, because a browser premultiplies RGB by alpha when it decodes the image — which would corrupt
+/// the other genera's densities wherever a genus-in-alpha read below full. So ceil(12 / 3) = 4 tiles.
+const GENERA_PER_TILE: usize = 3;
+const LAYERS: usize = GENUS_BINS.div_ceil(GENERA_PER_TILE);
 
+// The metre-space bucket edge the tree index sorts into, so a box query scans one run per row.
 const BUCKET_METERS: f64 = 60.0;
+
+// The accumulated crown coverage that quantizes to a full density byte (255). One opaque crown
+// deposits coverage 1 at its centre, so 2.5 means "about two or three crowns deep reads as full" —
+// the point where a channel saturates. Ratios below it are preserved, so the client's dither and
+// dominance stay faithful; only the very densest stands clip, which still read as fully dominant.
+const DENSITY_FULL: f32 = 2.5;
 
 pub struct Args {
     pub manifest: PathBuf,
-    pub palette: PathBuf, // GENUS_BINS RGBA entries, the genus colour a dot is filled with
     pub data: PathBuf,
     pub tiles: PathBuf,
 }
 
-/// One city's genus layer: the trees in a metre-space index and the projection that placed them.
-struct Genus {
+/// One city's trees in metre space, plus the projection that placed them.
+struct Field {
     trees: TreeIndex,
     projection: Projection,
     tree_count: usize,
@@ -75,46 +83,24 @@ impl std::ops::Add for Stats {
     }
 }
 
-fn read_genus(city: &City, data: &Path) -> Fallible<Option<Genus>> {
+fn read_field(city: &City, data: &Path) -> Fallible<Option<Field>> {
     if city.field.genus.is_none() {
         return Ok(None);
     }
     let trees = binfmt::read_trees(&data.join("trees").join(&city.field.trees.file))?;
     let projection = Projection::new(&city.bounds);
-    let tree_count = trees.coords.len();
-    Ok(Some(Genus {
+    Ok(Some(Field {
+        tree_count: trees.coords.len(),
         trees: TreeIndex::new(&trees, &projection),
         projection,
-        tree_count,
     }))
 }
 
-/// Composite one straight-alpha colour over a pixel: the non-premultiplied "over" operator, so a
-/// dot drawn on top of an earlier one keeps its own colour where it is opaque and blends only at
-/// its anti-aliased rim.
-fn over(pixels: &mut [u8], pixel: usize, rgb: [u8; 3], source_alpha: f64) {
-    let destination_alpha = f64::from(pixels[pixel + 3]) / 255.0;
-    let out_alpha = source_alpha + destination_alpha * (1.0 - source_alpha);
-    if out_alpha <= 0.0 {
-        return;
-    }
-    for channel in 0..3 {
-        let source = f64::from(rgb[channel]) / 255.0;
-        let destination = f64::from(pixels[pixel + channel]) / 255.0;
-        let blended = (source * source_alpha
-            + destination * destination_alpha * (1.0 - source_alpha))
-            / out_alpha;
-        pixels[pixel + channel] = (blended * 255.0).round() as u8;
-    }
-    pixels[pixel + 3] = (out_alpha * 255.0).round() as u8;
-}
-
-/// Draw one city's trees onto a tile, each a genus-coloured disc. Returns whether any pixel was
-/// painted. The tile's metre-space box is grown by the largest dot's reach, so a tree just off the
-/// edge whose disc spills in is still drawn; each disc is clipped to the tile and its rim feathered
-/// over a pixel so the dots do not read as jagged squares. `only` restricts the draw to a single
-/// genus id, since each genus is baked into its own pyramid.
-fn paint(pixels: &mut [u8], genus: &Genus, palette: &[u8], tile: &Tile, only: u8) -> bool {
+/// Accumulate one city's crown coverage into a tile's per-genus density buffer (`GENUS_BINS` floats
+/// per pixel). Every tree adds its disc's anti-aliased coverage into its own genus channel — additive,
+/// so overlapping crowns of a genus build density and crowns of different genera are kept apart per
+/// channel rather than compositing into one colour. Mirrors the disc geometry of `tiler genus`.
+fn accumulate(density: &mut [f32], field: &Field, tile: &Tile) {
     let zoom = tile.zoom;
     let origin_x = f64::from(tile.x) * TILE_SIZE as f64;
     let origin_y = f64::from(tile.y) * TILE_SIZE as f64;
@@ -122,33 +108,31 @@ fn paint(pixels: &mut [u8], genus: &Genus, palette: &[u8], tile: &Tile, only: u8
     let meters_per_pixel =
         EQUATOR_METERS_PER_PIXEL * centre_lat.to_radians().cos() / f64::from(1u32 << zoom);
 
-    let min_x = genus.projection.x(pixel_x_to_lng(origin_x, zoom));
-    let max_x = genus
+    let min_x = field.projection.x(pixel_x_to_lng(origin_x, zoom));
+    let max_x = field
         .projection
         .x(pixel_x_to_lng(origin_x + TILE_SIZE as f64, zoom));
-    let min_y = genus
+    let min_y = field
         .projection
         .y(pixel_y_to_lat(origin_y + TILE_SIZE as f64, zoom));
-    let max_y = genus.projection.y(pixel_y_to_lat(origin_y, zoom));
-    let reach = (genus.trees.max_crown_m() / meters_per_pixel).clamp(MIN_DOT_PX, MAX_DOT_PX)
+    let max_y = field.projection.y(pixel_y_to_lat(origin_y, zoom));
+    let reach = (field.trees.max_crown_m() / meters_per_pixel).clamp(MIN_DOT_PX, MAX_DOT_PX)
         * meters_per_pixel;
 
-    let mut painted = false;
-    genus.trees.for_each_in_box(
+    field.trees.for_each_in_box(
         min_x,
         min_y,
         max_x,
         max_y,
         reach,
         |mx, my, crown_m, genus_id| {
-            if only != genus_id {
+            let genus = genus_id as usize;
+            if genus >= GENUS_BINS {
                 return;
             }
-            let centre_px = lng_to_pixel_x(genus.projection.lng(mx), zoom) - origin_x;
-            let centre_py = lat_to_pixel_y(genus.projection.lat(my), zoom) - origin_y;
+            let centre_px = lng_to_pixel_x(field.projection.lng(mx), zoom) - origin_x;
+            let centre_py = lat_to_pixel_y(field.projection.lat(my), zoom) - origin_y;
             let radius = (crown_m / meters_per_pixel).clamp(MIN_DOT_PX, MAX_DOT_PX);
-            let base = genus_id as usize * 4;
-            let rgb = [palette[base], palette[base + 1], palette[base + 2]];
 
             let x0 = (centre_px - radius - 1.0).floor().max(0.0) as usize;
             let x1 = (centre_px + radius + 1.0)
@@ -164,43 +148,64 @@ fn paint(pixels: &mut [u8], genus: &Genus, palette: &[u8], tile: &Tile, only: u8
                     let dx = ix as f64 + 0.5 - centre_px;
                     let coverage = (radius + 0.5 - dx.hypot(dy)).clamp(0.0, 1.0);
                     if coverage > 0.0 {
-                        over(pixels, (iy * TILE_SIZE + ix) * 4, rgb, DOT_ALPHA * coverage);
-                        painted = true;
+                        density[(iy * TILE_SIZE + ix) * GENUS_BINS + genus] += coverage as f32;
                     }
                 }
             }
         },
     );
-    painted
 }
 
-/// Render every genus's tile at one position: one transparent tile per genus, each painting only
-/// its own trees into the same reused buffer (zeroed between them), a tile that lands on nothing
-/// written as the shared blank so the client never 404s.
-fn render(
-    genera: &[Option<Genus>],
-    palette: &[u8],
-    blank: &[u8],
-    variants: &[(PathBuf, u8)],
-    tile: &Tile,
-) -> Fallible<Stats> {
+/// The byte an opaque, tree-free pixel holds: RGB zero, alpha full. The alpha is always full because
+/// the genus densities live in RGB (see GENERA_PER_TILE) and a translucent tile would be premultiplied
+/// on decode. The shared blank is this repeated, so a treeless tile still reads as density zero.
+const OPAQUE_ZERO: [u8; 4] = [0, 0, 0, 255];
+
+/// Quantize one packed layer (genera `base..base + 3`) of the density buffer into an RGB-in-opaque
+/// tile. Returns None when the layer is entirely empty, so the caller can write the shared blank.
+fn pack_layer(density: &[f32], base: usize) -> Option<Vec<u8>> {
     let mut pixels = vec![0u8; TILE_SIZE * TILE_SIZE * 4];
-    let mut stats = Stats::default();
-    for (directory, only) in variants {
-        pixels.fill(0);
-        let mut painted = false;
-        for member in &tile.members {
-            if let Some(genus) = &genera[*member] {
-                painted |= paint(&mut pixels, genus, palette, tile, *only);
+    let mut painted = false;
+    for pixel in 0..TILE_SIZE * TILE_SIZE {
+        pixels[pixel * 4 + 3] = 255;
+        for channel in 0..GENERA_PER_TILE {
+            let genus = base + channel;
+            if genus >= GENUS_BINS {
+                continue;
+            }
+            let value = density[pixel * GENUS_BINS + genus];
+            if value > 0.0 {
+                let byte = (value / DENSITY_FULL * 255.0).round().clamp(0.0, 255.0) as u8;
+                pixels[pixel * 4 + channel] = byte;
+                painted |= byte > 0;
             }
         }
+    }
+    painted.then_some(pixels)
+}
 
-        let rendered = if painted {
-            Some(encode_webp(&pixels)?)
-        } else {
-            None
-        };
-        let webp = rendered.as_deref().unwrap_or(blank);
+/// Render one tile position: accumulate every member city's crowns once, then split the shared
+/// density buffer into the `LAYERS` packed RGBA tiles. A layer that lands on nothing is written as the
+/// shared blank so the client never 404s.
+fn render(
+    fields: &[Option<Field>],
+    blank: &[u8],
+    directories: &[PathBuf],
+    tile: &Tile,
+) -> Fallible<Stats> {
+    let mut density = vec![0f32; TILE_SIZE * TILE_SIZE * GENUS_BINS];
+    for member in &tile.members {
+        if let Some(field) = &fields[*member] {
+            accumulate(&mut density, field, tile);
+        }
+    }
+
+    let mut stats = Stats::default();
+    for (layer, directory) in directories.iter().enumerate() {
+        let packed = pack_layer(&density, layer * GENERA_PER_TILE);
+        let painted = packed.is_some();
+        let encoded = packed.map(|pixels| encode_webp_lossless(&pixels));
+        let webp = encoded.as_deref().unwrap_or(blank);
         fs::write(
             directory
                 .join(tile.zoom.to_string())
@@ -222,40 +227,28 @@ pub fn run(args: &Args) -> Fallible<()> {
     let started = Instant::now();
     let manifest: Manifest = serde_json::from_slice(&fs::read(&args.manifest)?)?;
 
-    let palette = fs::read(&args.palette)?;
-    if palette.len() != GENUS_BINS * 4 {
-        return Err(format!(
-            "{} is {} bytes, not the {} of a {GENUS_BINS}-entry RGBA palette",
-            args.palette.display(),
-            palette.len(),
-            GENUS_BINS * 4
-        )
-        .into());
-    }
-
-    let genera: Vec<Option<Genus>> = manifest
+    let fields: Vec<Option<Field>> = manifest
         .cities
         .iter()
-        .map(|city| read_genus(city, &args.data))
-        .collect::<Fallible<Vec<Option<Genus>>>>()?;
-    if genera.iter().all(Option::is_none) {
+        .map(|city| read_field(city, &args.data))
+        .collect::<Fallible<Vec<Option<Field>>>>()?;
+    if fields.iter().all(Option::is_none) {
         eprintln!("no city has a genus layer; nothing to render");
         return Ok(());
     }
-    for (city, genus) in manifest.cities.iter().zip(&genera) {
-        if let Some(genus) = genus {
-            eprintln!("{}: {} trees", city.id, genus.tree_count);
+    for (city, field) in manifest.cities.iter().zip(&fields) {
+        if let Some(field) = field {
+            eprintln!("{}: {} trees", city.id, field.tree_count);
         }
     }
 
-    // One transparent pyramid per genus id under public/tiles/genus, each holding only that genus,
-    // so the client can stack the enabled ones and toggle each on its own.
-    let variants: Vec<(PathBuf, u8)> = (0..GENUS_BINS)
-        .map(|id| (args.tiles.join(id.to_string()), id as u8))
+    // One lossless pyramid per packed layer under public/tiles/genus-field/{0,1,2}.
+    let directories: Vec<PathBuf> = (0..LAYERS)
+        .map(|layer| args.tiles.join(layer.to_string()))
         .collect();
 
     let plan = plan_tiles(&manifest.cities, GENUS_MAX_ZOOM);
-    for (directory, _) in &variants {
+    for directory in &directories {
         for tile in &plan {
             fs::create_dir_all(
                 directory
@@ -264,22 +257,21 @@ pub fn run(args: &Args) -> Fallible<()> {
             )?;
         }
     }
-    let blank = encode_webp(&vec![0u8; TILE_SIZE * TILE_SIZE * 4])?;
+    let blank = encode_webp_lossless(&OPAQUE_ZERO.repeat(TILE_SIZE * TILE_SIZE));
 
     eprintln!(
-        "rendering {} genus tiles ({} plan tiles x {} variants) across {} threads",
-        plan.len() * variants.len(),
+        "rendering {} genus-field tiles ({} positions x {LAYERS} layers) across {} threads",
+        plan.len() * LAYERS,
         plan.len(),
-        variants.len(),
         rayon::current_num_threads()
     );
     let stats = plan
         .par_iter()
-        .map(|tile| render(&genera, &palette, &blank, &variants, tile))
+        .map(|tile| render(&fields, &blank, &directories, tile))
         .try_reduce(Stats::default, |left, right| Ok(left + right))?;
 
     eprintln!(
-        "wrote {} genus tiles (z{MIN_ZOOM}-z{GENUS_MAX_ZOOM}, {} painted, {:.1} MiB) in {:.1}s",
+        "wrote {} genus-field tiles (z{MIN_ZOOM}-z{GENUS_MAX_ZOOM}, {} painted, {:.1} MiB) in {:.1}s",
         stats.tiles,
         stats.painted,
         stats.bytes as f64 / 1024.0 / 1024.0,
@@ -291,8 +283,8 @@ pub fn run(args: &Args) -> Fallible<()> {
 /// The trees in a uniform metre-space index, CSR-style: bucket `row * cols + col` owns
 /// `[starts[bucket], starts[bucket + 1])`. Buckets along a row are contiguous, so the scan a
 /// query makes is one run per row rather than one per bucket. Each tree carries its crown radius
-/// (the size the overlay draws its dot at) and its genus id (the colour), in bucket order.
-pub struct TreeIndex {
+/// (the size the overlay draws its dot at) and its genus id, in bucket order.
+struct TreeIndex {
     xs: Vec<f64>,
     ys: Vec<f64>,
     crown_radii_m: Vec<f64>, // in bucket order alongside xs/ys
@@ -306,7 +298,7 @@ pub struct TreeIndex {
 }
 
 impl TreeIndex {
-    pub fn new(trees: &Trees, projection: &Projection) -> Self {
+    fn new(trees: &Trees, projection: &Projection) -> Self {
         let tree_x: Vec<f64> = trees
             .coords
             .iter()
@@ -367,7 +359,7 @@ impl TreeIndex {
         }
     }
 
-    pub fn max_crown_m(&self) -> f64 {
+    fn max_crown_m(&self) -> f64 {
         self.max_crown_m
     }
 
@@ -375,7 +367,7 @@ impl TreeIndex {
     /// (x, y, crown_radius_m, genus_id). `reach` is the largest dot radius in metres, so a tree just
     /// outside the tile whose dot still spills into it is included. The bucket scan overshoots the
     /// box by up to a bucket, so each tree is tested against the grown box before it is visited.
-    pub fn for_each_in_box(
+    fn for_each_in_box(
         &self,
         min_x: f64,
         min_y: f64,
