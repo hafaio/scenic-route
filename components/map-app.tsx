@@ -53,6 +53,7 @@ import PinEditor from "./pin-editor";
 import RoutePanel from "./route-panel";
 import SignInDialog from "./sign-in-dialog";
 import Toolbar from "./toolbar";
+import { useHashFlag } from "./use-hash-flag";
 
 // leaflet touches `window` at module load, so the map must be client-only
 const MapView = dynamic(() => import("./map"), {
@@ -155,7 +156,8 @@ export default function MapApp() {
     () => new Set<OverlayId>(["canopy"]),
   );
   const [signingIn, setSigningIn] = useState<boolean>(false);
-  const [aboutOpen, setAboutOpen] = useState<boolean>(false);
+  // Bound to the URL hash so About is deep-linkable (#about) and the back button closes it.
+  const [aboutOpen, setAboutOpen] = useHashFlag("about");
   const [locationError, setLocationError] = useState<
     "denied" | "unavailable" | null
   >(null);
