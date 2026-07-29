@@ -13,8 +13,12 @@ import {
 import { OVERLAYS, type OverlayId } from "../src/overlays/registry";
 import type { Pin, PinDraft } from "../src/pin";
 import type { RouteResult } from "../src/routing/search";
+import installTilePrune from "../src/tiles/prune";
 import { savedIcon, userIcon } from "./map-icons";
 import RouteLayer from "./route-layer";
+
+// Every grid layer on the map inherits this, so it goes in once here rather than in each layer.
+installTilePrune();
 
 export interface MapTarget {
   lat: number;

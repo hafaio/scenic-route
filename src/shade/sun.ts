@@ -23,8 +23,52 @@ export const DECL_MAX_DEG = 23.44;
 export const SEASON_BANDS = 6;
 export const HOUR_ANGLE_STEP_DEG = 18;
 
+// The sun is a disk ~0.53° across, not a point, so its shadow has a penumbra that widens with distance
+// from the occluding edge. Both shadow generators model it by averaging the shadow cast from samples
+// spread over the disk, and DISK_SAMPLES is what the bake uses.
+const SUN_ANGULAR_RADIUS_DEG = 0.265;
+export const DISK_SAMPLES = 6;
+
+// One sun-disk sample: the ground unit vector pointing DOWN the shadow (anti-sun) and the shadow
+// length per metre of caster height.
+export interface SunSample {
+  east: number;
+  north: number;
+  shadowPerHeight: number;
+}
+
 function clamp(value: number, low: number, high: number): number {
   return Math.min(high, Math.max(low, value));
+}
+
+// `count` samples of the disk around a sun position: index 0 at the centre, the rest on a ring near the
+// disk's mean, so a count of 1 is the crisp point sun. The azimuth spread divides by cos(elevation) so
+// the offsets stay a circle on the sky.
+export function sunSamples(
+  azimuthDeg: number,
+  elevationDeg: number,
+  count: number,
+): SunSample[] {
+  const ringRadius = SUN_ANGULAR_RADIUS_DEG * 0.75;
+  const cosElevation = Math.cos(elevationDeg * DEGREES);
+  const samples: SunSample[] = [];
+  for (let index = 0; index < count; index++) {
+    let deltaElevation = 0;
+    let deltaAzimuth = 0;
+    if (index > 0) {
+      const angle = (2 * Math.PI * (index - 1)) / (count - 1);
+      deltaElevation = ringRadius * Math.cos(angle);
+      deltaAzimuth = (ringRadius * Math.sin(angle)) / cosElevation;
+    }
+    const azimuth = (azimuthDeg + deltaAzimuth) * DEGREES;
+    const elevation = (elevationDeg + deltaElevation) * DEGREES;
+    samples.push({
+      east: -Math.sin(azimuth),
+      north: -Math.cos(azimuth),
+      shadowPerHeight: 1 / Math.tan(elevation),
+    });
+  }
+  return samples;
 }
 
 // The sun's declination (degrees) from its horizontal position over an observer at `latDeg`. The

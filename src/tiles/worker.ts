@@ -1,4 +1,5 @@
 import { setBaseUrl } from "./base-url";
+import { canopyRenderer } from "./canopy";
 import { commercialRenderer } from "./commercial";
 import { linesRenderer } from "./lines";
 import { poiRenderer } from "./poi";
@@ -56,6 +57,8 @@ function rasterize(message: DrawMessage): Promise<void> {
       return run(poiRenderer, params, message);
     case "tree-dots":
       return run(treeDotsRenderer, params, message);
+    case "canopy":
+      return run(canopyRenderer, params, message);
     case "shade":
       return run(shadeRenderer, params, message);
   }

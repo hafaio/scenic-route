@@ -14,13 +14,13 @@ automatically whenever an input is newer than the last run.
 
 ## Who does what: TypeScript fetches, Rust computes
 
-**All of the model math lives in `crates/tiler`**, a Rust binary with seven subcommands. The
+**All of the model math lives in `crates/tiler`**, a Rust binary with eight subcommands. The
 scripts fetch, encode and orchestrate; they compute nothing about trees.
 
 | | |
 | --- | --- |
 | `scripts/` | Socrata paging, the Overpass mirror rotation, the disk cache, the `.bin` encoders, the manifest, and the colour ramp |
-| `crates/tiler` | the canopy convolution and the cover it yields, the sidewalk offsets and their cover, the Monte-Carlo cover distribution, the per-polygon canopy heights, the genus-dot overlay, the tile pyramids, the WebPs, the street chunks, and the routing graph |
+| `crates/tiler` | the canopy convolution and the cover it yields, the sidewalk offsets and their cover, the Monte-Carlo cover distribution, the per-polygon canopy heights, the genus-dot overlay, the tile pyramids, the WebPs, the street and caster chunks, and the routing graph |
 
 ```sh
 tiler densities --params <file.json>                          # fills the street & path density blobs, in place
@@ -29,6 +29,7 @@ tiler canopy --manifest … --ramp … --data … --tiles …         # the LiDA
 tiler genus  --manifest … --palette … --data … --tiles …      # the genus-dot raster pyramid
 tiler shade  --manifest … --data … --tiles … --params …       # the building- and tree-shadow pyramids
 tiler chunks --manifest … --data … --chunks … [--paths …]     # slices STRT (+PATH) into the client's street chunks
+tiler caster-chunks --manifest … --data … --chunks … --params …  # slices BLDG+CNPY+TREE into the client's shadow-caster chunks
 tiler graph  --streets <in.bin> --out <out.bin> [--paths …] [--ferries …]   # contracts STRT (+PATH, +FERR) into the GRPH routing graph
 ```
 
@@ -847,6 +848,143 @@ Then `segment count` segments, back to back, each:
   gradient rather than one flat colour
 
 Decoded by `components/street-score-layer.tsx`, which applies the offset in *pixels*.
+
+### `public/casters/{x}/{y}.bin` — the shadow casters, magic `CSTR` (v2, derived, gitignored)
+
+The footprints, crowns and trunks that touch one **z15** tile, so the client can generate their
+shadows itself past where the baked pyramid stops — the pyramid's z15 level alone is two thirds of
+its bytes, and geometry the client sweeps costs a fraction of that. `tiler caster-chunks` writes them
+from the same `data/buildings/<id>.bin` and `data/canopy/<id>.bin` that `tiler shade` rasterizes,
+dropping exactly what that drops: a footprint with no roof height, and a crown carrying the canopy
+file's **0 unknown-height sentinel** (496,604 of 1,076,146 crowns survive), plus the census trunks of
+`data/trees/<id>.bin`. A city with only some of the three sources chunks the ones it has.
+`src/tiles/casters.ts` decodes and caches them and `src/tiles/sweep.ts` sweeps them; the shade layer
+reads the pyramid below z15 and the sweep at and above it.
+
+A caster goes into every z15 tile it reaches, so it lands where it **stands**, not where its shadow
+falls. A shadow reaches up to `maxShadowMeters` (500 m, ~0.54 of a 927 m chunk) into a view from
+outside it, so the client gathers a halo of chunks around its viewport; `manifest.json` carries that
+radius, the chunk zoom, the coordinate scale and the list of chunks that exist — the last so a
+halo's worth of empty tiles is not a stampede of 404s.
+
+**A caster is clipped to the chunk it ships in**, to the tile's exact rectangle, so a canopy blob
+spanning fifty tiles costs its own area once instead of fifty whole copies — one 100,431-vertex
+crown alone spans 48 chunks, and shipping it whole into each cost 9.2 MiB of the artifact against
+the 197 KiB its pieces cost. That is lossless for both things the client does with a caster: a
+Minkowski sweep distributes over a union, so sweeping the pieces and unioning is the shadow of the
+whole, and the pieces union back to the whole footprint for the base punch-out. The clip is
+Weiler-Atherton rather than Sutherland-Hodgman, which would join a ring that leaves the chunk and
+comes back with a zero-area bridge along the seam — invisible to a fill, but the sweep would drag
+it into a shadow that is not there. Winding is preserved through the clip, and a caster that never
+leaves its chunk is passed through untouched, so the common case is byte-for-byte what it was.
+
+Header, 44 bytes:
+
+| offset | type | field |
+| --- | --- | --- |
+| 0 | u8[4] | magic `CSTR` |
+| 4 | u16 | format version |
+| 6 | u16 | header bytes |
+| 8 | u32 | building record count |
+| 12 | u32 | crown record count |
+| 16 | f64 | origin longitude, degrees (the tile's north-west corner, and the chunk's own west clip edge) |
+| 24 | f64 | origin latitude, degrees (also its north clip edge) |
+| 32 | f64 | coordinate scale, degrees per quantized unit (1e-6, ~0.1 m — the grid both sources are stored on) |
+| 40 | u32 | trunk count |
+
+Then the `building record count` buildings, then the `crown record count` crowns, back to back, each:
+
+- `varint` height, **decimetres** — a roof height or a measured crown height
+- `varint` ring count, the outer ring first
+- per ring, a `varint` vertex count and that many (longitude, latitude) pairs as zigzag LEB128
+  varint deltas. The delta chain runs on **across a record's rings**, so an inner ring starts from
+  the outer ring's last vertex rather than from the chunk origin again.
+
+Then the `trunk count` trunks, each four varints — a zigzag (longitude, latitude) step from the
+previous trunk on the same quantized grid, a **radius in centimetres** and a **height in
+decimetres**. Their delta chain is its own, starting at the chunk origin, and runs in the chunk's
+row-major order rather than the city's, which is what keeps the steps short; a trunk is a point, so
+nothing here is clipped and there is no ring count to carry. That is 5.0 bytes a trunk.
+
+A record is one clipped **piece**, not one caster: clipping a ring to the chunk can leave several
+disjoint pieces (a U reaching in, out and in again), which one record's ring list — an outer ring
+and its holes — cannot express, so each piece ships as its own record at the same height. The
+client already unions the shadows and the bases of two overlapping casters, and the pieces union to
+the whole, so nothing has to know they were once one polygon. NYC ships 1.42 M records for 1.36 M
+casters. The one shape with nowhere to put a hole is a footprint that both splits and has inner
+rings, since nothing in the format says which piece a hole belongs to; it ships whole into that
+chunk, as everything did before, which is still exact because the pieces it duplicates are subsets
+of it. That happens 37 times in the city.
+
+Which section a record came from is what it casts by, exactly as in `tiler shade`: a footprint is
+**swept** (its ring together with its translate, since a wall joins the roof to the ground) and a
+crown is only **translated**, floating free of the ground. A **trunk** is swept like a footprint, and
+swept **opaquely, with the buildings rather than with the crowns**: the crown layer is thinned by the
+season's tau (`src/shade/phenology.ts`), where wood blocks the sun in February as well as in July.
+Its swept circle is a capsule, drawn as the quad without the two round caps — the median trunk is
+0.34 m across against a 0.91 m z17 pixel, so the caps are a hundredth of a pixel — and the quad is
+floored at one device pixel of width, since a sliver thinner than the sample grid dashes or drops out
+of the rasterizer instead of reading as the faint line it is.
+
+A trunk's **diameter** is the dbh its crown was grown from, recovered by inverting the
+`CROWN_ALLOMETRY` of `scripts/build-tree-data.ts` (`dbh_cm = exp(exp((ln(2r) + 0.742) / 2.414)) - 1`,
+exact, since the crown byte is a monotone function of dbh alone) and clamped to the same 1..60 inch
+range the forward pass clamps to — which is also what stops an OSM tree, whose crown byte came from a
+*recorded* crown diameter and never from a dbh, from inverting into a metre-thick trunk. A tree whose
+dbh was missing carries the imputed median (crown byte 39, 7.07% of the city), so its trunk is the
+median trunk.
+
+A trunk's **height is the crown base of the canopy polygon it stands under**, `CROWN_BASE_FRACTION`
+(0.4) of that polygon's measured height — the very height the crown's own shadow is cast from, so the
+trunk's shadow runs from the tree to the crown shadow with nothing between. It is found by a
+point-in-polygon join against the crowns bucketed into the trunk's own z15 tile. A census tree under
+no measured crown is **dropped**: with no crown shadow overhead there is nothing to join, and the
+sliver would be shade the model never casts. NYC ships **582,719 of 925,338** census trees (63.0%),
+at a median 0.17 m of radius and 4.8 m of height.
+
+A footprint also ships its **inner rings**, because the display path punches a building's base back
+out of the shade and without them a courtyard would punch as though it were roof; they cost 21k
+vertices across the city. A crown ships its outer ring alone — it is never punched, `tiler shade`
+translates its outer ring alone, and the canopy's inner rings are a staircase of LiDAR gaps that
+would be a quarter of everything here. Trunks exist only where the **census** does, and the baked
+pyramid below z15 has none at all, so they appear at the z15 handoff — where a trunk is a tenth of a
+pixel wide and the two halves still agree to within 0.3/255 of mean alpha.
+
+**A crown's outline is simplified before it ships, by Douglas-Peucker at 0.6 m; a footprint's is
+not.** The canopy is traced from a 1-foot LiDAR raster, so a crown's ring is a staircase of ~0.3 m
+steps, and those rings were 25.6 M of the 34.2 M vertices shipped. Nothing this feeds can resolve
+them: the vector path stops at **z17**, where a pixel is 0.91 m. The tolerance is measured in
+**metres**, on a local projection — a degree is 24 % looser east-west than north-south at this
+latitude — and it is a true bound, distance to the segment rather than to its infinite line, so the
+outline moves by at most 0.6 m, **two thirds of a z17 pixel** (the worst deviation anywhere in the
+city measures 0.5999999 m; the codec's own quantization already costs 0.05 m). Sweeping the
+tolerance over the city removes 5.7 % of the crown vertices at 0.30 m, 34 % at 0.45 m, **52 % at
+0.60 m** and 70 % at 1.00 m: the cliff between 0.30 and 0.45 is the staircase's own step going all
+at once, and past 0.60 m the return flattens while the error crosses a whole pixel (1.00 m is also
+where four rings first simplify into self-intersection). Footprints are left alone — they average
+9.6 vertices, so there is nothing to win, and they carry the base punch-out, which must stay exact.
+
+This is a **display-only** simplification: `data/canopy/<id>.bin` is untouched, and the routing
+field and the baked pyramid go on reading the exact rings. It runs **before the bucketing and the
+clip**, on whole polygons, because two chunks that simplified their own side of a shared seam
+afterwards could leave a gap or an overlap along it; simplifying first leaves every seam decided by
+the exact tile rectangle, exactly as the clip alone decided it before.
+
+NYC comes out at **1121 chunks, 53.4 MiB (46.0 MiB gzipped)**, a chunk running 52 KiB raw /
+44 KiB gzipped at the median and 92 / 79 KiB at the p95, of which the trunks are 2.8 MiB raw
+(2.5 gzipped) — **+5.5 % on the artifact**. The simplification runs in the same time as unsimplified
+— the recursion costs about what the vertices it drops cost to encode. 34.0 M source vertices ship as
+21.0 M, of which 12.5 M are crowns. The clip is what took the 34.2 M unsimplified from 47.1 M
+copies, the 0.5 % over the source being the seam vertices it adds where a caster crosses.
+
+Where that lands: a screenful of z15 tiles costs ~19 ms a tile over midtown and **65 ms over
+Prospect Park**, down from 73, and a Prospect Park viewport with its halo fetches 3.35 MiB against
+4.75. Deeper in it is a fraction of that (~5-6 ms at z17), because a tile that small is reached by
+few casters. See `src/tiles/sweep.ts`. **The level of detail used to be deliberately the client's**
+— it is the half that knows its zoom and its frame budget, and detail dropped in the bake cannot be
+recovered there — but the staircase is not detail at any zoom the client can ask for, so what that
+bought was a payload and a path-building cost no viewport could ever use. LOD past this is still
+the client's to take.
 
 ### `public/routing/{id}.bin` — the routing graph, magic `GRPH` (v5, derived, gitignored)
 

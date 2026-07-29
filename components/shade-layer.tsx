@@ -27,6 +27,10 @@ import manifest from "../src/tree-cover/manifest.json";
 // the date — so the two pyramids are composited per pixel in the worker, with the canopy's seasonal
 // opacity (src/shade/phenology.ts) and the bin's solar intensity handed over as params.
 //
+// The pyramid stops at VECTOR_ZOOM. From there the worker GENERATES the shadows instead, sweeping the
+// baked caster chunks (src/tiles/sweep.ts) at the tile's own resolution — so the shadow edges stay
+// crisp however far the map goes in, and the seasonal canopy is one composite rather than a pyramid.
+//
 // The tiles are drawn by the tile worker (src/tiles/shade.ts) rather than fetched into <img>s, so that
 // past the baked pyramid's finest level the magnification resamples across tile boundaries instead of
 // leaving a seam at every one — and so the compositing happens once, at source resolution. Only the bin
@@ -40,9 +44,14 @@ const PANE_Z_INDEX = 275; // just under the commercial band (280), above the can
 
 const MIN_ZOOM = 10;
 const MAX_ZOOM = 20;
-// The finest level `tiler shade` bakes; above it the worker magnifies from this level. Keep in sync
-// with SHADE_MAX_ZOOM in scripts/shade-schedule.ts.
-const MAX_NATIVE_ZOOM = 15;
+// The finest level `tiler shade` bakes. Keep in sync with SHADE_MAX_ZOOM in
+// scripts/shade-schedule.ts.
+const MAX_NATIVE_ZOOM = 14;
+// Where the worker stops reading the pyramid and starts sweeping the casters itself. One past the
+// deepest baked level, so neither path is redundant: every baked level is read, and nothing deeper
+// is baked. Deeper would waste the pyramid's costliest levels; shallower would pull caster chunks
+// over four times the ground per level, which no amount of clock scrubbing pays back.
+const VECTOR_ZOOM = MAX_NATIVE_ZOOM + 1;
 
 const SCHEDULE_URL = "tiles/shade/buckets.json";
 const TILE_URL = "tiles/shade/{bin}/{z}/{x}/{y}.webp";
@@ -139,6 +148,10 @@ export default function ShadeLayer() {
     let cancelled = false;
     let bins: Bin[] = [];
     let activeIndex = -1;
+    // The sun the swept tiles are cast from, held still until the bin changes: within one bin every
+    // tile has to sweep from the SAME position, or a tile drawn after a scrub would not line up with
+    // the neighbours drawn before it.
+    let sweepSun = currentSun();
     // Only the visible bin, plus the outgoing one until its fade ends.
     const layers = new Map<number, WorkerTileLayer>();
     const ready = new Set<number>(); // bins whose tiles have finished painting at least once
@@ -146,11 +159,15 @@ export default function ShadeLayer() {
     // The tile layer for a bin, created hidden. A CSS opacity transition on its container turns
     // setOpacity into a crossfade; the `load` event marks the bin ready, so a switch can wait for the
     // target to paint before revealing it.
-    const layerFor = ({ index, elevation }: Bin): WorkerTileLayer => {
+    const layerFor = ({ index, elevation, azimuth }: Bin): WorkerTileLayer => {
       const existing = layers.get(index);
       if (existing) {
         return existing;
       }
+      // Captured, not read from the shared `sweepSun` at draw time. A bin scrubbed away from and back
+      // to within the fade window is the SAME layer, so a live read would let it paint later tiles
+      // from a sun up to a bin's width — 72 minutes — from the one its existing tiles used.
+      const castFrom = sweepSun;
       const layer = new WorkerTileLayer(
         () => ({
           kind: "shade",
@@ -160,6 +177,11 @@ export default function ShadeLayer() {
           maxNativeZoom: MAX_NATIVE_ZOOM,
           tau: canopyTau(getResolvedDate()),
           intensity: Math.max(0, Math.sin((elevation * Math.PI) / 180)),
+          vectorZoom: VECTOR_ZOOM,
+          binElevation: elevation,
+          binAzimuth: azimuth,
+          sunElevation: castFrom.elevation,
+          sunAzimuth: castFrom.azimuth,
         }),
         {
           pane: PANE_NAME,
@@ -251,7 +273,13 @@ export default function ShadeLayer() {
     // today's band, nearest the picked time first, so the slider lands on bins whose pixels are already
     // in hand. Nothing is drawn and no layer is created; on close the bitmaps just age out of the cache.
     const syncPrefetch = (): void => {
-      if (isPickerOpen() && bins.length > 0) {
+      // Above the handoff the pyramid is not read at all — the sweep works from caster chunks, which
+      // are sun-independent and already in the worker's cache — so there is nothing to warm.
+      if (
+        isPickerOpen() &&
+        bins.length > 0 &&
+        Math.round(map.getZoom()) < VECTOR_ZOOM
+      ) {
         const band = todayBand();
         const hourAngle = currentHourAngle();
         const ordered = bins
@@ -287,6 +315,7 @@ export default function ShadeLayer() {
         return;
       }
       activeIndex = target;
+      sweepSun = { elevation, azimuth };
       // Every bin but the target, not just the one this scrub left: a scrub that passes through a bin
       // faster than its tiles load strands it, because its own crossfade is still waiting on `load`
       // and the next one only ever knew about ITS predecessor. A stranded bin sat at full opacity

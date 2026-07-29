@@ -53,6 +53,7 @@ jobs:
         with:
           path: |
             public/tiles
+            public/casters
             public/routing
             public/streets
             public/commercial

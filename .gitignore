@@ -13,6 +13,7 @@
 # map overlays, rendered from data/streets/*.bin by `bun run build-tiles`
 /public/tiles/
 /public/streets/
+/public/casters/
 /public/commercial/
 /public/commercial-lines/
 /public/shade/

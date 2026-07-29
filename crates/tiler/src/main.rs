@@ -5,6 +5,7 @@
 
 mod binfmt;
 mod canopy;
+mod caster_chunks;
 mod chunks;
 mod conflate;
 mod corners;
@@ -30,6 +31,7 @@ const USAGE: &str = "usage:
   tiler densities --params <file.json>
   tiler heights --canopy <file.bin> --chm <file.tif>
   tiler chunks --manifest <file.json> --data <dir> --chunks <dir> [--paths <file.bin>]
+  tiler caster-chunks --manifest <file.json> --data <dir> --chunks <dir> --params <file.json>
   tiler canopy --manifest <file.json> --ramp <file.bin> --data <dir> --tiles <dir>
   tiler shade --manifest <file.json> --data <dir> --tiles <dir> --params <file.json>
   tiler genus-field --manifest <file.json> --data <dir> --tiles <dir>
@@ -72,6 +74,12 @@ fn run() -> Fallible<()> {
             data: path(&flags, "data")?,
             chunks: path(&flags, "chunks")?,
             paths: flags.get("paths").map(PathBuf::from),
+        }),
+        "caster-chunks" => caster_chunks::run(&caster_chunks::Args {
+            manifest: path(&flags, "manifest")?,
+            data: path(&flags, "data")?,
+            chunks: path(&flags, "chunks")?,
+            params: path(&flags, "params")?,
         }),
         "canopy" => canopy::run(&canopy::Args {
             manifest: path(&flags, "manifest")?,
