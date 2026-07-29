@@ -11,7 +11,7 @@ use std::time::Instant;
 use rayon::prelude::*;
 
 use crate::Fallible;
-use crate::binfmt::{self, LAND_FORMAT};
+use crate::binfmt::{self, CANOPY_FORMAT, LAND_FORMAT};
 use crate::geometry::{self, PolygonGrid, PolygonSet, Projection, round_half_up};
 use crate::manifest::{Bounds, City, Manifest};
 use crate::raster::{
@@ -24,7 +24,6 @@ use crate::raster::{
 // rasterizing at 4x and averaging the block back down: a pixel half under canopy reads 0.5
 // rather than a hard 0/1 edge.
 const SUPERSAMPLE: usize = 4;
-const CNPY_FORMAT: u16 = 1;
 // The raw polygon coverage is too concentrated to read as density — a hard 1 under a crown, 0
 // between — and shade physically reaches past a crown's edge. So the fraction is convolved with
 // an isotropic Gaussian before colouring, the same blur the sidewalk sampler uses, at the same
@@ -79,8 +78,11 @@ fn read_canopy(city: &City, data: &Path) -> Fallible<Option<Canopy>> {
     let Some(canopy) = &city.field.canopy else {
         return Ok(None);
     };
-    let polygons =
-        binfmt::read_polygons(&data.join("canopy").join(&canopy.file), "CNPY", CNPY_FORMAT)?;
+    let polygons = binfmt::read_polygons(
+        &data.join("canopy").join(&canopy.file),
+        "CNPY",
+        CANOPY_FORMAT,
+    )?;
     let land = binfmt::read_polygons(
         &data.join("land").join(&city.field.land.file),
         "LAND",

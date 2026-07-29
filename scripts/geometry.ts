@@ -82,8 +82,8 @@ function writeHeader(
 }
 
 // A tree, with the crown disc already sized from its dbh: the genus overlay draws each tree at
-// this crown size, so it travels with the point through the encoder. `genusId` is the top-12
-// genus id 0..11, or 12 ("Other") for a tail genus, an unknown genus, or an OSM tree.
+// this crown size, so it travels with the point through the encoder. `genusId` is the top-11
+// genus id 0..10, or 11 ("Other") for a tail genus, an unknown genus, or an OSM tree.
 export interface CrownedTree extends Coord {
   crownRadiusM: number;
   genusId: number;
@@ -324,6 +324,21 @@ export function encodePolygons(
     originLat,
   );
   return bytes.subarray(0, offset);
+}
+
+// The measured canopy polygons, magic `CNPY`: the encodePolygons body, then ONE trailing region of
+// one u16 little-endian per polygon in the same polygon order — the crown height in decimetres, as
+// BLDG carries its roof heights. The ingest writes the region zeroed and `tiler heights` samples
+// the LiDAR height model into it in place, the way `tiler densities` fills the street density blob;
+// a polygon the model saw no cell for keeps the 0, which reads as unknown. layout: scripts/README.md
+export function encodeCanopy(
+  format: number,
+  polygons: readonly Polygon[],
+): Uint8Array {
+  const body = encodePolygons("CNPY", format, polygons);
+  const out = new Uint8Array(body.length + polygons.length * 2);
+  out.set(body);
+  return out;
 }
 
 // A building footprint carrying the roof height the shade model raises the wall to, plus the ground

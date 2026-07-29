@@ -9,11 +9,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ingestArt } from "./art";
 import { fetchCanopyPolygons } from "./canopy";
+import { CHM_ATTRIBUTION, CHM_SOURCE_URL, fetchChmRaster } from "./chm";
 import { ingestFerries } from "./ferries";
 import {
   boxOf,
   COORD_SCALE,
   type CrownedTree,
+  encodeCanopy,
   encodePolygons,
   encodeTrees,
   writeVarint,
@@ -110,6 +112,14 @@ interface Estimate {
   pathDensity?: RawDistribution; // present only when a paths file was passed
 }
 
+// What `tiler heights` reports back, once it has filled the canopy file's height region from the
+// LiDAR height model.
+interface Heights {
+  polygons: number;
+  measured: number; // polygons the model had a cell for; the rest keep the 0 "unknown" height
+  skippedTiles: number; // CHM tiles whose LZW stream would not decode, all east of the city
+}
+
 const DATA_DIR = join(import.meta.dirname, "..", "data");
 const PARAMS_PATH = join(tmpdir(), "scenic-route-densities.json");
 
@@ -123,11 +133,11 @@ const STREET_SIDES = 2; // the density blob carries both sidewalks of every vert
 const UNNAMED_ID = 0xffff; // the segment's name id when CSCL carries no label — measured zero for NYC
 const TREE_FORMAT = 3; // v3 adds a genus byte per tree; v2 added the crown byte, v1 was points only
 const LAND_FORMAT = 1;
-const CANOPY_FORMAT = 1; // the measured 2017 LiDAR canopy, the shared polygon layout under magic CNPY
+const CANOPY_FORMAT = 2; // the measured 2017 LiDAR canopy under magic CNPY; v2 adds a crown height per polygon
 
 const TOP_GENUS_COUNT = 11; // the genera given their own id 0..10; the rest share id 11 ("Other")
-const OTHER_GENUS_ID = TOP_GENUS_COUNT; // 12: tail genera, unknown genus, and every OSM tree
-// The legend's common names for the expected top-12 genera; a selected genus not here falls back
+const OTHER_GENUS_ID = TOP_GENUS_COUNT; // 11: tail genera, unknown genus, and every OSM tree
+// The legend's common names for the expected top-11 genera; a selected genus not here falls back
 // to its own name, so a shift in the ranks stays legible rather than blank.
 const GENUS_COMMON_NAMES: Record<string, string> = {
   Quercus: "Oak",
@@ -877,6 +887,11 @@ async function ingest(): Promise<void> {
     `${CITY.id}: canopy ${canopy.fetched} polygons fetched, ${canopyOnLand.length} on land, ${canopyVertices} vertices, ${canopySquareKilometers.toFixed(1)} km² (${canopy.dropped} degenerate dropped)`,
   );
 
+  // The LiDAR canopy height model each polygon's crown height is measured from: a 243 MiB raster,
+  // downloaded once into .cache/ and read off disk by `tiler heights` below.
+  console.error(`${CITY.id}: fetching the LiDAR canopy height model`);
+  const chmPath = await fetchChmRaster();
+
   // Paths are the other Overpass query, so they are fetched next while a mirror is warm — and
   // land-clipped here, against the borough polygons, to drop the New Jersey and Westchester
   // spill the city bounding box reaches.
@@ -926,9 +941,9 @@ async function ingest(): Promise<void> {
   console.error(`${CITY.id}: fetching trees`);
   const trees = await fetchNycTrees();
 
-  // The genus legend: tally the ForMS genera, take the 12 most abundant, and give each an id 0..11
+  // The genus legend: tally the ForMS genera, take the 11 most abundant, and give each an id 0..10
   // in descending-count order. Everything else — tail genera, unknown genus, and every OSM tree —
-  // maps to id 12 ("Other"). The map is threaded into crownTrees so each tree gets its genus byte.
+  // maps to id 11 ("Other"). The map is threaded into crownTrees so each tree gets its genus byte.
   const genusCounts = new Map<string, number>();
   for (const tree of trees) {
     if (tree.genus !== "") {
@@ -984,13 +999,23 @@ async function ingest(): Promise<void> {
     encodePolygons("LAND", LAND_FORMAT, land),
   );
   // The canopy is a polygon blob under its own magic (CNPY) so it self-identifies rather than
-  // masquerading as another polygon source; the tiler reads it with the same generic decoder.
+  // masquerading as another polygon source; the tiler reads it with the same generic decoder. Its
+  // height region is written zeroed for `tiler heights` to fill in place, so the file on disk is
+  // no longer the one encoded and its bytes are read back for the manifest.
+  const canopyPath = join(DATA_DIR, "canopy", file);
   const canopyFile = await writeSource(
     "canopy",
     file,
     CANOPY_FORMAT,
     canopyOnLand.length,
-    encodePolygons("CNPY", CANOPY_FORMAT, canopyOnLand),
+    encodeCanopy(CANOPY_FORMAT, canopyOnLand),
+  );
+  const heights: Heights = JSON.parse(
+    runTiler(["heights", "--canopy", canopyPath, "--chm", chmPath], true),
+  );
+  const canopyBytes = new Uint8Array(await readFile(canopyPath));
+  console.error(
+    `${CITY.id}: canopy heights measured for ${heights.measured} of ${heights.polygons} polygons (${heights.skippedTiles} CHM tiles skipped)`,
   );
   const streetPath = join(DATA_DIR, "streets", file);
   await mkdir(join(DATA_DIR, "streets"), { recursive: true });
@@ -1044,12 +1069,15 @@ async function ingest(): Promise<void> {
     format: canopyFile.format,
     polygons: canopyFile.count,
     vertices: canopyVertices,
-    bytes: canopyFile.bytes,
-    sha256: canopyFile.sha256,
+    bytes: canopyBytes.length,
+    sha256: createHash("sha256").update(canopyBytes).digest("hex"),
     squareKm: Math.round(canopySquareKilometers * 10) / 10,
+    measuredHeights: heights.measured,
     updated,
     attribution: CITY.canopyAttribution,
     sourceUrl: CITY.canopySourceUrl,
+    heightAttribution: CHM_ATTRIBUTION,
+    heightSourceUrl: CHM_SOURCE_URL,
   };
   const field: FieldLayer = {
     trees: treeFile,

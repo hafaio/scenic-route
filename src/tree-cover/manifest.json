@@ -31,15 +31,18 @@
         },
         "canopy": {
           "file": "nyc.bin",
-          "format": 1,
+          "format": 2,
           "polygons": 1076146,
           "vertices": 33945341,
-          "bytes": 80317454,
-          "sha256": "8ab36b94cf78fec991d26952991f68b905b6c7aa8c1f8db258a3081e9d48e6e9",
+          "bytes": 82469746,
+          "sha256": "16c31e1005d1cb484130db017ae0d2407f138d67df25d4e158caea3c97585c62",
           "squareKm": 172.6,
+          "measuredHeights": 496604,
           "updated": "2026-07-18",
           "attribution": "Tree canopy © NYC OTI / NYC Parks (2017 LiDAR)",
-          "sourceUrl": "https://services3.arcgis.com/xJHn8F2NTtwCMFtX/arcgis/rest/services/TreeCanopy2017_Simplified_1ft/FeatureServer/0"
+          "sourceUrl": "https://services3.arcgis.com/xJHn8F2NTtwCMFtX/arcgis/rest/services/TreeCanopy2017_Simplified_1ft/FeatureServer/0",
+          "heightAttribution": "Canopy heights © Ma et al. 2023 (CC BY 4.0)",
+          "heightSourceUrl": "https://doi.org/10.6084/m9.figshare.20522895"
         },
         "fillSigmaMeters": 15,
         "tightSigmaAlongMeters": 15,

@@ -123,21 +123,15 @@ pub(crate) fn rasterize_land(
 // are a cosmetic overlay; the densities the routing and street lines read live in the .bin
 // blobs, not in these pixels, so lossy colour costs nothing real.
 pub(crate) fn encode_webp(pixels: &[u8]) -> Fallible<Vec<u8>> {
-    encode_webp_quality(pixels, WEBP_QUALITY)
-}
-
-/// As `encode_webp`, at a caller-chosen quality. The shade pyramid, a single flat slate tint varying
-/// only in alpha, tolerates a much lower quality than the colour overlays, which is most of how it
-/// keeps its deep z15 level within the deploy's size budget.
-pub(crate) fn encode_webp_quality(pixels: &[u8], quality: f32) -> Fallible<Vec<u8>> {
     let encoder = webp::Encoder::from_rgba(pixels, TILE_SIZE as u32, TILE_SIZE as u32);
-    Ok(encoder.encode(quality).to_vec())
+    Ok(encoder.encode(WEBP_QUALITY).to_vec())
 }
 
 /// Lossless WebP: for tiles whose channels carry DATA, not colour — the genus-field pyramid packs a
 /// per-genus density byte into each channel, which the client reads back exactly, so any lossy
-/// quantization would corrupt the numbers. Lossless still compresses these well because most tiles
-/// are mostly empty (transparent) and the packed densities are locally flat.
+/// quantization would corrupt the numbers; the shade pyramid is a constant slate whose alpha is a
+/// quantised opacity lattice that lossy encoding smears. Lossless still compresses both well, since
+/// a constant colour plane costs almost nothing and the varying channels are locally flat.
 pub(crate) fn encode_webp_lossless(pixels: &[u8]) -> Vec<u8> {
     let encoder = webp::Encoder::from_rgba(pixels, TILE_SIZE as u32, TILE_SIZE as u32);
     encoder.encode_lossless().to_vec()
