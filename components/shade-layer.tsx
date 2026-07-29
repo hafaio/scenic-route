@@ -19,8 +19,8 @@ import manifest from "../src/tree-cover/manifest.json";
 // (area-light sampling of the sun disk) — is baked by `tiler shade` into one WebP pyramid per SUN-POSITION
 // bin: the sun's (azimuth, elevation) envelope over the whole year, gridded, at public/tiles/shade/<bin>/
 // {z}/{x}/{y}.webp, with public/tiles/shade/buckets.json listing each bin's position. This layer maps the
-// picked time on TODAY'S date to a sun position, shows the nearest bin, and CROSSFADES between bins as the
-// sun moves — no per-frame redraw, no flicker. Below the horizon it shows nothing.
+// picked date and time to a sun position, shows the nearest bin, and CROSSFADES between bins as the sun
+// moves — no per-frame redraw, no flicker. Below the horizon it shows nothing.
 //
 // The tree canopy is baked as a second pyramid, public/tiles/tree-shade/<bin>/, and belongs to this same
 // overlay: crowns are shade. It is left as bare geometry, because what a crown actually stops depends on
@@ -35,7 +35,7 @@ import manifest from "../src/tree-cover/manifest.json";
 // past the baked pyramid's finest level the magnification resamples across tile boundaries instead of
 // leaving a seam at every one — and so the compositing happens once, at source resolution. Only the bin
 // on screen has a layer — a second one exists just for the length of a crossfade. While the clock popover
-// is open the worker is instead asked to decode the SOURCE tiles of today's other bins into its cache, so
+// is open the worker is instead asked to decode the SOURCE tiles of the date's other bins into its cache, so
 // scrubbing to one draws without a fetch; those are bitmaps in one cache with a cap, not a tile layer's
 // worth of device-resolution canvases each.
 
@@ -152,6 +152,7 @@ export default function ShadeLayer() {
     // tile has to sweep from the SAME position, or a tile drawn after a scrub would not line up with
     // the neighbours drawn before it.
     let sweepSun = currentSun();
+    let drawnTau = canopyTau(getResolvedDate()); // the canopy transmittance the live tiles were drawn with
     // Only the visible bin, plus the outgoing one until its fade ends.
     const layers = new Map<number, WorkerTileLayer>();
     const ready = new Set<number>(); // bins whose tiles have finished painting at least once
@@ -226,10 +227,10 @@ export default function ShadeLayer() {
       }, FADE_MS);
     };
 
-    // Today's declination is fixed, so the slider only ever visits one season band's bins — that band
-    // IS the day's set to prefetch. Read at noon, where the band is unambiguous.
-    const todayBand = (): number => {
-      const noon = new Date();
+    // One date has one declination, so the slider only ever visits one season band's bins — the picked
+    // DATE is what chooses which band that is. Read at noon, where the band is unambiguous.
+    const pickedBand = (): number => {
+      const noon = getResolvedDate();
       noon.setHours(12, 0, 0, 0);
       const position = sun.getPosition(noon, CENTRE_LAT, CENTRE_LNG);
       const azimuth = ((position.azimuth % 360) + 360) % 360;
@@ -270,8 +271,9 @@ export default function ShadeLayer() {
     };
 
     // Match the prefetch to the popover: while it is open, have the worker decode the source tiles of
-    // today's band, nearest the picked time first, so the slider lands on bins whose pixels are already
-    // in hand. Nothing is drawn and no layer is created; on close the bitmaps just age out of the cache.
+    // the picked date's band, nearest the picked time first, so the slider lands on bins whose pixels
+    // are already in hand. Nothing is drawn and no layer is created; on close the bitmaps just age out
+    // of the cache.
     const syncPrefetch = (): void => {
       // Above the handoff the pyramid is not read at all — the sweep works from caster chunks, which
       // are sun-independent and already in the worker's cache — so there is nothing to warm.
@@ -280,7 +282,7 @@ export default function ShadeLayer() {
         bins.length > 0 &&
         Math.round(map.getZoom()) < VECTOR_ZOOM
       ) {
-        const band = todayBand();
+        const band = pickedBand();
         const hourAngle = currentHourAngle();
         const ordered = bins
           .filter((bin) => bin.season === band)
@@ -311,10 +313,18 @@ export default function ShadeLayer() {
       const bin =
         elevation > HORIZON_DEG ? pickBin(bins, elevation, azimuth) : null;
       const target = bin ? bin.index : -1;
+      const tau = canopyTau(getResolvedDate());
       if (target === activeIndex) {
+        // Tau is composited into the drawn pixels, and a band is wide enough that a date can cross
+        // half of leaf-fall — or six months, to the same sun — without moving the bin.
+        if (tau !== drawnTau) {
+          drawnTau = tau;
+          layers.get(target)?.redraw();
+        }
         return;
       }
       activeIndex = target;
+      drawnTau = tau;
       sweepSun = { elevation, azimuth };
       // Every bin but the target, not just the one this scrub left: a scrub that passes through a bin
       // faster than its tiles load strands it, because its own crossfade is still waiting on `load`
