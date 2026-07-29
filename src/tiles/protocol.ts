@@ -43,8 +43,11 @@ export interface TreeDotsParams {
 export interface ShadeParams {
   kind: "shade";
   url: string; // a {bin}/{z}/{x}/{y} template
+  treeUrl: string; // the same template over the tree-shade pyramid, composited into the same layer
   bin: number; // which baked sun-position pyramid to read
   maxNativeZoom: number; // the finest baked level; past it a tile is magnified from that level
+  tau: number; // fraction of light the canopy blocks on the picked date; see src/shade/phenology.ts
+  intensity: number; // the bin's solar intensity, max(0, sin(elevation)) — what its alphas are scaled by
 }
 
 export type TileParams =
@@ -85,6 +88,7 @@ export interface CancelMessage {
 export interface ShadePrefetchMessage {
   type: "shade-prefetch";
   url: string; // the same {bin}/{z}/{x}/{y} template a draw uses
+  treeUrl: string; // and the tree pyramid's, warmed alongside so a scrub composites without a fetch
   bins: number[]; // nearest the picked time first; the tail is dropped if the set will not fit
   coords: TileCoords[]; // the source tiles covering the view, at their baked zoom
 }

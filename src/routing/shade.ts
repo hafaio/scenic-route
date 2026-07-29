@@ -1,7 +1,12 @@
-// The SHDE data: a per-edge signed sun/shade attribute baked for a grid of sun positions, so the
-// router can bias toward sun or shade for the resolved time of day. A given day's sun only sweeps a
-// handful of the (declination, hourAngle) bins, so the attributes ship as one small file PER BIN,
-// fetched lazily on demand, alongside a manifest of the bins.
+// The SHDE data: per edge and per sun-position bin, how much of the edge a building shadow covers and
+// how much a crown shadow does, so the router can bias toward sun or shade for the resolved time of
+// day. A given day's sun only sweeps a handful of the (declination, hourAngle) bins, so the fractions
+// ship as one small file PER BIN, fetched lazily on demand, alongside a manifest of the bins.
+//
+// The bake is pure geometry. The bin's solar intensity is derived here from its elevation, and how
+// much light a crown actually stops is SEASONAL — only the client knows the date — so the two
+// occlusions are composited here into the signed attribute the cost model wants, the same
+// `1 - (1 - buildings)(1 - tau*trees)` the shade overlay composites its two pyramids with.
 //
 // A route is not walked at a single instant: the sun keeps moving as you go, and on a long walk the
 // shadows at the far end differ from those at the start. So `computeEdgeShade` does not resolve one sun
@@ -13,12 +18,13 @@
 // src/shade/sun.ts), so the router agrees with the shade overlay at the departure instant.
 
 import * as SunCalc from "suncalc";
+import { canopyTau } from "../shade/phenology";
 import { declinationOf, hourAngleOf, seasonBand } from "../shade/sun";
 import manifest from "../tree-cover/manifest.json";
 import type { RoutingGraph } from "./graph";
 
 const MAGIC = "SHDB";
-const FORMAT_VERSION = 1;
+const FORMAT_VERSION = 2;
 const HEADER_BYTES = 12; // magic(4) + u16 version + u16 pad + u32 edgeCount
 const BINS_URL = "routing/shade/bins.json"; // relative, so it picks up the deploy basePath
 const HORIZON_DEG = 0.5; // at or below this the sun is down and there is no shade to bias
@@ -60,6 +66,26 @@ export interface ShadeBins {
   bins: ShadeBin[];
 }
 
+// One bin's baked occlusion, `fraction = byte / 255`: per edge, the share of its polyline the bin's
+// building shadows cover and the share its crown shadows do.
+export interface BinFractions {
+  buildings: Uint8Array;
+  trees: Uint8Array;
+}
+
+// A bin's solar intensity, the same `max(0, sin(elevation))` the tile bake folds into its alpha —
+// derived rather than shipped, since bins.json already carries the elevation.
+function intensityOf(bin: ShadeBin): number {
+  return Math.max(0, Math.sin((bin.elevation * Math.PI) / 180));
+}
+
+// The i8 a composited row stores, read back as `attr = byte / 128`. The magnitude is capped at 127
+// (never -128), so `|attr| <= 127/128 < 1` keeps the cost model's `1 - w*attr` strictly positive for
+// `|w| <= 1`.
+function encodeAttr(attr: number): number {
+  return Math.max(-127, Math.min(127, Math.round(attr * 128)));
+}
+
 // The per-edge signed shade attribute a route is costed against, as a function of how long into the
 // walk the edge is reached. `attrAt` returns a value in (-1, 1) — positive net sunlit, negative net
 // shaded; `maxAbs` bounds |attr| over every edge and elapsed time the field can return, the input to
@@ -70,17 +96,27 @@ export interface ShadeField {
 }
 
 // The route-time field: a blend of two hour-angle-nearest bins per elapsed-time bucket. Holds only the
-// referenced bin rows and the bucket tables it needs — not the graph — so it doesn't pin a large scope.
+// referenced bins' fractions and the bucket tables it needs — not the graph — so it doesn't pin a
+// large scope.
 class ScheduledShadeField implements ShadeField {
+  // Each referenced bin's composited signed row, built on first use and kept: A* reads an edge's
+  // attribute in its innermost loop, so the composite cannot live in `attrAt`. Tau ties a row to the
+  // departure date, so the field computeEdgeShade builds for a new date is what retires them.
+  private readonly rows: (Int8Array | null)[];
+
   constructor(
-    private readonly attrs: Int8Array[], // the referenced bin rows, in bucket-reference order
-    private readonly binA: Int32Array, // per bucket: index into `attrs`, or -1 for a night bucket
-    private readonly binB: Int32Array, // per bucket: the second blended bin's index into `attrs`
+    private readonly fractions: BinFractions[], // the referenced bins, in bucket-reference order
+    private readonly intensities: Float64Array, // per referenced bin, its solar intensity
+    private readonly tau: number, // the share of direct light a crown stops on the departure date
+    private readonly binA: Int32Array, // per bucket: index into `fractions`, or -1 for a night bucket
+    private readonly binB: Int32Array, // per bucket: the second blended bin's index into `fractions`
     private readonly weightA: Float64Array, // per bucket: bin A's blend weight, already divided by 128
     private readonly weightB: Float64Array, // per bucket: bin B's blend weight, already divided by 128
     private readonly lastBucket: number, // clamp elapsed time to this bucket (the schedule horizon)
     readonly maxAbs: number,
-  ) {}
+  ) {
+    this.rows = fractions.map(() => null);
+  }
 
   attrAt(edge: number, elapsedSeconds: number): number {
     const clamped = elapsedSeconds > 0 ? elapsedSeconds : 0;
@@ -92,10 +128,29 @@ class ScheduledShadeField implements ShadeField {
     if (indexA < 0) {
       return 0; // the sun is down at this point in the walk
     }
+    const indexB = this.binB[bucket];
+    const rowA = this.rows[indexA] ?? this.composite(indexA);
+    const rowB = this.rows[indexB] ?? this.composite(indexB);
     return (
-      this.attrs[indexA][edge] * this.weightA[bucket] +
-      this.attrs[this.binB[bucket]][edge] * this.weightB[bucket]
+      rowA[edge] * this.weightA[bucket] + rowB[edge] * this.weightB[bucket]
     );
+  }
+
+  // One bin's signed attributes. A crown stops only tau of the light a building stops outright, and
+  // what reaches the edge is what gets past BOTH, so the two occlusions compose as
+  // `1 - (1 - buildings)(1 - tau*trees)`; the bin's intensity then scales the sunlit-positive,
+  // shaded-negative attribute.
+  private composite(index: number): Int8Array {
+    const { buildings, trees } = this.fractions[index];
+    const intensity = this.intensities[index];
+    const row = new Int8Array(buildings.length);
+    for (let edge = 0; edge < row.length; edge++) {
+      const shaded =
+        1 - (1 - buildings[edge] / 255) * (1 - (this.tau * trees[edge]) / 255);
+      row[edge] = encodeAttr(intensity * (1 - 2 * shaded));
+    }
+    this.rows[index] = row;
+    return row;
   }
 }
 
@@ -144,9 +199,10 @@ export function loadShadeBins(): Promise<ShadeBins> {
   return binsPromise;
 }
 
-// Decode one bin file to its per-edge signed attributes, viewed in place after the 12-byte header
-// (Int8Array has no alignment requirement). The header's edge count must match the payload length.
-export function decodeShadeBin(buffer: ArrayBuffer): Int8Array {
+// Decode one bin file to its two per-edge fraction rows, buildings then trees, viewed in place after
+// the 12-byte header (Uint8Array has no alignment requirement). The header's edge count must match
+// the payload length.
+export function decodeShadeBin(buffer: ArrayBuffer): BinFractions {
   const bytes = new Uint8Array(buffer);
   const view = new DataView(buffer);
   const magic = String.fromCharCode(bytes[0], bytes[1], bytes[2], bytes[3]);
@@ -155,17 +211,20 @@ export function decodeShadeBin(buffer: ArrayBuffer): Int8Array {
     throw new Error(`not a v${FORMAT_VERSION} shade bin`);
   }
   const edgeCount = view.getUint32(8, true);
-  if (HEADER_BYTES + edgeCount !== buffer.byteLength) {
+  if (HEADER_BYTES + 2 * edgeCount !== buffer.byteLength) {
     throw new Error(
       `shade bin edge count ${edgeCount} does not match its ${buffer.byteLength}-byte payload`,
     );
   }
-  return new Int8Array(buffer, HEADER_BYTES, edgeCount);
+  return {
+    buildings: new Uint8Array(buffer, HEADER_BYTES, edgeCount),
+    trees: new Uint8Array(buffer, HEADER_BYTES + edgeCount, edgeCount),
+  };
 }
 
-const binCache = new Map<number, Promise<Int8Array>>();
+const binCache = new Map<number, Promise<BinFractions>>();
 
-export function loadShadeBin(index: number): Promise<Int8Array> {
+export function loadShadeBin(index: number): Promise<BinFractions> {
   const cached = binCache.get(index);
   if (cached) {
     return cached;
@@ -252,20 +311,20 @@ function selectBlend(
   };
 }
 
-// Intern a bin index into the referenced-rows order, returning its position; used so the schedule
-// stores small positional indices and only the referenced bin rows are fetched.
+// Intern a bin into the referenced-bins order, returning its position; used so the schedule stores
+// small positional indices and only the referenced bins are fetched.
 function intern(
   positions: Map<number, number>,
-  order: number[],
-  index: number,
+  order: ShadeBin[],
+  bin: ShadeBin,
 ): number {
-  const existing = positions.get(index);
+  const existing = positions.get(bin.index);
   if (existing !== undefined) {
     return existing;
   }
   const position = order.length;
-  positions.set(index, position);
-  order.push(index);
+  positions.set(bin.index, position);
+  order.push(bin);
   return position;
 }
 
@@ -307,7 +366,7 @@ export async function computeEdgeShade(
   const weightA = new Float64Array(bucketCount);
   const weightB = new Float64Array(bucketCount);
   const positions = new Map<number, number>();
-  const order: number[] = []; // bin indices in reference order, the axis of `attrs`
+  const order: ShadeBin[] = []; // the referenced bins, the axis of the field's rows
   let anyDay = false;
   for (let bucket = 0; bucket <= lastBucket; bucket++) {
     const when = new Date(
@@ -319,8 +378,8 @@ export async function computeEdgeShade(
       continue; // night bucket: binA stays -1, attrAt returns 0
     }
     anyDay = true;
-    binA[bucket] = intern(positions, order, blend.nearest.index);
-    binB[bucket] = intern(positions, order, blend.second.index);
+    binA[bucket] = intern(positions, order, blend.nearest);
+    binB[bucket] = intern(positions, order, blend.second);
     weightA[bucket] = blend.nearestWeight / 128;
     weightB[bucket] = blend.secondWeight / 128;
   }
@@ -329,28 +388,31 @@ export async function computeEdgeShade(
     return;
   }
 
-  const attrs = await Promise.all(order.map(loadShadeBin));
+  const fractions = await Promise.all(
+    order.map((bin) => loadShadeBin(bin.index)),
+  );
+  const intensities = Float64Array.from(order, intensityOf);
+  // |1 - 2*shaded| <= 1, so a bin's attributes cannot exceed its intensity in magnitude, and the
+  // encoding caps that below 1. A bound is all the admissible heuristic needs, and this one is all but
+  // exact: some edge in a city is fully sunlit in every bin.
   let maxAbs = 0;
-  for (const row of attrs) {
-    if (row.length !== edgeCount) {
+  for (const [position, row] of fractions.entries()) {
+    if (row.buildings.length !== edgeCount) {
       throw new Error(
-        `shade bin edge count ${row.length} != graph ${edgeCount}`,
+        `shade bin edge count ${row.buildings.length} != graph ${edgeCount}`,
       );
     }
-    for (let edge = 0; edge < row.length; edge++) {
-      const magnitude = Math.abs(row[edge]);
-      if (magnitude > maxAbs) {
-        maxAbs = magnitude;
-      }
-    }
+    maxAbs = Math.max(maxAbs, encodeAttr(intensities[position]) / 128);
   }
   graph.shade = new ScheduledShadeField(
-    attrs,
+    fractions,
+    intensities,
+    canopyTau(date),
     binA,
     binB,
     weightA,
     weightB,
     lastBucket,
-    maxAbs / 128,
+    maxAbs,
   );
 }

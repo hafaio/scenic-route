@@ -55,10 +55,10 @@ export interface CrownAllometry {
 }
 
 // data/canopy/<id>.bin: NYC's 2017 LiDAR tree-canopy polygons, magic `CNPY`, the shared polygon
-// byte layout (a header, then per-polygon varint-delta rings). This is the *measured* canopy
-// footprint — the cover field itself: `tiler canopy` rasterizes it for the fill pyramid and
-// `tiler densities` samples it at each sidewalk to fill the routing density blobs. The canopy
-// `.bin` is polygons only; it carries no density blob of its own. layout: scripts/README.md
+// byte layout (a header, then per-polygon varint-delta rings) plus a trailing crown height in
+// decimetres per polygon. This is the *measured* canopy footprint — the cover field itself:
+// `tiler canopy` rasterizes it for the fill pyramid and `tiler densities` samples it at each
+// sidewalk to fill the routing density blobs. layout: scripts/README.md
 export interface CanopyLayer {
   file: string;
   format: number;
@@ -67,9 +67,12 @@ export interface CanopyLayer {
   bytes: number;
   sha256: string;
   squareKm: number; // canopy area on land, ~a fifth of the city's land — a coverage sanity check
+  measuredHeights: number; // polygons the height model had a cell for; the rest read 0, unknown
   updated: string;
   attribution: string; // NYC OTI / NYC Parks (2017 LiDAR)
   sourceUrl: string;
+  heightAttribution: string; // the separate LiDAR height model the crown heights are sampled from
+  heightSourceUrl: string;
 }
 
 // The genus legend the genus overlay reads: the 11 most abundant genera by tree count, in id
@@ -102,7 +105,7 @@ export interface FieldLayer {
   meanCoverOverLand: number; // the mean covered fraction; sanity-checked against ~22% all-sources
   coverSamples: number; // land points the cover distribution was estimated from
   coverSeed: number; // and the seed they were drawn with, so the mean is reproducible
-  genus: GenusTable; // the top-12 genus legend the genus overlay renders from
+  genus: GenusTable; // the top-11 genus legend the genus overlay renders from
   density: Distribution; // the covered fraction over the land points; its mean is the check
   updated: string;
   attribution: string; // the OSM paths and trees the field mixes in; ForMS is credited on the city

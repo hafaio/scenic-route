@@ -4,7 +4,7 @@
 // read last time, not a fresher copy it did not ask for.
 
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 const CACHE_DIR = join(import.meta.dirname, "..", ".cache");
@@ -21,6 +21,23 @@ function parse<Value>(body: string): { value: Value } | null {
   }
 }
 
+function entryPath(name: string, key: string, extension: string): string {
+  const digest = createHash("sha256").update(key).digest("hex").slice(0, 16);
+  return join(CACHE_DIR, `${name}.${digest}.${extension}`);
+}
+
+// Renamed on, so an entry is either the whole value or absent: these run to hundreds of
+// megabytes, and an interrupted write would otherwise leave a torn one behind.
+async function writeEntry(
+  path: string,
+  contents: string | Uint8Array,
+): Promise<void> {
+  await mkdir(CACHE_DIR, { recursive: true });
+  const temporary = `${path}.${randomUUID()}.tmp`;
+  await writeFile(temporary, contents);
+  await rename(temporary, path);
+}
+
 // The key is the request itself — dataset plus query, or the Overpass QL — so changing what
 // is asked for lands on a different entry rather than silently reusing the old one.
 export async function cached<Value>(
@@ -28,8 +45,7 @@ export async function cached<Value>(
   key: string,
   read: () => Promise<Value>,
 ): Promise<Value> {
-  const digest = createHash("sha256").update(key).digest("hex").slice(0, 16);
-  const path = join(CACHE_DIR, `${name}.${digest}.json`);
+  const path = entryPath(name, key, "json");
 
   if (!REFRESH) {
     const hit = await readFile(path, "utf-8").catch(() => null);
@@ -41,11 +57,24 @@ export async function cached<Value>(
   }
 
   const value = await read();
-  await mkdir(CACHE_DIR, { recursive: true });
-  // Renamed on, so an entry is either the whole value or absent: these run to tens of
-  // megabytes, and an interrupted write would otherwise leave a torn one behind.
-  const temporary = `${path}.${randomUUID()}.tmp`;
-  await writeFile(temporary, JSON.stringify(value));
-  await rename(temporary, path);
+  await writeEntry(path, JSON.stringify(value));
   return value;
+}
+
+// The same cache for a source that is raw bytes rather than JSON — a raster the tiler reads off
+// disk itself — so the caller is handed the entry's path instead of its contents.
+export async function cachedFile(
+  name: string,
+  key: string,
+  read: () => Promise<Uint8Array>,
+): Promise<string> {
+  const path = entryPath(name, key, "bin");
+
+  if (!REFRESH && (await stat(path).catch(() => null)) !== null) {
+    console.error(`  ${name}: from .cache`);
+    return path;
+  }
+
+  await writeEntry(path, await read());
+  return path;
 }
