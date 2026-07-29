@@ -14,6 +14,7 @@ import { OVERLAYS, type OverlayId } from "../src/overlays/registry";
 import type { Pin, PinDraft } from "../src/pin";
 import type { RouteResult } from "../src/routing/search";
 import installTilePrune from "../src/tiles/prune";
+import type { Camera } from "../src/url-state";
 import { savedIcon, userIcon } from "./map-icons";
 import RouteLayer from "./route-layer";
 
@@ -38,6 +39,9 @@ interface MapViewProps {
   routeStart: { lat: number; lng: number } | null;
   picking: boolean;
   dragging: boolean; // an endpoint marker is being dragged; the route reframe goes zoom-out-only
+  initialCamera: Camera | null; // a shared link's camera, applied once; null leaves the map alone
+  preframedDest: { lat: number; lng: number } | null; // a dest whose framing the link already chose
+  onCamera: (camera: Camera) => void;
   onMapPick: (lat: number, lng: number) => void;
   onDisengageFollow: () => void;
   onEndpointDragMove: (
@@ -292,6 +296,40 @@ function DoubleTapZoom({
   return null;
 }
 
+// Reports the camera after every settled move so the share link can capture it, and applies a shared
+// link's camera once. The hash is read in an effect, so the camera arrives as a prop rather than as the
+// container's initial centre — hence setView here rather than a MapContainer prop.
+function CameraWatcher({
+  initial,
+  onCamera,
+}: {
+  initial: Camera | null;
+  onCamera: (camera: Camera) => void;
+}) {
+  const map = useMap();
+  const appliedRef = useRef<boolean>(false);
+
+  useEffect(() => {
+    const report = () => {
+      const { lat, lng } = map.getCenter();
+      onCamera({ center: { lat, lng }, zoom: map.getZoom() });
+    };
+    if (initial && !appliedRef.current) {
+      appliedRef.current = true;
+      map.setView([initial.center.lat, initial.center.lng], initial.zoom, {
+        animate: false,
+      });
+    }
+    report();
+    map.on("moveend", report);
+    return () => {
+      map.off("moveend", report);
+    };
+  }, [initial, map, onCamera]);
+
+  return null;
+}
+
 interface MapControllerProps {
   target: MapTarget | null;
   following: boolean;
@@ -390,6 +428,9 @@ export default function MapView({
   routeStart,
   picking,
   dragging,
+  initialCamera,
+  preframedDest,
+  onCamera,
   onMapPick,
   onDisengageFollow,
   onEndpointDragMove,
@@ -441,6 +482,7 @@ export default function MapView({
           <Fragment key={overlay.id}>{overlay.render()}</Fragment>
         ),
       )}
+      <CameraWatcher initial={initialCamera} onCamera={onCamera} />
       <MapController
         target={target}
         following={following}
@@ -452,6 +494,7 @@ export default function MapView({
         dest={routeDest}
         start={routeStart}
         dragging={dragging}
+        preframedDest={preframedDest}
         onDisengageFollow={onDisengageFollow}
         onEndpointDragMove={onEndpointDragMove}
         onEndpointDrag={onEndpointDrag}

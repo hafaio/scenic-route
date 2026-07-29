@@ -16,6 +16,7 @@ import ClockControl from "./clock-control";
 import LayersControl from "./layers-control";
 import type { AuthState } from "./map-app";
 import RouteToggle from "./route-toggle";
+import ShareControl from "./share-control";
 import ThemeToggle from "./theme-toggle";
 
 interface ToolbarProps {
@@ -36,6 +37,7 @@ interface ToolbarProps {
   logHereHint: string | null; // why the location is unavailable, when it is
   shareLocationForSearch: boolean; // send the live location to the geocoder to rank nearby results
   onToggleSearchBias: () => void;
+  composeShareUrl: () => string; // the route plus the current camera and overlays, as a link
 }
 
 const MENU_ITEM =
@@ -68,6 +70,7 @@ export default function Toolbar({
   logHereHint,
   shareLocationForSearch,
   onToggleSearchBias,
+  composeShareUrl,
 }: ToolbarProps) {
   const [menuOpen, setMenuOpen] = useState<boolean>(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
@@ -104,6 +107,7 @@ export default function Toolbar({
       <RouteToggle active={routing} onToggle={onToggleRouting} />
       <LayersControl active={activeOverlays} onToggle={onToggleOverlay} />
       <ClockControl />
+      <ShareControl composeUrl={composeShareUrl} />
       <ThemeToggle />
       <div ref={menuRef} className="relative">
         <button
