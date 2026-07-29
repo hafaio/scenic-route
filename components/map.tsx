@@ -70,14 +70,31 @@ function PickCatcher({
   return null;
 }
 
-// Leaflet 1.9 dropped its touch `tap` handler, so double-tap no longer reaches doubleClickZoom on
-// mobile. This adds it back: two single-finger taps in the same spot within DOUBLE_TAP_MS zoom in
-// one level toward the tap (or the centre while following, matching the scroll/pinch anchor). The
-// second tap's preventDefault both blocks the browser's own double-tap zoom and suppresses the
-// synthesised dblclick, so the desktop doubleClickZoom below never fires twice.
+// Leaflet's private zoom plumbing, which @types/leaflet doesn't expose.
+interface MapZoomInternals {
+  _stop(): void;
+  _move(
+    center: L.LatLng,
+    zoom: number,
+    data: { pinch: boolean; round: boolean },
+  ): void;
+  _animateZoom(
+    center: L.LatLng,
+    zoom: number,
+    startAnim: boolean,
+    noUpdate: number | boolean,
+  ): void;
+  _limitZoom(zoom: number): number;
+}
+
+// Leaflet 1.9 dropped its touch `tap` handler, so this restores double-tap zoom and adds Android's
+// quick zoom: hold the second tap and drag, down to zoom in. The drag mirrors Map.TouchZoom, hence
+// the private calls. preventDefault on the second tap suppresses the browser's own double-tap zoom
+// and the synthesised dblclick.
 const DOUBLE_TAP_MS = 300;
 const DOUBLE_TAP_SLOP = 40; // px between the two taps
-const TAP_MOVE_SLOP = 12; // px a single tap may drift before it counts as a drag
+const TAP_MOVE_SLOP = 12; // px a tap may drift and still count as a tap rather than a drag
+const ZOOM_PX_PER_LEVEL = 128; // matching MapLibre's quick zoom
 
 function DoubleTapZoom({
   following,
@@ -89,64 +106,183 @@ function DoubleTapZoom({
   const map = useMap();
   useEffect(() => {
     const container = map.getContainer();
-    let lastTime = 0;
-    let lastX = 0;
-    let lastY = 0;
-    let startX = 0;
-    let startY = 0;
+    const internals = map as unknown as MapZoomInternals;
+    let lastTap: { time: number; at: L.Point } | null = null;
+    let start: L.Point | null = null; // null when the touch began somewhere we must not zoom from
     let fingers = 0;
+    let armed = false;
+    let dragSuspended = false;
+    let anchor: { latLng: L.LatLng; at: L.Point } | null = null;
+    let zoomFrom: { zoom: number; clientY: number } | null = null;
+    let gesture: { zoom: number; center: L.LatLng } | null = null;
+    let animFrame: number | undefined;
+
+    const screenPoint = ({ clientX, clientY }: Touch): L.Point =>
+      L.point(clientX, clientY);
+
+    const containerPoint = (touch: Touch): L.Point => {
+      const { left, top } = container.getBoundingClientRect();
+      return screenPoint(touch).subtract(L.point(left, top));
+    };
+
+    const reset = () => {
+      armed = false;
+      anchor = null;
+      zoomFrom = null;
+      gesture = null;
+      if (animFrame !== undefined) {
+        L.Util.cancelAnimFrame(animFrame);
+        animFrame = undefined;
+      }
+      if (dragSuspended) {
+        dragSuspended = false;
+        map.dragging.enable();
+      }
+    };
+
+    // no-op unless a quick zoom ran, in which case it settles on an integer zoom
+    const end = () => {
+      const settled = gesture;
+      reset();
+      if (settled) {
+        const { center } = settled;
+        const zoom = internals._limitZoom(settled.zoom);
+        if (map.options.zoomAnimation) {
+          internals._animateZoom(center, zoom, true, map.options.zoomSnap ?? 1);
+        } else {
+          map.setView(center, zoom, { animate: false });
+        }
+      }
+    };
 
     const onStart = (event: TouchEvent) => {
       fingers = event.touches.length;
-      if (fingers === 1) {
-        startX = event.touches[0].clientX;
-        startY = event.touches[0].clientY;
+      if (fingers !== 1) {
+        end(); // pinch is taking over; don't leave our move dangling
+        lastTap = null;
+      } else {
+        const [touch] = event.touches;
+        // a draggable marker has its own Draggable, which map.dragging doesn't cover, so zooming
+        // from a route endpoint would drag the pin at the same time
+        const onMarker =
+          touch.target instanceof Element &&
+          touch.target.closest(".leaflet-marker-draggable") !== null;
+        start = onMarker ? null : screenPoint(touch);
+        if (
+          start &&
+          lastTap &&
+          event.timeStamp - lastTap.time < DOUBLE_TAP_MS &&
+          start.distanceTo(lastTap.at) < DOUBLE_TAP_SLOP
+        ) {
+          lastTap = null;
+          armed = true;
+          // while following, anchor on the centre so the zoom can't drift off the user
+          const at = following
+            ? map.getSize().divideBy(2)
+            : containerPoint(touch);
+          anchor = { at, latLng: map.containerPointToLatLng(at) };
+        }
       }
     };
-    const onEnd = (event: TouchEvent) => {
-      // only a clean single-finger tap counts — not the lift-off of a pinch or a drag
-      if (fingers > 1 || event.changedTouches.length !== 1) {
-        lastTime = 0;
-        return;
-      }
-      const touch = event.changedTouches[0];
+
+    const onMove = (event: TouchEvent) => {
       if (
-        Math.hypot(touch.clientX - startX, touch.clientY - startY) >
-        TAP_MOVE_SLOP
+        !armed ||
+        picking ||
+        !anchor ||
+        !start ||
+        event.touches.length !== 1
       ) {
-        lastTime = 0;
         return;
       }
-      const elapsed = event.timeStamp - lastTime;
-      const near =
-        Math.hypot(touch.clientX - lastX, touch.clientY - lastY) <
-        DOUBLE_TAP_SLOP;
-      if (lastTime > 0 && elapsed < DOUBLE_TAP_MS && near) {
-        lastTime = 0;
-        event.preventDefault();
-        if (picking) {
+      const [touch] = event.touches;
+      if (!zoomFrom) {
+        // beat Leaflet's Draggable to its own 3px tolerance — ours is on the container, its on the
+        // document — so nothing pans and no dragstart fires to disengage follow
+        if (!dragSuspended) {
+          dragSuspended = true;
+          map.dragging.disable();
+        }
+        if (screenPoint(touch).distanceTo(start) <= TAP_MOVE_SLOP) {
           return;
         }
-        const rect = container.getBoundingClientRect();
-        const point = L.point(
-          touch.clientX - rect.left,
-          touch.clientY - rect.top,
-        );
-        const anchor = following
-          ? map.getCenter()
-          : map.containerPointToLatLng(point);
-        map.setZoomAround(anchor, map.getZoom() + 1, { animate: true });
+        zoomFrom = { zoom: map.getZoom(), clientY: touch.clientY };
+        internals._stop();
+        map.fire("zoomstart").fire("movestart");
+      }
+      const target =
+        zoomFrom.zoom + (touch.clientY - zoomFrom.clientY) / ZOOM_PX_PER_LEVEL;
+      // bounceAtZoomLimits is off, so clamp; _limitZoom would snap mid-gesture
+      const zoom = Math.max(
+        map.getMinZoom(),
+        Math.min(map.getMaxZoom(), target),
+      );
+      // offset the anchor's projected position so it stays under the pixel it was tapped at
+      const center = map.unproject(
+        map
+          .project(anchor.latLng, zoom)
+          .subtract(anchor.at.subtract(map.getSize().divideBy(2))),
+        zoom,
+      );
+      gesture = { zoom, center };
+      if (animFrame !== undefined) {
+        L.Util.cancelAnimFrame(animFrame);
+      }
+      animFrame = L.Util.requestAnimFrame(
+        () => {
+          internals._move(center, zoom, { pinch: true, round: false });
+        },
+        undefined,
+        true,
+      );
+      event.preventDefault();
+    };
+
+    const onEnd = (event: TouchEvent) => {
+      if (zoomFrom) {
+        event.preventDefault();
+        end();
+        lastTap = null;
+      } else if (armed) {
+        const tapped = anchor;
+        end();
+        lastTap = null;
+        event.preventDefault();
+        if (tapped && !picking) {
+          map.setZoomAround(tapped.latLng, map.getZoom() + 1, {
+            animate: true,
+          });
+        }
+      } else if (fingers > 1 || event.changedTouches.length !== 1) {
+        // only a clean single-finger tap counts — not the lift-off of a pinch or a drag
+        lastTap = null;
       } else {
-        lastTime = event.timeStamp;
-        lastX = touch.clientX;
-        lastY = touch.clientY;
+        const [touch] = event.changedTouches;
+        const at = screenPoint(touch);
+        lastTap =
+          start && at.distanceTo(start) <= TAP_MOVE_SLOP
+            ? { time: event.timeStamp, at }
+            : null;
       }
     };
+
+    const onCancel = () => {
+      end();
+      lastTap = null;
+    };
+
     container.addEventListener("touchstart", onStart, { passive: true });
+    container.addEventListener("touchmove", onMove, { passive: false });
     container.addEventListener("touchend", onEnd, { passive: false });
+    container.addEventListener("touchcancel", onCancel, { passive: true });
     return () => {
       container.removeEventListener("touchstart", onStart);
+      container.removeEventListener("touchmove", onMove);
       container.removeEventListener("touchend", onEnd);
+      container.removeEventListener("touchcancel", onCancel);
+      // end, not reset: a prop change mid-drag would otherwise strand the map on the gesture's
+      // fractional zoom, which MapController then carries into every later flyTo
+      end();
     };
   }, [map, following, picking]);
   return null;
