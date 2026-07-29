@@ -256,8 +256,9 @@ async function build(): Promise<void> {
   // chunks the tiler just wrote, so this must run after them. Own rm/mkdir of public/commercial.
   await buildCommercial();
 
-  // The shade overlay's shadow-tile pyramid, one per time-of-day bucket, cast from the building
-  // footprints by `tiler shade`. The sun schedule (suncalc) is computed here and passed as params;
+  // The shade overlay's shadow-tile pyramids, one per time-of-day bucket, cast from the building
+  // footprints and from the canopy's crown heights by `tiler shade` — the tree one only when a city
+  // carries measured heights. The sun schedule (suncalc) is computed here and passed as params;
   // stale tiles are cleared first so a shrunk schedule leaves nothing behind.
   // The sun-position params drive both the shade tile pyramid and the per-edge SHDE routing bake, so
   // they are written once here and shared; null when the year yields no above-horizon bin.
@@ -282,10 +283,12 @@ async function build(): Promise<void> {
     )
   ).some(Boolean);
   if (anyBuildings && shadeParamsPath) {
-    await rm(join(PUBLIC_DIR, "tiles", "shade"), {
-      recursive: true,
-      force: true,
-    });
+    for (const pyramid of ["shade", "tree-shade"]) {
+      await rm(join(PUBLIC_DIR, "tiles", pyramid), {
+        recursive: true,
+        force: true,
+      });
+    }
     runTiler(
       [
         "shade",
@@ -374,7 +377,8 @@ async function build(): Promise<void> {
     }
     // The per-edge shade bake rides on the same graph invocation: it needs the city's building
     // footprints and the shared sun-position params, and writes one file per sun-position bin into
-    // public/routing/shade (cleared by the ROUTING_DIR rm above) plus a bins.json manifest.
+    // public/routing/shade (cleared by the ROUTING_DIR rm above) plus a bins.json manifest. The canopy
+    // rides along when the city has one, so crowns shade the edges as well as the tiles.
     const buildingsFile = sourcePath("buildings", `${city.id}.bin`);
     if (shadeParamsPath && (await fileExists(buildingsFile))) {
       graphArgs.push(
@@ -385,6 +389,12 @@ async function build(): Promise<void> {
         "--shade-dir",
         join(ROUTING_DIR, "shade"),
       );
+      if (city.field.canopy) {
+        graphArgs.push(
+          "--canopy",
+          sourcePath("canopy", city.field.canopy.file),
+        );
+      }
     }
     runTiler(graphArgs, false);
   }

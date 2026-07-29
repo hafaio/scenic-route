@@ -12,6 +12,7 @@ mod densities;
 mod genus_field;
 mod geometry;
 mod graph;
+mod heights;
 mod manifest;
 mod raster;
 mod scenic;
@@ -27,11 +28,12 @@ pub type Fallible<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
 const USAGE: &str = "usage:
   tiler densities --params <file.json>
+  tiler heights --canopy <file.bin> --chm <file.tif>
   tiler chunks --manifest <file.json> --data <dir> --chunks <dir> [--paths <file.bin>]
   tiler canopy --manifest <file.json> --ramp <file.bin> --data <dir> --tiles <dir>
   tiler shade --manifest <file.json> --data <dir> --tiles <dir> --params <file.json>
   tiler genus-field --manifest <file.json> --data <dir> --tiles <dir>
-  tiler graph --streets <file.bin> [--paths <file.bin>] [--ferries <file.bin>] [--landmarks <file.bin>] [--art <file.bin>] [--highways <file.bin>] [--commercial <file.bin>] [--buildings <file.bin> --shade-params <file.json> --shade-dir <dir>] --out <file.bin>
+  tiler graph --streets <file.bin> [--paths <file.bin>] [--ferries <file.bin>] [--landmarks <file.bin>] [--art <file.bin>] [--highways <file.bin>] [--commercial <file.bin>] [--buildings <file.bin> --shade-params <file.json> --shade-dir <dir> [--canopy <file.bin>]] --out <file.bin>
 ";
 
 fn flags(mut args: impl Iterator<Item = String>) -> Fallible<HashMap<String, String>> {
@@ -61,6 +63,10 @@ fn run() -> Fallible<()> {
     let flags = flags(args)?;
     match command.as_str() {
         "densities" => densities::run(&path(&flags, "params")?),
+        "heights" => heights::run(&heights::Args {
+            canopy: path(&flags, "canopy")?,
+            chm: path(&flags, "chm")?,
+        }),
         "chunks" => chunks::run(&chunks::Args {
             manifest: path(&flags, "manifest")?,
             data: path(&flags, "data")?,
@@ -96,6 +102,7 @@ fn run() -> Fallible<()> {
             buildings: flags.get("buildings").map(PathBuf::from),
             shade_params: flags.get("shade-params").map(PathBuf::from),
             shade_dir: flags.get("shade-dir").map(PathBuf::from),
+            canopy: flags.get("canopy").map(PathBuf::from),
         }),
         _ => Err(format!("unknown command \"{command}\"\n{USAGE}").into()),
     }

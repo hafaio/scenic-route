@@ -8,7 +8,7 @@ use std::path::Path;
 use crate::Fallible;
 
 pub const TREE_FORMAT: u16 = 3; // v3 adds a genus byte per tree; v2 added the crown byte
-pub const CANOPY_FORMAT: u16 = 1; // the measured 2017 LiDAR canopy, the shared polygon layout under magic CNPY
+pub const CANOPY_FORMAT: u16 = 2; // the measured 2017 LiDAR canopy under magic CNPY; v2 adds a trailing crown-height u16 per polygon
 pub const BLDG_FORMAT: u16 = 1; // building footprints with trailing roof-height/base-elevation u16s, magic BLDG
 pub const LAND_FORMAT: u16 = 1;
 pub const STREET_FORMAT: u16 = 5;
@@ -119,7 +119,7 @@ fn header(bytes: &[u8]) -> Header {
 }
 
 /// The tree inventory: a point per tree, the radius of the crown disc it shades the ground with
-/// (decoded from the trailing crown byte, decimetres to metres), and its genus id (0..12, from the
+/// (decoded from the trailing crown byte, decimetres to metres), and its genus id (0..11, from the
 /// genus byte block after the crowns). The three arrays are parallel — index `i` is one tree.
 pub struct Trees {
     pub coords: Vec<Coord>,
@@ -252,6 +252,65 @@ pub fn read_buildings(path: &Path) -> Fallible<(Vec<Polygon>, Vec<f64>)> {
         })
         .collect();
     Ok((polygons, heights))
+}
+
+/// The measured canopy polygons, plus the file they came from: `tiler heights` patches the
+/// trailing height region back into `bytes` and rewrites it, so the region is not decoded away.
+pub struct Canopy {
+    pub bytes: Vec<u8>,
+    pub polygons: Vec<Polygon>,
+    heights: usize,
+}
+
+impl Canopy {
+    /// Each polygon's crown height in metres, in polygon order. 0 means the height model saw no
+    /// cell inside the polygon: it is a sentinel no real reading collides with, the model being
+    /// thresholded at 2.1 m.
+    pub fn heights_m(&self) -> Vec<f64> {
+        (0..self.polygons.len())
+            .map(|polygon| {
+                f64::from(u16_at(&self.bytes, self.heights + polygon * 2)) / DECIMETERS_PER_METER
+            })
+            .collect()
+    }
+
+    /// Fills the trailing region, decimetres in polygon order.
+    pub fn set_heights_dm(&mut self, heights: &[u16]) {
+        for (polygon, height) in heights.iter().enumerate() {
+            let at = self.heights + polygon * 2;
+            self.bytes[at..at + 2].copy_from_slice(&height.to_le_bytes());
+        }
+    }
+}
+
+/// CNPY v2: the measured LiDAR canopy in the shared polygon layout, then ONE trailing u16 region
+/// in polygon order — the crown height in decimetres — exactly as BLDG carries its roof heights.
+/// The generic `read_polygons` still reads the geometry alone for the callers wanting no height.
+pub fn read_canopy(path: &Path) -> Fallible<Canopy> {
+    let bytes = fs::read(path)?;
+    check_magic(&bytes, "CNPY", CANOPY_FORMAT, path)?;
+    let head = header(&bytes);
+    let mut cursor = Cursor {
+        bytes: &bytes,
+        offset: head.body,
+    };
+    let polygons = decode_polygons(&mut cursor, &head);
+    let heights = cursor.offset;
+    let end = heights + head.count * 2;
+    if bytes.len() < end {
+        return Err(format!(
+            "{} is truncated: {} bytes, {end} needed for {} height u16s",
+            path.display(),
+            bytes.len(),
+            head.count
+        )
+        .into());
+    }
+    Ok(Canopy {
+        bytes,
+        polygons,
+        heights,
+    })
 }
 
 /// A bare point set (the scenic POI sources: `LMRK` landmarks, `ARTW` public art). The shared

@@ -14,18 +14,20 @@ automatically whenever an input is newer than the last run.
 
 ## Who does what: TypeScript fetches, Rust computes
 
-**All of the model math lives in `crates/tiler`**, a Rust binary with five subcommands. The
+**All of the model math lives in `crates/tiler`**, a Rust binary with seven subcommands. The
 scripts fetch, encode and orchestrate; they compute nothing about trees.
 
 | | |
 | --- | --- |
 | `scripts/` | Socrata paging, the Overpass mirror rotation, the disk cache, the `.bin` encoders, the manifest, and the colour ramp |
-| `crates/tiler` | the canopy convolution and the cover it yields, the sidewalk offsets and their cover, the Monte-Carlo cover distribution, the genus-dot overlay, the tile pyramids, the WebPs, the street chunks, and the routing graph |
+| `crates/tiler` | the canopy convolution and the cover it yields, the sidewalk offsets and their cover, the Monte-Carlo cover distribution, the per-polygon canopy heights, the genus-dot overlay, the tile pyramids, the WebPs, the street chunks, and the routing graph |
 
 ```sh
 tiler densities --params <file.json>                          # fills the street & path density blobs, in place
+tiler heights --canopy <file.bin> --chm <file.tif>            # fills the canopy file's crown-height region, in place
 tiler canopy --manifest … --ramp … --data … --tiles …         # the LiDAR-canopy cover fill pyramid
 tiler genus  --manifest … --palette … --data … --tiles …      # the genus-dot raster pyramid
+tiler shade  --manifest … --data … --tiles … --params …       # the building- and tree-shadow pyramids
 tiler chunks --manifest … --data … --chunks … [--paths …]     # slices STRT (+PATH) into the client's street chunks
 tiler graph  --streets <in.bin> --out <out.bin> [--paths …] [--ferries …]   # contracts STRT (+PATH, +FERR) into the GRPH routing graph
 ```
@@ -45,7 +47,9 @@ Two things cross the boundary in the other direction, and both are deliberate:
   cover sample count and seed) ride to `tiler densities` in its params JSON instead: densities
   runs *before* the manifest is finished — it is what *reports* the cover distribution that goes
   into it — so it cannot read them back from it. The crown allometry stays in the ingest, baked
-  into each tree's crown byte, so the tiler does geometry, not botany.
+  into each tree's crown byte, and the canopy's seasonal opacity stays in the client
+  (`src/shade/phenology.ts`, applied when the shade overlay composites the two shadow pyramids), so
+  the tiler does geometry, not botany.
 - **The colour ramp stays in TypeScript** (`src/tree-cover/ramp.ts`), because the client's
   street layer imports the same module. That shared import is what guarantees the block fill
   and the street lines are one colour function. `build-tiles` evaluates it over the 256 density
@@ -216,6 +220,7 @@ in its own band.
 | streets | NYC CSCL street centerline, Socrata `inkn-q76z` | `rw_type` in 1, 5, 6, 7, 10 = street, boardwalk, path/trail, step street, alley, plus pedestrian bridges/tunnels (3, 4) where `nonped != 'V'` |
 | land | NYC borough boundaries (water areas excluded), Socrata `gthc-hcne` | the population the cover distribution is taken over, and the clip that drops New Jersey |
 | canopy | NYC's 2017 LiDAR tree canopy, ArcGIS `TreeCanopy2017_Simplified_1ft` | the *measured* canopy footprint the cover field is blurred from, a committed source, magic `CNPY` — feeds the density blobs and, through them, routing; see below |
+| canopy heights | the 1 m LiDAR canopy height model of Ma et al. 2023, figshare doi `10.6084/m9.figshare.20522895` (`NY_CHM_10Int260m.tif`, CC BY 4.0) | a 243 MiB uint16 GeoTIFF of decimetres over UTM 18N, cached but never committed; `tiler heights` samples it per canopy polygon and writes the result *into* the `CNPY` file — see below |
 | paths | OSM pedestrian/park ways (footway/path/pedestrian/steps/cycleway/bridleway/track) plus park drives (roads closed to through motor traffic), via Overpass | the park, greenway and car-free-drive network CSCL lacks; a separate committed source, magic `PATH` — see below and "Binary layouts" |
 | ferries | the two NYC ferry GTFS feeds — Staten Island Ferry (NYC DOT) and NYC Ferry (Hornblower, via Connexionz) | consolidated to a time-independent ferry graph, a committed source, magic `FERR` — OSM- and canopy-independent, read by a later phase's routing graph, not the cover pipeline; see below and "Binary layouts" |
 | landmarks | NYC LPC Individual Landmark Sites, Socrata `buis-pvji` | ~1.5k designated historic/touristy sites, taken at their WGS84 centroid; a committed POI source, magic `LMRK` — fanned out into a per-edge routing discount, not the cover pipeline; see "Binary layouts" |
@@ -234,7 +239,7 @@ only when they carry pedestrians (`rw_type` 3/4 with `nonped != 'V'`) — that i
 East River crossings — and every kept row is flagged (record byte 23) so a router can drop the
 vehicular-only streets the overlay still draws.
 
-### The measured LiDAR canopy (`CNPY` v1)
+### The measured LiDAR canopy (`CNPY` v2)
 
 The map's cover is the **measured 2017 LiDAR tree canopy**, lightly blurred — not a point-KDE
 inferred from the ForMS register. NYC Parks publishes the canopy as ~1.08 M simplified polygons on
@@ -269,7 +274,76 @@ like the rest of `public/tiles/`, rebuilt by `bun dev`/`bun export`.
 **License:** NYC-public (NYC OTI / NYC Parks, 2017 LiDAR) — no ODbL entanglement, unlike the OSM
 sources. Attribution: "Tree canopy © NYC OTI / NYC Parks (2017 LiDAR)". The authoritative 6-inch
 land-cover raster (`he6d-2qns`, 1.33 GB, class 1 = Tree Canopy) is the documented fallback if the
-polygon service disappears; it needs a GeoTIFF crate, so the std-only polygon service is preferred.
+polygon service disappears; the GeoTIFF crate it needs is now in the tree for the height model
+below, so what keeps the polygon service preferred is only that it is the far smaller read.
+
+#### How tall each polygon is
+
+The polygons are a footprint — flat. Their **crown height** comes from a second, independent LiDAR
+product: the 1 m canopy height model of Ma et al. 2023 (figshare doi `10.6084/m9.figshare.20522895`,
+CC BY 4.0), a 47008 × 47697 uint16 GeoTIFF of **decimetres** over NAD83(2011) UTM 18N.
+`scripts/chm.ts` downloads it once into `.cache/` (243 MiB, checksum-verified, never committed) and
+`tiler heights` reads it off disk: it projects every polygon vertex into the raster's UTM grid with
+Snyder's transverse Mercator series (a round trip measures 0.06 mm, and a ±4 m registration sweep
+peaks at no offset), fills each polygon even-odd at cell centres, and stores the **75th percentile**
+of the cells it caught, in decimetres, in the file's trailing height region. It rewrites the `.bin`
+in place, exactly as `tiler densities` fills the density blobs, and the ingest calls it right after
+writing the canopy file.
+
+The CHM is a **thresholded crown-core product, not a canopy surface**: 95% of its cells are nodata
+and its lowest real reading is 2.1 m, because everything shorter (and everything taller than 60 m,
+to keep buildings out) was masked away. So a polygon can be real canopy and still catch no cell —
+1.98% of them cover no cell centre at all, and the thin fringes of a crown are masked. Those keep a
+height of **0, meaning unknown**, which no real reading can collide with given that 2.1 m floor; a
+reader must treat 0 as "no measurement", not as "flat". For NYC 46.15% of polygons carry a measured
+height; because the ones that miss are overwhelmingly the tiny ones, those 46% are **96.56% of the
+canopy area**. Area-weighted, the measured height runs 11.2–19.4 m across the interquartile range
+with a median of 15.2 m, and 21.8% of the canopy area stands above 20 m.
+
+372 of the raster's 137,264 internal tiles carry an LZW stream that will not decode; they sit in the
+last 32-pixel column, east of the city, and hold no polygon cell at all, so the pass reports the
+count and carries on rather than failing the build.
+
+#### What the heights are for: the tree-shadow pyramid, and routing
+
+`tiler shade` reads them alongside the building footprints and bakes a **second shadow pyramid**,
+`public/tiles/tree-shade/<bin>/{z}/{x}/{y}.webp`, mirroring the building one
+(`public/tiles/shade/<bin>/{z}/{x}/{y}.webp`) tile for tile: the same bin indices off the same
+`buckets.json`, the same z9–z15 plan, the same lossless WebP of one flat slate where only alpha
+varies, the same `MAX_SHADE_ALPHA * intensity * fraction` scale and 8-step quantisation, and a tile
+with nothing painted in it is not written at all — the client reads the 404 as transparent.
+
+Two things differ from a building. A crown **floats in the air**, so its shadow is the polygon simply
+TRANSLATED by `CROWN_BASE_FRACTION * height / tan(elevation)` (clipped to the same 500 m) — there is
+no wall connecting it to the ground, so there is nothing to sweep, which is both cheaper and more
+correct than the building's swept hull. The **0.4** is the crown BASE: the LiDAR outline is the
+crown's widest cross-section, which on the half-ellipsoid and ovoid crowns urban broadleaves take
+sits at or near the base, so casting from the polygon's own height would model the crown as a flat
+sheet at the top of the tree and throw the shadow about a crown radius too far — far enough at a low
+sun to detach it from its tree. It is an assumption anchored on crown ratio (0.39–0.60 for hardwoods,
+Russell & Weiskittel 2011 Table 1), not a measured height to largest crown width; the published HLCW
+work is all conifer. `src/tiles/sweep.ts` translates by the same fraction, or the client's swept
+tiles and the baked pyramid would disagree at the handoff. And it is cast from the bin's **centre
+sun-disk sample alone**: a 10 m crown's
+penumbra is ~5 cm against a 3.6 m pixel at z15, so the other five samples would paint the same
+picture at six times the cost. Building footprints are punched out of the tree shadow exactly as they
+are out of their own — shade landing on a roof is not ground shade — but canopy footprints are **not**
+punched out of theirs, because the ground under a tree is where you stand and the shadiest place
+there is. A polygon carrying the 0 unknown-height sentinel casts nothing, which leaves 3.44% of the
+canopy area throwing no shadow.
+
+The pyramid is **pure geometry**: no leaf-on/leaf-off opacity is baked into it. How much light a crown
+stops is seasonal, and only the client knows the date, so the shade overlay's tile worker fetches both
+pyramids for a tile and composites them per pixel,
+`alpha_b + tau*alpha_t - tau*alpha_b*alpha_t/(MAX_SHADE_ALPHA*intensity)` — which is
+`MAX*intensity*(1 - (1 - b)(1 - tau*t))`, the light that gets past a building AND past a crown, in
+baked-alpha terms — with tau from `src/shade/phenology.ts` (0.814 in leaf, 0.40 leaf-off, ramped
+across April and across October–November). Drawing them as two stacked Leaflet layers would
+source-over instead, which double-scales the cross term and comes out ~25% too dark where both fall.
+
+The same crowns cast the same shadows across the **routing** edges, in the SHDB artifact below, and
+the client composites them there with the same tau — so a shade-seeking route walks the tree line,
+not just the north side of the street.
 
 ### The pedestrian and park paths (`PATH` v1)
 
@@ -421,7 +495,8 @@ bun run build-tiles
 ```
 
 Raw source reads are cached in `.cache/` (gitignored), keyed by the request itself, and
-never expire on their own. The sources move about once a year, so a re-run wants whatever it
+never expire on their own — including the 243 MiB canopy height raster, which is kept as a file
+rather than as JSON because the tiler reads it off disk itself. The sources move about once a year, so a re-run wants whatever it
 read last time — not a fresher copy it did not ask for.
 
 `build-tiles` skips its work entirely if its output is newer than the manifest, the ramp, the
@@ -444,6 +519,12 @@ blank webp:
   CSR-style: a tile scans only the buckets a dot can reach, and a tile with no tree whose disc
   spills into it goes straight to the blank webp. Each tree is a single anti-aliased disc, so this
   pass is cheap next to the polygon fill.
+- **The shadows (`tiler shade`).** By far the longest pass, because it runs the whole plan once per
+  sun-position bin (58 of them): the buildings' six sun-disk samples measure 17.5 s a bin over a
+  3616-tile plan, and the crowns' single sample adds 6.2 s and ~0.5 GB of peak memory on top. The
+  tree pyramid comes out at ~88% of the building pyramid's bytes and paints about the
+  same fraction of the plan (43.7% against 42.5%), so it roughly doubles what the shade tiles cost
+  the deploy.
 
 `tiler densities` is the third heavy pass: it convolves the same canopy indicator at both
 sidewalks of every street and path vertex, and draws a seeded million-point land sample for the
@@ -529,13 +610,18 @@ a time, so two overlapping polygons do not cancel each other out. The land mask 
 ingest (the population the cover distribution is taken over) and at tile time (the clip that keeps
 canopy from bleeding over water), so it is committed rather than fused into anything.
 
-### `data/canopy/<id>.bin` — the measured LiDAR canopy, magic `CNPY` (v1)
+### `data/canopy/<id>.bin` — the measured LiDAR canopy, magic `CNPY` (v2)
 
-The **`LAND` polygon layout** exactly — the same 40-byte header, then `count` even-odd polygons of
-varint-delta rings — under its own magic so it self-identifies. It is NYC's 2017 LiDAR tree-canopy
-footprint (~1.08 M polygons, land-clipped), the *measured* field the cover is blurred from. Read
-with the generic `read_polygons(path, "CNPY", 1)`; `tiler densities` convolves and samples it to
-fill the streets/paths density blobs, and `tiler canopy` rasterizes it into the fill pyramid.
+The **`LAND` polygon layout** — the same 40-byte header, then `count` even-odd polygons of
+varint-delta rings — under its own magic so it self-identifies, followed by **one trailing region**
+of a `u16` little-endian per polygon in the same polygon order: the **crown height in decimetres**,
+as `BLDG` carries its roof heights. It is NYC's 2017 LiDAR tree-canopy footprint (~1.08 M polygons,
+land-clipped), the *measured* field the cover is blurred from. `encodeCanopy` writes the region
+zeroed and `tiler heights` fills it in place from the separate canopy height model (above); **0
+means unknown**, not flat. Read the geometry alone with the generic `read_polygons(path, "CNPY", 2)`
+— which is what `tiler densities` (convolving and sampling it into the streets/paths density blobs)
+and `tiler canopy` (rasterizing it into the fill pyramid) do — or with the heights through
+`read_canopy`.
 
 ### `data/landmarks/<id>.bin` and `data/art/<id>.bin` — the scenic POIs, magic `LMRK` / `ARTW` (v1)
 
@@ -574,11 +660,11 @@ the **roof height** in **decimetres**; then the **base (ground) elevation** in d
 biased by `+ELEVATION_BIAS_METERS` (100 m) so the shoreline's slightly-negative bases stay in the
 unsigned range — recover it as `decimetres / 10 − 100`. A building whose footprint is a multi-part
 MultiPolygon expands to several polygon records, each repeating that building's height and base, so both
-regions stay parallel to the polygons. Written by `encodeBuildings`. Not yet read by the tiler: it is
-the committed input for a future building-shade factor, which will raise each wall from its base
-elevation, project its shadow by the sun position, and bake a time-bucketed per-edge shade attribute
-(a separate artifact, not the GRPH edge record). The base elevation makes the casters terrain-aware;
-bare-earth self-shadowing (hills/parks with no buildings) would need the separate 1-ft LiDAR DEM.
+regions stay parallel to the polygons. Written by `encodeBuildings`. `tiler shade` reads the heights
+for the shadow pyramid and `tiler graph` for the per-edge shade bake (the `SHDB` artifact, not the
+GRPH edge record); the base elevations are still unread — folding them in would make the casters
+terrain-aware, and bare-earth self-shadowing (hills/parks with no buildings) would need the separate
+1-ft LiDAR DEM.
 
 ### `data/streets/<id>.bin` — the network, magic `STRT` (v5)
 
@@ -898,6 +984,38 @@ A pure degree-2 cycle is emitted as a self-loop on the one node it retains. GRPH
 distinct from the STRT record flags: a step street is bit1, and bit2 on a **sidewalk** marks the
 geometry-right side (v1's "path-like" bit is gone — the kind field carries that now).
 
+### `public/routing/shade/` — the per-edge occlusion fractions, magic `SHDB` (v2, derived, gitignored)
+
+The same `tiler graph` invocation, given `--buildings` and `--shade-params` (the sun-position file
+`tiler shade` reads) and `--shade-dir`, bakes for every GRPH edge and every sun-position bin how much
+of that edge's polyline a **building** shadow covers and how much a **crown** shadow covers — the
+same shadow geometry the two tile pyramids cast, from the bin's centre sun-disk sample alone (so an
+edge is cleanly in or out), probed every 5 m along the edge against a 5 m rasterized coverage grid of
+the bin's ~867k hulls. `--canopy` supplies the crowns; without it, or where a crown carries the 0
+unknown-height sentinel, the tree fractions are simply 0 and the router costs buildings alone.
+
+The bins run in parallel, one grid alive per thread. NYC's 58 bins over 531,520 edges take ~48 s from
+the buildings alone and ~105 s with the crowns as well, and the artifact is 59 MB either way — twice
+what the single signed row cost, since the tree row ships whether or not a crown covers anything.
+
+`bins.json` holds `edgeCount` and the bins — `index`, `season`, `hourAngle`, `elevation`, `azimuth`,
+the same (declination, hourAngle) keys `buckets.json` carries, so the router lands on the bin the
+overlay draws. `<index>.bin` is a 12-byte header (magic `SHDB`, u16 version = 2, u16 pad, u32
+`edgeCount`) then **two** `edgeCount`-byte rows, buildings then trees, each `fraction = byte / 255`.
+
+Neither the sun's strength nor the season is baked, because neither survives being folded in. The
+client derives the bin's intensity from its elevation (`max(0, sin(elevation))`, what the bake itself
+uses) and composites the rows into one signed i8 row per bin — once, on first use, cached, since A*
+reads an edge's attribute in its innermost loop — with the same tau the overlay composites its
+pyramids with:
+
+    shaded = 1 - (1 - buildings) * (1 - tau * trees)
+    attr   = intensity * (1 - 2 * shaded)   as round(attr * 128) clamped to +-127
+
+An edge reads positive when net sunlit and negative when net shaded; the clamp is what keeps
+`|attr| <= 127/128 < 1`, and with it the cost model's `1 - w*attr` positive for `|w| <= 1`. A ferry
+edge has no polyline and reads 0 in both rows — its cost never consults the attribute.
+
 ## Adding a city
 
 The client does not change. It reads `src/tree-cover/manifest.json` and the tile pyramid;
@@ -910,7 +1028,8 @@ hard-coded `CITY` constant plus four NYC-specific fetchers. A new city needs:
 
 1. **A measured tree-canopy source** — polygons of the canopy footprint (NYC uses its 2017 LiDAR
    canopy). This *is* the cover field: without it `tiler densities` has nothing to convolve and the
-   map has no cover at all.
+   map has no cover at all. A canopy height model to run `tiler heights` against is optional: with
+   none, every polygon keeps the 0 that reads as an unknown height.
 2. **A tree inventory** — points, ideally with a standing/removed flag and a trunk diameter to
    size the crowns (without one, a city would need its own way to a crown radius). This feeds the
    **genus overlay**, not the cover. It is the part with no standard: every city publishes its own.

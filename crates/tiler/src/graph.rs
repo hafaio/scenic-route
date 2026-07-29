@@ -98,6 +98,7 @@ pub struct Args {
     pub buildings: Option<PathBuf>,
     pub shade_params: Option<PathBuf>,
     pub shade_dir: Option<PathBuf>,
+    pub canopy: Option<PathBuf>, // the crowns that shade the edges too; without it trees occlude nothing
 }
 
 /// One edge, before and after contraction: the polyline runs a -> b with its endpoints pinned to
@@ -579,16 +580,18 @@ fn intern_name(
 }
 
 // The SHDE artifact, one file per sun-position bin so the client fetches only the ~2 bins a given
-// time needs: `<dir>/bins.json` lists the bins (index + sun position) and the edge count, and
-// `<dir>/<index>.bin` carries that bin's `edge_count` i8 attributes (0 neutral, positive sunnier,
-// `attr = byte / 128`). The dir is wiped first so a shrunk bin set leaves no stale files. Each bin
-// file is a 12-byte header (magic "SHDB", u16 version, u16 pad, u32 edgeCount) then the i8 row,
-// little-endian; `edge_count` matches the GRPH edge count. Layout: scripts/README.md.
+// time needs: `<dir>/bins.json` lists the bins (index + sun position, the elevation being what the
+// client derives the bin's solar intensity from) and the edge count, and `<dir>/<index>.bin` carries
+// that bin's two u8 occlusion rows — buildings then trees, `fraction = byte / 255`. The dir is wiped
+// first so a shrunk bin set leaves no stale files. Each bin file is a 12-byte header (magic "SHDB",
+// u16 version, u16 pad, u32 edgeCount) then the two `edge_count`-byte rows, little-endian;
+// `edge_count` matches the GRPH edge count. Layout: scripts/README.md.
 fn write_shade(
     dir: &std::path::Path,
     edge_count: usize,
     positions: &[shade::BinPosition],
-    attrs: &[i8],
+    buildings: &[u8],
+    trees: &[u8],
 ) -> Fallible<()> {
     match fs::remove_dir_all(dir) {
         Ok(()) => {}
@@ -615,16 +618,14 @@ fn write_shade(
 
     const HEADER_BYTES: usize = 12;
     for index in 0..positions.len() {
-        let row = &attrs[index * edge_count..index * edge_count + edge_count];
-        let mut bytes = vec![0u8; HEADER_BYTES + row.len()];
-        bytes[0..4].copy_from_slice(b"SHDB");
-        put_u16(&mut bytes, 4, 1); // version
-        // byte 6 is a u16 pad (kept zero).
-        put_u32(&mut bytes, 8, edge_count as u32);
-        // The i8 row reinterpreted into the byte buffer (two's complement, same width).
-        for (slot, &attr) in row.iter().enumerate() {
-            bytes[HEADER_BYTES + slot] = attr as u8;
-        }
+        let span = index * edge_count..index * edge_count + edge_count;
+        let mut bytes = Vec::with_capacity(HEADER_BYTES + 2 * edge_count);
+        bytes.extend_from_slice(b"SHDB");
+        bytes.extend_from_slice(&2u16.to_le_bytes()); // version
+        bytes.extend_from_slice(&0u16.to_le_bytes()); // pad
+        bytes.extend_from_slice(&(edge_count as u32).to_le_bytes());
+        bytes.extend_from_slice(&buildings[span.clone()]);
+        bytes.extend_from_slice(&trees[span]);
         fs::write(dir.join(format!("{index}.bin")), &bytes)?;
     }
     Ok(())
@@ -1894,10 +1895,11 @@ pub fn run(args: &Args) -> Fallible<()> {
     }
     fs::write(&args.out, &bytes)?;
 
-    // The SHDE artifact (optional): a signed shade attribute per edge per sun-position bin, keyed off
-    // the same finalized `v2_edges` order the client reads GRPH records in. Each edge's polyline is
-    // recovered in degrees exactly as the pre-write geometry check does — a ferry bakes to neutral,
-    // a stored-geometry edge uses its blob, a geometry-less edge its straight node-to-node line.
+    // The SHDE artifact (optional): the building and crown occlusion fractions per edge per
+    // sun-position bin, keyed off the same finalized `v2_edges` order the client reads GRPH records
+    // in. Each edge's polyline is recovered in degrees exactly as the pre-write geometry check does —
+    // a ferry bakes to zeroes, a stored-geometry edge uses its blob, a geometry-less edge its straight
+    // node-to-node line.
     if let (Some(buildings_path), Some(shade_params_path), Some(shade_dir_path)) =
         (&args.buildings, &args.shade_params, &args.shade_dir)
     {
@@ -1927,14 +1929,22 @@ pub fn run(args: &Args) -> Fallible<()> {
             .collect();
 
         let params: shade::Params = serde_json::from_slice(&fs::read(shade_params_path)?)?;
-        let (attr_bytes, positions) = shade::edge_shade_attrs(
+        let (building_bytes, tree_bytes, positions) = shade::edge_shade_attrs(
             buildings_path,
+            args.canopy.as_deref(),
             &params.buckets,
             params.max_shadow_meters,
             &edge_polys,
         )?;
-        assert_eq!(attr_bytes.len(), positions.len() * v2_edges.len());
-        write_shade(shade_dir_path, edge_count, &positions, &attr_bytes)?;
+        assert_eq!(building_bytes.len(), positions.len() * v2_edges.len());
+        assert_eq!(tree_bytes.len(), building_bytes.len());
+        write_shade(
+            shade_dir_path,
+            edge_count,
+            &positions,
+            &building_bytes,
+            &tree_bytes,
+        )?;
         eprintln!(
             "shade: {} bins x {edge_count} edges baked to {}",
             positions.len(),
@@ -2019,9 +2029,10 @@ mod tests {
             },
         ];
         let edge_count = 3;
-        // Two bins x three edges, row-major; bin 1's row is the last three.
-        let attrs: Vec<i8> = vec![1, -2, 3, -4, 5, -6];
-        write_shade(&dir, edge_count, &positions, &attrs).expect("write");
+        // Two bins x three edges, row-major; bin 1's row is the last three of each grid.
+        let buildings: Vec<u8> = vec![1, 2, 3, 4, 5, 6];
+        let trees: Vec<u8> = vec![10, 20, 30, 40, 50, 60];
+        write_shade(&dir, edge_count, &positions, &buildings, &trees).expect("write");
 
         let manifest: serde_json::Value =
             serde_json::from_slice(&fs::read(dir.join("bins.json")).expect("bins.json")).unwrap();
@@ -2034,16 +2045,14 @@ mod tests {
 
         let bin1 = fs::read(dir.join("1.bin")).expect("1.bin");
         assert_eq!(&bin1[0..4], b"SHDB");
-        assert_eq!(u16::from_le_bytes([bin1[4], bin1[5]]), 1);
+        assert_eq!(u16::from_le_bytes([bin1[4], bin1[5]]), 2);
         assert_eq!(
             u32::from_le_bytes([bin1[8], bin1[9], bin1[10], bin1[11]]),
             3
         );
-        assert_eq!(bin1.len(), 12 + 3);
-        assert_eq!(
-            [bin1[12] as i8, bin1[13] as i8, bin1[14] as i8],
-            [-4, 5, -6]
-        );
+        assert_eq!(bin1.len(), 12 + 2 * 3);
+        assert_eq!(&bin1[12..15], [4, 5, 6]);
+        assert_eq!(&bin1[15..18], [40, 50, 60]);
 
         fs::remove_dir_all(&dir).expect("cleanup");
     }

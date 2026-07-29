@@ -18,7 +18,6 @@
     "build-openstreets": "bun run scripts/openstreets.ts",
     "build-landuse": "bun run scripts/landuse.ts",
     "build-commercial": "bun run scripts/build-commercial.ts",
-    "build-shade": "bun run scripts/build-shade.ts",
     "build-tiles": "bun run scripts/build-street-tiles.ts"
   },
   "dependencies": {
