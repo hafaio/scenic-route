@@ -1,5 +1,8 @@
 # The tree-cover pipeline
 
+This is the reference: what each stage does and what every artifact contains. The reasoning behind
+the design — the alternatives that were measured and rejected, and the traps — is in DESIGN.md.
+
 Two scripts, run in order:
 
 ```sh
