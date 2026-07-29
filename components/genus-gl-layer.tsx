@@ -364,7 +364,6 @@ export default function GenusGlLayer() {
       minNativeZoom: MIN_NATIVE_ZOOM,
       maxNativeZoom: MAX_NATIVE_ZOOM,
       maxZoom: MAX_NATIVE_ZOOM, // hand off to TreeDotsLayer above
-      updateWhenZooming: false,
       keepBuffer: 2,
     });
 
