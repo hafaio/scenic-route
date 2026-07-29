@@ -10,32 +10,22 @@
 
 import {
   DECL_MAX_DEG,
+  DISK_SAMPLES,
   HOUR_ANGLE_STEP_DEG,
   SEASON_BANDS,
+  type SunSample,
+  sunSamples,
 } from "../src/shade/sun";
 import manifest from "../src/tree-cover/manifest.json";
 
 const DEGREES = Math.PI / 180;
 const HORIZON_DEG = 0.5; // at or below this the sun is down; no bin
 
-// The sun is a disk ~0.53° across (angular radius ~0.265°), not a point, so its shadow has a penumbra
-// that widens with distance from the occluding edge. The tiler models it directly by averaging the
-// shadow cast from these samples spread over the disk: one at the centre, the rest on a ring.
-const SUN_ANGULAR_RADIUS_DEG = 0.265;
-const DISK_SAMPLES = 6;
-
-// The finest native pyramid level (penumbrae are a 1-10 m effect, so they only resolve deep in) and
-// the shadow-length clamp (past this a low sun's shadow is faint and unbounded to trace).
-export const SHADE_MAX_ZOOM = 15;
+// The finest native pyramid level, and the shadow-length clamp (past this a low sun's shadow is
+// faint and unbounded to trace). The pyramid stops here because the client sweeps the casters itself
+// from the next level down (components/shade-layer.tsx), and z15 was two thirds of its bytes.
+export const SHADE_MAX_ZOOM = 14;
 export const SHADE_MAX_SHADOW_METERS = 500;
-
-// One sun-disk sample as the tiler wants it: the ground unit vector pointing DOWN the shadow (anti-sun)
-// and the shadow length per metre of building height.
-interface ShadeSample {
-  east: number;
-  north: number;
-  shadowPerHeight: number;
-}
 
 interface ShadeBucket {
   season: number; // the declination band [0, SEASON_BANDS) this bin sits in — its season key
@@ -43,32 +33,7 @@ interface ShadeBucket {
   elevation: number; // the synthesised sun elevation for (season, hourAngle), degrees
   azimuth: number; // and azimuth (compass, clockwise from north), degrees
   intensity: number; // solar intensity ~sin(elevation); scales the shade darkness
-  samples: ShadeSample[];
-}
-
-// The disk samples for a base sun position: index 0 at the centre, the rest on a ring near the disk's
-// mean. The azimuth spread divides by cos(elevation) so the offsets stay a circle on the sky.
-function diskSamples(azimuthDeg: number, elevationDeg: number): ShadeSample[] {
-  const ringRadius = SUN_ANGULAR_RADIUS_DEG * 0.75;
-  const cosElevation = Math.cos(elevationDeg * DEGREES);
-  const samples: ShadeSample[] = [];
-  for (let index = 0; index < DISK_SAMPLES; index++) {
-    let deltaElevation = 0;
-    let deltaAzimuth = 0;
-    if (index > 0) {
-      const angle = (2 * Math.PI * (index - 1)) / (DISK_SAMPLES - 1);
-      deltaElevation = ringRadius * Math.cos(angle);
-      deltaAzimuth = (ringRadius * Math.sin(angle)) / cosElevation;
-    }
-    const azimuthRad = (azimuthDeg + deltaAzimuth) * DEGREES;
-    const elevationRad = (elevationDeg + deltaElevation) * DEGREES;
-    samples.push({
-      east: -Math.sin(azimuthRad),
-      north: -Math.cos(azimuthRad),
-      shadowPerHeight: 1 / Math.tan(elevationRad),
-    });
-  }
-  return samples;
+  samples: SunSample[];
 }
 
 // The sun's horizontal position (degrees) for a declination and hour angle over `latDeg`: the forward
@@ -130,7 +95,7 @@ export function computeShadeBuckets(): ShadeBucket[] {
         elevation: position.elevation,
         azimuth: position.azimuth,
         intensity: Math.max(0, Math.sin(position.elevation * DEGREES)),
-        samples: diskSamples(position.azimuth, position.elevation),
+        samples: sunSamples(position.azimuth, position.elevation, DISK_SAMPLES),
       });
     }
   }

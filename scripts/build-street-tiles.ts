@@ -47,6 +47,9 @@ const GENUS_FIELD_TILE_DIR = join(PUBLIC_DIR, "tiles", "genus-field");
 // where the raster pyramid stops. Copied verbatim from data/trees/*.bin (the TREE v3 blob).
 const TREE_DIR = join(PUBLIC_DIR, "trees");
 const CHUNK_DIR = join(PUBLIC_DIR, "streets");
+// The shadow casters the client sweeps for itself past the baked pyramid's deepest level, written
+// by `tiler caster-chunks` from the same footprints and crowns `tiler shade` rasterizes.
+const CASTER_DIR = join(PUBLIC_DIR, "casters");
 // The commercial overlay's precomputed per-segment signals, one file per STCK chunk, written by
 // scripts/build-commercial.ts after the chunks exist. Derived, gitignored, like the chunks.
 const COMMERCIAL_DIR = join(PUBLIC_DIR, "commercial");
@@ -179,6 +182,7 @@ async function isFresh(hash: string): Promise<boolean> {
       stat(GENUS_FIELD_TILE_DIR),
       stat(TREE_DIR),
       stat(CHUNK_DIR),
+      stat(CASTER_DIR),
       stat(COMMERCIAL_DIR),
       stat(ROUTING_DIR),
     ]);
@@ -216,11 +220,13 @@ async function build(): Promise<void> {
   await rm(GENUS_FIELD_TILE_DIR, { recursive: true, force: true });
   await rm(TREE_DIR, { recursive: true, force: true });
   await rm(CHUNK_DIR, { recursive: true, force: true });
+  await rm(CASTER_DIR, { recursive: true, force: true });
   await rm(ROUTING_DIR, { recursive: true, force: true });
   await mkdir(CANOPY_TILE_DIR, { recursive: true });
   await mkdir(GENUS_FIELD_TILE_DIR, { recursive: true });
   await mkdir(TREE_DIR, { recursive: true });
   await mkdir(CHUNK_DIR, { recursive: true });
+  await mkdir(CASTER_DIR, { recursive: true });
   await mkdir(ROUTING_DIR, { recursive: true });
   await writeRamp();
 
@@ -282,6 +288,28 @@ async function build(): Promise<void> {
       ),
     )
   ).some(Boolean);
+  // The same casters as vectors, one chunk per z15 tile, for the shadows the client generates itself
+  // past the pyramid's deepest baked level. Either source alone is worth chunking, and the halo the
+  // client gathers them over comes from the shared params' maxShadowMeters.
+  if (
+    shadeParamsPath &&
+    (anyBuildings || cities.some((city) => city.field.canopy))
+  ) {
+    runTiler(
+      [
+        "caster-chunks",
+        "--manifest",
+        MANIFEST_PATH,
+        "--data",
+        DATA_DIR,
+        "--chunks",
+        CASTER_DIR,
+        "--params",
+        shadeParamsPath,
+      ],
+      false,
+    );
+  }
   if (anyBuildings && shadeParamsPath) {
     for (const pyramid of ["shade", "tree-shade"]) {
       await rm(join(PUBLIC_DIR, "tiles", pyramid), {

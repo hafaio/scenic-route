@@ -1,125 +1,42 @@
-import { resolveUrl } from "./base-url";
+import {
+  acquire,
+  assemble,
+  type Cut,
+  cutFor,
+  draw,
+  type Patch,
+  release,
+  tileUrl,
+} from "./magnify";
 import type { ShadeParams, ShadePrefetchMessage, TileCoords } from "./protocol";
 import type { TileRenderer } from "./renderer";
+import { drawSweep, type SweptGround, sweptGround } from "./sweep";
+import { drawSweepGl } from "./sweep-gl";
 
-// The baked shade pyramids, magnified here rather than by the browser and composited here rather than
-// stacked. `tiler shade` stops at maxNativeZoom; past it Leaflet would hand the native tile to an <img>
-// and stretch it, and each image is interpolated on its own — at its border there is no neighbour to
-// sample, so the browser clamps to the edge texel and two stretched neighbours disagree along their
-// shared edge, which reads as hard seams across the wash. Here the source tile is assembled with its
-// eight neighbours first, so the resample has real pixels past every edge, and it runs at "high"
-// quality rather than bilinear.
+// The baked shade pyramids, magnified through src/tiles/magnify.ts rather than by the browser and
+// composited here rather than stacked.
 //
 // Building shadows and tree shadows are baked as two pyramids over the same ground, and both are read
 // here so the one shade layer can composite them per pixel. Two Leaflet layers would source-over
 // instead, which is the wrong arithmetic on baked alphas (see `compositeAlpha`).
-
-const TILE_SIZE = 256;
+//
+// From `vectorZoom` the tile is instead SWEPT from the caster chunks (src/tiles/sweep.ts): the same
+// shadows at the tile's own resolution, rather than a raster that stopped resolving being enlarged.
+// A deploy with no caster chunks falls back here at every zoom.
 
 // Keep in sync with MAX_SHADE_ALPHA in crates/tiler/src/shade.rs. Both pyramids bake alpha as
 // MAX_SHADE_ALPHA * intensity * fraction; undoing that scale is what recovers the shaded fractions the
 // composite multiplies.
 const MAX_SHADE_ALPHA = 190;
 
-// Source pixels of context carried around the piece being magnified: wide enough for a cubic kernel,
-// and off-tile, so a resample that clamps at the cut's own edge clamps outside what the tile shows.
-const MARGIN_PX = 4;
-
-// Decoded source tiles held between draws, from both pyramids. Sixteen magnified tiles share one
-// source tile and their neighbourhoods overlap heavily, so this cache is what keeps the magnified path
-// to roughly one fetch per source tile; the cap is generous because it also holds the clock's
-// prefetched bins. Each entry is a 256² bitmap, so the cap is ~64 MB — a fraction of what one drawn
-// tile layer per bin cost.
-const CACHE_LIMIT = 256;
-
 // The most source tiles one prefetch may warm, leaving the rest of the cache to the bins actually
 // being drawn — a prefetch that evicted those would cost more than it saves. A bin's ground costs two
 // of them once the tree pyramid is there, since a draw needs both to composite.
 const PREFETCH_LIMIT = 192;
 
-// A cached source tile. `users` counts the draws still assembling from it, so an entry evicted while
-// one is mid-flight is closed only once that draw has let go of it.
-interface CacheEntry {
-  bitmap: Promise<ImageBitmap | null>;
-  users: number;
-  evicted: boolean;
-}
-
-const cache = new Map<string, CacheEntry>();
-
-function tileUrl(
-  template: string,
-  bin: number,
-  zoom: number,
-  x: number,
-  y: number,
-): string {
-  return resolveUrl(
-    template
-      .replace("{bin}", String(bin))
-      .replace("{z}", String(zoom))
-      .replace("{x}", String(x))
-      .replace("{y}", String(y)),
-  );
-}
-
-async function fetchBitmap(url: string): Promise<ImageBitmap | null> {
-  const response = await fetch(url);
-  // `tiler shade` skips tiles with no shadow in them — and skips the tree pyramid entirely when no
-  // canopy heights were baked — so a 404 means "nothing here", not a failure.
-  if (!response.ok) {
-    return null;
-  } else {
-    return createImageBitmap(await response.blob());
-  }
-}
-
-function dispose(entry: CacheEntry): void {
-  if (entry.evicted && entry.users === 0) {
-    void entry.bitmap.then((bitmap) => bitmap?.close());
-  }
-}
-
-function release(entry: CacheEntry): void {
-  entry.users -= 1;
-  dispose(entry);
-}
-
-function prune(): void {
-  while (cache.size > CACHE_LIMIT) {
-    const [oldest] = cache.keys();
-    const entry = cache.get(oldest);
-    cache.delete(oldest);
-    if (entry) {
-      entry.evicted = true;
-      dispose(entry);
-    }
-  }
-}
-
-function acquire(url: string): CacheEntry {
-  const cached = cache.get(url);
-  if (cached) {
-    // Map iterates in insertion order, so re-inserting is what makes the eviction above an LRU.
-    cache.delete(url);
-    cache.set(url, cached);
-    cached.users += 1;
-    return cached;
-  } else {
-    const entry: CacheEntry = {
-      users: 1,
-      evicted: false,
-      // A transient fetch failure draws as nothing but is dropped rather than cached, so the next
-      // tile over the same ground tries again.
-      bitmap: fetchBitmap(url).catch(() => {
-        cache.delete(url);
-        return null;
-      }),
-    };
-    cache.set(url, entry);
-    prune();
-    return entry;
-  }
+// One bin's pyramid, as a {z}/{x}/{y} template the shared magnifier can read.
+function binTemplate(template: string, bin: number): string {
+  return template.replace("{bin}", String(bin));
 }
 
 // Fetch and decode source tiles ahead of any draw. The entries land with no users, so they stay as
@@ -135,99 +52,7 @@ export function warm({
   for (const { bin, coord } of wanted.slice(0, PREFETCH_LIMIT / 2)) {
     const { x, y, z } = coord;
     for (const template of [url, treeUrl]) {
-      release(acquire(tileUrl(template, bin, z, x, y)));
-    }
-  }
-}
-
-// The source pixels one tile needs, cut out at their own zoom: `margin` of them on each side lie
-// outside the tile, and each covers `scale` tile pixels.
-interface ShadePatch {
-  patch: OffscreenCanvas;
-  margin: number;
-  scale: number;
-}
-
-// Which source pixels a tile is cut from: the source tile it falls in, the ring of neighbours around
-// that when the tile is finer than anything baked, and where inside them its own pixels start. One cut
-// serves both pyramids, since they share a plan.
-interface Cut {
-  sourceZoom: number;
-  sourceX: number;
-  sourceY: number;
-  originX: number;
-  originY: number;
-  size: number;
-  ring: number;
-  margin: number;
-  scale: number;
-}
-
-function cutFor({ maxNativeZoom }: ShadeParams, { x, y, z }: TileCoords): Cut {
-  const magnified = z > maxNativeZoom;
-  const sourceZoom = magnified ? maxNativeZoom : z;
-  const scale = 2 ** (z - sourceZoom);
-  const margin = magnified ? MARGIN_PX : 0;
-  const sourceX = Math.floor(x / scale);
-  const sourceY = Math.floor(y / scale);
-  const span = TILE_SIZE / scale;
-  return {
-    sourceZoom,
-    sourceX,
-    sourceY,
-    // Where the tile lands inside its source tile, grown by the margin.
-    originX: (x - sourceX * scale) * span - margin,
-    originY: (y - sourceY * scale) * span - margin,
-    size: span + 2 * margin,
-    ring: magnified ? 1 : 0,
-    margin,
-    scale,
-  };
-}
-
-// Cut the tile's ground out of one baked pyramid, blitted 1:1 into a patch. Null when every source
-// tile it wants is a 404 — that pyramid has nothing over this ground.
-async function assemble(
-  template: string,
-  bin: number,
-  cut: Cut,
-): Promise<OffscreenCanvas | null> {
-  const { sourceZoom, sourceX, sourceY, originX, originY, size, ring } = cut;
-  const entries: CacheEntry[] = [];
-  for (let row = -ring; row <= ring; row++) {
-    for (let column = -ring; column <= ring; column++) {
-      entries.push(
-        acquire(
-          tileUrl(template, bin, sourceZoom, sourceX + column, sourceY + row),
-        ),
-      );
-    }
-  }
-
-  try {
-    const bitmaps = await Promise.all(entries.map((entry) => entry.bitmap));
-    const patch = new OffscreenCanvas(size, size);
-    const context = patch.getContext("2d");
-    if (!context || bitmaps.every((bitmap) => bitmap === null)) {
-      return null;
-    } else {
-      context.imageSmoothingEnabled = false; // integer 1:1 blits, nothing to interpolate
-      for (const [index, bitmap] of bitmaps.entries()) {
-        if (bitmap) {
-          const column = (index % (2 * ring + 1)) - ring;
-          const row = Math.floor(index / (2 * ring + 1)) - ring;
-          context.drawImage(
-            bitmap,
-            column * TILE_SIZE - originX,
-            row * TILE_SIZE - originY,
-          );
-        }
-      }
-      return patch;
-    }
-  } finally {
-    for (const entry of entries) {
-      release(entry);
+      release(acquire(tileUrl(binTemplate(template, bin), z, x, y)));
     }
   }
 }
@@ -289,42 +114,47 @@ function merge(
   return target;
 }
 
+// Where a tile's shade comes from: the casters it is swept from, or the baked pixels it is cut out of.
+type ShadeSource = { swept: SweptGround } | { baked: Patch | null };
+
 // The tile's source pixels: both pyramids cut out of the same ground and composited into one patch.
-async function load(
+async function bakedPatch(
   params: ShadeParams,
   coords: TileCoords,
-): Promise<ShadePatch | null> {
-  const cut = cutFor(params, coords);
+): Promise<Patch | null> {
+  const cut = cutFor(params.maxNativeZoom, coords);
   const [buildings, trees] = await Promise.all([
-    assemble(params.url, params.bin, cut),
-    assemble(params.treeUrl, params.bin, cut),
+    assemble(binTemplate(params.url, params.bin), cut),
+    assemble(binTemplate(params.treeUrl, params.bin), cut),
   ]);
   const patch = merge(buildings, trees, cut, params);
   return patch ? { patch, margin: cut.margin, scale: cut.scale } : null;
 }
 
-// One resample, from the assembled patch straight to the tile's device pixels. The margin is drawn
-// too — off the tile, where it only feeds the filter.
-function draw(
-  context: OffscreenCanvasRenderingContext2D,
-  source: ShadePatch | null,
-): void {
-  if (source) {
-    const { patch, margin, scale } = source;
-    context.imageSmoothingEnabled = true;
-    context.imageSmoothingQuality = "high";
-    const offset = -margin * scale;
-    context.drawImage(
-      patch,
-      offset,
-      offset,
-      patch.width * scale,
-      patch.height * scale,
-    );
+async function load(
+  params: ShadeParams,
+  coords: TileCoords,
+): Promise<ShadeSource> {
+  if (coords.z >= params.vectorZoom) {
+    const swept = await sweptGround(params, coords);
+    if (swept) {
+      return { swept };
+    }
   }
+  return { baked: await bakedPatch(params, coords) };
 }
 
-export const shadeRenderer: TileRenderer<ShadeParams, ShadePatch | null> = {
+export const shadeRenderer: TileRenderer<ShadeParams, ShadeSource> = {
   load,
-  draw,
+  draw(context, source, coords, params, ratio) {
+    if ("swept" in source) {
+      // On the GPU where there is one (src/tiles/sweep-gl.ts), which is an order of magnitude cheaper
+      // per tile; the Canvas2D sweep is both the fallback and the reference the GPU path is held to.
+      if (!drawSweepGl(context, source.swept, coords, params, ratio)) {
+        drawSweep(context, source.swept, coords, params, ratio);
+      }
+    } else {
+      draw(context, source.baked);
+    }
+  },
 };
