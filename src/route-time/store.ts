@@ -1,14 +1,18 @@
-// The map's time of day, a module singleton shared by the clock control and every time-dependent
-// overlay — building shade now, ferry schedules later — without threading React state through the map.
-// Two modes: "now" tracks the wall clock live (a ticker nudges subscribers as real time passes); "custom"
-// holds a specific time today the user scrubbed to. Date is always TODAY (we don't pick dates), so a
-// resolved time is a Date the overlays hand to suncalc / a schedule. Framework-agnostic (no React), the
-// idiom the layer files use for their own shared state.
+// The map's date and time of day, a module singleton shared by the clock control and every
+// time-dependent overlay — building shade now, ferry schedules later — without threading React state
+// through the map. Two INDEPENDENT axes: time is "now" (tracking the wall clock live, a ticker nudging
+// subscribers as real time passes) or a scrubbed hour, and the day is today or one the user pinned, so
+// midwinter at the live time of day is expressible. They compose into the resolved instant the overlays
+// hand to suncalc / the canopy's phenology. Framework-agnostic (no React), the idiom the layer files
+// use for their own shared state.
 
 export type TimeMode = "now" | "custom";
+export type DateMode = "today" | "custom";
 
 let mode: TimeMode = "now";
 let customHour = 12; // local clock hour (float) used in "custom" mode
+let dateMode: DateMode = "today";
+let customDay = formatDay(new Date()); // local calendar day used in "custom" date mode
 let pickerOpen = false; // the clock popover is open — the user may be scrubbing time
 const listeners = new Set<() => void>();
 let ticker: ReturnType<typeof setInterval> | null = null;
@@ -59,19 +63,61 @@ export function setCustomHour(hour: number): void {
   notify();
 }
 
-// The resolved instant: right now while tracking, else today at the custom hour.
+// A local calendar day as "YYYY-MM-DD", the form <input type="date"> reads and writes.
+export function formatDay(date: Date): string {
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${date.getFullYear()}-${month}-${day}`;
+}
+
+// Local midnight on a "YYYY-MM-DD" day. `new Date(day)` would read the string as UTC instead.
+export function parseDay(day: string): Date {
+  return new Date(
+    Number(day.slice(0, 4)),
+    Number(day.slice(5, 7)) - 1,
+    Number(day.slice(8, 10)),
+  );
+}
+
+export function getDateMode(): DateMode {
+  return dateMode;
+}
+
+export function setDateMode(next: DateMode): void {
+  if (next === dateMode) {
+    return;
+  }
+  dateMode = next;
+  notify();
+}
+
+// The resolved day, for the date input's value.
+export function getResolvedDay(): string {
+  return dateMode === "custom" ? customDay : formatDay(new Date());
+}
+
+// Pinning a day implies leaving "today".
+export function setCustomDay(day: string): void {
+  if (dateMode === "custom" && day === customDay) {
+    return;
+  }
+  customDay = day;
+  dateMode = "custom";
+  notify();
+}
+
+// The resolved instant: the pinned day (else today) at the scrubbed hour (else the live wall clock).
 export function getResolvedDate(): Date {
   const now = new Date();
-  if (mode === "now") {
+  if (mode === "now" && dateMode === "today") {
     return now;
   }
-  return new Date(
-    now.getFullYear(),
-    now.getMonth(),
-    now.getDate(),
-    0,
-    Math.round(customHour * 60),
-  );
+  const day = dateMode === "custom" ? parseDay(customDay) : now;
+  const minutes =
+    mode === "custom"
+      ? Math.round(customHour * 60)
+      : now.getHours() * 60 + now.getMinutes();
+  return new Date(day.getFullYear(), day.getMonth(), day.getDate(), 0, minutes);
 }
 
 // The resolved local hour (float), for the clock label and the slider position.
