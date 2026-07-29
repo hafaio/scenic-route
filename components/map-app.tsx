@@ -20,7 +20,13 @@ import {
   type OverlayId,
 } from "../src/overlays/registry";
 import type { Pin, PinDraft } from "../src/pin";
-import { getResolvedDate, subscribeRouteTime } from "../src/route-time/store";
+import {
+  getPinnedTime,
+  getResolvedDate,
+  setCustomDay,
+  setCustomHour,
+  subscribeRouteTime,
+} from "../src/route-time/store";
 import {
   DEFAULT_ART_WEIGHT,
   DEFAULT_COMMERCIAL_WEIGHT,
@@ -46,6 +52,17 @@ import {
 } from "../src/routing/search";
 import { computeEdgeShade } from "../src/routing/shade";
 import { buildSnapIndex, type SnapIndex, snapPair } from "../src/routing/snap";
+import {
+  type Camera,
+  decodeRoute,
+  decodeView,
+  encodeRoute,
+  encodeView,
+  formatHash,
+  hashParams,
+  type LatLng,
+  type RouteUrlState,
+} from "../src/url-state";
 import AboutDialog from "./about-dialog";
 import FollowToggle from "./follow-toggle";
 import type { MapTarget } from "./map";
@@ -53,6 +70,7 @@ import PinEditor from "./pin-editor";
 import RoutePanel from "./route-panel";
 import SignInDialog from "./sign-in-dialog";
 import Toolbar from "./toolbar";
+import UrlSync from "./url-sync";
 import { useHashFlag } from "./use-hash-flag";
 
 // leaflet touches `window` at module load, so the map must be client-only
@@ -107,6 +125,40 @@ function loadRouting(): Promise<{ graph: RoutingGraph; index: SnapIndex }> {
   return routingPromise;
 }
 
+// The weights the sliders last persisted, each falling back to its default. These are what a URL key
+// overrides and what a missing one leaves in place.
+function storedWeights(): RouteWeights {
+  const read = (key: string, fallback: number, min: number, max: number) => {
+    const stored = window.localStorage.getItem(key);
+    const parsed = stored === null ? Number.NaN : Number.parseFloat(stored);
+    return Number.isFinite(parsed)
+      ? Math.min(max, Math.max(min, parsed))
+      : fallback;
+  };
+  return {
+    tree: read(TREE_WEIGHT_KEY, DEFAULT_TREE_WEIGHT, 0, MAX_TREE_WEIGHT),
+    ferry: read(FERRY_WEIGHT_KEY, DEFAULT_FERRY_WEIGHT, 0, MAX_FERRY_WEIGHT),
+    landmark: read(LANDMARK_WEIGHT_KEY, DEFAULT_LANDMARK_WEIGHT, 0, 1),
+    art: read(ART_WEIGHT_KEY, DEFAULT_ART_WEIGHT, 0, 1),
+    highway: read(HIGHWAY_WEIGHT_KEY, DEFAULT_HIGHWAY_WEIGHT, 0, 1),
+    commercial: read(COMMERCIAL_WEIGHT_KEY, DEFAULT_COMMERCIAL_WEIGHT, 0, 1),
+    shade: read(
+      SHADE_WEIGHT_KEY,
+      DEFAULT_SHADE_WEIGHT,
+      -MAX_SHADE_WEIGHT,
+      MAX_SHADE_WEIGHT,
+    ),
+    allowFerries: window.localStorage.getItem(FERRY_ALLOW_KEY) !== "false",
+  };
+}
+
+// The persisted overlay ids, or null when nothing was ever stored (which keeps the canopy default).
+// An empty stored string is a deliberate "all off".
+function storedOverlays(): string[] | null {
+  const stored = window.localStorage.getItem(OVERLAY_KEY);
+  return stored === null ? null : stored.split(",");
+}
+
 function metersBetween(
   a: { lat: number; lng: number },
   b: { lat: number; lng: number },
@@ -151,7 +203,7 @@ export default function MapApp() {
   const [following, setFollowing] = useState<boolean>(true);
   // The overlays drawn over the basemap, a freely-combinable set (tree genus is the one exception —
   // it goes solo). The canopy cover is the only content a signed-out visitor has, so it starts on.
-  // Hydrated from localStorage below; an empty set hides every overlay.
+  // Hydrated from the URL hash or localStorage below; an empty set hides every overlay.
   const [activeOverlays, setActiveOverlays] = useState<ReadonlySet<OverlayId>>(
     () => new Set<OverlayId>(["canopy"]),
   );
@@ -252,65 +304,19 @@ export default function MapApp() {
   // The nonce the route effect last acted on, so a recompute can tell a drop (nonce bumped, lands
   // silently) from a fresh target (a new destination or start, which flashes the loading spinner).
   const lastAppliedNonceRef = useRef<number>(0);
+  // The URL hash at load has been applied, so the live hash writer may start.
+  const [hashApplied, setHashApplied] = useState<boolean>(false);
+  // A shared link's camera, applied once by the map, and the destination it was framed around; null
+  // leaves the map where it is and lets a fresh route frame itself.
+  const [initialCamera, setInitialCamera] = useState<Camera | null>(null);
+  const [preframedDest, setPreframedDest] = useState<LatLng | null>(null);
+  // The live camera, tracked for the share link without re-rendering on every pan.
+  const cameraRef = useRef<Camera | null>(null);
 
   // Defaults to destination-pick when the routing panel is open with no destination; arming a field
   // from the panel overrides which end the next tap sets.
   const effectivePickTarget: "start" | "dest" | null =
     pickTarget ?? (routingOpen && dest === null ? "dest" : null);
-
-  useEffect(() => {
-    const stored = window.localStorage.getItem(TREE_WEIGHT_KEY);
-    if (stored !== null) {
-      const parsed = Number.parseFloat(stored);
-      if (Number.isFinite(parsed)) {
-        setTreeWeight(Math.min(MAX_TREE_WEIGHT, Math.max(0, parsed)));
-      }
-    }
-  }, []);
-
-  useEffect(() => {
-    const storedWeight = window.localStorage.getItem(FERRY_WEIGHT_KEY);
-    if (storedWeight !== null) {
-      const parsed = Number.parseFloat(storedWeight);
-      if (Number.isFinite(parsed)) {
-        setFerryWeight(Math.min(MAX_FERRY_WEIGHT, Math.max(0, parsed)));
-      }
-    }
-    const storedAllow = window.localStorage.getItem(FERRY_ALLOW_KEY);
-    if (storedAllow !== null) {
-      setAllowFerries(storedAllow === "true");
-    }
-  }, []);
-
-  useEffect(() => {
-    for (const [key, apply] of [
-      [LANDMARK_WEIGHT_KEY, setLandmarkWeight],
-      [ART_WEIGHT_KEY, setArtWeight],
-      [HIGHWAY_WEIGHT_KEY, setHighwayWeight],
-      [COMMERCIAL_WEIGHT_KEY, setCommercialWeight],
-    ] as const) {
-      const stored = window.localStorage.getItem(key);
-      if (stored !== null) {
-        const parsed = Number.parseFloat(stored);
-        if (Number.isFinite(parsed)) {
-          apply(Math.min(1, Math.max(0, parsed)));
-        }
-      }
-    }
-  }, []);
-
-  // The signed shade preference restores separately (its range is −1..1, not 0..1).
-  useEffect(() => {
-    const stored = window.localStorage.getItem(SHADE_WEIGHT_KEY);
-    if (stored !== null) {
-      const parsed = Number.parseFloat(stored);
-      if (Number.isFinite(parsed)) {
-        setShadeWeight(
-          Math.min(MAX_SHADE_WEIGHT, Math.max(-MAX_SHADE_WEIGHT, parsed)),
-        );
-      }
-    }
-  }, []);
 
   // While a shade preference is active, follow the global clock: each tick re-costs the route against
   // the sun's new position. The store only ticks in "now" mode or on a scrub, and only with a listener.
@@ -320,16 +326,6 @@ export default function MapApp() {
     }
     return subscribeRouteTime(() => setShadeTick((tick) => tick + 1));
   }, [shadeWeight]);
-
-  // Restore the persisted overlays from the comma-separated id list; unknown ids (a stale "trees"
-  // from before the canopy switch) are dropped. A missing value leaves the canopy default; an empty
-  // string is a deliberate "all off".
-  useEffect(() => {
-    const stored = window.localStorage.getItem(OVERLAY_KEY);
-    if (stored !== null) {
-      setActiveOverlays(new Set(stored.split(",").filter(isOverlayId)));
-    }
-  }, []);
 
   useEffect(() => {
     const stored = window.localStorage.getItem(SEARCH_BIAS_KEY);
@@ -477,6 +473,30 @@ export default function MapApp() {
       routeState.kind === "ready" ? routeState.result.travelSeconds : null;
   }, [routeState]);
 
+  // The cost context every search runs against, and what the URL and the share link carry.
+  const weights: RouteWeights = useMemo(
+    () => ({
+      tree: treeWeight,
+      ferry: ferryWeight,
+      landmark: landmarkWeight,
+      art: artWeight,
+      highway: highwayWeight,
+      commercial: commercialWeight,
+      shade: shadeWeight,
+      allowFerries,
+    }),
+    [
+      treeWeight,
+      ferryWeight,
+      landmarkWeight,
+      artWeight,
+      highwayWeight,
+      commercialWeight,
+      shadeWeight,
+      allowFerries,
+    ],
+  );
+
   // Live recompute: whenever a resolvable start and a destination both exist, (re)find the route,
   // keyed on the endpoints and the tree weight and rAF-coalesced so a slider drag computes at most
   // once per frame. The loading flash shows for a fresh endpoint pair unless the recompute came from
@@ -521,7 +541,7 @@ export default function MapApp() {
           // any in-flight drag solver they were built against. A missing or mismatched SHDE artifact is
           // not fatal: routing drops the sun/shade bias for this time rather than failing. When shade is
           // off, clear the field and the context so it costs nothing.
-          if (shadeWeight !== 0) {
+          if (weights.shade !== 0) {
             if (shadeContextRef.current !== shadeTick) {
               routeCacheRef.current = null;
               dragSolverRef.current = null;
@@ -544,16 +564,6 @@ export default function MapApp() {
             shadeContextRef.current = -1;
           }
           const pair = snapPair(graph, index, request.start, request.dest);
-          const weights: RouteWeights = {
-            tree: treeWeight,
-            ferry: ferryWeight,
-            landmark: landmarkWeight,
-            art: artWeight,
-            highway: highwayWeight,
-            commercial: commercialWeight,
-            shade: shadeWeight,
-            allowFerries,
-          };
           if (!pair.ok) {
             setRouteState({ kind: "error", message: messageFor(pair.reason) });
           } else if (draggingRef.current) {
@@ -621,20 +631,7 @@ export default function MapApp() {
       cancelled = true;
       cancelAnimationFrame(frame);
     };
-  }, [
-    resolvedStart,
-    dest,
-    treeWeight,
-    ferryWeight,
-    landmarkWeight,
-    artWeight,
-    highwayWeight,
-    commercialWeight,
-    shadeWeight,
-    shadeTick,
-    allowFerries,
-    routeRefreshNonce,
-  ]);
+  }, [resolvedStart, dest, weights, shadeTick, routeRefreshNonce]);
 
   // A new destination collapses any open maneuver list; keyed on the coordinates so a reverse-geocode
   // label patch (same point, new object identity) doesn't snap it shut.
@@ -789,6 +786,19 @@ export default function MapApp() {
     [],
   );
 
+  // Asking for directions pins where you are. Until a destination exists the start tracks the live
+  // position and reads "My location", which is right for a start you have not committed to — but once
+  // it is one end of a route, following would move it under you as you walk, and it would go into a
+  // shared link as nothing at all, leaving whoever opened it routing from THEIR position. So the live
+  // position is promoted to a real point, reverse-geocoded like any picked one. Clearing the start
+  // afterwards re-pins it to wherever you are then.
+  useEffect(() => {
+    if (!dest || manualStart || !userLocation) {
+      return;
+    }
+    applyPick("start", userLocation.lat, userLocation.lng);
+  }, [dest, manualStart, userLocation, applyPick]);
+
   // Each frame of an endpoint drag: move that end's coordinate so the route recomputes live, keeping
   // the prior label (a reverse geocode would spam the network) until the drag settles.
   const handleEndpointDragMove = useCallback(
@@ -825,6 +835,82 @@ export default function MapApp() {
     },
     [applyPick, handleDisengageFollow],
   );
+
+  // One-shot init from the URL hash, layered over the persisted preferences: a key in the link wins, a
+  // missing one keeps what the sliders were last left at, and a link with no view keys leaves the
+  // camera and overlays alone. Enables the hash writer only once done, so opening a link never
+  // rewrites it out from under itself.
+  useEffect(() => {
+    const params = hashParams(window.location.hash);
+    const stored: RouteUrlState = {
+      start: null,
+      dest: null,
+      weights: storedWeights(),
+      customHour: null,
+      customDay: null,
+    };
+    const route = decodeRoute(params, stored);
+    setTreeWeight(route.weights.tree);
+    setFerryWeight(route.weights.ferry);
+    setLandmarkWeight(route.weights.landmark);
+    setArtWeight(route.weights.art);
+    setHighwayWeight(route.weights.highway);
+    setCommercialWeight(route.weights.commercial);
+    setShadeWeight(route.weights.shade);
+    setAllowFerries(route.weights.allowFerries);
+    if (route.customHour !== null) {
+      setCustomHour(route.customHour);
+    }
+    if (route.customDay !== null) {
+      setCustomDay(route.customDay);
+    }
+    if (route.start) {
+      applyPick("start", route.start.lat, route.start.lng);
+    }
+    if (route.dest) {
+      applyPick("dest", route.dest.lat, route.dest.lng);
+      setRoutingOpen(true);
+      void loadRouting(); // warm the graph, as opening the panel by hand does
+    }
+    const view = decodeView(params);
+    const overlays = view.overlays ?? storedOverlays();
+    if (overlays) {
+      // unknown ids (a stale "trees" from before the canopy switch) are dropped
+      setActiveOverlays(new Set(overlays.filter(isOverlayId)));
+    }
+    if (view.camera) {
+      setInitialCamera(view.camera);
+      setPreframedDest(route.dest);
+      setFollowing(false); // else the first location fix yanks the shared camera away
+    }
+    setHashApplied(true);
+  }, [applyPick]);
+
+  const handleCamera = useCallback((camera: Camera) => {
+    cameraRef.current = camera;
+  }, []);
+
+  // The link the share button copies: the route the hash already carries, plus the camera and overlay
+  // set, which live in a URL only here.
+  const composeShareUrl = useCallback((): string => {
+    const { hour, day } = getPinnedTime();
+    const params = encodeRoute({
+      start: manualStart,
+      dest,
+      weights,
+      customHour: hour,
+      customDay: day,
+    });
+    if (cameraRef.current) {
+      for (const [key, value] of encodeView(cameraRef.current, [
+        ...activeOverlays,
+      ])) {
+        params.append(key, value);
+      }
+    }
+    const { origin, pathname, search } = window.location;
+    return `${origin}${pathname}${search}${formatHash(params)}`;
+  }, [manualStart, dest, weights, activeOverlays]);
 
   // A map tap sets the effective pick target's location; with nothing armed and a destination already
   // set, it does nothing.
@@ -1044,6 +1130,9 @@ export default function MapApp() {
         picking={effectivePickTarget !== null}
         onMapPick={handleMapPick}
         dragging={dragging}
+        initialCamera={initialCamera}
+        preframedDest={preframedDest}
+        onCamera={handleCamera}
         onDisengageFollow={handleDisengageFollow}
         onEndpointDragMove={handleEndpointDragMove}
         onEndpointDrag={handleEndpointDrag}
@@ -1067,6 +1156,13 @@ export default function MapApp() {
         logHereHint={locationHint}
         shareLocationForSearch={shareLocationForSearch}
         onToggleSearchBias={handleToggleSearchBias}
+        composeShareUrl={composeShareUrl}
+      />
+      <UrlSync
+        start={manualStart}
+        dest={dest}
+        weights={weights}
+        enabled={hashApplied}
       />
       <FollowToggle active={following} onToggle={handleToggleFollow} />
       {/* the active overlays' floating keys (genus only today); bottom-left keeps them clear of the

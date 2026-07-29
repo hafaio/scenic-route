@@ -18,6 +18,9 @@ interface RouteLayerProps {
   dest: { lat: number; lng: number } | null; // the tapped/searched destination
   start: { lat: number; lng: number } | null; // the snapped start, for the dot
   dragging: boolean; // an endpoint is being dragged; reframe zooms out only, never in
+  // A destination that arrived from a shared link alongside its own camera, so the shared framing is
+  // kept instead of being reframed away the moment the route lands.
+  preframedDest: { lat: number; lng: number } | null;
   onDisengageFollow: () => void;
   // Live position of a dragged endpoint, each frame: re-routes without reverse-geocoding.
   onEndpointDragMove: (
@@ -297,6 +300,7 @@ export default function RouteLayer({
   dest,
   start,
   dragging,
+  preframedDest,
   onDisengageFollow,
   onEndpointDragMove,
   onEndpointDrag,
@@ -306,7 +310,7 @@ export default function RouteLayer({
   const gridRef = useRef<RouteGrid | null>(null);
   // The dest object last framed by the camera; a slider recompute keeps its identity, a new
   // destination replaces it, so only the latter re-frames.
-  const framedDest = useRef<{ lat: number; lng: number } | null>(null);
+  const framedDest = useRef<{ lat: number; lng: number } | null>(preframedDest);
 
   useEffect(() => {
     let live = true;

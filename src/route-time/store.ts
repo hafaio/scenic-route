@@ -106,6 +106,15 @@ export function setCustomDay(day: string): void {
   notify();
 }
 
+// The two axes as the URL carries them: null on each while it tracks (the live clock, today), so a
+// tracking axis is simply absent from a link.
+export function getPinnedTime(): { hour: number | null; day: string | null } {
+  return {
+    hour: mode === "custom" ? customHour : null,
+    day: dateMode === "custom" ? customDay : null,
+  };
+}
+
 // The resolved instant: the pinned day (else today) at the scrubbed hour (else the live wall clock).
 export function getResolvedDate(): Date {
   const now = new Date();
