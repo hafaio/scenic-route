@@ -24,6 +24,15 @@ fetches. None of these files is ever served to a browser. Layouts are documented
 
 All of these are tracked in **Git LFS** (see `.gitattributes`).
 
+The sidewalk-shed artifact is **not** here and nothing under `data/` feeds it: it is derived output,
+committed at `public/sheds/`, written by `bun run build-sheds` and rewritten daily by the job
+(`scripts/README.md` documents it). It is committed *outside* this directory on purpose. **Nothing
+shed-related is in LFS and none of it may ever be** — LFS keeps every rewrite whole, so a megabyte a
+day costs ~400 MB of quota a year, and the client fetches these off `main` through
+`raw.githubusercontent.com`, which serves an LFS file's *pointer text* rather than its bytes — and
+every directory in here has a `.gitattributes` line, so one more would be an invitation to add the
+matching line without thinking.
+
 > **`sl commit` does not run git-lfs clean filters.** It commits the raw multi-megabyte blob and
 > says nothing. Commit these with `git commit`, then `git lfs push --object-id origin <oid>`.
 

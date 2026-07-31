@@ -1,0 +1,85 @@
+name: sheds
+
+# The sidewalk-shed artifact, rebuilt from the DOB's feed. The feed regenerates around 09:47 ET, so
+# this fires at 15:00 UTC — 10:00 EST and 11:00 EDT, comfortably after it either way. GitHub's cron
+# is UTC only and is best-effort, delayed by minutes to an hour under load; that does not matter here,
+# because `update-sheds` reads the day the published artifact reached and replays everything the feed
+# has put out since. A run that is late, or that never happened, catches up on the next one.
+#
+# Scheduled workflows on a public repo are DISABLED after 60 days without a PUSH to the repository,
+# and only ever run from the default branch. A scheduled run completing does not reset that clock —
+# but a push does, from any actor, the automatic GITHUB_TOKEN included. So the daily commit below is
+# what keeps this schedule alive, and it is a push to `main` itself rather than to a side branch, so
+# there is no arrangement to preserve for the clock's sake.
+#
+# `workflow_dispatch` is the recovery hatch, and has to be: a disabled workflow cannot re-enable
+# itself, and a later push does not re-enable it either — that takes a person. Do NOT add a keepalive
+# scheme on top. GitHub blocked the widely-cited `keepalive-workflow` action in April 2025 as a terms
+# violation, so anything whose purpose is to game this timer is a policy risk rather than insurance.
+on:
+  schedule:
+    - cron: "0 15 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sheds
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      # NEVER `lfs: true` here. This job reads no building blob and no canopy blob, so it draws
+      # nothing against the account-wide 10 GiB a month of LFS bandwidth, and the shed artifact it
+      # does read is not tracked and may never be — `raw` serves an LFS file's pointer text rather
+      # than its bytes, which would break the client fetch outright. `actions/checkout` defaults to
+      # lfs: false; leave it. Its credentials are what the push below authenticates with.
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      # Reads yesterday's artifact out of this checkout, the DOB history as a shallow clone, the
+      # deployed graph off the Pages site (30 MB), and Socrata for the day's new permits only. It
+      # keeps nothing between runs: the artifact's own header says which day it was built through.
+      #
+      # New sheds are placed against the graph the SITE is serving, not one this checkout could build,
+      # so their durable edge keys are the ones the client will resolve. The job fails loudly if the
+      # deployed graph is older than this checkout can read — deploy first, then run this.
+      - run: bun run update-sheds
+
+      # One ordinary commit on `main` a day. Not a size problem: packed git deltas these files to
+      # 1.7-22 KB a day depending on the repack window, not the ~1 MB a day the raw size suggests
+      # (DESIGN.md has the measurement). What the raw size WOULD cost is LFS, which deltas nothing:
+      # never track these.
+      #
+      # It must never clobber a human push, so no `--force` and no `--force-with-lease` either — a
+      # lease is checked against what this checkout last fetched, which is exactly the push it would
+      # be overwriting. Instead the commit is built on the tip the push is aimed at, and a rejected
+      # push re-reads `main` and rebuilds it on the new one. Only these three files are ever staged,
+      # so rebuilding is a fresh commit rather than a rebase and has nothing to conflict with.
+      #
+      # `build.yml` ignores this path, so the push does not fire a lint+test run.
+      - name: commit the artifact
+        run: |
+          staged="$(mktemp -d)"
+          cp public/sheds/*.bin "$staged/"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          for attempt in 1 2 3; do
+            git fetch --depth=1 origin main
+            git reset --quiet --hard FETCH_HEAD
+            cp "$staged"/*.bin public/sheds/
+            git add public/sheds
+            if git diff --quiet --cached; then
+              echo "the artifact is unchanged; nothing to commit"
+              exit 0
+            fi
+            git commit --quiet -m "chore(sheds): update through $(date -u +%F)"
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            echo "main moved under the push; rebuilding the commit on the new tip"
+          done
+          exit 1
