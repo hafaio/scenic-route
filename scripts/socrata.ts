@@ -18,6 +18,9 @@ export interface Tree extends Coord {
 const PAGE_SIZE = 50_000;
 const MAX_ATTEMPTS = 3;
 const RETRY_DELAY_MS = 2_000;
+const BATCH_KEYS = 200; // keys per `field in (...)`; longer lists start timing out
+const BATCH_WORKERS = 8;
+const BATCH_PROGRESS = 50; // batches between progress lines
 const TREE_DATASET = "hn5i-inap"; // ForMS "Forestry Tree Points"
 const TREE_COUNT = 898_618; // standing trees at the last refresh; a floor, not a number
 // The city keeps planting, so only a shortfall this far below the expected count is a page
@@ -87,6 +90,56 @@ export async function fetchDataset<Row>(
       }
     }
   });
+}
+
+// Every row whose `field` is one of `keys`, read as `field in (...)` batches run `concurrency` at a
+// time. Each batch is cached on its own, so a re-run costs nothing and a batch the server 500s on
+// costs one batch rather than the whole read.
+export async function fetchKeyed<Row>(
+  dataset: string,
+  select: string,
+  field: string,
+  keys: Iterable<string>,
+  concurrency: number = BATCH_WORKERS,
+): Promise<Row[]> {
+  const sorted = [...new Set(keys)].sort();
+  const batches: string[][] = [];
+  for (let start = 0; start < sorted.length; start += BATCH_KEYS) {
+    batches.push(sorted.slice(start, start + BATCH_KEYS));
+  }
+
+  const pages: Row[][] = new Array(batches.length);
+  let next = 0;
+  let done = 0;
+  const worker = async (): Promise<void> => {
+    while (next < batches.length) {
+      const index = next++;
+      const batch = batches[index];
+      pages[index] = await cached(
+        `${dataset}.${field}`,
+        `${select}|${batch.join(",")}`,
+        async () => {
+          const url = new URL(
+            `https://data.cityofnewyork.us/resource/${dataset}.json`,
+          );
+          const list = batch.map((key) => `'${key}'`).join(",");
+          url.searchParams.set("$select", select);
+          url.searchParams.set("$where", `${field} in (${list})`);
+          url.searchParams.set("$limit", String(PAGE_SIZE));
+          return await fetchJson<Row>(url.toString());
+        },
+        true,
+      );
+      done += 1;
+      if (done % BATCH_PROGRESS === 0 || done === batches.length) {
+        console.error(`  ${dataset}: ${done}/${batches.length} batches`);
+      }
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, batches.length) }, worker),
+  );
+  return pages.flat();
 }
 
 // Socrata returns points as WKT, e.g. "POINT(-73.8165 40.7162)" (lng first).
