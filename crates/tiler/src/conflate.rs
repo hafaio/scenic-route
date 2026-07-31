@@ -56,7 +56,9 @@ const STRUCTURE_FLAG: u8 = 1 << 0;
 /// One edge before `graph.rs` nodes it: the same shape as its `Edge`, plus an `osm` provenance bit
 /// the contraction and island-drop key on. The polyline is quantized in the streets frame with its
 /// endpoints already at their final positions; `cover_left`/`cover_right` are in the stored
-/// direction (equal for an offset-0 path); `length` is the ingest's geodesic metres.
+/// direction (equal for an offset-0 path); `length` is the ingest's geodesic metres. `source_id` is
+/// the source record's own id (a CSCL physicalid or an OSM way id) and every cut, weld or weave
+/// below hands it to each piece unchanged — it is what the graph's durable edge key is built from.
 #[derive(Clone)]
 pub struct ProtoEdge {
     pub poly_x: Vec<i32>,
@@ -68,6 +70,7 @@ pub struct ProtoEdge {
     pub flags: u8,
     pub name_id: u16,
     pub osm: bool,
+    pub source_id: u32,
 }
 
 /// What conflation did, folded into the graph's stats JSON.
@@ -330,6 +333,7 @@ fn split_at_vertices(
             flags: parent.flags,
             name_id: parent.name_id,
             osm: parent.osm,
+            source_id: parent.source_id,
         });
         start = end;
     }
@@ -632,6 +636,7 @@ pub fn conflate(
             flags: proto.flags,
             name_id: proto.name_id,
             osm: proto.osm,
+            source_id: proto.source_id,
         };
         let woven_last = woven.poly_x.len() - 1;
         let cuts: Vec<usize> = (1..woven_last)
@@ -756,7 +761,13 @@ mod tests {
             flags,
             name_id: 0xFFFF,
             osm,
+            source_id: 0,
         }
+    }
+
+    fn with_source_id(mut edge: ProtoEdge, source_id: u32) -> ProtoEdge {
+        edge.source_id = source_id;
+        edge
     }
 
     #[test]
@@ -806,6 +817,29 @@ mod tests {
         // Each street cut in two, the greenway cut at both crossings.
         assert_eq!(combined.iter().filter(|edge| !edge.osm).count(), 4);
         assert_eq!(combined.iter().filter(|edge| edge.osm).count(), 3);
+    }
+
+    #[test]
+    fn every_piece_of_a_cut_edge_keeps_its_source_id() {
+        let streets = vec![with_source_id(street(&[(0, -50), (0, 50)]), 11)];
+        // A T-split among the ways and a weld-driven CSCL split, so both cut paths run.
+        let greenway = with_source_id(path(&[(-20, 0), (0, 0), (20, 0)]), 22);
+        let stem = with_source_id(path(&[(20, 0), (20, 40)]), 33);
+        let (combined, _) = conflate(streets, vec![greenway, stem], MPU);
+        assert_eq!(
+            combined.iter().filter(|edge| edge.source_id == 11).count(),
+            2,
+            "the street was cut in two"
+        );
+        assert_eq!(
+            combined.iter().filter(|edge| edge.source_id == 22).count(),
+            2,
+            "the greenway was cut at the crossing"
+        );
+        assert_eq!(
+            combined.iter().filter(|edge| edge.source_id == 33).count(),
+            1
+        );
     }
 
     #[test]

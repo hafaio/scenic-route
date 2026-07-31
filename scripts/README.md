@@ -33,7 +33,7 @@ tiler genus  --manifest … --palette … --data … --tiles …      # the genu
 tiler shade  --manifest … --data … --tiles … --params …       # the building- and tree-shadow pyramids
 tiler chunks --manifest … --data … --chunks … [--paths …]     # slices STRT (+PATH) into the client's street chunks
 tiler caster-chunks --manifest … --data … --chunks … --params …  # slices BLDG+CNPY+TREE into the client's shadow-caster chunks
-tiler graph  --streets <in.bin> --out <out.bin> [--paths …] [--ferries …]   # contracts STRT (+PATH, +FERR) into the GRPH routing graph
+tiler graph  --streets <in.bin> --out <out.bin> [--paths …] [--ferries …] [--canopy …]  # contracts STRT (+PATH, +FERR) into the GRPH routing graph
 ```
 
 Both scripts shell out with `cargo run --release`, which no-ops once the binary is built, so
@@ -623,9 +623,9 @@ as `BLDG` carries its roof heights. It is NYC's 2017 LiDAR tree-canopy footprint
 land-clipped), the *measured* field the cover is blurred from. `encodeCanopy` writes the region
 zeroed and `tiler heights` fills it in place from the separate canopy height model (above); **0
 means unknown**, not flat. Read the geometry alone with the generic `read_polygons(path, "CNPY", 2)`
-— which is what `tiler densities` (convolving and sampling it into the streets/paths density blobs)
-and `tiler canopy` (rasterizing it into the fill pyramid) do — or with the heights through
-`read_canopy`.
+— which is what `tiler densities` (convolving and sampling it into the streets/paths density blobs),
+`tiler canopy` (rasterizing it into the fill pyramid) and `tiler graph` (integrating it *unblurred*
+along each sidewalk into the direct-canopy edge byte) do — or with the heights through `read_canopy`.
 
 ### `data/landmarks/<id>.bin` and `data/art/<id>.bin` — the scenic POIs, magic `LMRK` / `ARTW` (v1)
 
@@ -989,7 +989,7 @@ recovered there — but the staircase is not detail at any zoom the client can a
 bought was a payload and a path-building cost no viewport could ever use. LOD past this is still
 the client's to take.
 
-### `public/routing/{id}.bin` — the routing graph, magic `GRPH` (v5, derived, gitignored)
+### `public/routing/{id}.bin` — the routing graph, magic `GRPH` (v6, derived, gitignored)
 
 `tiler graph` contracts STRT into the graph the client routes on, then expands it into the edges a
 walker actually uses. When `--paths` is supplied it first **conflates** the OSM pedestrian/park
@@ -1042,7 +1042,7 @@ Header, 64 bytes:
 | offset | type | field |
 | --- | --- | --- |
 | 0 | u8[4] | magic `GRPH` |
-| 4 | u16 | format version = 5 |
+| 4 | u16 | format version = 6 |
 | 6 | u16 | header bytes = 64 |
 | 8 | u32 | node count N |
 | 12 | u32 | edge count E |
@@ -1065,7 +1065,7 @@ can view them as typed arrays without copying):
 4. **CSR offsets**: (N+1) × u32 — node n owns half-edges `[csr[n], csr[n+1])`.
 5. **Adjacency**: 2E × u32 — each entry an **edge id** (the neighbour is the edge's other
    endpoint, one indirection).
-6. **Edge records**: E × 28 bytes:
+6. **Edge records**: E × 34 bytes:
 
 | offset | type | field |
 | --- | --- | --- |
@@ -1083,6 +1083,35 @@ can view them as typed arrays without copying):
 | 25 | u8 | public-art amenity, 0–254 (a discount attribute; 0 for a ferry) |
 | 26 | u8 | highway/rail nuisance, 0–254 (a penalty attribute; 0 for a ferry) |
 | 27 | u8 | commercial frontage, 0–254 (a discount attribute; 0 for a ferry) |
+| 28 | u8 | direct canopy, 0–254 (the shelter factor's input; 0 for a ferry) |
+| 29 | u32 | **source id**: the CSCL physicalid, or the OSM way id for a conflated path; `0xFFFFFFFF` = no durable identity |
+| 33 | u8 | **ordinal**: how many earlier edges share this edge's (source id, side) pair; 0 where there is no source id |
+
+The record is 34 bytes, so the name table that follows it is zero-padded back to the 4-byte
+boundary every section starts on.
+
+Bytes 29–33 carry the **durable edge key** (v6). Node and edge ids are positional — nodes are
+renumbered by (component, latitude, longitude) and edges by (component, min node id) — so every id
+in the file shifts when the graph is rebuilt, and nothing outside it can name an edge across two
+builds. `(source id, side, ordinal)` can: the source id is the id of the CSCL row or OSM way the
+edge's geometry came from, the side is the label already in byte 22, and the ordinal disambiguates
+within that pair. A sidewalk takes the source id of the contracted street it was offset from and its
+own N/E/S/W label; a path edge (CSCL-derived or OSM-conflated) takes its contracted edge's source id
+with side `none`. Degree-2 contraction merges several source records into one edge, and the key
+keeps the **minimum** source id over the merged set, so a chain traced from either end names the
+same record. Ordinals are assigned over the final edge order, which makes the triple unique by
+construction (that also disposes of a small OSM way id colliding with a CSCL physicalid). It is a
+key, not a hash — a rebuilt graph that still contains the same stretch of pavement gives it the same
+triple, and one that split or merged the stretch does not pretend otherwise.
+
+**Crossings, links and ferry edges carry `0xFFFFFFFF` and ordinal 0.** They are derived topology,
+not source geometry: a crossing exists because two sidewalks meet, a link because a path reaches a
+corner, and a ferry leg comes from `FERR`, which carries no CSCL id at all. Over NYC 299,623 of the
+531,520 edges (56.4%) carry a durable id — every sidewalk and every path edge. 79.6% of those are
+ordinal 0, 9.7% ordinal 1, 4.1% ordinal 2 and 6.5% higher; the maximum is **102**, an OSM greenway
+welded to every street it crosses (the busiest sidewalk key reaches only 25, since only a street's
+two sides share a source id). The ordinal therefore needs a whole byte, and `tiler graph` fails
+rather than truncating if one ever passes 255.
 
 Bytes 24–27 are the **scenic-factor attributes** baked by `scenic.rs` (v5). The landmark and art
 bytes are a network **discount**: each POI (`LMRK`/`ARTW`) snaps to the nearest walking node and a
@@ -1096,6 +1125,27 @@ block's own street and sidewalks. All four quantize to a 0–254 ceiling so the 
 `maxLandmark`/`maxArt`/`maxCommercial` stay `< 1` (the cost model's admissibility invariant, as
 `maxCover` already relies on); a later phase reads the discounts as `1 − w·attr` and the penalty as
 `1 + w·attr`. A ferry carries none.
+
+Byte 28 is the **direct canopy** (v6, `direct_canopy.rs`, baked when `--canopy` is given): the
+fraction of the edge's own baked polyline that lies **directly under a `CNPY` polygon**, on the same
+0–254 ceiling and read the same `1 − w·attr` way, for a forthcoming shelter-from-rain factor. It is
+*not* a second cover byte. Cover (byte 20) is the deliberately **smoothed** field the overlay is
+coloured from — the oriented anisotropic Gaussian, σ 15 m along the road and 4 m across, reaching
+±37.5 m — which answers "is this a leafy stretch"; a walker under the rain is asking "is there
+anything over my head *here*", and a kernel reaching most of the block cannot say. So this is the raw
+0/1 canopy indicator integrated along the edge by arc length with **no kernel and no blur**: a sample
+every metre, midpoints of equal sub-lengths, each tested even-odd against the polygons the existing
+canopy grid index hands the edge. It samples the **sidewalk** geometry, not the centreline, so the
+two sides of a one-sided street differ: Central Park West reads 203 on its park side against 53 on
+its building side, where the blurred cover only manages 138 against 97.
+
+The two bytes come out related but far apart — over NYC they correlate **0.71**. The direct byte
+averages 0.222 over the edges against cover's 0.257 (0.291 against 0.262 weighted by edge length),
+and **47.3% of edges have nothing overhead at all** where only 4.9% read zero cover: a sidewalk in
+the gap between two crowns is 0 here and still green there. Its length-weighted 0.291 sits above the
+city's ~22% canopy over land, as it should — street trees are planted in the sidewalk, and the
+walking network runs through the parks. The pass costs ~48 s and ~1.8 GB over NYC's 1.08 M polygons
+and 531,520 edges.
 
 A **ferry edge** (kind 4) has no tree cover and no sidewalk half-offset, so bytes 20–21 instead carry
 a little-endian **u16 of crossing-plus-wait seconds** (`rawTimeSeconds`, ≤ ~2200). Its **name id**
@@ -1124,6 +1174,25 @@ route cross it.
 A pure degree-2 cycle is emitted as a self-loop on the one node it retains. GRPH edge flags are
 distinct from the STRT record flags: a step street is bit1, and bit2 on a **sidewalk** marks the
 geometry-right side (v1's "path-like" bit is gone — the kind field carries that now).
+
+### `public/routing/version.json` — what the deployed graph is (derived, gitignored)
+
+Written by the same `tiler graph` invocation, beside the `.bin` it just produced, so a job holding
+nothing but the live site can tell whether the graph it last snapped against is still the one being
+served:
+
+```json
+{"graph":"nyc.bin","hash":"08da264f5836fa95","edges":531520,"bytes":27423072,"generatedUnixSeconds":1785384926}
+```
+
+`hash` is FNV-1a 64 over the GRPH file's own bytes, hex — it detects a rebuild, it does not defend
+against one, so a hand-rolled hash beats a crypto dependency here.
+
+It is only worth reading because the bake is **reproducible**: identical inputs give identical bytes.
+Two places had to be pinned for that. The link edges and the deduped ferry edges are emitted in key
+order rather than in their hash map's per-process iteration order — the edge sort breaks ties only on
+the smaller node id, so without it a hundred-odd edge ids shuffled between two runs over the same
+files, and the SHDE rows, which are keyed by edge index, shuffled with them.
 
 ### `public/routing/shade/` — the per-edge occlusion fractions, magic `SHDB` (v2, derived, gitignored)
 

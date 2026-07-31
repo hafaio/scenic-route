@@ -10,6 +10,7 @@ mod chunks;
 mod conflate;
 mod corners;
 mod densities;
+mod direct_canopy;
 mod genus_field;
 mod geometry;
 mod graph;
@@ -35,7 +36,7 @@ const USAGE: &str = "usage:
   tiler canopy --manifest <file.json> --ramp <file.bin> --data <dir> --tiles <dir>
   tiler shade --manifest <file.json> --data <dir> --tiles <dir> --params <file.json>
   tiler genus-field --manifest <file.json> --data <dir> --tiles <dir>
-  tiler graph --streets <file.bin> [--paths <file.bin>] [--ferries <file.bin>] [--landmarks <file.bin>] [--art <file.bin>] [--highways <file.bin>] [--commercial <file.bin>] [--buildings <file.bin> --shade-params <file.json> --shade-dir <dir> [--canopy <file.bin>]] --out <file.bin>
+  tiler graph --streets <file.bin> [--paths <file.bin>] [--ferries <file.bin>] [--landmarks <file.bin>] [--art <file.bin>] [--highways <file.bin>] [--commercial <file.bin>] [--canopy <file.bin>] [--buildings <file.bin> --shade-params <file.json> --shade-dir <dir>] --out <file.bin>
 ";
 
 fn flags(mut args: impl Iterator<Item = String>) -> Fallible<HashMap<String, String>> {
