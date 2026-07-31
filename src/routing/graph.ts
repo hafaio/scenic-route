@@ -4,6 +4,7 @@
 // the search loop touches only flat arrays.
 
 import type { ShadeField } from "./shade";
+import type { ShedField } from "./sheds";
 
 // A no-geometry edge (a crossing, a link, or a straight ferry) stores this sentinel in its geometry
 // offset; its polyline is the straight line between its two node coordinates.
@@ -112,6 +113,12 @@ export interface RoutingGraph {
   // the moment it is reached. Null when no artifact is loaded or the sun is below the horizon for the
   // whole walk (no shade to bias); its maxAbs (0..1) is the shade factor's clip-floor input.
   shade: ShadeField | null;
+
+  // The picked day's sidewalk sheds, filled from the SHED artifact by computeEdgeSheds: per edge, how
+  // much of it stands under a deck. A deck is opaque and dry, so it feeds the shade composite, the
+  // shelter factor and the avoid penalty. Null until that resolves, and the cost model reads no
+  // scaffolding at all while it is.
+  sheds: ShedField | null;
 
   edgeHalfOffsetDm: Uint8Array; // decimetres to a sidewalk; 0 for crossings/links/paths/ferries
   edgeDurationSeconds: Float32Array; // a ferry edge's crossing-plus-wait seconds; 0 for every other kind
@@ -280,6 +287,7 @@ export function decodeGraph(buffer: ArrayBuffer): RoutingGraph {
     edgeDirectCanopy,
     maxDirectCanopy,
     shade: null, // populated lazily once the SHDE artifact loads, keyed on the departure instant
+    sheds: null, // populated lazily once the SHED artifact loads, keyed on the picked day
     edgeHalfOffsetDm,
     edgeDurationSeconds,
     ferryEdges: Uint32Array.from(ferryEdges),

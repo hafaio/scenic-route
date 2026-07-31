@@ -32,7 +32,9 @@ const weights = (
   highway: 0,
   commercial: 0,
   shade: 0,
+  shelter: 0,
   allowFerries,
+  allowSheds: true,
 });
 
 interface NodeSpec {

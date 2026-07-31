@@ -14,6 +14,19 @@
 const IN_LEAF = 0.814;
 const LEAF_OFF = 0.4;
 
+// The same two seasons for RAIN, which is a different question and a much weaker number: how much of
+// the rain falling on a sidewalk a crown keeps off it. 0.35 in leaf, from Zabret & Sraj's isolated
+// urban birch (11 gauges, 113 events, a full year under ~78% canopy): annual volume-weighted shelter
+// 0.27, and 0.38 over the events above 28 mm. 0.15 leaf-off, the same ~0.4 leafless ratio Heisler
+// measures for light. NOT the light tau above — reusing it would overvalue a tree by more than 2x,
+// because a walker mid-storm is almost always past the 1.5-4 mm that saturates a crown, where
+// throughfall runs 0.80-0.86 of open rainfall whatever the genus. The defensible bracket is 0.20-0.55
+// and this sits at its low end on purpose: the term carries most of the shelter slider's signal on
+// the least evidence (~4 studied trees), and the one paired-catchment study gives the lowest number
+// of all. Scaffolding, the other half of that slider, is 1.0 and is not a heuristic.
+const RAIN_IN_LEAF = 0.35;
+const RAIN_LEAF_OFF = 0.15;
+
 type Transition = [start: [number, number], end: [number, number]];
 
 // The two transitions, as [month, day] endpoints. Leaf-out ramps across the second half of April,
@@ -43,10 +56,19 @@ function ramp(day: number, year: number, [start, end]: Transition): number {
 }
 
 // Leaf-out and leaf-fall never overlap, so their difference is 0 through the winter, 1 through the
-// summer, and back to 0 in December — tau follows it between the two endpoints.
-export function canopyTau(date: Date): number {
+// summer, and back to 0 in December — every tau follows it between its two endpoints.
+function leafed(date: Date): number {
   const year = date.getFullYear();
   const day = Date.UTC(year, date.getMonth(), date.getDate());
-  const leafed = ramp(day, year, LEAF_OUT) - ramp(day, year, LEAF_FALL);
-  return LEAF_OFF + (IN_LEAF - LEAF_OFF) * leafed;
+  return ramp(day, year, LEAF_OUT) - ramp(day, year, LEAF_FALL);
+}
+
+export function canopyTau(date: Date): number {
+  return LEAF_OFF + (IN_LEAF - LEAF_OFF) * leafed(date);
+}
+
+// The share of the rain falling on a stretch of sidewalk that a crown directly over it keeps off, on
+// this date. Same curve, its own endpoints.
+export function rainTau(date: Date): number {
+  return RAIN_LEAF_OFF + (RAIN_IN_LEAF - RAIN_LEAF_OFF) * leafed(date);
 }

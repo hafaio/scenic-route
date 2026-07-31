@@ -28,7 +28,9 @@ const noPref = (over: Partial<RouteWeights> = {}): RouteWeights => ({
   highway: 0,
   commercial: 0,
   shade: 0,
+  shelter: 0,
   allowFerries: false,
+  allowSheds: true,
   ...over,
 });
 
@@ -372,6 +374,7 @@ test("the sun advancing over a long walk flips a late route decision", () => {
   };
   const timeVarying: ShadeField = {
     attrAt: attrOf,
+    intensityAt: () => 0.5,
     maxAbs: 0.5,
   };
   // The departure snapshot frozen for the whole walk — the old, single-sun-position behaviour.

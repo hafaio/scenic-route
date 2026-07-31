@@ -138,6 +138,12 @@ penumbra is ~5 cm against 3.6 m pixels.
   from 0.4h cut the leverage of any height error by 60%.
 - The transition dates in `src/shade/phenology.ts` are sourced but the ramp between them is a chosen
   curve, and NYC leaf-out is drifting ~0.43 d/yr later.
+- `rainTau` (0.35 in leaf, 0.15 leaf-off) rides that same curve for the shelter factor, and it is the
+  weakest number in the file: the light tau rests on 149 taxa, this one on about four studied trees.
+  It sits at the low end of its 0.20-0.55 bracket on purpose, because it carries most of the shelter
+  slider's signal on the least evidence. The scaffolding half of that factor is not a heuristic — a
+  plywood deck stops essentially all vertical rain — which is why the slider is labelled a preference
+  and shows no percentage.
 - The CSTR tests do not cross-check the two implementations: the TS reader is tested against a
   hand-rolled TS writer and the Rust writer against a hand-rolled Rust reader, so a mistake mirrored
   into both would pass. The two agree today.
@@ -272,10 +278,40 @@ lot depended on whether some *other* permit in the batch happened to name that B
 be a function of its own permit — anything read out of the batch it was fetched in is this bug wearing
 different clothes.
 
+### How it shades, and how it shelters
+
+**Under the deck is not shaded at every sun position**, which is what the first version assumed. A
+deck is a slab, not a tunnel: trace a ray back toward the sun from a point beneath one and the point is
+lit as soon as that ray has moved further *across* the sidewalk than the deck is deep. Only the
+across-street component of the translate counts, so a sun running along the street slides the shadow
+down tens of metres of the shed's own length while a sun across it clears the pavement's width within
+a few degrees of elevation. No single elevation threshold can say that; the angle between the sun and
+the street is what decides it — and how far the shadow has to slide is the edge's own measured DEPTH,
+the mean of its spans' weighted by the length each covers, so the falloff a 6 m avenue deck gets is
+not the one a 2.5 m side-street deck gets and the router agrees with the band on screen. Depth reaches
+neither of the other two terms: shelter is a roof either over you or not, and the avoid penalty is
+charged per decked metre of length.
+
+Shelter reads the same coverage number, but `shed` and `directCanopy` are **fractions of an edge's
+length, not transmittances at a point**, so they combine as a union of coverage rather than a stack of
+opacities. The canopy half could not reuse GRPH's existing cover byte: that is the *smoothed* field,
+an oriented anisotropic Gaussian at σ 15 m along the road and 4 m across, built that way on purpose so
+the overlay does not lurch block to block. It answers "is this a leafy stretch"; shelter needs "is
+there canopy directly overhead here", which is the raw indicator integrated along the sidewalk with no
+kernel at all. One more baked byte, and the reason GRPH went to v6. `rainTau` is in the shade notes
+above.
+
 ### Known gaps
 
 - **19.8% of placed coverage sits on an edge whose street name does not match the permit.** Much of it
   is legitimate corner wrap and nothing separates the two, so that is an upper bound on the error and
   not a measurement of it. A further 1.28% sits more than 20 m from the permit's own lot.
+- 1.5% of the backfill places nowhere at all, against 26 of today's 7,535; the commonest reason by
+  some way is a permit naming a street no sidewalk near its lot matches. Confidence is below 0.4 for
+  4.2% of permits, and nothing costs on it — it is a diagnostic in the artifact, not a routing input.
+  A synthetic score is not evidence the deck is elsewhere, and a shed that might be there is a reason
+  to avoid the block rather than a reason to charge less for walking under it.
+- Shelter assumes shed and canopy coverage are independent along an edge. Both are per-edge fractions,
+  so the real overlap is measurable rather than assumable — it just has not been measured.
 - The feed has 74 gaps totalling 392 days, worst a 66-day hole in early 2021. A date inside one is
   interpolated rather than observed, and nothing in the UI says so.

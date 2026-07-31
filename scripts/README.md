@@ -1128,7 +1128,7 @@ block's own street and sidewalks. All four quantize to a 0–254 ceiling so the 
 
 Byte 28 is the **direct canopy** (v6, `direct_canopy.rs`, baked when `--canopy` is given): the
 fraction of the edge's own baked polyline that lies **directly under a `CNPY` polygon**, on the same
-0–254 ceiling and read the same `1 − w·attr` way, for a forthcoming shelter-from-rain factor. It is
+0–254 ceiling and read the same `1 − w·attr` way — the canopy half of the shelter factor. It is
 *not* a second cover byte. Cover (byte 20) is the deliberately **smoothed** field the overlay is
 coloured from — the oriented anisotropic Gaussian, σ 15 m along the road and 4 m across, reaching
 ±37.5 m — which answers "is this a leafy stretch"; a walker under the rain is asking "is there
@@ -1421,6 +1421,34 @@ a side street. Where two offset lines meet more than twice the deck's depth out,
 different offsets, the corner is cut square across both edges instead: a chamfer at a hairpin, and
 the step across a change of depth. The date comes from the route-time store, which is why the date
 picker now reaches back to the epoch rather than one year.
+
+`computeEdgeSheds` (`src/routing/sheds.ts`) turns the standing set into one per-edge byte on the same
+0-254 ceiling the graph's own attributes use — the share of the edge standing under a deck — which
+three cost terms read. A placement's confidence is not one of the inputs: it stays in the artifact as
+a diagnostic, but nothing in the client weights by it, because being unsure whether a deck is there is
+a reason to steer clear of it rather than to discount it.
+
+- **Shade.** A deck is opaque, so its share of the edge is shaded whatever the sun is doing:
+  `1 - (1 - bakedShade)(1 - shed)`, written on the signed attribute as `attr(1 - shed) - shed*i` for
+  the field's sun strength `i`. Composited, not summed — a shed inside a building's shadow cannot
+  push the attribute past fully shaded. What `shed` is falls off as the sun slides the deck's shadow
+  sideways off the pavement it stands over, and it is the edge's own DEPTH that decides how fast —
+  the mean of its spans', weighted by the length each covers, so a 6 m avenue deck holds its shade to
+  a lower sun than a 2.5 m side-street one and the router and the map agree on which. Depth reaches
+  nothing else: shelter is a roof either over you or not, and the avoid penalty is charged per decked
+  metre of LENGTH.
+- **Shelter**, a slider of its own, for rain: `shed + rainTau*directCanopy*(1 - shed)`, with `rainTau`
+  0.35 in leaf and 0.15 leaf-off (`src/shade/phenology.ts`, the light curve's shape and its own
+  endpoints). Both terms are length fractions, so this is a union of coverage, not a stack of
+  opacities. Labelled a preference, and shown without a percentage: the deck half is solid, the tree
+  half is extrapolated from about four studied trees.
+- **Avoid**, a toggle: the decked share is priced at an undiscounted metre plus `SHED_AVOID_PENALTY`
+  (20) extra walked metres per metre of deck. Per metre rather than per edge, because a shed over a
+  tenth of an edge must not price the whole of it, and finite rather than infeasible, so a start or
+  destination under scaffolding stays routable. The two terms above are *not* switched off by it: a
+  deck you were told to avoid still shelters and still shades the ground it stands over, and the route
+  summary reports it that way. The penalty is what has to dominate what they earn — the flat metre
+  alone does not, since the shade axis and the highway penalty can both push a multiplier above 1.
 
 #### Keeping it current — the daily commit
 

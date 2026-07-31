@@ -19,6 +19,7 @@ import {
 import {
   MdAccountBalance,
   MdArrowUpward,
+  MdConstruction,
   MdDirectionsBoat,
   MdDirectionsCar,
   MdFlag,
@@ -31,6 +32,7 @@ import {
   MdTurnSlightLeft,
   MdTurnSlightRight,
   MdUTurnLeft,
+  MdWaterDrop,
   MdWbSunny,
 } from "react-icons/md";
 import { PiBoatFill, PiTreeEvergreenFill } from "react-icons/pi";
@@ -42,6 +44,7 @@ import {
   MAX_HIGHWAY_WEIGHT,
   MAX_LANDMARK_WEIGHT,
   MAX_SHADE_WEIGHT,
+  MAX_SHELTER_WEIGHT,
   MAX_TREE_WEIGHT,
 } from "../src/routing/cost";
 import {
@@ -77,6 +80,8 @@ interface RoutePanelProps {
   highwayWeight: number;
   commercialWeight: number;
   shadeWeight: number; // signed: −1 = prefer shade, +1 = prefer sun, 0 = off
+  shelterWeight: number;
+  allowSheds: boolean;
   directions: Maneuver[] | null;
   progress: NavProgress | null; // live position along the route, or null when off-route/unlocated
   directionsOpen: boolean;
@@ -89,6 +94,8 @@ interface RoutePanelProps {
   onHighwayWeight: (weight: number) => void;
   onCommercialWeight: (weight: number) => void;
   onShadeWeight: (weight: number) => void;
+  onShelterWeight: (weight: number) => void;
+  onAllowSheds: (allow: boolean) => void;
   onStartSelect: (result: GeocodeResult) => void;
   onDestSelect: (result: GeocodeResult) => void;
   onStartClear: () => void;
@@ -204,6 +211,8 @@ export default function RoutePanel({
   highwayWeight,
   commercialWeight,
   shadeWeight,
+  shelterWeight,
+  allowSheds,
   directions,
   progress,
   directionsOpen,
@@ -216,6 +225,8 @@ export default function RoutePanel({
   onHighwayWeight,
   onCommercialWeight,
   onShadeWeight,
+  onShelterWeight,
+  onAllowSheds,
   onStartSelect,
   onDestSelect,
   onStartClear,
@@ -276,6 +287,16 @@ export default function RoutePanel({
       color: "#f59e0b",
     },
     {
+      key: "shelter",
+      label: "Prefer shelter",
+      Icon: MdWaterDrop,
+      weight: shelterWeight,
+      max: MAX_SHELTER_WEIGHT,
+      onChange: onShelterWeight,
+      tint: "text-sky-600 dark:text-sky-400",
+      color: "#0284c7",
+    },
+    {
       key: "landmark",
       label: "Pass landmarks",
       Icon: MdAccountBalance,
@@ -330,8 +351,12 @@ export default function RoutePanel({
   ];
   // Every scenic factor gets a summary chip — the slider's own icon and tint with the route's mean
   // intensity for it — shown regardless of weight, for reference. Ferry is presence-only (the "· ferry"
-  // suffix), so it stays out of the chip row.
-  const factorChips = factors.filter((factor) => factor.key !== "ferry");
+  // suffix), so it stays out of the chip row. Shelter stays out too, and deliberately: a percentage
+  // beside a raindrop reads as a forecast of how dry you will stay, and the tree half of that number
+  // is extrapolated from about four studied trees. It is a preference, not a prediction.
+  const factorChips = factors.filter(
+    (factor) => factor.key !== "ferry" && factor.key !== "shelter",
+  );
   const hasFerry =
     directions?.some((maneuver) => maneuver.kind === "ferry") ?? false;
   const pickHint =
@@ -407,6 +432,11 @@ export default function RoutePanel({
               onClick={() => onAllowFerries(!allowFerries)}
               aria-label="Allow ferries"
               aria-pressed={allowFerries}
+              title={
+                allowFerries
+                  ? "Ferries allowed — click to route without them"
+                  : "Ferries barred — click to allow ferry crossings"
+              }
               className={`-m-1 grid h-8 w-8 place-items-center rounded-full hover:bg-slate-100 dark:hover:bg-slate-700 ${
                 allowFerries
                   ? "text-blue-600 dark:text-blue-400"
@@ -414,6 +444,24 @@ export default function RoutePanel({
               }`}
             >
               <MdDirectionsBoat />
+            </button>
+            <button
+              type="button"
+              onClick={() => onAllowSheds(!allowSheds)}
+              aria-label="Allow scaffolding"
+              aria-pressed={allowSheds}
+              title={
+                allowSheds
+                  ? "Scaffolding allowed — click to route around sidewalk sheds"
+                  : "Scaffolding avoided — click to walk under sidewalk sheds again"
+              }
+              className={`-m-1 grid h-8 w-8 place-items-center rounded-full hover:bg-slate-100 dark:hover:bg-slate-700 ${
+                allowSheds
+                  ? "text-orange-600 dark:text-orange-400"
+                  : "text-slate-400"
+              }`}
+            >
+              <MdConstruction />
             </button>
             <button
               type="button"
