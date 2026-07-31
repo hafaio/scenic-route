@@ -1,5 +1,5 @@
 // The client's view of the routing graph baked by `tiler graph`. Layout: scripts/README.md
-// (magic GRPH, v3 — the sidewalk graph with inert ferry edges). Fixed sections are viewed in place
+// (magic GRPH, v6 — the sidewalk graph with inert ferry edges). Fixed sections are viewed in place
 // over the fetched buffer; the strided edge records are copied once into parallel typed arrays so
 // the search loop touches only flat arrays.
 
@@ -16,6 +16,42 @@ const SIDE_MASK = 0x7;
 const KIND_FERRY = 4;
 // flags byte bit 2 marks a sidewalk that lies to the right of its stored geometry direction.
 const GEOMETRY_RIGHT_FLAG = 0x4;
+
+// An edge with no durable identity — a crossing, a link or a ferry, none of which comes from a
+// source segment. Its source-id slot carries this sentinel.
+export const NO_SOURCE_ID = 0xffffffff;
+// The durable key packs (source id, side, ordinal) into one number: the ordinal is a u8 and the side
+// fits three bits, so a source id up to a u32 still lands well inside an exact double.
+const DURABLE_SIDE_STRIDE = 256;
+const DURABLE_SOURCE_STRIDE = 2048;
+
+// The rebuild-surviving name of one edge, as `sheds.ts` and the SHED artifact spell it. Positional
+// edge ids all shift when the graph is rebuilt; this does not, because the source id is CSCL's own
+// `physicalid` (or an OSM way id for a path), the side is the sidewalk's N/E/S/W label, and the
+// ordinal only separates the several edges one source segment can become.
+export function durableKey(
+  sourceId: number,
+  side: number,
+  ordinal: number,
+): number {
+  return (
+    sourceId * DURABLE_SOURCE_STRIDE + side * DURABLE_SIDE_STRIDE + ordinal
+  );
+}
+
+// One edge's durable key, or -1 when it has no durable identity.
+export function edgeDurableKey(graph: RoutingGraph, edge: number): number {
+  const sourceId = graph.edgeSourceId[edge];
+  if (sourceId === NO_SOURCE_ID) {
+    return -1;
+  } else {
+    return durableKey(
+      sourceId,
+      (graph.edgeKindSide[edge] >> SIDE_SHIFT) & SIDE_MASK,
+      graph.edgeOrdinal[edge],
+    );
+  }
+}
 
 export type EdgeKind = "sidewalk" | "crossing" | "link" | "path" | "ferry";
 export type SideLabel = "north" | "east" | "south" | "west" | null;
@@ -54,6 +90,8 @@ export interface RoutingGraph {
   edgeCover: Uint8Array; // 0..254, this edge's own single value; 0 for a ferry
   edgeNameId: Uint16Array; // index into names, or NAME_NONE
   edgeKindSide: Uint8Array; // bits 0-2 kind, bits 3-5 side
+  edgeSourceId: Uint32Array; // the CSCL physicalid or OSM way id; NO_SOURCE_ID for a crossing, link or ferry
+  edgeOrdinal: Uint8Array; // which edge of the several one source segment becomes; both feed `edgeDurableKey`
   maxCover: number; // the greatest per-edge cover in the graph, 0..1; sets the cost clip floor
 
   edgeLandmark: Uint8Array; // 0..254, this edge's landmark-amenity discount attribute; 0 for a ferry
@@ -63,6 +101,11 @@ export interface RoutingGraph {
   maxLandmark: number; // the greatest per-edge landmark amenity, 0..1; sets that discount's clip floor
   maxArt: number; // the greatest per-edge art amenity, 0..1; sets that discount's clip floor
   maxCommercial: number; // the greatest per-edge commercial amenity, 0..1; sets that discount's clip floor
+
+  // The share of the edge that lies DIRECTLY under a crown, unblurred — what edgeCover, the smoothed
+  // field the overlay is coloured from, cannot answer.
+  edgeDirectCanopy: Uint8Array; // 0..254; 0 for a ferry
+  maxDirectCanopy: number; // the greatest per-edge direct canopy, 0..1; that factor's clip-floor input
 
   // The route-time signed shade field, filled from the SHDE artifact by computeEdgeShade: the per-edge
   // sun/shade attribute as a function of elapsed walking time, so a metre is costed against the sun at
@@ -83,9 +126,9 @@ export interface RoutingGraph {
 }
 
 const MAGIC = "GRPH";
-const FORMAT_VERSION = 5;
+const FORMAT_VERSION = 6;
 const HEADER_BYTES = 64;
-const EDGE_RECORD_BYTES = 28;
+const EDGE_RECORD_BYTES = 34;
 const GRAPH_URL = "routing/nyc.bin"; // relative, so it picks up the deploy basePath
 const PATH_CACHE_LIMIT = 512;
 
@@ -141,11 +184,15 @@ export function decodeGraph(buffer: ArrayBuffer): RoutingGraph {
   const edgeArt = new Uint8Array(edgeCount);
   const edgeHighway = new Uint8Array(edgeCount);
   const edgeCommercial = new Uint8Array(edgeCount);
+  const edgeDirectCanopy = new Uint8Array(edgeCount);
+  const edgeSourceId = new Uint32Array(edgeCount);
+  const edgeOrdinal = new Uint8Array(edgeCount);
   const ferryEdges: number[] = [];
   let maxCoverByte = 0;
   let maxLandmarkByte = 0;
   let maxArtByte = 0;
   let maxCommercialByte = 0;
+  let maxDirectCanopyByte = 0;
   let minFerrySecPerMetre = Number.POSITIVE_INFINITY;
   for (let edge = 0; edge < edgeCount; edge++) {
     const record = offset + edge * EDGE_RECORD_BYTES;
@@ -173,20 +220,25 @@ export function decodeGraph(buffer: ArrayBuffer): RoutingGraph {
       edgeHalfOffsetDm[edge] = bytes[record + 21];
       maxCoverByte = Math.max(maxCoverByte, edgeCover[edge]);
     }
-    // The scenic-factor bytes are their own record slot, so a ferry's duration in bytes 20-21 does
-    // not collide; a ferry carries 0 in all four, so it never lifts a discount's max.
+    // The attribute bytes are their own record slots, so a ferry's duration in bytes 20-21 does not
+    // collide; a ferry carries 0 in all five, so it never lifts a discount's max.
     edgeLandmark[edge] = bytes[record + 24];
     edgeArt[edge] = bytes[record + 25];
     edgeHighway[edge] = bytes[record + 26];
     edgeCommercial[edge] = bytes[record + 27];
+    edgeDirectCanopy[edge] = bytes[record + 28];
+    edgeSourceId[edge] = view.getUint32(record + 29, true);
+    edgeOrdinal[edge] = bytes[record + 33];
     maxLandmarkByte = Math.max(maxLandmarkByte, edgeLandmark[edge]);
     maxArtByte = Math.max(maxArtByte, edgeArt[edge]);
     maxCommercialByte = Math.max(maxCommercialByte, edgeCommercial[edge]);
+    maxDirectCanopyByte = Math.max(maxDirectCanopyByte, edgeDirectCanopy[edge]);
   }
   const maxCover = maxCoverByte / 255;
   const maxLandmark = maxLandmarkByte / 255;
   const maxArt = maxArtByte / 255;
   const maxCommercial = maxCommercialByte / 255;
+  const maxDirectCanopy = maxDirectCanopyByte / 255;
 
   const names = decodeNames(buffer, nameTableOffset);
   const geometry = new Uint8Array(buffer, geometryOffset, geometryLength);
@@ -215,6 +267,8 @@ export function decodeGraph(buffer: ArrayBuffer): RoutingGraph {
     edgeCover,
     edgeNameId,
     edgeKindSide,
+    edgeSourceId,
+    edgeOrdinal,
     maxCover,
     edgeLandmark,
     edgeArt,
@@ -223,6 +277,8 @@ export function decodeGraph(buffer: ArrayBuffer): RoutingGraph {
     maxLandmark,
     maxArt,
     maxCommercial,
+    edgeDirectCanopy,
+    maxDirectCanopy,
     shade: null, // populated lazily once the SHDE artifact loads, keyed on the departure instant
     edgeHalfOffsetDm,
     edgeDurationSeconds,

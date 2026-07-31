@@ -171,6 +171,44 @@ pub fn flatten(polygons: &[Polygon]) -> PolygonSet {
     set
 }
 
+impl PolygonSet {
+    /// Whether a point lands on any of `candidates` — the raw 0/1 indicator, no kernel. A polygon
+    /// is tested even-odd over all of its rings together, so an inner ring punches a hole, and the
+    /// candidates are tested one at a time, so two overlapping woods do not cancel out: the same
+    /// semantics `fill_indices` rasterizes with. The candidates come from a `PolygonGrid`, so this
+    /// walks a few dozen outlines rather than a million.
+    pub fn contains_point(&self, candidates: &[u32], lng: f64, lat: f64) -> bool {
+        candidates.iter().any(|candidate| {
+            let index = *candidate as usize;
+            let box_ = &self.boxes[index];
+            if lng < box_.west || lng > box_.east || lat < box_.south || lat > box_.north {
+                false
+            } else {
+                let mut inside = false;
+                for ring in &self.rings[index] {
+                    if ring.lngs.is_empty() {
+                        continue;
+                    }
+                    let mut previous = ring.lngs.len() - 1;
+                    for point in 0..ring.lngs.len() {
+                        if (ring.lats[point] > lat) != (ring.lats[previous] > lat)
+                            && lng
+                                < ring.lngs[point]
+                                    + (lat - ring.lats[point])
+                                        / (ring.lats[previous] - ring.lats[point])
+                                        * (ring.lngs[previous] - ring.lngs[point])
+                        {
+                            inside = !inside;
+                        }
+                        previous = point;
+                    }
+                }
+                inside
+            }
+        })
+    }
+}
+
 /// Even-odd scanline fill of the polygons at `indices` into a `width` by `height` mask,
 /// returning how many reached it. `project` carries a lng/lat to the mask's coordinate space;
 /// both tile projections are separable, but a single point map keeps this one loop. Taking
