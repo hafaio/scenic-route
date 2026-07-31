@@ -39,11 +39,14 @@ async function writeEntry(
 }
 
 // The key is the request itself — dataset plus query, or the Overpass QL — so changing what
-// is asked for lands on a different entry rather than silently reusing the old one.
+// is asked for lands on a different entry rather than silently reusing the old one. `quiet` is for
+// a read split into hundreds of cached batches, which reports its own progress and would otherwise
+// bury the build log in hit notices.
 export async function cached<Value>(
   name: string,
   key: string,
   read: () => Promise<Value>,
+  quiet = false,
 ): Promise<Value> {
   const path = entryPath(name, key, "json");
 
@@ -51,7 +54,9 @@ export async function cached<Value>(
     const hit = await readFile(path, "utf-8").catch(() => null);
     const entry = hit === null ? null : parse<Value>(hit);
     if (entry !== null) {
-      console.error(`  ${name}: from .cache`);
+      if (!quiet) {
+        console.error(`  ${name}: from .cache`);
+      }
       return entry.value;
     }
   }

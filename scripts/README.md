@@ -1226,6 +1226,188 @@ An edge reads positive when net sunlit and negative when net shaded; the clamp i
 `|attr| <= 127/128 < 1`, and with it the cost model's `1 - w*attr` positive for `|w| <= 1`. A ferry
 edge has no polyline and reads 0 in both rows — its cost never consults the attribute.
 
+### `public/sheds/` — the sidewalk-shed history, magic `SHED` (v2, derived, **committed**)
+
+Every scaffolding permit New York has issued since **2017-12-28**, placed on the GRPH edges it stands
+over. Not baked by `tiler`: `bun run build-sheds` (`scripts/build-sheds.ts`) does the whole pipeline
+and writes these three files; `bun run update-sheds` keeps them current without ever running it
+again. It reads `public/routing/nyc.bin`, so it runs **after** `bun run build-tiles` — which bakes
+that graph and clears `public/routing` on its way, and never touches this directory. All dates are
+**day numbers from 2017-12-28**, which a u16 holds until 2197.
+
+Derived but committed, which nothing else under `public/` is: this is the one artifact rebuilt by a
+daily job rather than by a deploy, so it has to survive a checkout that has run no build. The client
+does not read it out of the deploy — it fetches these three files off `main` through
+raw.githubusercontent.com, so what it draws is as fresh as the job rather than as the last deploy.
+**Nothing shed-related is in Git LFS and none of it may ever be** — LFS is the one store that keeps
+each rewrite whole, and a megabyte a day really would cost ~400 MB a year there (DESIGN.md). Packed
+git deltas it to 1.7-22 KB a day.
+
+Three sources feed it. What stood when comes from the DOB's own daily CSV snapshots, which survive
+only as the git history of `NYCDOB/ActiveShedPermits` — `scripts/shed-permits.ts` walks every commit,
+turns a permit's appearances and disappearances into presence intervals (runs less than a fortnight
+apart are one shed, and a snapshot far below its neighbours' row count is a truncated write, not a
+day the city took every shed down), and recovers the Block/Lot the permit claimed. Where it stood
+comes from the DOF digital tax map and the building footprints (`scripts/shed-parcels.ts`): a shed
+runs along the property line, so the **tax lot** is the geometry, and the footprint only picks which
+part of a multi-part lot is in use and anchors a permit shorter than its frontage. `scripts/
+shed-map.ts` puts the two together — the stretch of lot boundary facing a sidewalk that carries the
+permit's street name is the measured frontage, and a permit longer than that runs on around the
+corner as a bounded walk over the sidewalk network. What a permit resolves to there depends on that
+permit alone and never on the company it was fetched in: the parts of a multi-part lot are sorted
+before they are unioned, because Socrata's row order shifts with the batch, and the lot a permit's BIN
+*reports* — the fallback when the tax map has no polygon for the permit's own BBL — is run through the
+same condominium resolution as the permits' own lots, because otherwise it found geometry only when
+some unrelated permit happened to name the same BBL. Each placement carries a confidence, the product
+of six ways it can be wrong; `scripts/shed-streets.ts` is the DOB-to-CSCL street-name comparison the
+first of those factors reads.
+
+Almost every query is "what is up today", so the records are split by whether they still are.
+`open.bin` (138 KB) holds the sheds still standing and answers that query on its own; `closed.bin`
+(961 KB) holds the ones that have come down, **sorted by the day they did**, so a query for a past day
+seeks into it with `index.bin` and decodes only the suffix that could still have been standing. A
+permit that came down and went back up is **two records with their own geometry** — its intervals
+are disjoint, so no day sees it twice, and each is placed from the attributes the feed carried on the
+day it ended rather than from the ones the feed carries now.
+
+The split is not "in the newest snapshot" but "could still be extended". Runs less than a fortnight
+apart are one shed, so an interval whose last sighting is within `MERGE_TOLERANCE_DAYS` of the newest
+usable snapshot is **provisional**: a reappearance would lengthen it. Those go in `open.bin` with no
+close day; everything else is final and goes in `closed.bin`. The feed drops and re-adds 40-70 permits
+a day around a renewal, so about 400 of `open.bin`'s records are a shed the newest snapshot happens
+not to carry. That is also what makes `closed.bin` **append-only**: nothing in it can ever change, so
+the daily job appends the day's closures rather than revisiting the file. Nothing, including a
+correction — the DOB goes on fixing a permit's geocode and length years after its shed came down, and
+a record placed from the reading in force *now* would have to move with them.
+
+**`open.bin` names its records**, in job-number order, and every permit gets a record even when the
+placement could put it nowhere. The job numbers ride in its header, so which record is which permit is
+something the artifact **states** rather than something the daily job has to re-derive; the feed's own
+answer — the permits still provisional on the day the file reached, sorted the same way — is then a
+check on it, and a disagreement stops the run. Sorting `open.bin` by day instead would have made its
+first-day deltas monotone and saved a byte a record; the byte buys the job numbers a delta chain to
+ride on. `closed.bin` is that same order stably re-sorted by close day, so records closing on one day
+stay in job order, and it carries no job numbers at all — nothing ever has to ask a closed record
+which permit it was.
+
+Header, 32 bytes plus each file's own trailing block, both record files:
+
+| offset | type | field |
+| --- | --- | --- |
+| 0 | u8[4] | magic `SHED` |
+| 4 | u16 | format version = 2 |
+| 6 | u16 | header bytes, and so where the records start: 32 plus whatever the block below runs to |
+| 8 | u32 | records in this file |
+| 12 | u32 | spans in this file |
+| 16 | u64 | graph hash — the FNV-1a 64 of the GRPH bytes `routing/version.json` carries |
+| 24 | u16 | the day the file's delta chain starts from: its first record's own day |
+| 26 | u8 | flags: bit0 set in `closed.bin` |
+| 27 | u8 | reserved, zero |
+| 28 | u16 | the newest usable DOB snapshot the artifact was built through |
+| 30 | u8[2] | reserved, zero |
+| 32 | u16[n] | `closed.bin` only: the truncation window, n ≤ 30 row counts |
+| 32 | varint pairs | `open.bin` only: one job number per record, in record order |
+
+Both blocks are state for the daily job rather than anything a reader of the records needs, which is
+why they sit in front of the records instead of inside them: the client takes the record offset from
+the header-bytes field and walks straight past them, and never decodes a byte of either.
+
+The window is there so the daily job does not have to rediscover it: the truncated-snapshot rule
+judges a day against the row counts of the 30 published days before it, and a run that picks the feed
+up a fortnight back has none of them in hand. Thirty exactly, not a round number with slack — the
+whole feed is re-walkable from the DOB's git history whenever the rule is retuned, so there is nothing
+to be gained by carrying counts the rule does not ask for.
+
+A job number is stored as **two varints, not a string**: the delta from the previous record's key,
+then a suffix code. The key is the nine digits of a BIS number as they stand, or a DOB NOW one's
+borough letter and eight digits as 1e9 + borough × 1e8 + digits, with the borough indexed over
+`BMQSX` — digits sort below letters, so both run in the order the strings themselves sort in, the
+file's own order, and the deltas are non-negative. The suffix code is 0 for a BIS number and
+1 + 10 × (job-type letter − `A`) + its digit otherwise, which is the part with no order to exploit
+and the one the delta would otherwise be multiplied by. That costs **2.60 bytes a record** against
+the 12 or 13 a string does: `open.bin` 117 KB → 138 KB raw, over 7,940 records. A job number of a third shape is a code change and a full rebuild, so the encoder throws on
+one rather than storing something that will not read back as itself — and likewise on a block that
+would overrun the header-bytes u16, which would take about 21,000 standing sheds against a set that
+has sat near 7,500 for eight years.
+
+A record in `closed.bin` is a varint **close-day delta** from the previous record's close day, a
+varint **duration** (`close - first`), a u8 confidence, a varint span count, and then per span a
+varint **source-id delta**, a varint packing the **side** in its low three bits and the **ordinal**
+above them, and the three bytes `t0`, `t1`, `depth`. A record in `open.bin` is the same without the duration, and
+its first field is a **zigzag first-day delta** instead — an open shed has no close day, so there is
+nothing for a duration to be measured from, and the file is in job order rather than day order, so
+that delta takes either sign. Both day chains start from the header's day, so the first record's
+delta is 0.
+
+A span names its edge by the graph's **durable key** — `(source id, side, ordinal)`, the GRPH edge
+record's bytes 29–33 (v6) — not by the edge's position. Edge ids are positional and every one of them
+moves when the graph is rebuilt, so an artifact keyed on positions does not fail on a rebuild, it
+quietly puts scaffolding on other streets. The client turns keys back into positions in one pass over
+the graph's key column, per query: a day's standing set is ~13k spans against 531k edges, so a map of
+the keys that day wants is a hundredth of the size of a map of every edge. A key this graph has no
+edge for — a source segment the rebuild dropped, or one whose contraction changed enough to break the
+key — contributes no coverage, which is the correct answer rather than a silent misplacement.
+
+`t0`/`t1` are how far along the edge the shed runs, as `round(fraction * 255)`. Confidence is
+`round(value * 255)` capped at 254, as the graph's cover and scenic bytes are. `depth` is how deep
+the deck runs ACROSS the pavement, in **decimetres**, and **0 means the placement could not measure
+one** rather than a deck of no depth — the client turns that into its own 4 m fallback, in one place.
+
+Depth is per SPAN rather than per shed, at a byte a span (~91 KB over the whole history, ~13 KB of
+`open.bin`), because a shed that turns a corner off a Midtown avenue onto a side street really does
+stand on two pavements of different widths, and both the band and the shadow are drawn per span.
+
+**How it is measured**, all of it in `scripts/shed-map.ts`, since no dataset New York publishes
+carries a sidewalk width:
+
+- The **kerb** comes out of the graph. A sidewalk's baked polyline is its centreline offset by the
+  half-offset byte, which is half the CSCL kerb-to-kerb roadway plus the manifest's
+  `sidewalkInsetMeters` — so the kerb sits exactly that inset inboard of the polyline. The byte says
+  nothing else about the pavement: it measures the ROADWAY and stops at the kerb, and the polyline is
+  where the inset assumes the middle of the sidewalk is, not where it is.
+- The **building line** is the tax lot the placement already measures its frontage against. For each
+  candidate sidewalk the lot's street wall — the boundary samples within 2 m of the closest the lot
+  comes, facing the line rather than running back off it — is projected onto the polyline and taken
+  as a SIGNED offset, positive away from the roadway, its side read off the graph's own
+  geometry-right flag rather than guessed from the wall's normal. The median of those samples is the
+  wall; a stoop or a bay reaches a metre past it and a shed follows the wall.
+- **Depth** is then `sidewalkInsetMeters + offset − 0.3 m`, the 0.3 being what the deck stops short
+  of the kerb by.
+- A span with no lot boundary behind it — the wrap walk stepped onto a street the lot does not front
+  — takes the median of the same shed's other spans, and a shed with none at all writes 0. Over the
+  whole history 113,248 of 115,573 spans (98.0%) measure their own, 2,325 take their shed's median,
+  and none write 0. The fallback path is the client's belt and braces, not a load-bearing one.
+
+Over the whole feed that comes out as a clean bell around **3.7 m** (a 12 ft sidewalk, which is what
+New York builds), running p90 6.5 m on the avenues, which is why the flat 4 m assumption it replaced
+was not obviously wrong and why it was wrong everywhere in particular. It is clamped into
+**[0.1 m, 8 m]**: 3.7% of spans measure above the ceiling, where the distribution stops falling and
+goes flat all the way out to 32 m — superblocks, forecourts and plazas, where the lot line is not the
+building line at all. The floor is the format's own, since a depth rounds to decimetres and zero
+decimetres is the byte for "not measured". What cannot be BUILT — 5 ft of clear path plus the frame
+either side of it, so 2.4 m — is floored by the reader instead (`deckDepth`, `src/routing/sheds.ts`),
+which is the only side that knows where the kerb was put and so the only one that can widen a deck
+outward over the roadway rather than into the building the measurement found.
+
+**The source-id chain restarts at every record.** A chain running across records would make the
+suffix read below impossible and drift the ids silently instead of failing — the bug that cost a day
+in the `CSTR` work. Spans within a record are ascending by durable key, which keeps those deltas
+non-negative and puts the two sidewalks of one street next to each other at a delta of zero. The
+close-day chain does run across records, because the file is sorted and the deltas are tiny; a suffix
+read re-bases it from the index.
+
+`index.bin` is a bare array of 8-byte entries, one per calendar month that has a record in
+`closed.bin`, ascending: a u16 month (as the day number of its first day, clamped at the epoch), the
+u32 byte offset of the first record closing on or after it, and that record's u16 **absolute** close
+day. The third field is the whole point — a reader seeking to a month starts its close-day chain from
+that value rather than replaying the file to rebuild it.
+
+The sheds standing on day `D` are everything in `open.bin` with `first <= D` — the whole file is
+walked, since it is in job order — plus the suffix of `closed.bin` from the first record with
+`close >= D`, filtered to `first <= D`. Coverage per edge is
+the sum of `t1 - t0` over its spans, clamped to 1: concurrent permits overlap, and about a tenth of
+the touched edges are covered past their own length before the clamp.
+
 ## Adding a city
 
 The client does not change. It reads `src/tree-cover/manifest.json` and the tile pyramid;
