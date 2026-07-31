@@ -4,6 +4,7 @@ import dynamic from "next/dynamic";
 import type { ReactNode } from "react";
 import {
   MdAccountBalance,
+  MdConstruction,
   MdDirectionsCar,
   MdPalette,
   MdStorefront,
@@ -37,6 +38,9 @@ const PoiLayer = dynamic(() => import("../../components/poi-layer"), {
 const LinesLayer = dynamic(() => import("../../components/lines-layer"), {
   ssr: false,
 });
+const ShedLayer = dynamic(() => import("../../components/shed-layer"), {
+  ssr: false,
+});
 
 export type OverlayId =
   | "canopy"
@@ -46,7 +50,8 @@ export type OverlayId =
   | "ferries"
   | "highways"
   | "commercial"
-  | "shade";
+  | "shade"
+  | "scaffolding";
 
 export interface OverlayDef {
   id: OverlayId;
@@ -65,6 +70,8 @@ const LANDMARK_COLOR = "#f59e0b"; // amber-500
 const ART_COLOR = "#d946ef"; // fuchsia-500
 const FERRY_COLOR = "#2563eb"; // blue-600, the route layer's ferry-leg colour
 const HIGHWAY_COLOR = "#ef4444"; // red-500
+// Scaffolding draws its own orange-600 bands (in shed-layer.tsx); only its menu glyph is tinted
+// here, so the switcher still reads as the layer's colour code.
 // The "cute commercial" overlay is a heat field with its own violet ramp (in dining-layer.tsx); only
 // its menu glyph is tinted here, to violet-600, so the switcher still reads as the layer's colour code.
 
@@ -96,6 +103,14 @@ export const OVERLAYS: readonly OverlayDef[] = [
     label: "Shade",
     icon: <MdWbShade className="h-4 w-4 text-slate-500" aria-hidden="true" />,
     render: () => <ShadeLayer />,
+  },
+  {
+    id: "scaffolding",
+    label: "Scaffolding",
+    icon: (
+      <MdConstruction className="h-4 w-4 text-orange-600" aria-hidden="true" />
+    ),
+    render: () => <ShedLayer />,
   },
   {
     id: "landmarks",

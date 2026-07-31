@@ -5,9 +5,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Marker, Polyline, useMap } from "react-leaflet";
 import {
   edgeKind,
-  edgePath,
   loadGraph,
   type RoutingGraph,
+  subEdgePath,
 } from "../src/routing/graph";
 import type { RouteResult, RouteStep } from "../src/routing/search";
 import type { Snap } from "../src/routing/snap";
@@ -116,58 +116,6 @@ function stepBounds(
   return [0, edgeLength];
 }
 
-// The edge polyline clipped to [fromMeters, toMeters] in a -> b order, endpoints interpolated.
-function clipEdge(
-  graph: RoutingGraph,
-  edge: number,
-  fromMeters: number,
-  toMeters: number,
-): { lngs: number[]; lats: number[] } {
-  const { lngs, lats } = edgePath(graph, edge);
-  const toRad = Math.PI / 180;
-  const cosLat = Math.cos(lats[0] * toRad);
-  const cumulative = new Float64Array(lngs.length);
-  for (let vertex = 1; vertex < lngs.length; vertex++) {
-    const deltaX = (lngs[vertex] - lngs[vertex - 1]) * cosLat;
-    const deltaY = lats[vertex] - lats[vertex - 1];
-    cumulative[vertex] = cumulative[vertex - 1] + Math.hypot(deltaX, deltaY);
-  }
-  const total = cumulative[lngs.length - 1];
-  const scale = total > 0 ? graph.edgeLength[edge] / total : 0;
-
-  const at = (distance: number): { lng: number; lat: number } => {
-    if (scale === 0) {
-      return { lng: lngs[0], lat: lats[0] };
-    }
-    const raw = distance / scale;
-    let vertex = 1;
-    while (vertex < lngs.length - 1 && cumulative[vertex] < raw) {
-      vertex += 1;
-    }
-    const span = cumulative[vertex] - cumulative[vertex - 1];
-    const param = span > 0 ? (raw - cumulative[vertex - 1]) / span : 0;
-    return {
-      lng: lngs[vertex - 1] + param * (lngs[vertex] - lngs[vertex - 1]),
-      lat: lats[vertex - 1] + param * (lats[vertex] - lats[vertex - 1]),
-    };
-  };
-
-  const startPoint = at(fromMeters);
-  const outLngs = [startPoint.lng];
-  const outLats = [startPoint.lat];
-  for (let vertex = 0; vertex < lngs.length; vertex++) {
-    const along = cumulative[vertex] * scale;
-    if (along > fromMeters && along < toMeters) {
-      outLngs.push(lngs[vertex]);
-      outLats.push(lats[vertex]);
-    }
-  }
-  const endPoint = at(toMeters);
-  outLngs.push(endPoint.lng);
-  outLats.push(endPoint.lat);
-  return { lngs: outLngs, lats: outLats };
-}
-
 function buildDrawSteps(graph: RoutingGraph, result: RouteResult): DrawStep[] {
   const draw: DrawStep[] = [];
   const stepCount = result.steps.length;
@@ -181,7 +129,7 @@ function buildDrawSteps(graph: RoutingGraph, result: RouteResult): DrawStep[] {
       result.start,
       result.dest,
     );
-    const clipped = clipEdge(graph, step.edge, fromMeters, toMeters);
+    const clipped = subEdgePath(graph, step.edge, fromMeters, toMeters);
     // The clip runs a -> b; reverse it into travel order so the ribbon flows the way it is walked.
     const lngs = step.forward ? clipped.lngs : [...clipped.lngs].reverse();
     const lats = step.forward ? clipped.lats : [...clipped.lats].reverse();

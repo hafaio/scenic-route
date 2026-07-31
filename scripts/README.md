@@ -1408,6 +1408,20 @@ walked, since it is in job order — plus the suffix of `closed.bin` from the fi
 the sum of `t1 - t0` over its spans, clamped to 1: concurrent permits overlap, and about a tenth of
 the touched edges are covered past their own length before the clamp.
 
+`components/shed-layer.tsx` draws the standing set: a span becomes the stretch of its edge's own
+baked polyline between `t0` and `t1`, and `src/tiles/shed-decks.ts` turns a chain of them into the
+POLYGON the deck covers — the band's two edges are that polyline offset to the kerb, a fixed
+`sidewalkInsetMeters − 0.3` toward the roadway, and to the building, the span's own measured depth
+beyond that. A band centred on the polyline left a visible strip of sunlight between a shed and its
+building on every wide pavement in Midtown; a band drawn as a stroked line could carry only one width
+per path, so a chain had to break wherever the depth changed — at exactly the corners a shed turns.
+The ring walks out along the building edge and back along the kerb edge, and a corner is where the
+two offset lines cross, which mitres it by construction and lets one deck narrow from an avenue onto
+a side street. Where two offset lines meet more than twice the deck's depth out, or are parallel at
+different offsets, the corner is cut square across both edges instead: a chamfer at a hairpin, and
+the step across a change of depth. The date comes from the route-time store, which is why the date
+picker now reaches back to the epoch rather than one year.
+
 #### Keeping it current — the daily commit
 
 The DOB publishes a new snapshot every morning, so this is the one artifact rebuilt by a job rather
