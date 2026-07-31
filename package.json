@@ -19,7 +19,8 @@
     "build-landuse": "bun run scripts/landuse.ts",
     "build-commercial": "bun run scripts/build-commercial.ts",
     "build-sheds": "bun run scripts/build-sheds.ts",
-    "build-tiles": "bun run scripts/build-street-tiles.ts"
+    "build-tiles": "bun run scripts/build-street-tiles.ts",
+    "update-sheds": "bun run scripts/update-sheds.ts"
   },
   "dependencies": {
     "firebase": "^12.16.0",

@@ -39,6 +39,31 @@ equals `1 − (1−b)(1−t)` only if the alphas *are* the fractions. If they ar
 anything, the cross term is scaled twice: a pixel fully shaded by both comes out 238/255 where it
 should be 190/255, ~25% too dark, worst where the overlap is densest.
 
+## Repository traps
+
+These came out of the scaffolding work and neither is about scaffolding. They apply to any file that
+is rebuilt rather than authored.
+
+**Packed git deltas a rewritten binary; LFS does not.** The shed artifact is 1.1 MB rebuilt every
+morning, and "git keeps a whole copy of every version of a binary" is the sentence that kept it off
+`main`. Measured over 177 real successive days, one commit each, repacked from scratch: **1.7 KB a
+day** at `--aggressive`, 22 KB at git's default `pack.window=10` — 44× to 550× under the naive figure.
+`closed.bin` is append-only but for two header bytes, so it deltas to **86 B a day** for a 940 KB
+file; the churn is nearly all `open.bin`, whose job-number order scatters the day's new permits
+through it, and git's own commits and trees add 385 B a day. Packfile size is not a reason to keep a
+daily artifact off `main`, and it no longer keeps this one off: `public/sheds/` is committed and the
+daily job pushes a commit there, which the client then reads off `main` through
+raw.githubusercontent.com. `main` always exists, so nothing has to be bootstrapped before the first
+read, and the read is as fresh as the job rather than as the last deploy.
+
+**The same sentence is exactly true of LFS**, which stores each version whole and deltas nothing:
+1.1 MB × 365 = **401 MB a year**, charged to the account's quota rather than the repo's. That is what
+picked `public/sheds/` over `data/sheds/` for the committed copy. `.gitattributes` tracks
+`data/<name>/*.bin` per directory, so a fifteenth directory under `data/` sits one habitual line away
+from being tracked — and the line would read as restoring an oversight rather than as signing up for
+400 MB a year. Outside `data/` there is no line to restore, and that is the whole of the reason: the
+deploy copies `public/sheds/` out with the rest of `public/`, but the client does not read it there.
+
 ## Shade
 
 The map shades ground the sun cannot reach: buildings, and tree canopy.

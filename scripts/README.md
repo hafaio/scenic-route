@@ -1408,6 +1408,90 @@ walked, since it is in job order — plus the suffix of `closed.bin` from the fi
 the sum of `t1 - t0` over its spans, clamped to 1: concurrent permits overlap, and about a tenth of
 the touched edges are covered past their own length before the clamp.
 
+#### Keeping it current — the daily commit
+
+The DOB publishes a new snapshot every morning, so this is the one artifact rebuilt by a job rather
+than by a deploy. `.github/workflows/sheds.yml` runs `bun run update-sheds` at 15:00 UTC, which reads
+the three committed files out of the checkout, rewrites them, and pushes one ordinary commit to
+`main`. `build.yml`'s push trigger ignores `public/sheds/**`, so that commit does not fire a lint+test
+run; `paths-ignore` is not on the `pull_request` trigger, so a person editing the pipeline still gets
+one. The push is never forced — not even `--force-with-lease`, whose lease is checked against the tip
+this checkout fetched, which is exactly the human push it would be overwriting. A rejected push
+re-reads `main`, re-stages the same three files on the new tip and commits again, up to three times;
+nothing else is ever staged, so there is nothing for a retry to conflict with.
+
+That commit is what the client reads. It fetches
+`raw.githubusercontent.com/hafaio/scenic-route/main/public/sheds/{open,closed,index}.bin` — `raw`
+serves any branch with `access-control-allow-origin: *`, gzip, an etag, a five-minute cache and range
+requests — **so the scaffolding on the map is as fresh as the job, not as the last deploy**, which
+matters because Pages ships on `workflow_dispatch` only. A dev server reads its own `public/sheds/`
+instead, as it does every other artifact; `NEXT_PUBLIC_SHED_BASE` overrides the base either way. Set
+`SHED_ARTIFACT` to point the *job* at another copy — a directory, or a URL to read one over HTTP.
+
+**Nothing shed-related is in Git LFS and none of it may ever be.** LFS keeps every rewrite whole, so a
+megabyte a day really does cost ~400 MB a year there, charged to the account. Packed git does not:
+1.7-22 KB a day depending on the repack window (DESIGN.md has the measurement), which is why the
+artifact is committed at all — and why it is committed under `public/` rather than beside the LFS
+directories in `data/`.
+
+**A format bump needs a full rebuild before the job can run again.** The artifact is rebuilt outside
+any deploy, so the client and the artifact are versioned independently and a `SHED` version bump
+breaks both directions at once: the new reader rejects the files the job last committed, and the new
+`update-sheds` rejects them too. The move is `bun run build-sheds`, commit, then deploy — there is
+no in-place migration and none is wanted, since a full rebuild is two minutes and reproduces the
+artifact exactly.
+
+**The job keeps nothing of its own between runs.** The artifact's header says which day it was built
+through and which permit each of its standing records is, the DOB's CSV history says what stood on
+that day and every day since, and the difference is the update — no side file, no clock. The feed's
+own answer to the identity question, the permits still provisional on that day in job order, is
+checked against the stored one on every run, and a disagreement stops the job rather than shifting
+every shed onto its neighbour's street.
+
+**And it never assumes it ran yesterday.** Cron is best-effort, a scheduled workflow on a public repo
+is switched off after sixty days of repository quiet, a run can fail unnoticed for a week, and the
+feed itself has 74 gaps totalling 392 days (the worst a 66-day hole in early 2021). So it reads the
+artifact's own day and replays every snapshot published since — one or three hundred, the same code
+either way. It is `scripts/shed-permits.ts`'s own walk over a window rather than a second
+implementation, over exactly the days whose intervals could still change and not one day more.
+Running after a month idle produces what running every morning would have, running twice in a day
+writes the same bytes, and — the property the other two are corollaries of — the artifact is a
+function of the day it was built through and of nothing else, so a chain of updates lands on the
+bytes a full `build-sheds` at the same day writes however far back the chain started
+(`src/routing/shed-update.test.ts`).
+
+Four properties of the rest of the pipeline are what let it be this small:
+
+- **The truncated-snapshot rule looks only backwards, and its window travels in the artifact.** A day
+  is judged against the row counts of the 30 published days *before* it, so its verdict is final the
+  moment it is made and no later run can disagree with an earlier one about a day both have seen. A
+  two-sided window cannot say that, which is why the job used to need a separate settled-day clock; a
+  30-day backward window still outvotes the longest degraded run the feed has had, a fortnight in
+  mid-2019. Those 30 counts ride in `closed.bin`'s header, so the run judges its first day exactly as
+  a walk over the whole history would without reading a day of history to find out how.
+- **A record is placed from the reading its own interval ended under.** The feed keeps correcting a
+  permit's geocode and length, and the walk swaps a permit's attributes only when they actually
+  change, so an interval that closed before a correction keeps the object the walk held then. A full
+  rebuild places one reading per permit plus one per correction an older interval predates — 65,026
+  placements against 61,331 permits and 72,020 records, so 6% more work, not the tripling this used
+  to warn of.
+- **Spans are keyed by the graph's durable edge id.** A rebuilt graph invalidates no record, so
+  nothing has to be stored in order to place anything again, and the job re-places only what is new.
+- **`closed.bin` is append-only.** Nothing whose last sighting is more than a renewal old can change,
+  so the window the job reads is exactly the renewal tolerance plus however far behind it is.
+
+The only thing it fetches fresh is the tax lot for a permit the artifact has never placed: the day's
+~16 new sheds, plus the ~28 whose length or geocode the feed has corrected inside the window, which
+`ShedPermit.corrected` reports. One Socrata batch per dataset.
+
+**It used to reproduce all but one thing, and that one thing was the bug.** A permit whose length the
+feed corrected *after* an earlier stint of its had closed kept that stint's old placement, where a
+full rebuild gave every one of its intervals today's number — so what the artifact held depended on
+where the replay that produced it started, not only on the day it reached. Rewinding six months and
+catching up left 27 of 64,080 closed records disagreeing, and a 92-byte `closed.bin`. The fix is the
+second property above, and it settled the argument the other way from what this used to guess: the
+shed that stood in 2024 was the length the feed gave in 2024, and a full rebuild now says so too.
+
 ## Adding a city
 
 The client does not change. It reads `src/tree-cover/manifest.json` and the tile pyramid;
