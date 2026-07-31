@@ -14,8 +14,8 @@ import manifest from "../tree-cover/manifest.json";
 import { projectX, projectY } from "./mercator";
 import type { PolygonSink } from "./sweep";
 
-// One day's sidewalk-shed decks, as the display overlay (components/shed-layer.tsx) reads them, in a
-// module of their own so that anything else drawn from the same decks cannot disagree with the band.
+// One day's sidewalk-shed decks, as both the display overlay (components/shed-layer.tsx) and the
+// shade sweep (src/tiles/sweep.ts) read them, so a band and the shadow leaving it cannot disagree.
 // A deck is one continuous run of a shed — the SHED artifact's spans chained back into the polyline
 // they wrap, so a corner is a bend in one deck rather than two decks meeting — and it is carried as
 // the POLYGON it covers rather than as a line to be stroked to a width.
@@ -38,7 +38,8 @@ import type { PolygonSink } from "./sweep";
 // into a constant pixel offset.
 //
 // Which sheds are standing depends on the picked DATE, so unlike buildings and crowns this geometry
-// is rebuilt whenever the date moves. It takes ~10 ms for a day's ~13k spans.
+// is rebuilt whenever the date moves. It takes ~10 ms for a day's ~13k spans, which is why the two
+// readers just build their own rather than sharing one through a cache.
 
 const EARTH_CIRCUMFERENCE_METERS = 40_075_016.686;
 const TILE_SIZE = 256;

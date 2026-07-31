@@ -8,10 +8,16 @@ import {
   isPickerOpen,
   subscribeRouteTime,
 } from "../src/route-time/store";
+import { loadGraph } from "../src/routing/graph";
+import { loadSheds, shedDay } from "../src/routing/sheds";
 import { canopyTau } from "../src/shade/phenology";
 import { declinationOf, hourAngleOf, seasonBand } from "../src/shade/sun";
-import WorkerTileLayer, { prefetchShadeTiles } from "../src/tiles/layer";
+import WorkerTileLayer, {
+  prefetchShadeTiles,
+  sendShedDecks,
+} from "../src/tiles/layer";
 import type { TileCoords } from "../src/tiles/protocol";
+import { shedDecks } from "../src/tiles/shed-decks";
 import manifest from "../src/tree-cover/manifest.json";
 
 // The "Shade" overlay: shadow tiles for the sun's actual position, drawn as a smooth cool wash over all
@@ -301,11 +307,37 @@ export default function ShadeLayer() {
       }
     };
 
+    // The sidewalk sheds standing on the picked DATE, whose decks throw shadows in the swept half of
+    // the layer. Their geometry hangs off the routing graph, which lives on this side, so it is built
+    // here and handed over rather than loaded again in the worker — and only past the handoff, where
+    // the tiles are swept at all and a 4 m deck is more than a pixel deep. The tiles already drawn
+    // are redrawn once the decks land, since the first of them cannot wait on the graph's fetch.
+    let deckDay = Number.NaN;
+    const syncSheds = (): void => {
+      const day = shedDay(getResolvedDate());
+      if (Math.round(map.getZoom()) < VECTOR_ZOOM || day === deckDay) {
+        return;
+      }
+      deckDay = day;
+      Promise.all([loadGraph(), loadSheds()]).then(
+        ([graph, history]) => {
+          if (!cancelled && deckDay === day) {
+            sendShedDecks(shedDecks(graph, history, day));
+            for (const layer of layers.values()) {
+              layer.redraw();
+            }
+          }
+        },
+        () => {},
+      );
+    };
+
     // Map the picked time to today's sun position and switch to its bin (or none, sun down). The
     // previous layer stays fully visible until the target has painted, then they crossfade — so a
     // not-yet-loaded target never flashes a blank gap.
     const apply = (): void => {
       syncPrefetch();
+      syncSheds();
       if (bins.length === 0) {
         return;
       }
@@ -363,13 +395,18 @@ export default function ShadeLayer() {
       }
     });
     const unsubscribe = subscribeRouteTime(apply);
-    // A pan or zoom moves the prefetch onto different source tiles.
-    map.on("moveend", syncPrefetch);
+    // A pan or zoom moves the prefetch onto different source tiles, and a zoom past the handoff is
+    // what first asks for the sheds.
+    const moved = (): void => {
+      syncPrefetch();
+      syncSheds();
+    };
+    map.on("moveend", moved);
 
     return () => {
       cancelled = true;
       unsubscribe();
-      map.off("moveend", syncPrefetch);
+      map.off("moveend", moved);
       for (const layer of layers.values()) {
         layer.remove();
       }

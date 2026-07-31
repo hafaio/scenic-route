@@ -19,10 +19,11 @@ import manifest from "../src/tree-cover/manifest.json";
 // half years of them as spans along GRPH edges, so scrubbing the date picker back re-reads the
 // history rather than re-fetching anything.
 //
-// The deck geometry is src/tiles/shed-decks.ts's. A deck arrives as the polygon it covers, already
-// pinned between the building line and the kerb at its own measured depth, so this only scales it
-// into the tile and fills it. Where that depth falls under a pixel the minimum width opens the band
-// out instead of dropping it.
+// The deck geometry is src/tiles/shed-decks.ts's, which the shade layer casts the decks' shadows
+// from — so a band and the shadow leaving it cannot disagree. A deck arrives as the polygon it
+// covers, already pinned between the building line and the kerb at its own measured depth, so this
+// only scales it into the tile and fills it. Where that depth falls under a pixel the minimum width
+// opens the band out instead of dropping it.
 //
 // Everything is drawn on the main thread rather than in the tile worker: the graph and the artifact
 // are both already there (the router reads them), and a day's ~13k spans project once into world

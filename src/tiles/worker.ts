@@ -7,6 +7,7 @@ import type { DoneMessage, DrawMessage, ToWorker } from "./protocol";
 import type { TileRenderer } from "./renderer";
 import { shadeRenderer, warm as warmShade } from "./shade";
 import { streetScoreRenderer } from "./street-score";
+import { setShedDecks } from "./sweep";
 import { treeDotsRenderer } from "./tree-dots";
 
 // The tile rasterizer. Projecting every street vertex, tree or POI in a tile and issuing the canvas
@@ -77,6 +78,8 @@ scope.onmessage = ({ data: message }) => {
     setBaseUrl(message.base);
   } else if (message.type === "shade-prefetch") {
     warmShade(message);
+  } else if (message.type === "shed-decks") {
+    setShedDecks(message.decks);
   } else if (message.type === "cancel") {
     if (inFlight.has(message.tileKey)) {
       cancelled.add(message.tileKey);
