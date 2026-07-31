@@ -5,6 +5,7 @@ import {
   castBases,
   castBuildings,
   castCrowns,
+  castSheds,
   castTrunks,
   frameFor,
   MAX_SHADE_ALPHA,
@@ -166,6 +167,7 @@ class Sweeper {
   private readonly texture: WebGLTexture;
   private readonly shadows = new Geometry();
   private readonly crowns = new Geometry();
+  private readonly sheds = new Geometry();
   private readonly bases = new Geometry();
 
   constructor(readonly size: number) {
@@ -327,7 +329,7 @@ class Sweeper {
   // the tile, which leaves it as untouched as the Canvas2D sweep leaves it.
   draw(ground: SweptGround, coords: TileCoords, { tau }: ShadeParams): boolean {
     const { gl } = this;
-    const { chunks, samples, maxShadowMeters } = ground;
+    const { chunks, decks, samples, maxShadowMeters } = ground;
     const frame = frameFor(coords);
     const devicePixel = TILE_SIZE / this.size;
     const [red, green, blue] = SLATE;
@@ -344,6 +346,15 @@ class Sweeper {
         frame,
         devicePixel,
       );
+    this.sheds.reset();
+    const sheds = castSheds(
+      this.sheds,
+      decks,
+      samples[0],
+      maxShadowMeters,
+      frame,
+      devicePixel,
+    );
     this.bases.reset();
     castBases(this.bases, chunks, frame);
 
@@ -379,8 +390,14 @@ class Sweeper {
         share,
       ]);
     }
-    if (drawn === 0 && crowns === 0) {
+    if (drawn === 0 && crowns === 0 && sheds === 0) {
       return false;
+    }
+    // The decks compose over the samples rather than accumulating with them; the note in
+    // src/tiles/sweep.ts says why.
+    if (sheds > 0) {
+      gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+      this.stencilCover(this.sheds, [red, green, blue, 1]);
     }
     this.punch();
 

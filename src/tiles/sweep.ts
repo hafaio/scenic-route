@@ -1,3 +1,4 @@
+import { DECK_HEIGHT_METERS } from "../routing/sheds";
 import { DISK_SAMPLES, type SunSample, sunSamples } from "../shade/sun";
 import {
   type CasterChunk,
@@ -7,6 +8,12 @@ import {
 } from "./casters";
 import { unproject } from "./mercator";
 import type { ShadeParams, TileCoords } from "./protocol";
+import {
+  forEachDeckIn,
+  NO_DECKS,
+  type ShedDecks,
+  traceDeck,
+} from "./shed-decks";
 
 // The other half of the shade overlay: past the baked pyramid's deepest level the shadows are
 // GENERATED here, from the caster chunks (src/tiles/casters.ts), rather than magnified out of a raster
@@ -44,6 +51,7 @@ const PENUMBRA_LEVELS = 2;
 // One tile's casters and the sun to sweep them from.
 export interface SweptGround {
   chunks: CasterChunk[];
+  decks: ShedDecks;
   samples: SunSample[];
   intensity: number;
   maxShadowMeters: number;
@@ -419,6 +427,63 @@ export function castCrowns(
   return drawn;
 }
 
+// Every sidewalk-shed shadow. A deck is a crown by another name — an opaque slab floating clear of
+// the ground, so its shadow is its footprint TRANSLATED and there is no wall to sweep — differing
+// only in hanging at a fixed height rather than at a share of its own, and in passing no light at
+// all, which is why the decks go into the buildings' layer and not the canopy's tau. One sun sample
+// like the crowns: a 4 m deck's penumbra is 3.7 cm against a 0.45 m z18 pixel.
+//
+// The footprint is the same ring the band is drawn from (src/tiles/shed-decks.ts), traced through
+// the same call, so the shadow cannot leave a shed the display never drew. `minWidth` is one DEVICE
+// pixel in tile pixels, the floor a band is opened out to, as the trunks use.
+export function castSheds(
+  path: PolygonSink,
+  decks: ShedDecks,
+  sample: SunSample,
+  maxShadowMeters: number,
+  frame: Frame,
+  minWidth: number,
+): number {
+  const distance = Math.min(
+    DECK_HEIGHT_METERS * sample.shadowPerHeight,
+    maxShadowMeters,
+  );
+  if (!(distance > 0)) {
+    return 0;
+  }
+  const { scale, originX, originY, pixelsPerMeter } = frame;
+  const shiftX = distance * sample.east * pixelsPerMeter;
+  const shiftY = -distance * sample.north * pixelsPerMeter;
+  // The tile in world pixels, widened the way the shadow runs: a deck reaches the tile if either it or
+  // its translate does, which is what `reaches` asks of a caster chunk one box at a time.
+  const windowMinX = (originX - Math.max(shiftX, 0)) / scale;
+  const windowMinY = (originY - Math.max(shiftY, 0)) / scale;
+  const windowMaxX = (originX + TILE_SIZE - Math.min(shiftX, 0)) / scale;
+  const windowMaxY = (originY + TILE_SIZE - Math.min(shiftY, 0)) / scale;
+  let drawn = 0;
+  forEachDeckIn(
+    decks,
+    windowMinX,
+    windowMinY,
+    windowMaxX,
+    windowMaxY,
+    (deck) => {
+      drawn += 1;
+      // The shadow is the ring displaced, which the origin carries rather than the trace.
+      traceDeck(
+        path,
+        decks,
+        deck,
+        scale,
+        originX - shiftX,
+        originY - shiftY,
+        minWidth,
+      );
+    },
+  );
+  return drawn;
+}
+
 // The building footprints over the tile, holes wound against their outer ring so a courtyard stays
 // open. Punched out of both shadow layers: shade on a roof is not ground shade.
 export function castBases(
@@ -474,6 +539,16 @@ function layer(
   return context;
 }
 
+// The shed decks the worker sweeps, for the one picked DATE: which sheds are standing moves with it,
+// unlike the buildings and crowns a chunk carries. Handed over from the main thread
+// (components/shade-layer.tsx) rather than read here, because the geometry hangs off the routing
+// graph and the worker has no copy of that.
+let standing: ShedDecks = NO_DECKS;
+
+export function setShedDecks(decks: ShedDecks): void {
+  standing = decks;
+}
+
 // The chunks a tile's shadows can come from, and the sun to throw them with. Null where the deploy
 // carries no casters, which is what sends the tile back to the magnified pyramid.
 export async function sweptGround(
@@ -496,6 +571,7 @@ export async function sweptGround(
   const { elevation, azimuth } = rampedSun(params, coords.z);
   return {
     chunks,
+    decks: standing,
     samples: sunSamples(
       azimuth,
       elevation,
@@ -518,7 +594,7 @@ export function drawSweep(
   { tau }: ShadeParams,
   ratio: number,
 ): void {
-  const { chunks, samples, intensity, maxShadowMeters } = ground;
+  const { chunks, decks, samples, intensity, maxShadowMeters } = ground;
   const frame = frameFor(coords);
   const shadows = samples.map((sample) => {
     const path = new Path2D();
@@ -527,6 +603,15 @@ export function drawSweep(
       drawn: castBuildings(path, chunks, sample, maxShadowMeters, frame),
     };
   });
+  const sheds = new Path2D();
+  const shedsDrawn = castSheds(
+    sheds,
+    decks,
+    samples[0],
+    maxShadowMeters,
+    frame,
+    1 / ratio,
+  );
   // Trunks ride with the crowns, not with the buildings. Wood does not leaf off, so the season's tau
   // is a little wrong on them — but a trunk stands under its own crown and the lower crown tapers to
   // nothing around it, so the ground there is part trunk and part thin crown either way. Casting them
@@ -535,7 +620,11 @@ export function drawSweep(
   const crownsDrawn =
     castCrowns(crowns, chunks, samples[0], maxShadowMeters, frame) +
     castTrunks(crowns, chunks, samples[0], maxShadowMeters, frame, 1 / ratio);
-  if (crownsDrawn === 0 && shadows.every(({ drawn }) => drawn === 0)) {
+  if (
+    crownsDrawn === 0 &&
+    shedsDrawn === 0 &&
+    shadows.every(({ drawn }) => drawn === 0)
+  ) {
     return;
   }
   const bases = new Path2D();
@@ -550,6 +639,14 @@ export function drawSweep(
   shade.fillStyle = `rgba(${SHADE_CSS}, ${1 / samples.length})`;
   for (const { path } of shadows) {
     shade.fill(path);
+  }
+  // The decks land at full alpha under source-over rather than joining the samples' additive pass: a
+  // deck stops all of the light, and adding it in would double the slate wherever it fell on a
+  // building's shadow, which comes out LIGHTER rather than darker.
+  if (shedsDrawn > 0) {
+    shade.globalCompositeOperation = "source-over";
+    shade.fillStyle = `rgb(${SHADE_CSS})`;
+    shade.fill(sheds);
   }
   shade.globalCompositeOperation = "destination-out";
   shade.fillStyle = "#000";

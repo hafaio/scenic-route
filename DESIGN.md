@@ -278,7 +278,22 @@ lot depended on whether some *other* permit in the batch happened to name that B
 be a function of its own permit — anything read out of the batch it was fetched in is this bug wearing
 different clothes.
 
-### How it shades, and how it shelters
+### How it casts, and how it shelters
+
+A shed deck is geometrically a crown: an opaque slab floating clear of the ground, so its shadow is
+its footprint *translated* and there is no wall to sweep — which is what `castCrowns` already does for
+canopy. `castSheds` is that same translate at a fixed 4 m rather than at 0.4 of the caster's own
+height, DOB requiring 8 ft of clearance and typical decks running 12–15 ft, and with plywood passing
+nothing, so decks join the buildings' layer rather than the canopy's τ.
+
+They enter only the **generated** half of the pipeline. At z14 a pixel is 7.24 m and a deck is 3.7 m
+deep at the median, so it is sub-pixel in the baked pyramid and its shadow spans 0–2.6 px; everything legible about
+scaffolding lives at z15+, which is exactly where the client is already casting. That is what keeps
+sheds out of the bake, and so what keeps the daily permit update free of a deploy. Their geometry is
+the display overlay's own (`src/tiles/shed-decks.ts`), handed to the worker whenever the picked date
+moves the standing set — the one caster that is not baked, because which sheds are up is a property of
+the day. It is the same ring through the same call: the caster displaces the polygon the band is
+filled from, so a shadow cannot leave a corner the display drew differently, or one it never drew.
 
 **Under the deck is not shaded at every sun position**, which is what the first version assumed. A
 deck is a slab, not a tunnel: trace a ray back toward the sun from a point beneath one and the point is
@@ -311,6 +326,16 @@ above.
   4.2% of permits, and nothing costs on it — it is a diagnostic in the artifact, not a routing input.
   A synthetic score is not evidence the deck is elsewhere, and a shed that might be there is a reason
   to avoid the block rather than a reason to charge less for walking under it.
+- **Deck height is 4 m and is an assumption**, not data — the permit carries none, and it sets the
+  cast shadow's length directly. Depth is measured per span now, but through the tax lot and the
+  graph's own kerb estimate rather than through anything that surveyed a pavement, and 23% of spans
+  are held up off the floor by what a shed can be built at rather than by what was measured — which
+  hangs 18% of them out over the kerb, by 2 m at the tail.
+- Shed shadows appear on the z14 → z15 step, the only layer with such a discontinuity. Measured over
+  a downtown screenful they darken 0.28% of it, against a step that redraws the whole layer from a
+  magnified raster to swept vectors, so nothing about the crossing reads as scaffolding arriving.
+- The cast shed shadow is not a routing term. It falls mostly on the roadway, and reaches the
+  opposite sidewalk only below ~15° sun, where the buildings have shaded everything anyway.
 - Shelter assumes shed and canopy coverage are independent along an edge. Both are per-edge fractions,
   so the real overlap is measurable rather than assumable — it just has not been measured.
 - The feed has 74 gaps totalling 392 days, worst a 66-day hole in early 2021. A date inside one is

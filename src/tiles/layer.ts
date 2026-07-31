@@ -7,6 +7,7 @@ import type {
   TileParams,
   ToWorker,
 } from "./protocol";
+import type { ShedDecks } from "./shed-decks";
 
 // The main-thread half of the off-thread rasterizer. Every canvas overlay that used to project its
 // geometry inside createTile subclasses this instead: the tile canvas is handed to the worker and
@@ -50,6 +51,14 @@ function tileWorker(): Worker {
 // Warm source tiles a layer will want shortly. No canvas is transferred and nothing is drawn, so
 // this rides the same worker without a layer of its own.
 export function prefetchShadeTiles(message: ShadePrefetchMessage): void {
+  tileWorker().postMessage(message);
+}
+
+// The date's shed decks, for the shadows the swept shade tiles cast. Copied rather than transferred:
+// the display overlay draws from the same arrays on this side. Messages are delivered in order, so a
+// draw posted after this one already sees them.
+export function sendShedDecks(decks: ShedDecks): void {
+  const message: ToWorker = { type: "shed-decks", decks };
   tileWorker().postMessage(message);
 }
 

@@ -1,3 +1,5 @@
+import type { ShedDecks } from "./shed-decks";
+
 // The messages between the map's tile layers and the rasterizing worker. Every canvas overlay that
 // projects geometry per tile hands the drawing off across this boundary, so a pan or a pinch never
 // waits on it.
@@ -105,11 +107,20 @@ export interface ShadePrefetchMessage {
   coords: TileCoords[]; // the source tiles covering the view, at their baked zoom
 }
 
+// The sidewalk-shed decks the swept tiles cast, sent whenever the picked date moves the standing set
+// rather than riding along with every draw. They are built from the routing graph, which lives on the
+// main thread and is far too big to hand the worker a second copy of; a day's are ~440 KB.
+export interface ShedDecksMessage {
+  type: "shed-decks";
+  decks: ShedDecks;
+}
+
 export type ToWorker =
   | InitMessage
   | DrawMessage
   | CancelMessage
-  | ShadePrefetchMessage;
+  | ShadePrefetchMessage
+  | ShedDecksMessage;
 
 export interface DoneMessage {
   type: "done";
