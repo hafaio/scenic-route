@@ -403,10 +403,15 @@ async function build(): Promise<void> {
     if (await fileExists(commercialFile)) {
       graphArgs.push("--commercial", commercialFile);
     }
+    // The measured canopy does two jobs on this invocation: its polygons are integrated along every
+    // sidewalk into the per-edge direct-canopy byte, and its crowns occlude the edges alongside the
+    // buildings in the shade bake below.
+    if (city.field.canopy) {
+      graphArgs.push("--canopy", sourcePath("canopy", city.field.canopy.file));
+    }
     // The per-edge shade bake rides on the same graph invocation: it needs the city's building
     // footprints and the shared sun-position params, and writes one file per sun-position bin into
-    // public/routing/shade (cleared by the ROUTING_DIR rm above) plus a bins.json manifest. The canopy
-    // rides along when the city has one, so crowns shade the edges as well as the tiles.
+    // public/routing/shade (cleared by the ROUTING_DIR rm above) plus a bins.json manifest.
     const buildingsFile = sourcePath("buildings", `${city.id}.bin`);
     if (shadeParamsPath && (await fileExists(buildingsFile))) {
       graphArgs.push(
@@ -417,12 +422,6 @@ async function build(): Promise<void> {
         "--shade-dir",
         join(ROUTING_DIR, "shade"),
       );
-      if (city.field.canopy) {
-        graphArgs.push(
-          "--canopy",
-          sourcePath("canopy", city.field.canopy.file),
-        );
-      }
     }
     runTiler(graphArgs, false);
   }

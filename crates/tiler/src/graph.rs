@@ -1,12 +1,18 @@
 //! `tiler graph`: contracts STRT v5 into the pedestrian routing graph the client searches, then
 //! expands every street into the two sidewalks a walker uses, joined at corner nodes, with derived
-//! crossings at real intersections and paths stitched in by links — and writes it as GRPH v3 to
+//! crossings at real intersections and paths stitched in by links — and writes it as GRPH to
 //! public/routing/<id>.bin. Ferry terminals snap to the nearest walking node so a ferry edge joins the
 //! two boroughs it serves. The tile pyramid and the street chunks draw every walkable segment;
 //! this drops the vehicular-only ones, collapses the shape joints, and turns "which side" from a
 //! display choice into topology, so a router settles a cross-borough query in tens of
 //! milliseconds. v4 bakes three scenic-factor bytes per edge (landmark and public-art amenity
-//! discounts, a highway/rail nuisance penalty) via `scenic.rs`. See scripts/README.md.
+//! discounts, a highway/rail nuisance penalty) via `scenic.rs`. v6 adds two things. The
+//! direct-canopy byte, via `direct_canopy.rs` — the raw unblurred canopy indicator integrated along
+//! each sidewalk, which the smoothed cover byte cannot stand in for. And the durable edge key: node
+//! and edge ids are positional, so every one of them shifts on a rebuild, and an edge carries
+//! instead the source record it came from (a CSCL physicalid, or an OSM way id for a conflated
+//! path) plus an ordinal that, with the side label already in the record, picks it out within that
+//! source. See scripts/README.md.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -16,6 +22,7 @@ use crate::Fallible;
 use crate::binfmt::{self, SIDES, write_varint, zigzag};
 use crate::conflate::{self, ProtoEdge};
 use crate::corners::{self, EdgeEnd};
+use crate::direct_canopy;
 use crate::geometry::{METERS_PER_DEGREE_LAT, round_half_up};
 use crate::scenic;
 use crate::shade;
@@ -54,9 +61,20 @@ const SIDE_SOUTH: u8 = 3;
 const SIDE_WEST: u8 = 4;
 const FLAG_GEOMETRY_RIGHT: u8 = 1 << 2; // this sidewalk lies right of its stored geometry direction
 
-const GRAPH_FORMAT: u16 = 5; // v5 fills the record's last byte with the commercial-frontage attribute
+const GRAPH_FORMAT: u16 = 6; // v6 adds the direct-canopy byte and the durable edge key
 const GRAPH_HEADER_BYTES: usize = 64;
-const EDGE_RECORD_BYTES: usize = 28; // 24 + landmark(24), art(25), highway(26), commercial(27)
+// 24 + landmark(24), art(25), highway(26), commercial(27), directCanopy(28), sourceId(29..32),
+// ordinal(33)
+const EDGE_RECORD_BYTES: usize = 34;
+// Record bytes 29-33: the source record an edge was derived from (a CSCL physicalid, or an OSM way
+// id for a conflated path) and the how-many-th edge of that source, on that side, this is. With the
+// side label already in byte 22 the triple (source id, side, ordinal) survives a rebuild, where the
+// positional edge id does not.
+const NO_SOURCE_ID: u32 = 0xFFFF_FFFF; // no durable identity: a crossing, a link or a ferry
+// A long greenway noded and welded against every street it crosses becomes many path edges under one
+// source id, and they all carry SIDE_NONE: NYC's worst OSM way reaches 103 (its busiest sidewalk key
+// only 25, the two sides splitting that source's edges between them), so the ordinal needs a byte.
+const ORDINALS: usize = 256;
 const NO_GEOMETRY: u32 = 0xFFFF_FFFF; // edge record byte 12 sentinel: straight a->b, no blob entry
 const UNNAMED: u16 = 0xFFFF;
 const DECIMETERS_PER_METER: f64 = 10.0; // the half-offset byte's unit, as the chunk uses
@@ -98,7 +116,9 @@ pub struct Args {
     pub buildings: Option<PathBuf>,
     pub shade_params: Option<PathBuf>,
     pub shade_dir: Option<PathBuf>,
-    pub canopy: Option<PathBuf>, // the crowns that shade the edges too; without it trees occlude nothing
+    // The measured canopy, read twice over: for the direct-canopy record byte, and — when the shade
+    // bake runs — for the crowns that occlude the edges alongside the buildings.
+    pub canopy: Option<PathBuf>,
 }
 
 /// One edge, before and after contraction: the polyline runs a -> b with its endpoints pinned to
@@ -116,11 +136,13 @@ struct Edge {
     flags: u8,
     name_id: u16,
     osm: bool, // OSM-sourced (a conflated path); keeps contraction and island-drop from blending provenance
+    source_id: u32, // the CSCL physicalid or OSM way id this came from; the minimum over a contracted chain
 }
 
 /// One finished v2 edge: a sidewalk, a crossing, a link, or a path. `geom` indexes the shared
 /// geometry entries (`NO_GEOMETRY` for the geometry-less crossings and links); `name_id` is still
-/// the original STRT id here and is remapped to the compact table at write time.
+/// the original STRT id here and is remapped to the compact table at write time. `source_id` is the
+/// contracted street or path edge this was derived from, `NO_SOURCE_ID` for the derived kinds.
 struct V2Edge {
     a: u32,
     b: u32,
@@ -132,6 +154,7 @@ struct V2Edge {
     kind: u8,
     side: u8,
     flags: u8,
+    source_id: u32,
 }
 
 /// The departure bearing of one edge end: `atan2(north, east)` to the first geometry vertex
@@ -407,7 +430,8 @@ fn contractible(edges: &[Edge], incidence: &[Vec<u32>], node: u32) -> bool {
 /// the far node stays contractible, and emit the single edge that spans it. Each part is oriented
 /// to flow from the running end; a reversed part swaps its two cover sides. The merged cover is the
 /// length-weighted mean of the parts, the length is their f32 sum, and the shared junction vertex
-/// is dropped where two parts meet.
+/// is dropped where two parts meet. The merged source id is the minimum over the parts, so a chain
+/// traced from either end names the same source record.
 fn trace_chain(
     edges: &[Edge],
     incidence: &[Vec<u32>],
@@ -419,6 +443,7 @@ fn trace_chain(
     let flags = edges[first_edge as usize].flags;
     let name_id = edges[first_edge as usize].name_id;
     let osm = edges[first_edge as usize].osm;
+    let mut source_id = edges[first_edge as usize].source_id;
     let mut poly_x: Vec<i32> = Vec::new();
     let mut poly_y: Vec<i32> = Vec::new();
     let mut length = 0.0f32;
@@ -459,6 +484,7 @@ fn trace_chain(
             poly_y.extend_from_slice(&part_y[1..]);
         }
         length += edge.length;
+        source_id = source_id.min(edge.source_id);
         total_weight += f64::from(edge.length);
         left_weighted += f64::from(edge.length) * f64::from(left);
         right_weighted += f64::from(edge.length) * f64::from(right);
@@ -505,6 +531,7 @@ fn trace_chain(
         flags,
         name_id,
         osm,
+        source_id,
     }
 }
 
@@ -540,6 +567,32 @@ fn prune_collinear(xs: &[i32], ys: &[i32]) -> (Vec<i32>, Vec<i32>) {
         keep.iter().map(|&index| xs[index]).collect(),
         keep.iter().map(|&index| ys[index]).collect(),
     )
+}
+
+/// The ordinal half of the durable key, over the final edge order: for each edge carrying a source
+/// id, how many earlier edges share its `(source id, side)` pair. That makes the triple unique by
+/// construction, so it also settles the theoretical collision between a small OSM way id and a CSCL
+/// physicalid. Record byte 33 holds it, so a source that would need a 257th edge on one side is an
+/// error rather than a silently truncated duplicate key.
+fn assign_ordinals(edges: &[V2Edge]) -> Fallible<Vec<u8>> {
+    let mut seen: HashMap<(u32, u8), usize> = HashMap::new();
+    let mut ordinals = vec![0u8; edges.len()];
+    for (edge_id, edge) in edges.iter().enumerate() {
+        if edge.source_id == NO_SOURCE_ID {
+            continue;
+        }
+        let count = seen.entry((edge.source_id, edge.side)).or_insert(0);
+        if *count >= ORDINALS {
+            return Err(format!(
+                "source id {} side {} carries more than {ORDINALS} edges: the durable key's ordinal overflows",
+                edge.source_id, edge.side
+            )
+            .into());
+        }
+        ordinals[edge_id] = *count as u8;
+        *count += 1;
+    }
+    Ok(ordinals)
 }
 
 fn put_u16(bytes: &mut [u8], offset: usize, value: u16) {
@@ -631,6 +684,33 @@ fn write_shade(
     Ok(())
 }
 
+// `version.json`, written beside the graph: what the deployed graph *is*, so a job that only has the
+// live site can tell whether the artifact it snapped against is still the one being served. FNV-1a
+// 64 over the file's own bytes — this detects a rebuild, it does not defend against one, and a
+// hand-rolled hash beats a crypto dependency for that.
+fn write_version(out: &std::path::Path, bytes: &[u8], edge_count: usize) -> Fallible<()> {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    let generated = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs();
+    let version = serde_json::json!({
+        "graph": out.file_name().map(|name| name.to_string_lossy()),
+        "hash": format!("{hash:016x}"),
+        "edges": edge_count,
+        "bytes": bytes.len(),
+        "generatedUnixSeconds": generated,
+    });
+    fs::write(
+        out.with_file_name("version.json"),
+        serde_json::to_vec(&version)?,
+    )?;
+    Ok(())
+}
+
 pub fn run(args: &Args) -> Fallible<()> {
     let streets = binfmt::read_streets(&args.streets)?;
     let origin_lng = streets.origin_lng;
@@ -699,6 +779,7 @@ pub fn run(args: &Args) -> Fallible<()> {
             flags,
             name_id: streets.name_ids[segment],
             osm: false,
+            source_id: streets.ids[segment],
         });
     }
     // FLAG_NON_VEHICULAR rides in the STRT flags byte and is consumed inside half_offset_meters
@@ -758,6 +839,7 @@ pub fn run(args: &Args) -> Fallible<()> {
                 flags,
                 name_id,
                 osm: true,
+                source_id: paths.ids[segment],
             });
         }
         all_names.extend(paths.names);
@@ -865,6 +947,7 @@ pub fn run(args: &Args) -> Fallible<()> {
             flags: proto.flags,
             name_id: proto.name_id,
             osm: proto.osm,
+            source_id: proto.source_id,
         });
     }
 
@@ -1140,6 +1223,7 @@ pub fn run(args: &Args) -> Fallible<()> {
                     kind: KIND_CROSSING,
                     side: SIDE_NONE,
                     flags: crossed.flags & (GRPH_STRUCTURE | GRPH_STEPS),
+                    source_id: NO_SOURCE_ID,
                 });
                 crossing_count += 1;
             }
@@ -1217,6 +1301,7 @@ pub fn run(args: &Args) -> Fallible<()> {
                 kind: KIND_PATH,
                 side: SIDE_NONE,
                 flags: path_flags,
+                source_id: edge.source_id,
             });
             path_edge_count += 1;
             if edge.osm {
@@ -1272,6 +1357,7 @@ pub fn run(args: &Args) -> Fallible<()> {
                 kind: KIND_SIDEWALK,
                 side: left_side,
                 flags: base_flags,
+                source_id: edge.source_id,
             });
             let right_geom = offset_polyline(
                 &edge.poly_x,
@@ -1298,14 +1384,19 @@ pub fn run(args: &Args) -> Fallible<()> {
                 kind: KIND_SIDEWALK,
                 side: right_side,
                 flags: base_flags | FLAG_GEOMETRY_RIGHT,
+                source_id: edge.source_id,
             });
             sidewalk_count += 2;
         }
     }
 
-    // Links, one per deduped (path node, corner) pair.
+    // Links, one per deduped (path node, corner) pair, emitted in key order: a hash map's iteration
+    // order is seeded per process, and the edge sort below breaks ties only on the smaller node id,
+    // so leaving it would shuffle a handful of edge ids between two runs over identical inputs.
     let link_count = link_pairs.len();
-    for (&(node, corner), &cover) in &link_pairs {
+    let mut link_list: Vec<((u32, u32), u8)> = link_pairs.into_iter().collect();
+    link_list.sort_unstable();
+    for ((node, corner), cover) in link_list {
         let length = node_distance(&v2_x, &v2_y, node, corner, origin_lng, origin_lat, scale);
         v2_edges.push(V2Edge {
             a: node,
@@ -1318,6 +1409,7 @@ pub fn run(args: &Args) -> Fallible<()> {
             kind: KIND_LINK,
             side: SIDE_NONE,
             flags: 0,
+            source_id: NO_SOURCE_ID,
         });
     }
 
@@ -1346,6 +1438,7 @@ pub fn run(args: &Args) -> Fallible<()> {
                 kind: KIND_CROSSING,
                 side: SIDE_NONE,
                 flags: crossed.flags & (GRPH_STRUCTURE | GRPH_STEPS),
+                source_id: NO_SOURCE_ID,
             });
             union(&mut v2_parent, corner_a, corner_b);
             mopup_crossings += 1;
@@ -1490,7 +1583,11 @@ pub fn run(args: &Args) -> Fallible<()> {
             }
         }
 
-        for &index in best_segment.values() {
+        // In node-pair order, for the same reason the links are: the ferry edges are appended after
+        // the walking renumber, so their order is the order they are emitted in.
+        let mut kept_segments: Vec<((u32, u32), usize)> = best_segment.into_iter().collect();
+        kept_segments.sort_unstable();
+        for (_, index) in kept_segments {
             let segment = &ferries.segments[index];
             let node_a = stop_node[segment.stop_a as usize].expect("a kept segment's stop snapped");
             let node_b = stop_node[segment.stop_b as usize].expect("a kept segment's stop snapped");
@@ -1557,6 +1654,7 @@ pub fn run(args: &Args) -> Fallible<()> {
                 kind: KIND_FERRY,
                 side: SIDE_NONE,
                 flags: 0,
+                source_id: NO_SOURCE_ID,
             });
             ferry_edges += 1;
         }
@@ -1719,6 +1817,48 @@ pub fn run(args: &Args) -> Fallible<()> {
         None => vec![0u8; edge_count],
     };
 
+    // Every edge's polyline in degrees, recovered exactly as the pre-write geometry check does: a
+    // ferry has none, a geometry-less edge is its straight node-to-node line, and a sidewalk or path
+    // is its own baked entry. Both canopy bakes below read the sidewalk a walker is actually on.
+    let to_coord = |quantized_x: i32, quantized_y: i32| binfmt::Coord {
+        lng: origin_lng + f64::from(quantized_x) * scale,
+        lat: origin_lat + f64::from(quantized_y) * scale,
+    };
+    let edge_polys: Vec<Vec<binfmt::Coord>> = v2_edges
+        .iter()
+        .map(|edge| {
+            if edge.kind == KIND_FERRY {
+                Vec::new()
+            } else if edge.geom == NO_GEOMETRY {
+                vec![
+                    to_coord(node_lng[edge.a as usize], node_lat[edge.a as usize]),
+                    to_coord(node_lng[edge.b as usize], node_lat[edge.b as usize]),
+                ]
+            } else {
+                let (poly_x, poly_y) = &geometry_polys[edge.geom as usize];
+                poly_x
+                    .iter()
+                    .zip(poly_y)
+                    .map(|(&quantized_x, &quantized_y)| to_coord(quantized_x, quantized_y))
+                    .collect()
+            }
+        })
+        .collect();
+
+    // The direct-canopy byte (v6): the fraction of the edge under a crown, integrated along that
+    // polyline with no kernel — see direct_canopy.rs for why the cover byte cannot stand in.
+    let direct_canopy_bytes = match &args.canopy {
+        Some(path) => {
+            let baked = direct_canopy::direct_canopy(&edge_polys, path, origin_lat)?;
+            eprintln!(
+                "direct canopy: {} polygons, mean covered fraction {:.3}, max byte {}",
+                baked.polygons, baked.mean, baked.max_byte
+            );
+            baked.bytes
+        }
+        None => vec![0u8; edge_count],
+    };
+
     // Pre-write invariants: a stored-geometry edge begins and ends exactly on its node coordinates
     // (a sidewalk is baked corner-to-corner, a path keeps its pinned endpoints), so no geometry
     // overshoots the intersection; every edge is at least as long as its straight-line node
@@ -1748,6 +1888,15 @@ pub fn run(args: &Args) -> Fallible<()> {
     if csr[node_count] as usize != 2 * edge_count {
         return Err("the CSR half-edge count is not 2E".into());
     }
+
+    // The durable key's ordinals, over the exact order the records are written in — the walking sort
+    // and the ferry append are both behind us, so an edge id here is the id the file ships.
+    let edge_ordinals = assign_ordinals(&v2_edges)?;
+    let durable_id_edges = v2_edges
+        .iter()
+        .filter(|edge| edge.source_id != NO_SOURCE_ID)
+        .count();
+    let max_ordinal = edge_ordinals.iter().copied().max().unwrap_or(0);
 
     // The geometry blob: one entry per sidewalk and per path edge, its first vertex absolute (delta
     // from the graph origin — kept origin-anchored so the client decoder is unchanged), the rest
@@ -1784,7 +1933,9 @@ pub fn run(args: &Args) -> Fallible<()> {
     let csr_offset = node_component_offset + 2 * node_count + component_pad;
     let adjacency_offset = csr_offset + 4 * (node_count + 1);
     let edges_offset = adjacency_offset + 8 * edge_count;
-    let name_offset = edges_offset + EDGE_RECORD_BYTES * edge_count;
+    // The 34-byte record leaves the edge section off a 4-byte boundary, so the name table is padded
+    // back onto one like every other section.
+    let name_offset = align4(edges_offset + EDGE_RECORD_BYTES * edge_count);
     let geometry_offset = align4(name_offset + name_table_bytes);
 
     let mut bytes = vec![0u8; geometry_offset];
@@ -1856,14 +2007,21 @@ pub fn run(args: &Args) -> Fallible<()> {
         bytes[record + 21] = edge.half_offset;
         bytes[record + 22] = (edge.kind & KIND_MASK) | (edge.side << SIDE_SHIFT);
         bytes[record + 23] = edge.flags;
-        // Scenic-factor bytes (v5): a ferry passes no landmark, art, highway, or commercial frontage,
-        // so it keeps the record's default zeros; every walking kind carries the baked attributes.
+        // The attribute bytes (v5 scenic, v6 direct canopy): a ferry passes no landmark, art,
+        // highway or commercial frontage and walks under no crown, so it keeps the record's default
+        // zeros; every walking kind carries the baked attributes.
         if edge.kind != KIND_FERRY {
             bytes[record + 24] = landmark_bytes[edge_id];
             bytes[record + 25] = art_bytes[edge_id];
             bytes[record + 26] = highway_bytes[edge_id];
             bytes[record + 27] = commercial_bytes[edge_id];
+            bytes[record + 28] = direct_canopy_bytes[edge_id];
         }
+        // The durable key (v6): the source record's id, and the ordinal that — with the side already
+        // in byte 22 — picks this edge out within it. A crossing, link or ferry has no source
+        // geometry, so it carries the sentinel and a zero ordinal.
+        put_u32(&mut bytes, record + 29, edge.source_id);
+        bytes[record + 33] = edge_ordinals[edge_id];
     }
 
     put_u32(&mut bytes, name_offset, used_names.len() as u32);
@@ -1894,40 +2052,14 @@ pub fn run(args: &Args) -> Fallible<()> {
         fs::create_dir_all(parent)?;
     }
     fs::write(&args.out, &bytes)?;
+    write_version(&args.out, &bytes, edge_count)?;
 
     // The SHDE artifact (optional): the building and crown occlusion fractions per edge per
     // sun-position bin, keyed off the same finalized `v2_edges` order the client reads GRPH records
-    // in. Each edge's polyline is recovered in degrees exactly as the pre-write geometry check does —
-    // a ferry bakes to zeroes, a stored-geometry edge uses its blob, a geometry-less edge its straight
-    // node-to-node line.
+    // in, over the same `edge_polys` the direct-canopy bake sampled.
     if let (Some(buildings_path), Some(shade_params_path), Some(shade_dir_path)) =
         (&args.buildings, &args.shade_params, &args.shade_dir)
     {
-        let to_coord = |quantized_x: i32, quantized_y: i32| binfmt::Coord {
-            lng: origin_lng + f64::from(quantized_x) * scale,
-            lat: origin_lat + f64::from(quantized_y) * scale,
-        };
-        let edge_polys: Vec<Vec<binfmt::Coord>> = v2_edges
-            .iter()
-            .map(|edge| {
-                if edge.kind == KIND_FERRY {
-                    Vec::new()
-                } else if edge.geom == NO_GEOMETRY {
-                    vec![
-                        to_coord(node_lng[edge.a as usize], node_lat[edge.a as usize]),
-                        to_coord(node_lng[edge.b as usize], node_lat[edge.b as usize]),
-                    ]
-                } else {
-                    let (poly_x, poly_y) = &geometry_polys[edge.geom as usize];
-                    poly_x
-                        .iter()
-                        .zip(poly_y)
-                        .map(|(&quantized_x, &quantized_y)| to_coord(quantized_x, quantized_y))
-                        .collect()
-                }
-            })
-            .collect();
-
         let params: shade::Params = serde_json::from_slice(&fs::read(shade_params_path)?)?;
         let (building_bytes, tree_bytes, positions) = shade::edge_shade_attrs(
             buildings_path,
@@ -1981,6 +2113,8 @@ pub fn run(args: &Args) -> Fallible<()> {
         "mopupCrossings": mopup_crossings,
         "lengthClamped": length_clamped,
         "coverClamped": cover_clamped,
+        "durableIdEdges": durable_id_edges,
+        "maxOrdinal": max_ordinal,
         "dedupedWays": conflate_stats.deduped_ways,
         "dedupedKm": conflate_stats.deduped_km,
         "osmTSplits": conflate_stats.osm_t_splits,
@@ -2010,6 +2144,42 @@ pub fn run(args: &Args) -> Fallible<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn keyed(source_id: u32, side: u8) -> V2Edge {
+        V2Edge {
+            a: 0,
+            b: 0,
+            length: 0.0,
+            geom: NO_GEOMETRY,
+            cover: 0,
+            half_offset: 0,
+            name_id: UNNAMED,
+            kind: KIND_SIDEWALK,
+            side,
+            flags: 0,
+            source_id,
+        }
+    }
+
+    #[test]
+    fn ordinals_count_per_source_and_side() {
+        let edges = vec![
+            keyed(7, SIDE_NORTH),
+            keyed(7, SIDE_SOUTH),
+            keyed(NO_SOURCE_ID, SIDE_NONE),
+            keyed(7, SIDE_NORTH),
+            keyed(9, SIDE_NORTH),
+        ];
+        let ordinals = assign_ordinals(&edges).expect("ordinals");
+        assert_eq!(ordinals, vec![0, 0, 0, 1, 0]);
+    }
+
+    #[test]
+    fn an_ordinal_past_the_byte_is_an_error() {
+        let edges: Vec<V2Edge> = (0..=ORDINALS).map(|_| keyed(7, SIDE_NORTH)).collect();
+        let message = assign_ordinals(&edges).expect_err("overflow").to_string();
+        assert!(message.contains("source id 7"), "{message}");
+    }
 
     #[test]
     fn writes_per_bin_shade_files() {

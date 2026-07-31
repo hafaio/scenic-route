@@ -345,6 +345,7 @@ pub struct Streets {
     pub lngs: Vec<f64>, // every vertex of every segment, concatenated
     pub lats: Vec<f64>,
     pub starts: Vec<u32>, // segments + 1 entries; segment i owns [starts[i], starts[i + 1])
+    pub ids: Vec<u32>, // per segment: the CSCL physicalid (STRT) or the OSM way id (PATH), record offset 0
     pub road_types: Vec<u8>, // per segment: 1 street, 3 bridge, 4 tunnel, 5 boardwalk, 6 path, 7 step, 10 alley
     pub width_feet: Vec<u8>, // curb to curb, 0 unknown — what the sidewalk offset is derived from
     pub flags: Vec<u8>, // per segment: bit0 vehicular-only, bit1 non-vehicular deck, bit2 structure
@@ -426,6 +427,7 @@ fn read_network(path: &Path, magic: &str, format: u16) -> Fallible<Streets> {
     let mut lngs = Vec::with_capacity(vertices);
     let mut lats = Vec::with_capacity(vertices);
     let mut starts = Vec::with_capacity(count + 1);
+    let mut ids = Vec::with_capacity(count);
     let mut road_types = Vec::with_capacity(count);
     let mut width_feet = Vec::with_capacity(count);
     let mut flags = Vec::with_capacity(count);
@@ -439,6 +441,7 @@ fn read_network(path: &Path, magic: &str, format: u16) -> Fallible<Streets> {
         };
         let length = usize::from(u16_at(&bytes, record + 8));
         starts.push(lngs.len() as u32);
+        ids.push(u32_at(&bytes, record));
         road_types.push(bytes[record + 20]);
         width_feet.push(bytes[record + 21]);
         flags.push(bytes[record + 23]);
@@ -486,6 +489,7 @@ fn read_network(path: &Path, magic: &str, format: u16) -> Fallible<Streets> {
         lngs,
         lats,
         starts,
+        ids,
         road_types,
         width_feet,
         flags,
