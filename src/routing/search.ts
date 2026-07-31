@@ -25,6 +25,7 @@ import {
   otherEnd,
   type RoutingGraph,
   type SideLabel,
+  subEdgePath,
 } from "./graph";
 import { haversineMeters, type Snap } from "./snap";
 
@@ -144,59 +145,6 @@ class NodeHeap {
   }
 }
 
-// The polyline of an edge between two along-distances (a -> b order), with the boundaries
-// interpolated. Along-distance is measured in the same scaled metric as Snap.metersFromA.
-function subPolyline(
-  graph: RoutingGraph,
-  edge: number,
-  fromMeters: number,
-  toMeters: number,
-): { lngs: number[]; lats: number[] } {
-  const { lngs, lats } = edgePath(graph, edge);
-  const toRad = Math.PI / 180;
-  const cosLat = Math.cos(lats[0] * toRad);
-  const cumulative = new Float64Array(lngs.length);
-  for (let vertex = 1; vertex < lngs.length; vertex++) {
-    const deltaX = (lngs[vertex] - lngs[vertex - 1]) * cosLat;
-    const deltaY = lats[vertex] - lats[vertex - 1];
-    cumulative[vertex] = cumulative[vertex - 1] + Math.hypot(deltaX, deltaY);
-  }
-  const total = cumulative[lngs.length - 1];
-  const scale = total > 0 ? graph.edgeLength[edge] / total : 0;
-
-  const at = (distance: number): { lng: number; lat: number } => {
-    if (scale === 0) {
-      return { lng: lngs[0], lat: lats[0] };
-    }
-    const raw = distance / scale;
-    let vertex = 1;
-    while (vertex < lngs.length - 1 && cumulative[vertex] < raw) {
-      vertex += 1;
-    }
-    const span = cumulative[vertex] - cumulative[vertex - 1];
-    const param = span > 0 ? (raw - cumulative[vertex - 1]) / span : 0;
-    return {
-      lng: lngs[vertex - 1] + param * (lngs[vertex] - lngs[vertex - 1]),
-      lat: lats[vertex - 1] + param * (lats[vertex] - lats[vertex - 1]),
-    };
-  };
-
-  const start = at(fromMeters);
-  const outLngs = [start.lng];
-  const outLats = [start.lat];
-  for (let vertex = 0; vertex < lngs.length; vertex++) {
-    const along = cumulative[vertex] * scale;
-    if (along > fromMeters && along < toMeters) {
-      outLngs.push(lngs[vertex]);
-      outLats.push(lats[vertex]);
-    }
-  }
-  const end = at(toMeters);
-  outLngs.push(end.lng);
-  outLats.push(end.lat);
-  return { lngs: outLngs, lats: outLats };
-}
-
 // Append a step's polyline to the running path, dropping the shared junction vertex except on the
 // very first step.
 function appendPolyline(
@@ -260,7 +208,7 @@ function reconstruct(
     const low = Math.min(start.metersFromA, dest.metersFromA);
     const high = Math.max(start.metersFromA, dest.metersFromA);
     steps.push(makeStep(graph, start.edge, forward, high - low));
-    const { lngs, lats } = subPolyline(graph, start.edge, low, high);
+    const { lngs, lats } = subEdgePath(graph, start.edge, low, high);
     appendPolyline(lngsOut, latsOut, lngs, lats, forward, true);
   } else {
     // Interior edges from the start-edge endpoint we depart through to the dest-edge endpoint.
@@ -278,8 +226,8 @@ function reconstruct(
       ? startLength - start.metersFromA
       : start.metersFromA;
     const startPiece = startForward
-      ? subPolyline(graph, start.edge, start.metersFromA, startLength)
-      : subPolyline(graph, start.edge, 0, start.metersFromA);
+      ? subEdgePath(graph, start.edge, start.metersFromA, startLength)
+      : subEdgePath(graph, start.edge, 0, start.metersFromA);
     steps.push(makeStep(graph, start.edge, startForward, startWalked));
     appendPolyline(
       lngsOut,
@@ -311,8 +259,8 @@ function reconstruct(
       ? dest.metersFromA
       : destLength - dest.metersFromA;
     const destPiece = destForward
-      ? subPolyline(graph, dest.edge, 0, dest.metersFromA)
-      : subPolyline(graph, dest.edge, dest.metersFromA, destLength);
+      ? subEdgePath(graph, dest.edge, 0, dest.metersFromA)
+      : subEdgePath(graph, dest.edge, dest.metersFromA, destLength);
     steps.push(makeStep(graph, dest.edge, destForward, destWalked));
     appendPolyline(
       lngsOut,

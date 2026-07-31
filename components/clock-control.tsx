@@ -16,6 +16,7 @@ import {
   setTimeMode,
   subscribeRouteTime,
 } from "../src/route-time/store";
+import { SHED_EPOCH_DAY } from "../src/routing/sheds";
 
 // The map's global date and time control, a toolbar icon like the others. Both are global properties,
 // not tied to any one overlay — the shade layer takes the sun's position AND the canopy's seasonal
@@ -29,8 +30,10 @@ const STEP_HOUR = 0.25;
 // scrubber always covers the same wide day rather than tracking the picked season's daylight.
 const MIN_HOUR = 0;
 const MAX_HOUR = 23.75;
-// How far from today a date can be pinned. Bounded so the picker's arrows and wheels feel finite.
-const DAY_RANGE_YEARS = 1;
+// How far ahead a date can be pinned. Everything the future can show — the sun's position, the
+// canopy's phenology — repeats yearly, so a further date shows nothing new. The past reaches back to
+// SHED_EPOCH_DAY instead, because the scaffolding history genuinely differs day by day that far back.
+const FUTURE_YEARS = 1;
 
 const ICON_ON = "h-4 w-4 text-brand-600 dark:text-brand-400";
 const ICON_OFF = "h-4 w-4 text-slate-500 dark:text-slate-400";
@@ -61,7 +64,7 @@ function formatDayLabel(day: string): string {
   });
 }
 
-// `years` from today, as the date input's bound.
+// `years` from today, as the date input's upper bound.
 function dayFromNow(years: number): string {
   const today = new Date();
   return formatDay(
@@ -195,8 +198,8 @@ export default function ClockControl() {
               <input
                 type="date"
                 value={day}
-                min={dayFromNow(-DAY_RANGE_YEARS)}
-                max={dayFromNow(DAY_RANGE_YEARS)}
+                min={SHED_EPOCH_DAY}
+                max={dayFromNow(FUTURE_YEARS)}
                 onChange={(event) => {
                   const picked = event.target.value;
                   if (picked) {

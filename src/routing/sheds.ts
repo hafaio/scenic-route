@@ -17,6 +17,38 @@
 import { type Cursor, readUnsignedVarint, readVarint } from "../tiles/varint";
 import { durableKey, NO_SOURCE_ID, type RoutingGraph } from "./graph";
 
+// How high the deck stands, which the permit feed does not carry and nothing measures: 4 m is the
+// middle of the range DOB leaves — it requires 8 ft of clearance and typical decks run 12-15 ft.
+// It sets the length of the shadow the deck throws (src/tiles/sweep.ts).
+export const DECK_HEIGHT_METERS = 4;
+
+// What a span with no measured depth falls back to. The pipeline measures the pavement its deck
+// stands on for every span it can (scripts/shed-map.ts), and the whole feed's median comes out at
+// 3.7 m; 4 m was the flat assumption this replaced, and it is close enough to that median to stay
+// the answer where there is nothing to measure.
+export const DEFAULT_DECK_DEPTH_METERS = 4;
+
+// The narrowest deck that can be BUILT, which is not the narrowest that can be measured. The code
+// wants a clear path of 5 ft under a shed (BC 3307.6.2, and BC 3307.6.3 has the deck cover the whole
+// pavement bar 18 in at the kerb), the frame's posts and their bracing stand outside that path either
+// side, and 8 ft is where the standard shed frame starts. So a measurement under it is a lot line or
+// a kerb estimate that is off rather than a sliver of a shed, and the correction belongs to the
+// MEASUREMENT: the band, the shadow it throws and the shade it holds all take the corrected number.
+export const MIN_DECK_DEPTH_METERS = 2.4;
+
+// What the pipeline measured across the pavement, or the fallback where it could not — which is
+// where the building line is, since the measurement ran from it.
+export function measuredDepth(depth: number): number {
+  return depth > 0 ? depth : DEFAULT_DECK_DEPTH_METERS;
+}
+
+// One span's depth as a reader should use it: the measurement, floored at what can be built. The
+// extra goes OUTWARD, over what the graph took for roadway — the lot line the measurement started
+// from is evidence and the kerb is a fixed inset off a centreline, so the kerb is the one to move.
+export function deckDepth(depth: number): number {
+  return Math.max(MIN_DECK_DEPTH_METERS, measuredDepth(depth));
+}
+
 const MAGIC = "SHED";
 const FORMAT_VERSION = 2;
 const CLOSED_FLAG = 0x1; // header byte 26, set in closed.bin

@@ -454,6 +454,61 @@ export function edgePath(graph: RoutingGraph, edge: number): EdgePath {
   return path;
 }
 
+// The edge's polyline between two along-distances, in a -> b order, with the two boundaries
+// interpolated. Along-distance is measured in the same scaled metric as Snap.metersFromA — the
+// polyline's own planar arc length rescaled to the edge's geodesic length — so a fraction of the
+// edge's length is the same fraction of its polyline.
+export function subEdgePath(
+  graph: RoutingGraph,
+  edge: number,
+  fromMeters: number,
+  toMeters: number,
+): { lngs: number[]; lats: number[] } {
+  const { lngs, lats } = edgePath(graph, edge);
+  const toRad = Math.PI / 180;
+  const cosLat = Math.cos(lats[0] * toRad);
+  const cumulative = new Float64Array(lngs.length);
+  for (let vertex = 1; vertex < lngs.length; vertex++) {
+    const deltaX = (lngs[vertex] - lngs[vertex - 1]) * cosLat;
+    const deltaY = lats[vertex] - lats[vertex - 1];
+    cumulative[vertex] = cumulative[vertex - 1] + Math.hypot(deltaX, deltaY);
+  }
+  const total = cumulative[lngs.length - 1];
+  const scale = total > 0 ? graph.edgeLength[edge] / total : 0;
+
+  const at = (distance: number): { lng: number; lat: number } => {
+    if (scale === 0) {
+      return { lng: lngs[0], lat: lats[0] };
+    }
+    const raw = distance / scale;
+    let vertex = 1;
+    while (vertex < lngs.length - 1 && cumulative[vertex] < raw) {
+      vertex += 1;
+    }
+    const span = cumulative[vertex] - cumulative[vertex - 1];
+    const param = span > 0 ? (raw - cumulative[vertex - 1]) / span : 0;
+    return {
+      lng: lngs[vertex - 1] + param * (lngs[vertex] - lngs[vertex - 1]),
+      lat: lats[vertex - 1] + param * (lats[vertex] - lats[vertex - 1]),
+    };
+  };
+
+  const start = at(fromMeters);
+  const outLngs = [start.lng];
+  const outLats = [start.lat];
+  for (let vertex = 0; vertex < lngs.length; vertex++) {
+    const along = cumulative[vertex] * scale;
+    if (along > fromMeters && along < toMeters) {
+      outLngs.push(lngs[vertex]);
+      outLats.push(lats[vertex]);
+    }
+  }
+  const end = at(toMeters);
+  outLngs.push(end.lng);
+  outLats.push(end.lat);
+  return { lngs: outLngs, lats: outLats };
+}
+
 export function otherEnd(
   graph: RoutingGraph,
   edge: number,

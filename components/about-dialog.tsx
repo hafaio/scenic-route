@@ -131,6 +131,10 @@ export default function AboutDialog({ onClose }: AboutDialogProps) {
               detail="NYC Building Footprints · NYC Open Data"
             />
             <Source
+              label="Scaffolding"
+              detail="Active Shed Permits · NYC DOB, and Digital Tax Map & condo billing lots · NYC Open Data"
+            />
+            <Source
               label="Commercial streets"
               detail="PLUTO, Dining Out & Open Streets · NYC Open Data, and OpenStreetMap"
             />
