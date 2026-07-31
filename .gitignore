@@ -26,6 +26,9 @@
 /public/dining/
 /public/openstreets/
 /public/landuse/
+# NOT public/sheds/: the shed artifact is rebuilt daily by a job rather than by a deploy, so it is
+# committed — the job reads the last one out of the checkout and the client reads it off `main`
+# through raw.githubusercontent.com. Never LFS-track it (data/README.md).
 
 # raw source reads cached by `bun run build-tree-data`; --refresh to go back to the network
 /.cache/
