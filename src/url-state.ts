@@ -12,6 +12,7 @@ import {
   DEFAULT_HIGHWAY_WEIGHT,
   DEFAULT_LANDMARK_WEIGHT,
   DEFAULT_SHADE_WEIGHT,
+  DEFAULT_SHELTER_WEIGHT,
   DEFAULT_TREE_WEIGHT,
   MAX_ART_WEIGHT,
   MAX_COMMERCIAL_WEIGHT,
@@ -19,6 +20,7 @@ import {
   MAX_HIGHWAY_WEIGHT,
   MAX_LANDMARK_WEIGHT,
   MAX_SHADE_WEIGHT,
+  MAX_SHELTER_WEIGHT,
   MAX_TREE_WEIGHT,
   type RouteWeights,
 } from "./routing/cost";
@@ -55,7 +57,9 @@ export const DEFAULT_WEIGHTS: RouteWeights = {
   highway: DEFAULT_HIGHWAY_WEIGHT,
   commercial: DEFAULT_COMMERCIAL_WEIGHT,
   shade: DEFAULT_SHADE_WEIGHT,
+  shelter: DEFAULT_SHELTER_WEIGHT,
   allowFerries: true,
+  allowSheds: true,
 };
 
 export const DEFAULT_ROUTE_STATE: RouteUrlState = {
@@ -74,7 +78,7 @@ const DAY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 
 interface WeightParam {
   key: string;
-  field: Exclude<keyof RouteWeights, "allowFerries">;
+  field: Exclude<keyof RouteWeights, "allowFerries" | "allowSheds">;
   min: number;
   max: number;
 }
@@ -97,6 +101,7 @@ const WEIGHT_PARAMS: readonly WeightParam[] = [
     min: -MAX_SHADE_WEIGHT,
     max: MAX_SHADE_WEIGHT,
   },
+  { key: "shelter", field: "shelter", min: 0, max: MAX_SHELTER_WEIGHT },
 ];
 
 // Every key this module owns, so a rewrite can clear its own and leave the rest (the About flag today,
@@ -106,6 +111,7 @@ const ROUTE_KEYS: readonly string[] = [
   "to",
   ...WEIGHT_PARAMS.map((param) => param.key),
   "ferries",
+  "sheds",
   "time",
   "date",
 ];
@@ -177,6 +183,9 @@ export function decodeRoute(
   weights.allowFerries = params.has("ferries")
     ? params.get("ferries") !== "0"
     : defaults.weights.allowFerries;
+  weights.allowSheds = params.has("sheds")
+    ? params.get("sheds") !== "0"
+    : defaults.weights.allowSheds;
   const hour = params.get("time");
   const day = params.get("date");
   return {
@@ -205,6 +214,9 @@ export function encodeRoute(state: RouteUrlState): URLSearchParams {
   }
   if (!state.weights.allowFerries) {
     params.set("ferries", "0");
+  }
+  if (!state.weights.allowSheds) {
+    params.set("sheds", "0");
   }
   if (state.customHour !== null) {
     params.set("time", String(round(state.customHour, WEIGHT_DIGITS)));

@@ -1,9 +1,9 @@
 // The optimal route is piecewise-constant in a single weight: each candidate path's cost is linear
 // in that weight, so the cheapest path changes only at discrete breakpoints, and any weight bracketed
 // by two samples that share a path provably yields that path — no recompute. That interval argument
-// is strictly one-dimensional, so with several scenic weights plus the allow-ferries gate the cache
-// brackets only the *active* slider: whichever single one moved since the last call. Moving another
-// slider or toggling the gate changes the fixed context the range was built against, so the old range
+// is strictly one-dimensional, so with several scenic weights plus the ferry and scaffolding gates the
+// cache brackets only the *active* slider: whichever single one moved since the last call. Moving
+// another slider or toggling a gate changes the fixed context the range was built against, so the old range
 // is dropped and a fresh one is started around the current slider — seeded with the just-computed
 // point, which is still valid because only the active slider moved. It reports whether the path
 // changed so the caller can skip redrawing an identical route.
@@ -13,7 +13,8 @@ import type { RoutingGraph } from "./graph";
 import { findRoute, type RouteResult } from "./search";
 import type { Snap } from "./snap";
 
-// The numeric weights that a slider can move; the allow-ferries gate is a discrete context, not an axis.
+// The numeric weights that a slider can move; the two toggles (ferries, scaffolding) are discrete
+// contexts, not axes.
 const AXES = [
   "tree",
   "ferry",
@@ -22,6 +23,7 @@ const AXES = [
   "highway",
   "commercial",
   "shade",
+  "shelter",
 ] as const;
 type Axis = (typeof AXES)[number];
 
@@ -43,14 +45,22 @@ function quantizeWeights(weights: RouteWeights): RouteWeights {
     highway: quantize(weights.highway),
     commercial: quantize(weights.commercial),
     shade: quantize(weights.shade),
+    shelter: quantize(weights.shelter),
     allowFerries: weights.allowFerries,
+    allowSheds: weights.allowSheds,
   };
+}
+
+function sameGates(left: RouteWeights, right: RouteWeights): boolean {
+  return (
+    left.allowFerries === right.allowFerries &&
+    left.allowSheds === right.allowSheds
+  );
 }
 
 function sameWeights(left: RouteWeights, right: RouteWeights): boolean {
   return (
-    left.allowFerries === right.allowFerries &&
-    AXES.every((axis) => left[axis] === right[axis])
+    sameGates(left, right) && AXES.every((axis) => left[axis] === right[axis])
   );
 }
 
@@ -115,10 +125,10 @@ export class RouteCache {
       return { result: this.lastResult, changed: false };
     }
 
-    // The active slider is whichever single weight moved since the last call, with the gate unchanged.
+    // The active slider is whichever single weight moved since the last call, with the gates unchanged.
     // A first call, a toggled gate, or two weights moving at once has no single bracketable axis.
     let active: Axis | null = null;
-    if (this.last !== null && current.allowFerries === this.last.allowFerries) {
+    if (this.last !== null && sameGates(current, this.last)) {
       const moved = AXES.filter((axis) => current[axis] !== this.last?.[axis]);
       if (moved.length === 1) {
         active = moved[0];

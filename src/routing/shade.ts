@@ -32,8 +32,19 @@ const HORIZON_DEG = 0.5; // at or below this the sun is down and there is no sha
 // The elapsed-time schedule: sun positions are sampled every SCHEDULE_STEP_SECONDS (the sun moves
 // ~1.25° across one step, well under a bin's span) out to SCHEDULE_HORIZON_SECONDS — a walk longer than
 // this (~20 km at 1.4 m/s) freezes the sun at the horizon, a negligible tail.
-const SCHEDULE_STEP_SECONDS = 300;
+export const SCHEDULE_STEP_SECONDS = 300;
 const SCHEDULE_HORIZON_SECONDS = 4 * 3600;
+export const SCHEDULE_BUCKETS =
+  Math.floor(SCHEDULE_HORIZON_SECONDS / SCHEDULE_STEP_SECONDS) + 1;
+
+// The bucket an elapsed walking time falls in, clamped at the horizon. Shared with the scaffolding
+// field (src/routing/sheds.ts), which samples the sun on this same schedule so the two terms cannot
+// disagree about where it is at a point in the walk.
+export function scheduleBucket(elapsedSeconds: number): number {
+  const clamped = elapsedSeconds > 0 ? elapsedSeconds : 0;
+  const bucket = Math.round(clamped / SCHEDULE_STEP_SECONDS);
+  return bucket < SCHEDULE_BUCKETS ? bucket : SCHEDULE_BUCKETS - 1;
+}
 
 const binUrl = (index: number): string => `routing/shade/${index}.bin`;
 
@@ -89,9 +100,12 @@ function encodeAttr(attr: number): number {
 // The per-edge signed shade attribute a route is costed against, as a function of how long into the
 // walk the edge is reached. `attrAt` returns a value in (-1, 1) — positive net sunlit, negative net
 // shaded; `maxAbs` bounds |attr| over every edge and elapsed time the field can return, the input to
-// the cost model's admissible clip floor.
+// the cost model's admissible clip floor. `intensityAt` is the sun's strength at that point in the
+// walk — what a fully sunlit edge reads and, negated, what a fully shaded one does — so a caller with
+// its own opaque cover (a scaffolding deck) can composite it into the attribute.
 export interface ShadeField {
   attrAt(edge: number, elapsedSeconds: number): number;
+  intensityAt(elapsedSeconds: number): number;
   readonly maxAbs: number;
 }
 
@@ -112,18 +126,18 @@ class ScheduledShadeField implements ShadeField {
     private readonly binB: Int32Array, // per bucket: the second blended bin's index into `fractions`
     private readonly weightA: Float64Array, // per bucket: bin A's blend weight, already divided by 128
     private readonly weightB: Float64Array, // per bucket: bin B's blend weight, already divided by 128
-    private readonly lastBucket: number, // clamp elapsed time to this bucket (the schedule horizon)
+    private readonly blended: Float64Array, // per bucket: the blended solar intensity, 0 at night
     readonly maxAbs: number,
   ) {
     this.rows = fractions.map(() => null);
   }
 
+  intensityAt(elapsedSeconds: number): number {
+    return this.blended[scheduleBucket(elapsedSeconds)];
+  }
+
   attrAt(edge: number, elapsedSeconds: number): number {
-    const clamped = elapsedSeconds > 0 ? elapsedSeconds : 0;
-    let bucket = Math.round(clamped / SCHEDULE_STEP_SECONDS);
-    if (bucket > this.lastBucket) {
-      bucket = this.lastBucket;
-    }
+    const bucket = scheduleBucket(elapsedSeconds);
     const indexA = this.binA[bucket];
     if (indexA < 0) {
       return 0; // the sun is down at this point in the walk
@@ -164,6 +178,12 @@ class ConstantShadeField implements ShadeField {
 
   attrAt(edge: number): number {
     return this.attrs[edge];
+  }
+
+  // A fully sunlit edge is what the field's peak magnitude stands for, so that is its sun strength —
+  // and taking it from maxAbs keeps a composited attribute inside the bound the clip floor uses.
+  intensityAt(): number {
+    return this.maxAbs;
   }
 }
 
@@ -247,8 +267,8 @@ export function loadShadeBin(index: number): Promise<BinFractions> {
 }
 
 // The sun over the city centroid at a given instant, in the same convention shade-layer's currentSun
-// uses so both agree on which bin a time maps to.
-function sunAt(date: Date): { elevation: number; azimuth: number } {
+// uses so both agree on which bin a time maps to. Degrees; azimuth a compass bearing in [0, 360).
+export function sunAt(date: Date): { elevation: number; azimuth: number } {
   const position = sun.getPosition(date, CENTRE_LAT, CENTRE_LNG);
   return {
     elevation: position.altitude,
@@ -357,18 +377,16 @@ export async function computeEdgeShade(
     }
   }
 
-  const lastBucket = Math.floor(
-    SCHEDULE_HORIZON_SECONDS / SCHEDULE_STEP_SECONDS,
-  );
-  const bucketCount = lastBucket + 1;
-  const binA = new Int32Array(bucketCount).fill(-1); // -1 marks a night bucket
-  const binB = new Int32Array(bucketCount);
-  const weightA = new Float64Array(bucketCount);
-  const weightB = new Float64Array(bucketCount);
+  const binA = new Int32Array(SCHEDULE_BUCKETS).fill(-1); // -1 marks a night bucket
+  const binB = new Int32Array(SCHEDULE_BUCKETS);
+  const weightA = new Float64Array(SCHEDULE_BUCKETS);
+  const weightB = new Float64Array(SCHEDULE_BUCKETS);
+  // The bucket's own sun strength, 0 through the night.
+  const blended = new Float64Array(SCHEDULE_BUCKETS);
   const positions = new Map<number, number>();
   const order: ShadeBin[] = []; // the referenced bins, the axis of the field's rows
   let anyDay = false;
-  for (let bucket = 0; bucket <= lastBucket; bucket++) {
+  for (let bucket = 0; bucket < SCHEDULE_BUCKETS; bucket++) {
     const when = new Date(
       date.getTime() + bucket * SCHEDULE_STEP_SECONDS * 1000,
     );
@@ -382,6 +400,12 @@ export async function computeEdgeShade(
     binB[bucket] = intern(positions, order, blend.second);
     weightA[bucket] = blend.nearestWeight / 128;
     weightB[bucket] = blend.secondWeight / 128;
+    // Quantized exactly as a row's fully-sunlit entry is, so a composited attribute can never leave
+    // the [-maxAbs, maxAbs] the clip floor is computed from.
+    blended[bucket] =
+      (blend.nearestWeight * encodeAttr(intensityOf(blend.nearest)) +
+        blend.secondWeight * encodeAttr(intensityOf(blend.second))) /
+      128;
   }
   if (!anyDay) {
     graph.shade = null;
@@ -412,7 +436,7 @@ export async function computeEdgeShade(
     binB,
     weightA,
     weightB,
-    lastBucket,
+    blended,
     maxAbs,
   );
 }

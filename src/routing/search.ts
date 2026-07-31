@@ -9,10 +9,12 @@
 import {
   edgeCover,
   edgeMultiplier,
+  edgeShed,
   effSeconds,
   ferryCredit,
   type RouteWeights,
   rawSeconds,
+  shadeAttrOf,
   WALK_METERS_PER_SECOND,
   walkSecondsCoeff,
 } from "./cost";
@@ -304,10 +306,16 @@ function reconstruct(
       sums.highway += (graph.edgeHighway[edge] / 255) * stepMeters;
       sums.commercial += (graph.edgeCommercial[edge] / 255) * stepMeters;
       // Sun exposure only: the positive (sunlit) part of the signed shade attribute at this point in the
-      // walk. 0 when shaded, at night, or with no artifact loaded.
-      const shadeAttr = graph.shade
-        ? graph.shade.attrAt(edge, elapsedSeconds)
-        : 0;
+      // walk, with a deck composited in whether or not scaffolding is barred, which is what the cost
+      // model does too. It reads the deck's whole coverage rather than the share the sun has not slid
+      // off it, so a decked stretch reads a little more shaded here than the router costed it — worst
+      // measured 0.18 points of a route's exposure. 0 when shaded, at night, or with no artifact loaded.
+      const shadeAttr = shadeAttrOf(
+        graph,
+        edge,
+        elapsedSeconds,
+        edgeShed(graph, edge),
+      );
       sums.shade += Math.max(0, shadeAttr) * stepMeters;
       const seconds = stepMeters / WALK_METERS_PER_SECOND;
       travelSeconds += seconds;

@@ -40,7 +40,9 @@ const weights = (
   highway: 0,
   commercial: 0,
   shade: 0,
+  shelter: 0,
   allowFerries,
+  allowSheds: true,
 });
 
 interface NodeSpec {
@@ -700,7 +702,7 @@ test("a start-drag anchors the sun at arrival and counts it backward", () => {
     }
     return 0;
   };
-  graph.shade = { attrAt: attrOf, maxAbs: 0.5 };
+  graph.shade = { attrAt: attrOf, intensityAt: () => 0.5, maxAbs: 0.5 };
   const preferSun: RouteWeights = {
     tree: 0,
     ferry: 0,
@@ -709,7 +711,9 @@ test("a start-drag anchors the sun at arrival and counts it backward", () => {
     highway: 0,
     commercial: 0,
     shade: 1,
+    shelter: 0,
     allowFerries: false,
+    allowSheds: true,
   };
 
   // Ground truth: a fresh forward A* from the true start reaches the fork ~900 s in and walks the

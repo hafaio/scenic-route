@@ -34,9 +34,11 @@ import {
   DEFAULT_HIGHWAY_WEIGHT,
   DEFAULT_LANDMARK_WEIGHT,
   DEFAULT_SHADE_WEIGHT,
+  DEFAULT_SHELTER_WEIGHT,
   DEFAULT_TREE_WEIGHT,
   MAX_FERRY_WEIGHT,
   MAX_SHADE_WEIGHT,
+  MAX_SHELTER_WEIGHT,
   MAX_TREE_WEIGHT,
   type RouteWeights,
 } from "../src/routing/cost";
@@ -51,6 +53,7 @@ import {
   reverseResult,
 } from "../src/routing/search";
 import { computeEdgeShade } from "../src/routing/shade";
+import { computeEdgeSheds, setShedSun, shedDay } from "../src/routing/sheds";
 import { buildSnapIndex, type SnapIndex, snapPair } from "../src/routing/snap";
 import {
   type Camera,
@@ -97,7 +100,9 @@ type RouteState =
 const TREE_WEIGHT_KEY = "scenic-route:tree-weight";
 const FERRY_WEIGHT_KEY = "scenic-route:ferry-weight";
 const SHADE_WEIGHT_KEY = "scenic-route:shade-weight";
+const SHELTER_WEIGHT_KEY = "scenic-route:shelter-weight";
 const FERRY_ALLOW_KEY = "scenic-route:allow-ferries";
+const SHED_ALLOW_KEY = "scenic-route:allow-sheds";
 const LANDMARK_WEIGHT_KEY = "scenic-route:landmark-weight";
 const ART_WEIGHT_KEY = "scenic-route:art-weight";
 const HIGHWAY_WEIGHT_KEY = "scenic-route:highway-weight";
@@ -148,7 +153,14 @@ function storedWeights(): RouteWeights {
       -MAX_SHADE_WEIGHT,
       MAX_SHADE_WEIGHT,
     ),
+    shelter: read(
+      SHELTER_WEIGHT_KEY,
+      DEFAULT_SHELTER_WEIGHT,
+      0,
+      MAX_SHELTER_WEIGHT,
+    ),
     allowFerries: window.localStorage.getItem(FERRY_ALLOW_KEY) !== "false",
+    allowSheds: window.localStorage.getItem(SHED_ALLOW_KEY) !== "false",
   };
 }
 
@@ -244,12 +256,20 @@ export default function MapApp() {
   const [commercialWeight, setCommercialWeight] = useState<number>(
     DEFAULT_COMMERCIAL_WEIGHT,
   );
-  // The signed sun/shade preference (−1 = prefer shade, +1 = prefer sun, 0 = off). `shadeTick` fires
+  // The signed sun/shade preference (−1 = prefer shade, +1 = prefer sun, 0 = off). `routeTimeTick` fires
   // as the resolved time (the global clock) moves, so the route re-costs against the sun's new
   // position; `shadeContextRef` records which tick the route cache was built against.
   const [shadeWeight, setShadeWeight] = useState<number>(DEFAULT_SHADE_WEIGHT);
-  const [shadeTick, setShadeTick] = useState<number>(0);
+  const [routeTimeTick, setRouteTimeTick] = useState<number>(0);
   const shadeContextRef = useRef<number>(-1);
+  // Rain shelter (decks plus canopy) and the scaffolding gate. Both read the same per-edge shed
+  // coverage, which only changes with the picked DAY — `shedDayRef` records the day the graph's field
+  // was built for, so a clock tick re-aims its sun rather than rebuilding it.
+  const [shelterWeight, setShelterWeight] = useState<number>(
+    DEFAULT_SHELTER_WEIGHT,
+  );
+  const [allowSheds, setAllowSheds] = useState<boolean>(true);
+  const shedDayRef = useRef<number>(Number.NaN);
   // Whether to send the live location to the geocoder so nearby results rank first. On by default;
   // the toolbar menu toggle opts out, and it persists to localStorage below.
   const [shareLocationForSearch, setShareLocationForSearch] =
@@ -318,14 +338,15 @@ export default function MapApp() {
   const effectivePickTarget: "start" | "dest" | null =
     pickTarget ?? (routingOpen && dest === null ? "dest" : null);
 
-  // While a shade preference is active, follow the global clock: each tick re-costs the route against
-  // the sun's new position. The store only ticks in "now" mode or on a scrub, and only with a listener.
+  // While a preference reads the clock, follow it: each tick re-costs the route against the sun's new
+  // position, and a tick that lands on a new day also restands the scaffolding. The store only ticks in
+  // "now" mode or on a scrub, and only with a listener.
   useEffect(() => {
-    if (shadeWeight === 0) {
+    if (shadeWeight === 0 && shelterWeight === 0 && allowSheds) {
       return;
     }
-    return subscribeRouteTime(() => setShadeTick((tick) => tick + 1));
-  }, [shadeWeight]);
+    return subscribeRouteTime(() => setRouteTimeTick((tick) => tick + 1));
+  }, [shadeWeight, shelterWeight, allowSheds]);
 
   useEffect(() => {
     const stored = window.localStorage.getItem(SEARCH_BIAS_KEY);
@@ -483,7 +504,9 @@ export default function MapApp() {
       highway: highwayWeight,
       commercial: commercialWeight,
       shade: shadeWeight,
+      shelter: shelterWeight,
       allowFerries,
+      allowSheds,
     }),
     [
       treeWeight,
@@ -493,7 +516,9 @@ export default function MapApp() {
       highwayWeight,
       commercialWeight,
       shadeWeight,
+      shelterWeight,
       allowFerries,
+      allowSheds,
     ],
   );
 
@@ -542,10 +567,10 @@ export default function MapApp() {
           // not fatal: routing drops the sun/shade bias for this time rather than failing. When shade is
           // off, clear the field and the context so it costs nothing.
           if (weights.shade !== 0) {
-            if (shadeContextRef.current !== shadeTick) {
+            if (shadeContextRef.current !== routeTimeTick) {
               routeCacheRef.current = null;
               dragSolverRef.current = null;
-              shadeContextRef.current = shadeTick;
+              shadeContextRef.current = routeTimeTick;
               try {
                 await computeEdgeShade(graph, getResolvedDate());
               } catch (error) {
@@ -562,6 +587,38 @@ export default function MapApp() {
           } else {
             graph.shade = null;
             shadeContextRef.current = -1;
+          }
+          // The standing sheds, whose set moves only with the picked DAY. They feed the shade composite
+          // as well as the shelter factor and the scaffolding gate, so the field is kept current while any of
+          // the three is live. A failed fetch is not fatal either: computeEdgeSheds seeds the canopy half
+          // of shelter first, so the slider keeps working on trees alone.
+          if (
+            weights.shade !== 0 ||
+            weights.shelter !== 0 ||
+            !weights.allowSheds
+          ) {
+            const day = shedDay(getResolvedDate());
+            if (shedDayRef.current !== day) {
+              routeCacheRef.current = null;
+              dragSolverRef.current = null;
+              shedDayRef.current = day;
+              try {
+                await computeEdgeSheds(graph, getResolvedDate());
+              } catch (error) {
+                console.error("scaffolding routing disabled:", error);
+              }
+              if (cancelled) {
+                return;
+              }
+            }
+            // The standing set moves with the day but the sun moves with the clock, so the field's
+            // schedule is re-aimed on every tick rather than rebuilt; setShedSun carries why.
+            if (graph.sheds) {
+              setShedSun(graph.sheds, getResolvedDate());
+            }
+          } else {
+            graph.sheds = null;
+            shedDayRef.current = Number.NaN;
           }
           const pair = snapPair(graph, index, request.start, request.dest);
           if (!pair.ok) {
@@ -631,7 +688,7 @@ export default function MapApp() {
       cancelled = true;
       cancelAnimationFrame(frame);
     };
-  }, [resolvedStart, dest, weights, shadeTick, routeRefreshNonce]);
+  }, [resolvedStart, dest, weights, routeTimeTick, routeRefreshNonce]);
 
   // A new destination collapses any open maneuver list; keyed on the coordinates so a reverse-geocode
   // label patch (same point, new object identity) doesn't snap it shut.
@@ -703,6 +760,16 @@ export default function MapApp() {
   const handleShadeWeight = useCallback((weight: number) => {
     setShadeWeight(weight);
     window.localStorage.setItem(SHADE_WEIGHT_KEY, String(weight));
+  }, []);
+
+  const handleShelterWeight = useCallback((weight: number) => {
+    setShelterWeight(weight);
+    window.localStorage.setItem(SHELTER_WEIGHT_KEY, String(weight));
+  }, []);
+
+  const handleAllowSheds = useCallback((allow: boolean) => {
+    setAllowSheds(allow);
+    window.localStorage.setItem(SHED_ALLOW_KEY, String(allow));
   }, []);
 
   const handleToggleSearchBias = useCallback(() => {
@@ -857,7 +924,9 @@ export default function MapApp() {
     setHighwayWeight(route.weights.highway);
     setCommercialWeight(route.weights.commercial);
     setShadeWeight(route.weights.shade);
+    setShelterWeight(route.weights.shelter);
     setAllowFerries(route.weights.allowFerries);
+    setAllowSheds(route.weights.allowSheds);
     if (route.customHour !== null) {
       setCustomHour(route.customHour);
     }
@@ -1225,6 +1294,8 @@ export default function MapApp() {
           highwayWeight={highwayWeight}
           commercialWeight={commercialWeight}
           shadeWeight={shadeWeight}
+          shelterWeight={shelterWeight}
+          allowSheds={allowSheds}
           directions={directions}
           progress={progress}
           directionsOpen={directionsOpen}
@@ -1237,6 +1308,8 @@ export default function MapApp() {
           onHighwayWeight={handleHighwayWeight}
           onCommercialWeight={handleCommercialWeight}
           onShadeWeight={handleShadeWeight}
+          onShelterWeight={handleShelterWeight}
+          onAllowSheds={handleAllowSheds}
           onStartSelect={handleStartSelect}
           onDestSelect={handleDestSelect}
           onStartClear={handleClearStart}

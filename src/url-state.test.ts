@@ -29,7 +29,9 @@ test("every route field survives a round trip", () => {
     highway: 0.05,
     commercial: 0.6,
     shade: -0.85,
+    shelter: 0.25,
     allowFerries: false,
+    allowSheds: false,
   };
   const state: RouteUrlState = {
     start: { lat: 40.712776, lng: -74.005974 },

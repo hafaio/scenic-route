@@ -181,7 +181,8 @@ test("computeEdgeShade clears the field when the whole walk is below the horizon
   expect(sunAt(NIGHT).elevation).toBeLessThanOrEqual(0.5); // precondition: it is night at departure
 
   const graph = makeGraph(EDGE_COUNT);
-  graph.shade = { attrAt: () => 0.5, maxAbs: 0.5 }; // stale daytime field, to prove reset
+  // stale daytime field, to prove reset
+  graph.shade = { attrAt: () => 0.5, intensityAt: () => 0.5, maxAbs: 0.5 };
   await computeEdgeShade(graph, NIGHT);
 
   expect(graph.shade).toBeNull();

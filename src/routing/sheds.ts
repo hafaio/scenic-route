@@ -14,8 +14,15 @@
 // only the suffix that could still have been standing. Reading a day eight years back costs the whole
 // file; reading today costs a tenth of it.
 
+import { rainTau } from "../shade/phenology";
 import { type Cursor, readUnsignedVarint, readVarint } from "../tiles/varint";
-import { durableKey, NO_SOURCE_ID, type RoutingGraph } from "./graph";
+import { durableKey, edgePath, NO_SOURCE_ID, type RoutingGraph } from "./graph";
+import {
+  SCHEDULE_BUCKETS,
+  SCHEDULE_STEP_SECONDS,
+  scheduleBucket,
+  sunAt,
+} from "./shade";
 
 // How high the deck stands, which the permit feed does not carry and nothing measures: 4 m is the
 // middle of the range DOB leaves — it requires 8 ft of clearance and typical decks run 12-15 ft.
@@ -368,6 +375,203 @@ export function shedsOn(
   const standing = [...openOn(history.open, day), ...closedOn(history, day)];
   resolveSpans(graph, standing);
   return standing;
+}
+
+// What a day's sheds add up to on one edge.
+export interface EdgeDeck {
+  covered: number; // the share of the edge standing under a deck, 0..1
+  depth: number; // how deep that deck runs across the pavement, metres; 0 where none was measured
+}
+
+// Every decked edge on `day`, by edge id. Sheds overlap — about a tenth of the touched edges are
+// covered past their own length by concurrent permits — so the covered share is clamped, and the
+// depth is the mean of the spans' own weighted by the length each contributes, which is what makes
+// one long shed on a wide pavement outweigh a stub of a narrow one beside it. A span the artifact
+// measured no depth for is left out of that mean rather than pulling it toward a stand-in, and an
+// edge with no measured span at all reads 0, for a reader to fall back on as it sees fit.
+//
+// A placement's confidence weights neither: the cost model prices what might be overhead, and being
+// unsure of a deck is a reason to steer clear of it rather than to discount it.
+export function shedCoverage(
+  graph: RoutingGraph,
+  history: ShedHistory,
+  day: number,
+): Map<number, EdgeDeck> {
+  const decks = new Map<number, EdgeDeck>();
+  const measured = new Map<number, number>(); // the weight behind each depth sum
+  for (const shed of shedsOn(graph, history, day)) {
+    for (const { edge, t0, t1, depth } of shed.spans) {
+      if (edge < 0) {
+        continue; // this graph has no edge by that durable name
+      }
+      const along = t1 - t0;
+      const deck = decks.get(edge) ?? { covered: 0, depth: 0 };
+      deck.covered += along;
+      if (depth > 0) {
+        deck.depth += along * depth;
+        measured.set(edge, (measured.get(edge) ?? 0) + along);
+      }
+      decks.set(edge, deck);
+    }
+  }
+  for (const [edge, deck] of decks) {
+    // The weighted mean, taken before the clamp so a doubly covered edge is not thinned by it.
+    const weight = measured.get(edge) ?? 0;
+    deck.depth = weight > 0 ? deck.depth / weight : 0;
+    deck.covered = Math.min(1, deck.covered);
+  }
+  return decks;
+}
+
+// A day's scaffolding as the cost model reads it: one byte per graph edge, on the same 0-254 ceiling
+// the graph's own attribute bytes use. Coverage feeds discounts (the shade composite and the shelter
+// factor), so it has to stay strictly under 1 or a metre under a deck could cost nothing and the
+// search would wander. It carries the day's rain tau too, since the shelter factor is the deck and the
+// canopy together and only the client knows the date, and the sun across the walk, since how much of
+// its own sidewalk a deck still shades depends on where the sun is and which way the street runs.
+export interface ShedField {
+  coverage: Uint8Array; // per edge, 0-254: the share of it standing under a deck
+  depth: Float32Array; // per decked edge, how deep its deck runs across the pavement, metres
+  bearing: Float32Array; // per decked edge, the way it runs, in radians clockwise from north
+  translate: Float64Array; // per shade-schedule bucket, metres the sun slides a deck's shadow along the ground
+  sunAzimuth: Float64Array; // per shade-schedule bucket, where the sun comes from, radians clockwise from north
+  rainTau: number; // the share of rain a crown directly overhead keeps off on the day
+  maxCoverage: number; // the greatest per-edge coverage, 0..1; an input to the shelter clip floor
+}
+
+const COVERAGE_CEILING = 254;
+const DEGREES = Math.PI / 180;
+
+// The sun elevation below which a deck's shadow is taken as flat on the ground: at 0.5 deg the
+// translate is already 458 m, ~100x the deck's depth, and the shade attribute is 0 at night anyway.
+// Clamping rather than dividing by tan(0) keeps the translate finite, so a sun exactly along a street
+// stays 0 across it instead of going NaN.
+const MIN_ELEVATION_DEG = 0.5;
+
+// What a deck still shades once the sun has slid its shadow clear across the sidewalk. A bare slab
+// would let all the light in, but a real shed has a solid fascia along its street edge and posts and
+// debris netting between them, so oblique light is cut more than the slab model says. Small on
+// purpose: it only bites at a low sun across the street, where the sun's own intensity has already
+// gone with it.
+export const SHED_OBLIQUE_FLOOR = 0.15;
+
+function quantizeCoverage(fraction: number): number {
+  return Math.min(COVERAGE_CEILING, Math.round(fraction * 255));
+}
+
+// The way a decked edge runs, in radians clockwise from north. A sidewalk edge runs corner to corner
+// and can bend, so this is its segments' mean direction weighted by length — taken on doubled angles,
+// because a street has no forward end and the two halves of a bend would otherwise cancel out.
+function edgeBearing(graph: RoutingGraph, edge: number): number {
+  const { lngs, lats } = edgePath(graph, edge);
+  let sumSin = 0;
+  let sumCos = 0;
+  for (let segment = 0; segment + 1 < lngs.length; segment++) {
+    const east =
+      (lngs[segment + 1] - lngs[segment]) * Math.cos(lats[segment] * DEGREES);
+    const north = lats[segment + 1] - lats[segment];
+    const length = Math.hypot(east, north);
+    const bearing = Math.atan2(east, north);
+    sumSin += length * Math.sin(2 * bearing);
+    sumCos += length * Math.cos(2 * bearing);
+  }
+  return Math.atan2(sumSin, sumCos) / 2;
+}
+
+// Point a field's sun schedule at a departure instant. Its own function because which sheds stand
+// moves with the DAY while the sun moves with the clock: an hour-slider step has to re-aim the sun,
+// and rebuilding the coverage and the bearings for it would cost ~10 ms of work that did not change.
+export function setShedSun(field: ShedField, date: Date): void {
+  for (let bucket = 0; bucket < SCHEDULE_BUCKETS; bucket++) {
+    const when = new Date(
+      date.getTime() + bucket * SCHEDULE_STEP_SECONDS * 1000,
+    );
+    const sun = sunAt(when);
+    field.translate[bucket] =
+      DECK_HEIGHT_METERS /
+      Math.tan(Math.max(sun.elevation, MIN_ELEVATION_DEG) * DEGREES);
+    field.sunAzimuth[bucket] = sun.azimuth * DEGREES;
+  }
+}
+
+// The day's coverage as the cost model reads it, over the graph it was placed against.
+export function shedField(
+  graph: RoutingGraph,
+  decks: ReadonlyMap<number, EdgeDeck>,
+  date: Date,
+): ShedField {
+  const covered = new Uint8Array(graph.edgeCount);
+  const depth = new Float32Array(graph.edgeCount);
+  const bearing = new Float32Array(graph.edgeCount);
+  let maxByte = 0;
+  for (const [edge, deck] of decks) {
+    if (edge < graph.edgeCount) {
+      covered[edge] = quantizeCoverage(deck.covered);
+      depth[edge] = deckDepth(deck.depth);
+      bearing[edge] = edgeBearing(graph, edge);
+      maxByte = Math.max(maxByte, covered[edge]);
+    }
+  }
+
+  const field: ShedField = {
+    coverage: covered,
+    depth,
+    bearing,
+    translate: new Float64Array(SCHEDULE_BUCKETS),
+    sunAzimuth: new Float64Array(SCHEDULE_BUCKETS),
+    rainTau: rainTau(date),
+    maxCoverage: maxByte / 255,
+  };
+  setShedSun(field, date);
+  return field;
+}
+
+// The share of an edge a deck actually shades at this point in the walk: its coverage, damped by how
+// far the sun has slid the deck's shadow off the sidewalk it stands over.
+//
+// A deck is a floating opaque slab, not a tunnel. Trace a ray back toward the sun from a point under
+// one and the point is lit as soon as that ray has moved further ACROSS the sidewalk than the deck is
+// deep — which is why only the across-street component of the translate counts. A sun running ALONG
+// the street slides the shadow down the shed's own length, tens of metres of it, so the deck stays
+// shaded to a far lower elevation than one across the street does. A single elevation threshold
+// cannot say that; the angle between the sun and the street is what decides it.
+//
+// The depth it is measured against is the edge's own, so a 6 m deck on a Midtown avenue holds its
+// shade to a lower sun than a 2 m one on a side street — which is the same number the band is drawn
+// at. The zero coverage exits first, so an undecked edge never divides by its empty depth.
+export function shedShade(
+  field: ShedField,
+  edge: number,
+  elapsedSeconds: number,
+): number {
+  const covered = field.coverage[edge] / 255;
+  if (covered === 0) {
+    return 0;
+  } else {
+    const bucket = scheduleBucket(elapsedSeconds);
+    const across =
+      field.translate[bucket] *
+      Math.abs(Math.sin(field.sunAzimuth[bucket] - field.bearing[edge]));
+    return (
+      covered * Math.max(SHED_OBLIQUE_FLOOR, 1 - across / field.depth[edge])
+    );
+  }
+}
+
+// Build the graph's scaffolding field for a date. The canopy half of shelter needs no artifact, so it
+// lands first and a slow or failed fetch leaves the shelter slider working on trees alone rather than
+// inert; the sheds standing that day replace it once they arrive.
+export async function computeEdgeSheds(
+  graph: RoutingGraph,
+  date: Date,
+): Promise<void> {
+  graph.sheds = shedField(graph, new Map(), date);
+  const history = await loadSheds();
+  graph.sheds = shedField(
+    graph,
+    shedCoverage(graph, history, shedDay(date)),
+    date,
+  );
 }
 
 let historyPromise: Promise<ShedHistory> | null = null;
