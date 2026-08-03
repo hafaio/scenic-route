@@ -4,8 +4,8 @@
 //! See scripts/README.md.
 
 // graph.rs's stats object is one `serde_json::json!` literal with more keys than the default 128
-// expansion steps allow.
-#![recursion_limit = "256"]
+// expansion steps allow, and the whole-city invariants added another dozen.
+#![recursion_limit = "512"]
 
 mod association;
 mod binfmt;
@@ -20,6 +20,7 @@ mod genus_field;
 mod geometry;
 mod graph;
 mod heights;
+mod invariants;
 mod manifest;
 mod raster;
 mod scenic;

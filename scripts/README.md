@@ -1250,6 +1250,34 @@ and returns the walker to where they started, so no search can use it and droppi
 disconnect anything either. Nodes are sorted by (component, latitude, longitude) and renumbered,
 edges by (component, min node id).
 
+Then the **whole-city invariants** (`invariants.rs`), run over the finished edges before the artifact
+is written. Each is a pure function of a plain edge view, so each is unit-tested on a hand-built
+network and then run once over the real city — the same shape as the existence gate's two guards, and
+for the same reason: they are the failures a fixture cannot see, because they are about how the whole
+network hangs together rather than about any one rule. Five carry a bound, and every bound sits in a
+gap measured from both sides — the finished city on one, and a build of the same city with the fix
+that closed the defect taken back out on the other:
+
+| invariant | stats | city | bound | without its fix |
+| --- | --- | --- | --- | --- |
+| alley km off the main component | `alleyKm`, `alleyOffComponentKm` | 0.42 of 303.1 km (0.14%) | 1% | 87.1% unnoded, 2.0% uncut |
+| alley mouth's walk to mapped pavement | `alleyMouthWalk*`, `alleyMouthsStranded` | p50 0 m, p90 37 m, 0 of 3,813 stranded | 10 m / 120 m / 10 | p50 108 m, p90 349 m, 94 stranded |
+| one-sided streets carrying both sides | `phantomSidewalks`, `oneSidedKeys` | 25 of 14,961 | 200 | — |
+| link edge lengths | `linkEdgesScored`, `linkP99M`, `linkLongestM` | p99 32 m, longest 56.8 m over 15,539 links | 50 m / `SEAM_REPAIR_METERS` | — |
+| worst neighbourhood's unpaved share | `pavementCell*` | p90 9.4% over 2,877 half-km cells | 30% | — |
+
+Each bound is held over a population the build classifies for itself, so each would pass on the empty
+set — stop the alley classifier matching and there is no stranded alley km to be over a ceiling. So
+every population carries a floor of its own, checked first and reported as its own failure: 50 km of
+alley (`MIN_ALLEY_KM`), 600 mouths, 2,500 one-sided keys, 500 scored cells and 2,500 link edges, each
+roughly a sixth of what the city measures.
+
+Two more are recorded and left unbounded, because each is dominated by a shape that is correct: the
+crossings whose far end has nothing on it (`crossingsToNowhere`, 5,784 — mostly crossing stubs OSM
+drew short), and the degree-2 derived-to-mapped hand-offs that turn past a right angle
+(`seamHairpins`, 113 — about half of them cul-de-sacs wrapping round their own head). The whole pass
+costs ~200 ms of a ~10 s graph build.
+
 When `--ferries` is supplied (`data/ferries/<id>.bin`, magic `FERR`, referenced by convention — not
 the manifest), a final stage adds the ferry network **after** that walking assertion and renumber,
 so neither is disturbed. Each FERR terminal snaps to the nearest walking node within 250 m (a linear

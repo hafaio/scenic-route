@@ -374,6 +374,60 @@ not a loosening of `graph.rs`'s 1 m near-miss union, which is a CSCL digitizatio
 topology in it and stays as tight as it is. The end that moves is always OSM's: CSCL geometry feeds
 the corner and crossing construction downstream and is left exactly where the city drew it.
 
+### What the whole city is held to
+
+The defects the swap produced were all of one kind: every local rule held and the network still did
+not hang together. A stranded alley lattice is all present, all internally connected and all useless;
+a crossing that loses its traffic island keeps both halves and joins neither; a phantom sidewalk puts
+a walker on ground the road runs over. A fixture cannot see any of them, and neither can the app —
+the router answers a trip onto a stranded alley by silently snapping to the nearest street. So the
+build runs a handful of whole-city properties over the finished graph and fails on them.
+
+**Each bound is measured from both sides**: the finished city on one, and a build of the same city
+with the fix that closed the defect taken back out on the other. A ceiling then sits in a gap that is
+known to be a gap — several times what the city measures, and an order or two under what the
+regression measures — rather than at a number somebody liked the look of. Where there is no far side
+to measure, the bound says so. And a property that cannot separate a real defect from correct
+topology, like the hairpin at a cul-de-sac head, is counted and reported rather than asserted:
+inventing a join over an arbitrary distance would be a worse lie than the honest break.
+
+**A walk has properties no edge can answer**, and four of the same campaign's findings are of that
+kind: how far a route goes against the straight line, whether it doubles back over a street it has
+just crossed, whether it threads roadway to roadway, and whether it arrives at all. None of them
+shows up until thousands of walks have been asked for, so `tests/route-sampling.test.ts` routes 400
+trips in each borough between real PLUTO tax lots — addressed parcels, where random lat/lngs would
+land in the harbour and manufacture a routing failure — and holds the distributions rather than any
+one route. It cannot run beside the unit tests: it reads the built graph, which is gitignored, and
+two LFS files standard CI checks out as pointers, so it runs on the manual deploy path beside the
+shed pairing check.
+
+Those bounds are calibrated against a floor and a ceiling the app itself imposes: the floor is a
+plain shortest path with every scenic weight at zero, which no cost-model change can go below, and
+the ceiling is the strongest bias one slider can ask for. At n = 400 a borough on the graph of
+2026-08-02 (627,106 edges), over Manhattan, the Bronx, Brooklyn, Queens and Staten Island, the app's
+defaults give a **detour ratio** median of 1.305/1.325/1.333/1.327/1.415 and a p90 of
+1.451/1.539/1.652/1.547/1.873, a **reversal share** of 2.0/6.8/26.0/22.8/3.3% of which
+0.0/0.0/0.3/0.0/0.0% are avoidable, a **longest crossing run** of 4/5/5/6/4, and no routing failure
+anywhere. Flat weights move the detour median to 1.221/1.250/1.272/1.268/1.344, its p90 to
+1.375/1.422/1.549/1.447/1.737 and the reversal share to 1.3/4.5/12.5/12.0/2.0%, with the avoidable
+share **0.0% in every borough** — which is what says that bound measures the cost model rather than
+the network, since an avoidable reversal is strictly extra distance and a shortest path would never
+buy one. The tree slider at maximum reaches a median 1.354/1.365/1.368/1.369/1.476, a p90 of
+1.568/1.670/1.763/1.683/2.188 and 3.0/8.8/31.0/27.5/4.3% reversing, of which 0.0/0.0/0.3/0.0/0.3%
+avoidable.
+
+### Known gaps
+
+- **The per-borough drop criterion was waived in the Bronx, and nobody has checked it by eye.** The
+  criterion was that no borough lose much more derived sidewalk than the city as a whole, and the
+  Bronx came in 2.8 pp above it (25.7% against 22.9%), which is a fail. It was waived on the
+  judgement that the number is measuring OSM's thinner coverage there rather than pavement the graph
+  is missing, and the evidence for that is a browser pass over the finished network: **zero routing
+  failures in 700 sampled trips**, a median detour ratio of 1.38 against Manhattan's 1.32, and worst
+  cases that are all genuine terrain — the Van Cortlandt trails, the Bronx Community College bluff,
+  the Botanical Garden. That is a judgement rather than a measurement of pavement, so it is left open
+  until someone drives Bronx routing in the app and confirms it.
+
 ## Sidewalk sheds
 
 Scaffolding is the one thing on the map whose source changes every morning, so it is the one artifact

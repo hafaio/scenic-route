@@ -73,6 +73,12 @@ jobs:
           key: tiles-${{ hashFiles('data/**', 'crates/tiler/**', 'scripts/*.ts', 'src/tree-cover/manifest.json', 'src/tree-cover/ramp.ts', 'src/tree-cover/genus.ts', 'Cargo.toml', 'Cargo.lock') }}
       - if: inputs.upload-pages
         run: bun export
+      # The route-level checks (tests/route-sampling.test.ts) cannot run with lint and tests above:
+      # they read the graph this build just made, which is gitignored, and two LFS files under data/
+      # that the non-deploy checkout deliberately takes as pointers. This is the one path with both,
+      # and the graph is as fresh as it gets here. ~13 s.
+      - if: inputs.upload-pages
+        run: bun run test-routes
       - if: inputs.upload-pages
         uses: actions/upload-pages-artifact@v5
         with:

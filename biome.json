@@ -11,7 +11,8 @@
       "app/**/*.css",
       "components/**/*.tsx",
       "scripts/**/*.ts",
-      "src/**/*.ts"
+      "src/**/*.ts",
+      "tests/**/*.ts"
     ],
     "ignoreUnknown": false
   },
