@@ -35,7 +35,7 @@ export function commercialLinesPath(cityId: string): string {
 }
 
 const CHUNK_MAGIC = "STCK";
-const CHUNK_FORMAT = 3;
+const CHUNK_FORMAT = 4;
 const CHUNK_ZOOM = 12;
 const SIDES = 2; // density bytes per street vertex in a chunk; skipped, we only read geometry
 
@@ -126,8 +126,10 @@ function magicOf(bytes: Uint8Array): string {
   return String.fromCharCode(bytes[0], bytes[1], bytes[2], bytes[3]);
 }
 
-// Decode one STCK v3 street chunk into its segment geometry, in file order. Mirrors the overlay's
-// decoder; the per-vertex density bytes are stepped over so the cursor stays aligned.
+// Decode one STCK v4 street chunk into its segment geometry, in file order. Mirrors the overlay's
+// decoder; the per-vertex density bytes are stepped over so the cursor stays aligned, and the
+// trailing stranded bitmap is ignored — a signal is computed for every segment the chunk carries,
+// drawn or not, so these indices keep answering to the chunk's own order.
 function decodeChunk(bytes: Uint8Array): Segment[] {
   const view = dataView(bytes);
   if (

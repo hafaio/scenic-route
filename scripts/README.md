@@ -944,7 +944,7 @@ Header, 40 bytes:
 | 4 | u16 | format version |
 | 6 | u16 | header bytes |
 | 8 | u32 | segment count |
-| 12 | u32 | reserved |
+| 12 | u32 | byte offset of the stranded bitmap |
 | 16 | f64 | origin longitude, degrees |
 | 24 | f64 | origin latitude, degrees |
 | 32 | f64 | coordinate scale, degrees per quantized unit |
@@ -958,6 +958,13 @@ Then `segment count` segments, back to back, each:
 - `vertex count` (longitude, latitude) pairs, zigzag LEB128 varint deltas as above
 - `2 · vertex count` density bytes, left sidewalk then right, so each line is stroked as a
   gradient rather than one flat colour
+
+Then `ceil(segment count / 8)` bitmap bytes, one bit per segment in the same order, LSB first: set
+when the segment is an OSM path whose whole component `tiler graph` dropped as an unanchored island.
+The overlay skips those, since a green line is an offer to walk somewhere the router can in fact
+take you. The bits live in their own trailing region rather than in each segment's header so that
+the two passes over a chunk — `tiler chunks` before the graph, and `tiler chunks --stranded` after
+it — differ only there, leaving `public/commercial/{x}/{y}.bin` keyed on the segment index aligned.
 
 Decoded by `components/street-score-layer.tsx`, which applies the offset in *pixels*.
 
@@ -1448,6 +1455,23 @@ Two places had to be pinned for that. The link edges and the deduped ferry edges
 order rather than in their hash map's per-process iteration order — the edge sort breaks ties only on
 the smaller node id, so without it a hundred-odd edge ids shuffled between two runs over the same
 files, and the SHDE rows, which are keyed by edge index, shuffled with them.
+
+### `public/routing/stranded.bin` — the walks the graph dropped, magic `STRD` (v1, derived, gitignored)
+
+`tiler graph --stranded` writes the OSM way ids of the paths its **island drop** takes away entirely
+— a way every edge of which sat in a component nothing CSCL anchored, so no route can enter or leave
+it. 4,704 ways, of which 4,635 are `PATH` records covering 236.0 km. The header is the magic, a
+`u16` format, a `u16` header size (12) and a `u32` count, then that many `u32` way ids, ascending.
+
+It exists because the overlay and the router are built from different sets. `tiler chunks` draws
+straight from `data/paths/<id>.bin`, which never sees the drop, so without the list the tree-cover
+overlay paints a green, tree-lined walk over trail networks the router has no edge for — 2,921 of
+those records, 145.2 km, have no graph geometry anywhere along them (Floyd Bennett Field's North
+Forty, the Staten Island Greenbelt, Ferry Point Park). The second `tiler chunks` pass reads the list
+back and sets each drawn segment's stranded bit; `src/tiles/street-score.ts` skips them.
+
+The list says nothing about whether those trails are walkable on the ground — most are. It records
+only that *this* graph cannot route them, which is what the overlay must not contradict.
 
 ### `public/routing/shade/` — the per-edge occlusion fractions, magic `SHDB` (v2, derived, gitignored)
 
