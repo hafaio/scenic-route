@@ -4034,6 +4034,7 @@ pub fn run(args: &Args) -> Fallible<()> {
         "shortEntranceSnaps": conflate_stats.short_entrance_snaps,
         "danglingEnds": conflate_stats.dangling_ends,
         "mergedDanglingEnds": conflate_stats.merged_dangling_ends,
+        "islandTouchCuts": conflate_stats.island_touch_cuts,
         "csclSplits": conflate_stats.cscl_splits,
         "osmWays": conflate_stats.osm_ways,
         "osmKm": conflate_stats.osm_km,

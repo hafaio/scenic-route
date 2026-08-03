@@ -1126,13 +1126,15 @@ walk beside it), welded at at-grade crossings, their dangling entrances snapped 
 **walking line**, the CSCL splits applied, and finally any dangling end left within 8 m of another
 node but more than 60 m from it through the network pulled onto it — so a greenway or step street
 joins the routable network, and a second mapping of an alley does not sit on top of the first as a
-dead-end spur. The entrance snap's continuation guard is waived below 8 m: inside the street's own
+dead-end spur. A last pass then nodes each component nothing anchors onto the routable line it is
+already standing on, within 1 m and never across a bridge or tunnel deck, so the island drop below
+judges only what is genuinely out of reach. The entrance snap's continuation guard is waived below 8 m: inside the street's own
 right-of-way half-width there is nothing for it to guard against, and rejecting there costs a
 whole-block detour. Conflated edges carry the OSM flag (byte-23 bit3), and the pass reports
 `osmPathEdges`, `weldedVertices`, `entranceSnaps` (with `entranceSnapsKerb` and
 `shortEntranceSnaps`, the shares that reached a sidewalk and that the waiver accepted),
-`osmTSplits`, `csclTSplits`, `dedupedOrphanWays`, `mergedDanglingEnds`, `mergedNearNodes` and
-`droppedOsmIslands`. The sidewalk pass reports `sidewalkWays`, `osmSidewalkEdges`/`osmSidewalkKm`,
+`osmTSplits`, `csclTSplits`, `dedupedOrphanWays`, `mergedDanglingEnds`, `islandTouchCuts`,
+`mergedNearNodes` and `droppedOsmIslands`. The sidewalk pass reports `sidewalkWays`, `osmSidewalkEdges`/`osmSidewalkKm`,
 `derivedSidewalkKm`, `osmSideKm` (the street-side length OSM owns), `osmCoveredStreets`,
 `streetlessSidewalkKm`, `seamCorners`, `seamLinks`, `kerbCuts`, `suppressedCrossings` and the
 repair's `seamRepairLinks`/`seamRepairMeters`/`seamRepairLongest`/`seamGaps`.
@@ -1460,15 +1462,19 @@ files, and the SHDE rows, which are keyed by edge index, shuffled with them.
 
 `tiler graph --stranded` writes the OSM way ids of the paths its **island drop** takes away entirely
 — a way every edge of which sat in a component nothing CSCL anchored, so no route can enter or leave
-it. 4,704 ways, of which 4,635 are `PATH` records covering 236.0 km. The header is the magic, a
+it. 4,036 ways, of which 3,979 are `PATH` records covering 204.5 km. The header is the magic, a
 `u16` format, a `u16` header size (12) and a `u32` count, then that many `u32` way ids, ascending.
 
 It exists because the overlay and the router are built from different sets. `tiler chunks` draws
 straight from `data/paths/<id>.bin`, which never sees the drop, so without the list the tree-cover
-overlay paints a green, tree-lined walk over trail networks the router has no edge for — 2,921 of
-those records, 145.2 km, have no graph geometry anywhere along them (Floyd Bennett Field's North
-Forty, the Staten Island Greenbelt, Ferry Point Park). The second `tiler chunks` pass reads the list
-back and sets each drawn segment's stranded bit; `src/tiles/street-score.ts` skips them.
+overlay paints a green, tree-lined walk over trail networks the router has no edge for — every one of
+those records has no graph geometry anywhere along it (Floyd Bennett Field's North Forty, the Staten
+Island Greenbelt, Ferry Point Park, Alley Pond). The second `tiler chunks` pass reads the list back
+and sets each drawn segment's stranded bit; `src/tiles/street-score.ts` skips them.
+
+Conflation's step 7 (DESIGN.md, "The order conflation runs in") is what keeps the list to the
+components that are genuinely out of reach rather than merely unnoded: it took 668 ways — 656
+records, 31.5 km — off this list by cutting the routable line each of them was already standing on.
 
 The list says nothing about whether those trails are walkable on the ground — most are. It records
 only that *this* graph cannot route them, which is what the overlay must not contradict.
