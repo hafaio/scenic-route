@@ -11,8 +11,9 @@ pub const TREE_FORMAT: u16 = 3; // v3 adds a genus byte per tree; v2 added the c
 pub const CANOPY_FORMAT: u16 = 2; // the measured 2017 LiDAR canopy under magic CNPY; v2 adds a trailing crown-height u16 per polygon
 pub const BLDG_FORMAT: u16 = 1; // building footprints with trailing roof-height/base-elevation u16s, magic BLDG
 pub const LAND_FORMAT: u16 = 1;
-pub const STREET_FORMAT: u16 = 5;
-pub const PATH_FORMAT: u16 = 1; // OSM pedestrian/park ways: STRT v5's layout, magic "PATH"
+pub const STREET_FORMAT: u16 = 6; // v6 adds the per-side sidewalk bits to the record's flags byte
+pub const PATH_FORMAT: u16 = 1; // OSM pedestrian/park ways: STRT's layout, magic "PATH"
+pub const SIDEWALK_FORMAT: u16 = 1; // OSM sidewalk/crossing/traffic-island ways: STRT's layout, magic "SWLK"
 pub const FERRY_FORMAT: u16 = 2; // the time-independent NYC ferry graph, magic "FERR"; v2 adds a route name id
 pub const LANDMARK_FORMAT: u16 = 1; // scenic POI points, the shared point layout, magic "LMRK"
 pub const ART_FORMAT: u16 = 1; // public-art POI points, the shared point layout, magic "ARTW"
@@ -348,7 +349,10 @@ pub struct Streets {
     pub ids: Vec<u32>, // per segment: the CSCL physicalid (STRT) or the OSM way id (PATH), record offset 0
     pub road_types: Vec<u8>, // per segment: 1 street, 3 bridge, 4 tunnel, 5 boardwalk, 6 path, 7 step, 10 alley
     pub width_feet: Vec<u8>, // curb to curb, 0 unknown — what the sidewalk offset is derived from
-    pub flags: Vec<u8>, // per segment: bit0 vehicular-only, bit1 non-vehicular deck, bit2 structure
+    // per segment: bit0 vehicular-only, bit1 non-vehicular deck, bit2 structure, and on STRT bits
+    // 3-6 the per-side sidewalk bits — OSM-mapped left/right, then surveyed left/right (the city's
+    // planimetric ROW polygons) — which `graph.rs`'s existence gate reads
+    pub flags: Vec<u8>,
     pub name_ids: Vec<u16>, // per segment: index into `names`, 0xFFFF when the row carried no label
     pub names: Vec<String>, // the distinct street names, decoded from the trailing name blob
     pub lengths_m: Vec<f32>, // per segment: the stored geodesic length; the graph sums, never recomputes
@@ -381,8 +385,8 @@ impl Streets {
     }
 }
 
-/// STRT v5: the CSCL street network. `road_types` is rw_type, `width_feet` the curb-to-curb
-/// width, `flags` the vehicular/deck/structure bits.
+/// STRT v6: the CSCL street network. `road_types` is rw_type, `width_feet` the curb-to-curb
+/// width, `flags` the vehicular/deck/structure bits and the four per-side sidewalk bits above.
 pub fn read_streets(path: &Path) -> Fallible<Streets> {
     read_network(path, "STRT", STREET_FORMAT)
 }
@@ -395,8 +399,16 @@ pub fn read_paths(path: &Path) -> Fallible<Streets> {
     read_network(path, "PATH", PATH_FORMAT)
 }
 
-// STRT v5's reader, shared by both networks: the two files are byte-identical in shape, so only
-// the magic and format version differ. The field meanings above are the caller's to know.
+/// SWLK v1: OSM's own sidewalk network. Same byte layout again — `road_types` is the kind (20
+/// sidewalk, 21 crossing, 22 traffic island), `width_feet` and the density blob are zero (the way
+/// *is* the walking line, and the ingest never samples cover on it), and `flags` carries only bit2
+/// structure.
+pub fn read_sidewalks(path: &Path) -> Fallible<Streets> {
+    read_network(path, "SWLK", SIDEWALK_FORMAT)
+}
+
+// STRT's reader, shared by the networks: the files are byte-identical in shape, so only the magic
+// and format version differ. The field meanings above are the caller's to know.
 fn read_network(path: &Path, magic: &str, format: u16) -> Fallible<Streets> {
     let bytes = fs::read(path)?;
     check_magic(&bytes, magic, format, path)?;

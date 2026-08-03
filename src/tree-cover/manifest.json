@@ -11,7 +11,7 @@
         "east": -73.69754968526789
       },
       "trees": 899394,
-      "updated": "2026-07-18",
+      "updated": "2026-07-31",
       "attribution": "NYC Parks Forestry (ForMS) via NYC Open Data",
       "sourceUrl": "https://data.cityofnewyork.us/d/hn5i-inap",
       "field": {
@@ -38,7 +38,7 @@
           "sha256": "16c31e1005d1cb484130db017ae0d2407f138d67df25d4e158caea3c97585c62",
           "squareKm": 172.6,
           "measuredHeights": 496604,
-          "updated": "2026-07-18",
+          "updated": "2026-07-31",
           "attribution": "Tree canopy © NYC OTI / NYC Parks (2017 LiDAR)",
           "sourceUrl": "https://services3.arcgis.com/xJHn8F2NTtwCMFtX/arcgis/rest/services/TreeCanopy2017_Simplified_1ft/FeatureServer/0",
           "heightAttribution": "Canopy heights © Ma et al. 2023 (CC BY 4.0)",
@@ -146,17 +146,17 @@
             "p99": 0.993
           }
         },
-        "updated": "2026-07-18",
+        "updated": "2026-07-31",
         "attribution": "path & tree data © OpenStreetMap contributors",
         "sourceUrl": "https://www.openstreetmap.org/copyright"
       },
       "streets": {
         "file": "nyc.bin",
-        "format": 5,
+        "format": 6,
         "segments": 122652,
         "vertices": 745883,
         "bytes": 7379200,
-        "sha256": "c64f419f6257d63bc3a398e3f0d817514a036c196eeebf98ac789306dc2831c3",
+        "sha256": "c987635da9b0369169bf619fd579875f572120c17fe820391029f251b3289b41",
         "densifyMeters": 25,
         "sidewalkInsetMeters": 2,
         "density": {
@@ -181,7 +181,7 @@
             "p99": 0.98
           }
         },
-        "updated": "2026-07-18",
+        "updated": "2026-07-31",
         "attribution": "NYC DoITT Street Centerline (CSCL) via NYC Open Data",
         "sourceUrl": "https://data.cityofnewyork.us/d/inkn-q76z"
       },
@@ -216,7 +216,7 @@
             "p99": 1
           }
         },
-        "updated": "2026-07-18",
+        "updated": "2026-07-31",
         "attribution": "OpenStreetMap contributors",
         "sourceUrl": "https://www.openstreetmap.org/copyright"
       }

@@ -150,17 +150,211 @@ penumbra is ~5 cm against 3.6 m pixels.
 
 ## The walking network
 
-CSCL's street centrelines carry the sidewalks — one derived edge offset onto each side — and OSM's
-pedestrian and park network is conflated into them before the graph is noded. `scripts/README.md`
-says how it is built. This is why the seam between the two datasets is cut where it is.
+Where OSM maps a sidewalk, that way *is* the sidewalk edge. CSCL's centrelines supply a per-side
+offset only on the sides OSM leaves, and only where OSM or the city's planimetric survey says there
+is pavement there at all — a street both of whose sides come back silent is demoted to its own
+centreline rather than deleted, because you walk an alley. `scripts/README.md` says how it is built.
+This is why the seam between the two datasets is cut where it is.
+
+### Whether there is pavement at all
+
+Two sources answer it and neither alone can. **OSM's silence is ambiguous** — a mapping gap or a
+genuinely bare kerb — and it is worst exactly where it would do most damage: OSM is silent on both
+sides of 40.5% of Bronx street km, and only 24.0% of that is really bare, against 82.1% of the 7.6%
+it is silent on in Brooklyn. The gaps fall in contiguous neighbourhoods
+(Williamsbridge, Wakefield, Soundview, Mott Haven) that plainly have sidewalks. The city's
+planimetric ROW-sidewalk polygons are an aerial trace of what is on the ground, so *their* silence
+means something. A side has pavement when OSM maps a sidewalk there **or** the survey draws one; only
+a side both come back silent on is bare. Where both call a street one-sided they name the same side
+**96.8%** of the time — 11,177 of the 11,546 streets they both call one-sided, or 97.9% by kilometre.
+
+**The survey layer is `52n9-sdep`, `sub_code` 380000, and its sibling is a trap.** "Sidewalk
+Centerline" (`a9xv-vek9`) looks like the obvious dataset and is not: it captures interior-campus
+walkways and explicitly excludes the street right-of-way, so it cannot answer the sidedness question
+at all. The polygon layer can, and it is NYC Open Data rather than ODbL.
+
+Both sources are read the same way — a side counts when half its samples hit, not when one lucky
+point does — so a driveway or a corner cannot decide a whole segment. The stations are the **centres
+of equal pieces** of the segment rather than every step from its start: a CSCL segment ends at a
+junction, so a station standing on an end vertex takes its perpendicular offset into the *cross*
+street's roadway, and on the corner slivers the city is full of that one station is the whole answer.
+The point probe's own false negatives are then beaten down by a cross-street fan at each station
+rather than by loosening the half rule. Where CSCL carries no `streetwidth` at all the fan is
+**wider**, because there the offset it is fanning around is the citywide median standing in for a
+width nobody recorded rather than a measured one off by half a metre.
+
+**Those false negatives are not evenly spread, and the gate's budget must not be read as if they
+were.** Against "OSM maps both sides" as the independent check, the survey confirms 94.7% of the
+streets it gets eight or more stations on and 26.8% of the ones it gets one; both sides come back
+silent on 55.4% of sub-15 m segments against 9.6% of blocks over 120 m, and on 57.5% of the 1,602
+offsetted segments with no recorded width against 16.0% of those that have one. Part of that is real
+— a sliver inside a junction has no pavement beside it to draw — and the rest is the probe's, so a
+short or width-less street is markedly likelier than a long one to be demoted to its centreline. The
+figures above are after both fixes; from the start of the segment and with one fan for every street
+they read 20.6%, 61.2% and 66.9%.
+
+### The existence gate
+
+A side keeps its derived sidewalk edge only where the two sources above say there is pavement on it:
+OSM maps a sidewalk there, or the survey draws one. A street both of whose sides come back silent
+keeps no sidewalk at all and is **demoted to its centreline as a path edge, never deleted** — an
+alley has no sidewalk, but you walk the alley, and so do the people on any street the city never
+paved a side of. Alleys fall out of the rule with no special case of their own, which is the check
+the build asserts on: a run where the gate does not take them has the rule the wrong way round.
+About 15–20% of the derived sidewalk length the ungated network carried had no pavement under it.
+
+The gate is guarded in both directions because it reads bits another program stamped. A STRT file
+whose per-side bits were never written reads as "no sidewalk anywhere", which would silently strip
+the city of pavement, so an implausible drop is a build error rather than a graph.
+
+### The centreline dogleg
+
+Observed live at Pearl and Water Street: a route walks the sidewalk, turns 90° **into the middle of
+the roadway**, and turns back out to reach a plaza path. It is a seam defect, not a coverage or a
+sidedness one — a dangling OSM endpoint snapped to its projection on the CSCL *centreline*, that
+projection became a graph node, and the sidewalks were offset off the centreline only afterwards, so
+the join landed where nobody walks. Citywide there were **13,636 such entrance snaps**, each costing
+twice the street's half-offset: a median 13.1 m of detour, 19.2 m at p90.
+
+So an entrance snaps to the nearest *walking* line — the sidewalk position of a side that has
+pavement, or a centreline only where the street is itself the walking surface — and splits that. A
+sidewalked street's centreline is never a snap target again. Both the continuation guard and its
+right-of-way waiver stay measured to the centreline, because either question asks whether the way is
+heading for this street and the street is where its centreline is: moving the far end of the
+connector onto the pavement must not also change which entrances are accepted.
+
+**A side offers its line when pavement *exists* there, not when this build derives an edge for it.**
+Those are different masks: the derived one is zeroed wherever OSM maps the pavement itself, so
+keying the targets to it would offer no line along a fully mapped block — and an entrance reaching
+for one would find nothing and be dropped with its island, or take the far side's line and cross the
+roadway to reach it under the 8 m waiver, which is the dogleg again. The corner these snaps bind to
+is materialized off the existence mask for the same reason.
+
+**Another OSM way is a walking polyline too, and is deliberately not a candidate.** Joining two OSM
+ways is the dangling-end merge's job, and that pass asks a second question this one cannot — how far
+apart they are through the network. A 20 m way-to-way snap here would quietly override it.
+
+### OSM is the pavement, CSCL is the label
+
+The dogleg is what makes OSM primary rather than supplementary. It is a seam defect, so it is not
+answered by better coverage or better sidedness, and it is fixed *by construction* wherever OSM has
+mapped the block: the sidewalk way is in the graph, the entrance footway meets it at a node the
+mappers already shared, and the centreline never enters into it. **86% of the dangling entrance
+endpoints have an OSM sidewalk mapped within 30 m**, so most of that join was there all along and the
+old build discarded it by excluding sidewalks from the ingest and then re-invented it badly.
+
+The cost of ingesting `footway=sidewalk` is that the network doubles unless something takes the
+derived offset away, and **the exclusivity has to be per stretch, not per side**: a side is not all
+one thing, and gating it on a per-side threshold left every partly-mapped side carrying its OSM way
+and a full-length offset over the same ground. So the association measures which stretches of a side
+OSM covers, and the derived offset is cut back out of exactly those. **It has to be its own corridor
+test and not a widening of the conflation's 6 m dedup band**, which was tuned to shed on-street
+protected bike lanes: a narrow street's sidewalk sits at ~5.7 m, inside that band, so widening it
+would eat the pavement the swap exists to keep.
+
+**CSCL labels the geometry OSM draws.** OSM's sidewalk ways are 98.7% unnamed — 1,813 of 137,014
+carry a name — so a matched way takes its street's name, its N/E/S/W side label, its half-offset byte
+and its cover byte from the CSCL side it flanks. That side label is the nearest cardinal to the
+side's outward normal, with an exact diagonal resolved to N/S. The half-offset has to keep meaning
+"half the roadway plus the inset of the street I flank", because the shed depth measurement infers
+the kerb from it. The cover byte transfers because the OSM line sits a median 0.78 m from where that
+byte was sampled, which is noise against the density kernel's 4 m across-street σ.
+
+`footway=traffic_island` comes in with the crossings and is costed as part of one: a crossing chains
+through the island in the middle of it, so an island read as anything else leaves the two halves of
+every divided street's crossing joined to nothing.
+
+### Named by the street it flanks, not by the way id
+
+The durable edge key is `(source id, side, ordinal)` — see *Named by its source, not its position*
+under sheds for why an edge cannot be keyed on its position. An OSM sidewalk way could supply its own
+way id as that source id, and must not. Measured against Overpass attic snapshots joined to today's
+extract, **10.65% of the 2022 sidewalk way ids and 3.13% of the 2024 ids are dead now** — about
+1.5–2% a year, concentrated exactly where mapping is active, which is now the Bronx frontier.
+`closed.bin` is append-only history whose spans are never re-placed, so those losses would be silent
+and permanent between full rebuilds. The association already computed for the labels mints the key
+instead: a mapped sidewalk edge is keyed on the CSCL `physicalid` it flanks, stable however mappers
+split or redraw the way. Way-id keys survive only on the ~155 km of street-less ways — esplanades,
+bridge decks — where scaffolding is rare and 1.5–2% a year is an acceptable exposure.
+
+**The ordinal carries no cross-build meaning**, and two schemes that tried to give it one were
+measured and rejected. An along-street *index* shifts every later sibling down one when a piece is
+removed, so a span keyed to ordinal 2 silently resolves to what was ordinal 3 — the adjacent piece of
+the same street and side. Plausible, undetectable, wrong. A **position-derived** ordinal, the piece's
+start offset along the centreline quantised into the u8's 255 buckets, cannot pick a quantum: the
+buckets must span a `physicalid` row that runs to 2,505 m, while the pieces the ordinal has to
+separate are corner and crossing slivers — cutting the 137k sidewalk ways at their junction nodes
+gives 293,797 pieces of **median length 4.2 m**, 52.3% of them under 8 m. At any workable quantum
+about half collide with a neighbour at build time, and the geometry drifts underneath: 3.1% of way
+start nodes moved more than 8 m in two years, so a vacated bucket gets reoccupied by a drifted one.
+Both schemes turn a removal into a neighbour match, which is the one failure this artifact may not
+have. What makes them unnecessary is the hash gate — the artifact resolves nothing at all against any
+other graph — so an ordinal never has to survive a rebuild.
+
+### The seam
+
+Two networks meeting is where gaps and duplicates hide, and there are four joins to make.
+
+*Inside a mapped block* there is nothing to invent: OSM's own shared nodes carry the walk, and
+mid-block crossings and plaza connections come along free — connectivity the derived graph could not
+express at all.
+
+*At a mixed intersection*, where some legs are mapped and some derived, the corner fan is still built
+from the CSCL street-ends. Every street-side slot resolves to exactly one **terminus**: the derived
+corner node where the side is derived, the nearest incident OSM sidewalk node within the corner
+radius where it is mapped. Crossings and fan joins then connect termini pairwise, whichever kind each
+is. Exactly one, in both directions — a slot with no terminus leaves the two networks passing within
+metres of each other and never meeting, and a slot with two leaves a corner standing beside a corner.
+
+*Where the mapping ends mid-block* — uncommon, since sidewalks are mapped block-wise — the OSM end
+and the derived edge on the same side splice end to end.
+
+*Where OSM draws a whole block as one unbroken way* there is no node for the seam to bind to at all,
+so a corner standing metres from that pavement reaches nothing and the walk goes round the block. The
+corner cuts the way at its own projection, which gives the seam the node it was missing; nothing
+downstream changes, because a cut is only a node. It is guarded, because a line passing close is not
+by itself pavement this corner opens onto — `cut_sidewalks_at_corners` states the three guards and
+what each one is measured against.
+
+### Crossings
+
+Where OSM maps a crossing it is the crossing, at its true position, including the marked mid-block
+ones. A crossing is still **synthesized at every corner pair OSM does not serve**, suppressed only
+where an OSM crossing already joins that pair: without the supplement the router would refuse the
+legal unmarked corner crossing and detour around it, so mapped areas would come out worse than
+unmapped ones. Differences remain where OSM maps a crossing on one arm of an intersection and not
+another.
+
+This is also what carries a walk from one block face to the next. A block face's mapped pavement
+stops at every kerb — see *Where a shed actually stands* for the 152,629 sidewalk ends this produced
+against 54 in the derived network — so a walk that steps only from sidewalk to sidewalk stops dead at
+the first corner.
+
+### An OSM refresh is a deploy decision
+
+OSM's NYC sidewalk network tripled between 2022 and 2026 and the mapping campaign is still running,
+mostly on the Bronx frontier. So a refresh is deliberate and roughly annual rather than continuous,
+and it always carries `build-sheds` in the same deploy — see *A source refresh and its re-place are
+one deploy*. Under the existence gate a refresh is monotone improvement, sides upgrading from derived
+to OSM, but route diffs between deploys now include OSM edits, which they did not before.
 
 ### The order conflation runs in
 
-Every pass is a rule about that seam and the order is the design: dedup OSM against CSCL, node the
-paths among themselves, dedup the named orphans a second time in a wider band, weld at-grade
-crossings, snap dangling entrances, apply the accumulated CSCL splits, then merge the dangling ends
-the network says are a block from what they touch. Every tolerance in it is a named constant
-carrying the Central Park measurement that chose it, so none of them should be moved by eye.
+Every pass is a rule about that seam and the order is the design: node the CSCL network against
+itself, dedup OSM against CSCL, node the paths among themselves, dedup the named orphans a second
+time in a wider band, weld at-grade crossings, snap dangling entrances, apply the accumulated CSCL
+splits, then merge the dangling ends the network says are a block from what they touch. Every
+tolerance in it is a named constant carrying the Central Park measurement that chose it, so none of
+them should be moved by eye.
+
+**The first pass exists because the city does not node an alley's mouth.** `graph.rs` nodes protos by
+their endpoints alone, which is all it takes wherever the city splits both lines at their junction —
+and an alley is a T onto the *interior* of the street it opens off. **3,795 alley ends citywide stand
+on a street centreline** at p50 0.00 m with no node of their own, against 63 street ends and 108 path
+ends that do the same. With no cut there the alley lattice behind a block is a walkable island
+nothing on the street can reach: 269 of 312 km of alley, measured before the pass existed. So a
+street endpoint standing on another street's interior cuts it there and moves onto the cut, and the
+noding then sees one point.
 
 **The two dedup bands are one rule split by how much evidence it has.** Between 6 and 10 m geometry
 alone cannot tell a re-mapped street from a path that merely runs beside one — at 10 m a single band
