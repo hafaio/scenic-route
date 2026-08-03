@@ -10,6 +10,7 @@ use std::time::Instant;
 use crate::Fallible;
 use crate::binfmt::{self, SIDES, Streets, write_varint, zigzag};
 use crate::geometry::round_half_up;
+use crate::graph::{STRANDED_FORMAT, STRANDED_HEADER_BYTES};
 use crate::manifest::Manifest;
 use crate::raster::{
     TILE_SIZE, lat_to_pixel_y, lng_to_pixel_x, pixel_x_to_lng, pixel_y_to_lat, tile_index,
@@ -17,7 +18,7 @@ use crate::raster::{
 use crate::sidewalks;
 
 // layouts: scripts/README.md
-const CHUNK_FORMAT: u16 = 3;
+const CHUNK_FORMAT: u16 = 4;
 const CHUNK_HEADER_BYTES: usize = 40;
 const CHUNK_COORD_SCALE: f64 = 1e-6; // degrees per quantized unit, ~0.1 m
 const CHUNK_ZOOM: u32 = 12;
@@ -28,6 +29,36 @@ pub struct Args {
     pub data: PathBuf,
     pub chunks: PathBuf,
     pub paths: Option<PathBuf>, // the OSM path network, drawn into the same z12 street chunks
+    // The graph's STRD list of the OSM ways its island drop stranded. Absent on the pass that runs
+    // before the graph exists, and then every segment's bit is clear.
+    pub stranded: Option<PathBuf>,
+}
+
+/// The STRD way ids, sorted as `tiler graph` wrote them, for `contains` by binary search.
+fn read_stranded(file: &Path) -> Fallible<Vec<u32>> {
+    let bytes = fs::read(file)?;
+    if bytes.len() < STRANDED_HEADER_BYTES || &bytes[0..4] != b"STRD" {
+        return Err(format!("{}: not an STRD file", file.display()).into());
+    }
+    let format = u16::from_le_bytes([bytes[4], bytes[5]]);
+    if format != STRANDED_FORMAT {
+        return Err(format!(
+            "{}: STRD v{format}, expected v{STRANDED_FORMAT}",
+            file.display()
+        )
+        .into());
+    }
+    let header = u16::from_le_bytes([bytes[6], bytes[7]]) as usize;
+    let count = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]) as usize;
+    if bytes.len() < header + 4 * count {
+        return Err(format!("{}: STRD truncated", file.display()).into());
+    }
+    Ok((0..count)
+        .map(|index| {
+            let at = header + 4 * index;
+            u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
+        })
+        .collect())
 }
 
 /// A chunk member: which network it came from and its segment index there. Streets and paths
@@ -40,11 +71,17 @@ enum Member {
 
 // The client has no access to the records, so the sidewalk offset the two lines are drawn either
 // side of travels with the geometry. A path member points into `paths` and always carries offset
-// 0 — it is one centreline, not a curb-to-curb road. layout: scripts/README.md
+// 0 — it is one centreline, not a curb-to-curb road.
+//
+// The stranded bits ride in a trailing bitmap rather than in each segment's header so that the two
+// passes over a chunk — before the graph and after it — differ in that region alone, leaving the
+// per-segment records byte-identical and the commercial signals keyed on their index still aligned.
+// layout: scripts/README.md
 fn encode_chunk(
     streets: &Streets,
     paths: Option<&Streets>,
     members: &[Member],
+    stranded: &[u32],
     inset_meters: f64,
     origin_lng: f64,
     origin_lat: f64,
@@ -86,10 +123,22 @@ fn encode_chunk(
         bytes.extend_from_slice(&densities[SIDES * from..SIDES * to]);
     }
 
+    let stranded_offset = bytes.len();
+    bytes.resize(stranded_offset + members.len().div_ceil(8), 0);
+    for (index, member) in members.iter().enumerate() {
+        if let Member::Path(segment) = member {
+            let way = paths.expect("a paths network for a path member").ids[*segment as usize];
+            if stranded.binary_search(&way).is_ok() {
+                bytes[stranded_offset + index / 8] |= 1 << (index % 8);
+            }
+        }
+    }
+
     bytes[0..4].copy_from_slice(b"STCK");
     bytes[4..6].copy_from_slice(&CHUNK_FORMAT.to_le_bytes());
     bytes[6..8].copy_from_slice(&(CHUNK_HEADER_BYTES as u16).to_le_bytes());
     bytes[8..12].copy_from_slice(&(members.len() as u32).to_le_bytes());
+    bytes[12..16].copy_from_slice(&(stranded_offset as u32).to_le_bytes());
     bytes[16..24].copy_from_slice(&origin_lng.to_le_bytes());
     bytes[24..32].copy_from_slice(&origin_lat.to_le_bytes());
     bytes[32..40].copy_from_slice(&CHUNK_COORD_SCALE.to_le_bytes());
@@ -133,6 +182,7 @@ fn bucket_network(
 fn write_chunks(
     streets: &Streets,
     paths: Option<&Streets>,
+    stranded: &[u32],
     inset_meters: f64,
     chunks: &Path,
 ) -> Fallible<(usize, usize)> {
@@ -150,6 +200,7 @@ fn write_chunks(
             streets,
             paths,
             members,
+            stranded,
             inset_meters,
             origin_lng,
             origin_lat,
@@ -175,6 +226,11 @@ pub fn run(args: &Args) -> Fallible<()> {
         None => None,
     };
 
+    let stranded = match &args.stranded {
+        Some(file) => read_stranded(file)?,
+        None => Vec::new(),
+    };
+
     let mut chunks = 0;
     let mut chunk_bytes = 0;
     for city in &manifest.cities {
@@ -188,6 +244,7 @@ pub fn run(args: &Args) -> Fallible<()> {
         let (city_chunks, city_bytes) = write_chunks(
             &streets,
             paths.as_ref(),
+            &stranded,
             city.streets.sidewalk_inset_meters,
             &args.chunks,
         )?;

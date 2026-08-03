@@ -37,12 +37,12 @@ pub type Fallible<T> = Result<T, Box<dyn Error + Send + Sync>>;
 const USAGE: &str = "usage:
   tiler densities --params <file.json>
   tiler heights --canopy <file.bin> --chm <file.tif>
-  tiler chunks --manifest <file.json> --data <dir> --chunks <dir> [--paths <file.bin>]
+  tiler chunks --manifest <file.json> --data <dir> --chunks <dir> [--paths <file.bin>] [--stranded <file.bin>]
   tiler caster-chunks --manifest <file.json> --data <dir> --chunks <dir> --params <file.json>
   tiler canopy --manifest <file.json> --ramp <file.bin> --data <dir> --tiles <dir>
   tiler shade --manifest <file.json> --data <dir> --tiles <dir> --params <file.json>
   tiler genus-field --manifest <file.json> --data <dir> --tiles <dir>
-  tiler graph --streets <file.bin> [--paths <file.bin>] [--sidewalks <file.bin>] [--ferries <file.bin>] [--landmarks <file.bin>] [--art <file.bin>] [--highways <file.bin>] [--commercial <file.bin>] [--canopy <file.bin>] [--buildings <file.bin> --shade-params <file.json> --shade-dir <dir>] --out <file.bin>
+  tiler graph --streets <file.bin> [--paths <file.bin>] [--sidewalks <file.bin>] [--ferries <file.bin>] [--landmarks <file.bin>] [--art <file.bin>] [--highways <file.bin>] [--commercial <file.bin>] [--canopy <file.bin>] [--buildings <file.bin> --shade-params <file.json> --shade-dir <dir>] [--stranded <file.bin>] --out <file.bin>
 ";
 
 fn flags(mut args: impl Iterator<Item = String>) -> Fallible<HashMap<String, String>> {
@@ -81,6 +81,7 @@ fn run() -> Fallible<()> {
             data: path(&flags, "data")?,
             chunks: path(&flags, "chunks")?,
             paths: flags.get("paths").map(PathBuf::from),
+            stranded: flags.get("stranded").map(PathBuf::from),
         }),
         "caster-chunks" => caster_chunks::run(&caster_chunks::Args {
             manifest: path(&flags, "manifest")?,
@@ -115,6 +116,7 @@ fn run() -> Fallible<()> {
             highways: flags.get("highways").map(PathBuf::from),
             commercial: flags.get("commercial").map(PathBuf::from),
             out: path(&flags, "out")?,
+            stranded: flags.get("stranded").map(PathBuf::from),
             buildings: flags.get("buildings").map(PathBuf::from),
             shade_params: flags.get("shade-params").map(PathBuf::from),
             shade_dir: flags.get("shade-dir").map(PathBuf::from),

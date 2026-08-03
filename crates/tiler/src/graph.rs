@@ -231,6 +231,9 @@ const MIN_LINK_EDGES: usize = 2_500;
 // 0%, and no alley km makes the demoted share whatever the missing-denominator branch says.
 const MIN_DERIVED_SIDEWALK_KM: f64 = 400.0;
 
+pub const STRANDED_FORMAT: u16 = 1;
+pub const STRANDED_HEADER_BYTES: usize = 12;
+
 pub struct Args {
     pub streets: PathBuf,
     pub paths: Option<PathBuf>,
@@ -243,6 +246,9 @@ pub struct Args {
     pub highways: Option<PathBuf>,
     pub commercial: Option<PathBuf>,
     pub out: PathBuf,
+    // Where the OSM way ids of the paths the island drop stranded are written. `tiler chunks` reads
+    // the file back so the overlay stops painting a walk this graph holds no edge for.
+    pub stranded: Option<PathBuf>,
     // The optional SHDE bake: building footprints, the shade sun-position params (the same file
     // `tiler shade` reads), and the directory the per-bin shade files are written to. All three or none.
     pub buildings: Option<PathBuf>,
@@ -1399,6 +1405,49 @@ fn drop_self_loops(edges: &mut Vec<V2Edge>) -> Vec<V2Edge> {
     dropped
 }
 
+/// The OSM way ids of the paths the island drop takes away entirely, sorted. The overlay draws the
+/// same ways straight from the PATH network, which never sees this drop, so without the list it
+/// paints a tree-lined walk over a component no route can enter or leave.
+///
+/// A way is stranded only when *every* edge it produced went with a dropped component, and the test
+/// runs over the pre-contraction edges because a contracted chain keeps only the least source id of
+/// its parts: reading the survivors alone would call a way stranded whose geometry a chain still
+/// carries. Folding those edges into the union-find restores the nodes contraction removed and joins
+/// nothing the survivors kept apart, since a chain never spans two components.
+fn stranded_osm_paths(
+    edges: &[Edge],
+    final_edges: &[Edge],
+    keep_edge: &[bool],
+    node_count: usize,
+) -> Vec<u32> {
+    let mut parent: Vec<u32> = (0..node_count as u32).collect();
+    for edge in final_edges.iter().chain(edges) {
+        union(&mut parent, edge.a, edge.b);
+    }
+    let mut dropped_roots: HashSet<u32> = HashSet::new();
+    for (edge, keep) in final_edges.iter().zip(keep_edge) {
+        if !keep {
+            let root = find(&mut parent, edge.a);
+            dropped_roots.insert(root);
+        }
+    }
+    let mut kept: HashSet<u32> = HashSet::new();
+    let mut lost: HashSet<u32> = HashSet::new();
+    for edge in edges {
+        if edge.osm && edge.kind == KIND_PATH {
+            let root = find(&mut parent, edge.a);
+            if dropped_roots.contains(&root) {
+                lost.insert(edge.source_id);
+            } else {
+                kept.insert(edge.source_id);
+            }
+        }
+    }
+    let mut ways: Vec<u32> = lost.difference(&kept).copied().collect();
+    ways.sort_unstable();
+    ways
+}
+
 /// Leaves one crossing over each pair of nodes and drops the rest, returning how many it dropped.
 /// Parallel edges are never the only path between their own two ends, so this cannot disconnect
 /// anything: every pair it touches keeps a crossing.
@@ -1578,6 +1627,25 @@ fn write_version(out: &std::path::Path, bytes: &[u8], edge_count: usize) -> Fall
         out.with_file_name("version.json"),
         serde_json::to_vec(&version)?,
     )?;
+    Ok(())
+}
+
+/// The STRD file: the magic, the format, the header size and the count, then that many sorted u32 OSM
+/// way ids. Written beside the graph because it is the graph's own answer to which drawn walks it
+/// keeps, and read by `tiler chunks`. Layout: scripts/README.md.
+fn write_stranded(out: &std::path::Path, ways: &[u32]) -> Fallible<()> {
+    let mut bytes = Vec::with_capacity(STRANDED_HEADER_BYTES + 4 * ways.len());
+    bytes.extend_from_slice(b"STRD");
+    bytes.extend_from_slice(&STRANDED_FORMAT.to_le_bytes());
+    bytes.extend_from_slice(&(STRANDED_HEADER_BYTES as u16).to_le_bytes());
+    bytes.extend_from_slice(&(ways.len() as u32).to_le_bytes());
+    for way in ways {
+        bytes.extend_from_slice(&way.to_le_bytes());
+    }
+    if let Some(parent) = out.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(out, &bytes)?;
     Ok(())
 }
 
@@ -2171,6 +2239,7 @@ pub fn run(args: &Args) -> Fallible<()> {
         })
         .collect();
     let dropped_osm_islands = dropped_osm_island_roots.len();
+    let stranded_ways = stranded_osm_paths(&edges, &final_edges, &keep_edge, merged_count);
     let mut kept_edges: Vec<Edge> = Vec::with_capacity(final_edges.len());
     for (edge, keep) in final_edges.into_iter().zip(keep_edge) {
         if keep {
@@ -3836,6 +3905,9 @@ pub fn run(args: &Args) -> Fallible<()> {
     }
     fs::write(&args.out, &bytes)?;
     write_version(&args.out, &bytes, edge_count)?;
+    if let Some(path) = &args.stranded {
+        write_stranded(path, &stranded_ways)?;
+    }
 
     // The SHDE artifact (optional): the building and crown occlusion fractions per edge per
     // sun-position bin, keyed off the same finalized `v2_edges` order the client reads GRPH records
@@ -3972,6 +4044,7 @@ pub fn run(args: &Args) -> Fallible<()> {
         "osmCoveredStreets": osm_covered_streets,
         "droppedOsmIslands": dropped_osm_islands,
         "droppedOsmIslandKm": dropped_osm_island_km,
+        "strandedPathWays": stranded_ways.len(),
         "osmPathEdges": osm_path_edges,
         "osmPathKm": osm_path_km,
         "osmSidewalkEdges": osm_sidewalk_edges,
@@ -4385,6 +4458,63 @@ mod tests {
     // (4, -4) and one in the 270-degree wedge behind it at (-4, 4); the way passes through the
     // second wedge and only clips the corner of the first, which is what the guards have to tell
     // apart.
+    /// One edge for the island-drop tests: nothing but its ends, its provenance and its kind matter.
+    fn island_edge(a: u32, b: u32, osm: bool, kind: u8, source_id: u32) -> Edge {
+        Edge {
+            a,
+            b,
+            poly_x: vec![0, 1],
+            poly_y: vec![0, 1],
+            length: 1.0,
+            cover_left: 0,
+            cover_right: 0,
+            offset: 0,
+            flags: 0,
+            name_id: UNNAMED,
+            osm,
+            source_id,
+            kind,
+            side: SIDE_NONE,
+            sidewalks: 0,
+            paved: 0,
+            kerb_a: false,
+            kerb_b: false,
+        }
+    }
+
+    #[test]
+    fn a_way_is_stranded_only_when_its_whole_component_goes() {
+        // Nodes 0-1 are a CSCL street with an OSM path (way 10) hung off it at node 1; nodes 3-4 are
+        // an OSM path net (ways 20 and 21) touching nothing else.
+        let edges = vec![
+            island_edge(0, 1, false, KIND_SIDEWALK, 1),
+            island_edge(1, 2, true, KIND_PATH, 10),
+            island_edge(3, 4, true, KIND_PATH, 20),
+            island_edge(4, 5, true, KIND_PATH, 21),
+        ];
+        let keep_edge = vec![true, true, false, false];
+        let ways = stranded_osm_paths(&edges, &edges, &keep_edge, 6);
+        assert_eq!(ways, vec![20, 21]);
+    }
+
+    #[test]
+    fn a_way_a_surviving_chain_still_carries_is_not_stranded() {
+        // Contraction keeps only the least source id of a chain, so the survivor of ways 30 and 31
+        // names 30 alone. Read off the survivors, way 31 would look stranded; read off the parts it
+        // was built from, it is exactly as reachable as way 30 is.
+        let parts = vec![
+            island_edge(0, 1, false, KIND_SIDEWALK, 1),
+            island_edge(1, 2, true, KIND_PATH, 30),
+            island_edge(2, 3, true, KIND_PATH, 31),
+        ];
+        let contracted = vec![
+            island_edge(0, 1, false, KIND_SIDEWALK, 1),
+            island_edge(1, 3, true, KIND_PATH, 30),
+        ];
+        let ways = stranded_osm_paths(&parts, &contracted, &vec![true, true], 4);
+        assert!(ways.is_empty(), "{ways:?}");
+    }
+
     fn cut_edge(a: u32, b: u32, poly: &[(i32, i32)], pathlike: bool, structure: bool) -> Edge {
         let poly_x: Vec<i32> = poly.iter().map(|point| point.0).collect();
         let poly_y: Vec<i32> = poly.iter().map(|point| point.1).collect();

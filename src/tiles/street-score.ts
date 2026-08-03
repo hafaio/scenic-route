@@ -146,7 +146,12 @@ function draw(
   const normalXs = new Float64Array(longest);
   const normalYs = new Float64Array(longest);
 
-  for (const { lngs, lats, densities, offsetMeters } of segments) {
+  for (const { lngs, lats, densities, offsetMeters, stranded } of segments) {
+    // A green line here is an offer to walk somewhere pleasant, so a path the routing graph dropped
+    // has no business being one: the router would answer with a way round it, or nothing at all.
+    if (stranded) {
+      continue;
+    }
     // The two sidewalks of a street are ~14 m apart, which at z13 is one pixel: drawn true to
     // the ground they would merge into the single line this layer exists to take apart. So the
     // separation is a screen-space decision, never baked into the data — floored at a stroke
