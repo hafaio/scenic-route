@@ -1,7 +1,7 @@
-// A slice of the real shed history, taken from the Python prototype in the session scratchpad
-// (`sheds/encode_sheds.py --fixture`). `SHEDS` and `COVERAGE` come from the prototype's CSV rows and
-// a naive day scan, not from any encoder's byte layout, so a mistake shared by encoder and reader
-// still fails — that is what the reader's oracle rests on.
+// A slice of the real shed history, taken from the prototype that preceded this encoder and no
+// longer exists in the tree. `SHEDS` and `COVERAGE` come from that prototype's CSV rows and a naive
+// day scan, not from any encoder's byte layout, so a mistake shared by encoder and reader still
+// fails — that is what the reader's oracle rests on.
 //
 // The three base64 blobs are NOT the prototype's. SHED names a span by the graph's
 // durable key rather than by an edge id, a layout the prototype never wrote, so they are this

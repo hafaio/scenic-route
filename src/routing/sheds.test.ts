@@ -85,7 +85,9 @@ const QUANTUM = 1e-6;
 const SIDE_SHIFT = 3; // the graph's kind-and-side byte, bits 3-5
 
 // A graph of straight edges out of one node, edge `i` running at `bearings[i]` (degrees) for ~110 m.
-// Geometry-less, so edgePath reads the node coordinates — which is all the shed field needs of a graph.
+// Geometry-less, so edgePath reads the node coordinates — which is all the shed field needs of a
+// graph. It names itself with the hash the fixture's artifact was placed against, or nothing it
+// carries would resolve onto it.
 function straightGraph(edgeCount: number, ...bearings: number[]): RoutingGraph {
   const nodeQx = new Int32Array(edgeCount + 1);
   const nodeQy = new Int32Array(edgeCount + 1);
@@ -102,6 +104,7 @@ function straightGraph(edgeCount: number, ...bearings: number[]): RoutingGraph {
     edgeNodeB[edge] = edge + 1;
   }
   return {
+    hash: GRAPH_HASH,
     edgeCount,
     nodeCount: edgeCount + 1,
     originLat: MIDTOWN.lat,
@@ -325,6 +328,23 @@ test("a shed lands on the same street after a rebuild renumbers every edge", () 
   expect(moved).toBeGreaterThan(0); // or the renumbering was never exercised
 });
 
+// What the durable key cannot promise on its own (`sameGraph`, sheds.ts): an artifact whose header
+// names another graph resolves NOTHING rather than whatever its keys happen to hit. That is the
+// guarantee every reader here rests on, since wrong-and-invisible is the one failure a blank map
+// cannot be mistaken for.
+test("an artifact placed against another graph resolves no span at all", () => {
+  const stale: ShedHistory = { ...history, graphHash: "0000000000000000" };
+  let resolved = 0;
+  for (const day of probeDays()) {
+    expect(shedsOn(graph, stale, day)).toEqual([]);
+    expect(shedCoverage(graph, stale, day).size).toBe(0);
+    for (const shed of shedsOn(graph, history, day)) {
+      resolved += shed.spans.length;
+    }
+  }
+  expect(resolved).toBeGreaterThan(0); // or the matching graph resolves nothing either
+});
+
 test("the index seek agrees with a full linear scan", () => {
   // The same history with no index: every seek falls back to the head of closed.bin, so the walk is
   // the whole file. Only the seek differs between the two, so a disagreement is the seek's.
@@ -443,7 +463,7 @@ afterAll(() => {
   globalThis.fetch = realFetch;
 });
 
-test("computeEdgeSheds fills the graph with the day's coverage, capped below 1", async () => {
+function serveFixture(): void {
   globalThis.fetch = (async (input: RequestInfo | URL) => {
     const base64 = SERVED[String(input)];
     if (base64 === undefined) {
@@ -451,6 +471,10 @@ test("computeEdgeSheds fills the graph with the day's coverage, capped below 1",
     }
     return new Response(buffer(base64));
   }) as typeof fetch;
+}
+
+test("computeEdgeSheds fills the graph with the day's coverage, capped below 1", async () => {
+  serveFixture();
 
   // A day the fixture covers, with the graph cut short of its highest edge so the drop is exercised.
   const { day, edges } = COVERAGE[COVERAGE.length - 1];
@@ -486,6 +510,23 @@ test("computeEdgeSheds fills the graph with the day's coverage, capped below 1",
   for (const [edge] of full) {
     expect(sheds.coverage[edge]).toBe(254);
   }
+});
+
+// The router's half of the same guarantee: the field it costs against is the seeded empty one, so a
+// walk is priced with no scaffolding at all rather than with scaffolding on the wrong street, and the
+// mismatch is said out loud for the caller's catch to log.
+test("a graph the artifact was not placed against costs no scaffolding", async () => {
+  serveFixture();
+  const { day } = COVERAGE[COVERAGE.length - 1];
+  const other = namedGraph(EDGE_COUNT);
+  other.hash = "0000000000000000";
+  await expect(
+    computeEdgeSheds(other, new Date(2017, 11, 28 + day)),
+  ).rejects.toThrow(GRAPH_HASH);
+
+  const sheds = other.sheds as NonNullable<RoutingGraph["sheds"]>;
+  expect(sheds.maxCoverage).toBe(0);
+  expect(sheds.coverage.every((byte) => byte === 0)).toBe(true);
 });
 
 test("a Date maps to its own local calendar day", () => {

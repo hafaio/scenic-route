@@ -95,34 +95,31 @@ export async function cloneSnapshots(): Promise<string> {
   return SNAPSHOT_DIR;
 }
 
-// The graph the placement snaps against, and what it hashes to. The hash is recomputed from the
+// The graph the placement snaps against, carrying what it hashes to. The hash is recomputed from the
 // bytes rather than taken on trust from version.json beside them, because the daily job reads a graph
 // off the live site where that file may be older than the deploy that put it there.
-export function loadGraphBytes(source: Uint8Array): {
-  graph: RoutingGraph;
-  hash: string;
-} {
+export function loadGraphBytes(source: Uint8Array): RoutingGraph {
   // Copied out of the read rather than viewed in place: decodeGraph takes typed-array views over the
   // buffer, and a Buffer from readFile can sit at an offset in a pooled one.
   const bytes = new Uint8Array(source.byteLength);
   bytes.set(source);
-  return { graph: decodeGraph(bytes.buffer), hash: graphHashOf(bytes) };
+  return decodeGraph(bytes.buffer, graphHashOf(bytes));
 }
 
-async function loadGraph(): Promise<{ graph: RoutingGraph; hash: string }> {
-  const loaded = loadGraphBytes(await readFile(GRAPH_PATH));
+async function loadGraph(): Promise<RoutingGraph> {
+  const graph = loadGraphBytes(await readFile(GRAPH_PATH));
   const version = (await readFile(VERSION_PATH, "utf-8").catch(() => null)) as
     | string
     | null;
   if (version !== null) {
     const declared = (JSON.parse(version) as { hash: string }).hash;
-    if (declared !== loaded.hash) {
+    if (declared !== graph.hash) {
       throw new Error(
-        `${GRAPH_PATH} hashes to ${loaded.hash}, version.json says ${declared}`,
+        `${GRAPH_PATH} hashes to ${graph.hash}, version.json says ${declared}`,
       );
     }
   }
-  return loaded;
+  return graph;
 }
 
 // A permit as the placement reads it: the attributes that decide where the shed goes, and the one lot
@@ -384,6 +381,41 @@ export function summarize(
       ` min ${quantile(0)} p50 ${quantile(0.5)} p90 ${quantile(0.9)}` +
       ` max ${quantile(1)} m`,
   );
+  // The declared length the lot had no frontage left to hold. The lot boundary is a hard constraint
+  // the placement never trades against, so the shortfall is reported rather than chased. Nearly every
+  // record leaves a metre or two of it — a run is clipped to the frontage it can actually stand on —
+  // so the total and the tail are what to read: a permit declaring far more than its lot can hold is
+  // usually a bad geocode, and those are the records that place under half of what they claim.
+  const declaredMeters = placements.reduce(
+    (total, placement) =>
+      total +
+      (Number.isFinite(placement.shedMeters) ? placement.shedMeters : 0),
+    0,
+  );
+  const declaring = assigned.filter((placement) =>
+    Number.isFinite(placement.shedMeters),
+  );
+  const unplacedMeters = placements.reduce(
+    (total, placement) => total + placement.unplacedMeters,
+    0,
+  );
+  const shortfalls = declaring
+    .map((placement) => placement.unplacedMeters)
+    .sort((left, right) => left - right);
+  const halved = declaring.filter(
+    (placement) => placement.coveredMeters < placement.shedMeters / 2,
+  ).length;
+  const shortfall = (share: number): string =>
+    shortfalls[
+      Math.min(shortfalls.length - 1, Math.floor(share * shortfalls.length))
+    ].toFixed(1);
+  console.error(
+    `  unplaced: ${(unplacedMeters / METERS_PER_MILE).toFixed(1)} of` +
+      ` ${(declaredMeters / METERS_PER_MILE).toFixed(1)} declared mi had no frontage to stand on;` +
+      ` per placed record p50 ${shortfall(0.5)} p90 ${shortfall(0.9)}` +
+      ` p99 ${shortfall(0.99)} max ${shortfall(1)} m,` +
+      ` ${halved}/${declaring.length} placing under half what they declare`,
+  );
 }
 
 export async function buildSheds(): Promise<void> {
@@ -395,7 +427,7 @@ export async function buildSheds(): Promise<void> {
   const parcels = await fetchShedParcels(parcelRequestsOf(attributes));
   const records = attributes.map((reading) => toShedRecord(reading, parcels));
 
-  const { graph, hash } = await loadGraph();
+  const graph = await loadGraph();
   const started = performance.now();
   const index = buildSidewalkIndex(graph);
   console.error(
@@ -417,7 +449,7 @@ export async function buildSheds(): Promise<void> {
       }),
       day,
     ),
-    hash,
+    graph.hash,
     day,
     counts,
   );

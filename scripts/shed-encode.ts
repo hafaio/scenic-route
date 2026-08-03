@@ -539,3 +539,22 @@ export function decodeShedArtifact(
   }
   return { graphHash, lastDay, counts, open, closed };
 }
+
+// Why the artifact does not mean anything against `graphHash`, or null when it does. A durable key
+// survives a rebuild without promising to name the same edge across one, so the client resolves
+// nothing at all against a graph the header does not name (`shedsOn`, src/routing/sheds.ts) — a
+// visible failure rather than scaffolding down the wrong street.
+//
+// Every WRITER has to stop on the same disagreement rather than re-stamp the header. Carrying
+// records forward under a hash they were not placed under is exactly the misplacement the gate
+// exists to rule out, and it would heal the blank map into a wrong one within a day.
+export function shedGraphMismatch(
+  artifact: DecodedShedArtifact,
+  graphHash: string,
+): string | null {
+  if (artifact.graphHash === graphHash) {
+    return null;
+  } else {
+    return `the shed artifact was placed against graph ${artifact.graphHash}, this one is ${graphHash}`;
+  }
+}

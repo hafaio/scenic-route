@@ -29,6 +29,7 @@ import {
   type EncodedShed,
   encodeSheds,
   shedDayOf,
+  shedGraphMismatch,
 } from "../../scripts/shed-encode";
 import {
   type DatedSnapshot,
@@ -437,4 +438,20 @@ test("a permit that comes back long after it came down is a second record", () =
     expect(found).toHaveLength(1);
     expect(found[0].first).toBe(shedDayOf(interval.first));
   }
+});
+
+test("an artifact is only extended against the graph it names", () => {
+  const artifact = decodeShedArtifact(
+    build(DAYS - 1).open,
+    build(DAYS - 1).closed,
+  );
+
+  expect(shedGraphMismatch(artifact, GRAPH_HASH)).toBeNull();
+  // The client resolves nothing against another graph, so a deploy that moved a graph input without
+  // a re-place shows bare pavement. What must not happen next is the daily job carrying these
+  // records forward under the new hash: that would put every one of them on whatever edge its key
+  // now names, which is the failure the key design exists to rule out.
+  const other = shedGraphMismatch(artifact, "0123456789abcdef");
+  expect(other).toContain(GRAPH_HASH);
+  expect(other).toContain("0123456789abcdef");
 });

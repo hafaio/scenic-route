@@ -1433,7 +1433,8 @@ geometry-right side (v1's "path-like" bit is gone — the kind field carries tha
 
 Written by the same `tiler graph` invocation, beside the `.bin` it just produced, so a job holding
 nothing but the live site can tell whether the graph it last snapped against is still the one being
-served:
+served — and so the client, which fetches it with the graph, can tell whether an artifact placed
+against a graph is the one it is holding:
 
 ```json
 {"graph":"nyc.bin","hash":"08da264f5836fa95","edges":531520,"bytes":27423072,"generatedUnixSeconds":1785384926}
@@ -1505,9 +1506,9 @@ day the city took every shed down), and recovers the Block/Lot the permit claime
 comes from the DOF digital tax map and the building footprints (`scripts/shed-parcels.ts`): a shed
 runs along the property line, so the **tax lot** is the geometry, and the footprint only picks which
 part of a multi-part lot is in use and anchors a permit shorter than its frontage. `scripts/
-shed-map.ts` puts the two together — the stretch of lot boundary facing a sidewalk that carries the
-permit's street name is the measured frontage, and a permit longer than that runs on around the
-corner as a bounded walk over the sidewalk network. What a permit resolves to there depends on that
+shed-map.ts` puts the two together — the connected stretch of lot boundary nearest a sidewalk that
+carries the permit's street name is the measured frontage, and a permit longer than that runs on
+around the corner as a bounded walk over the sidewalk network. What a permit resolves to there depends on that
 permit alone and never on the company it was fetched in: the parts of a multi-part lot are sorted
 before they are unioned, because Socrata's row order shifts with the batch, and the lot a permit's BIN
 *reports* — the fallback when the tax map has no polygon for the permit's own BBL — is run through the
@@ -1515,6 +1516,25 @@ same condominium resolution as the permits' own lots, because otherwise it found
 some unrelated permit happened to name the same BBL. Each placement carries a confidence, the product
 of six ways it can be wrong; `scripts/shed-streets.ts` is the DOB-to-CSCL street-name comparison the
 first of those factors reads.
+
+**`bun run scripts/shed-drill.ts` is that claim measured**, because nothing else can see it: it builds
+the record set from every permit, builds it again with one permit dropped, and compares every
+surviving record's `(first, close, confidence, spans)`, which is the whole of what the artifact
+stores. Only the dropped permit's own records may differ — one that moved because an unrelated permit
+left the run is one the daily job would have written differently from a full rebuild, and then
+`closed.bin` could not be appended to at all. It drops one permit per shape (a corner lot, a mid-block
+lot, a superblock run, one declaring far more length than its lot can hold), preferring permits naming
+a BIN and a BBL no other permit names, since those are the drops that actually take a key out of the
+sorted lists `fetchKeyed` batches and so re-compose every batch after it. It reads the built graph and
+the DOB clone, so it is a by-hand check beside `check-sheds` rather than part of `bun test src`.
+
+**Run it against a same-day `.cache/`.** Entries never expire and are keyed by the batch they were
+fetched in, so a drop that shifts a batch boundary re-fetches part of the key space — and the city
+republishes the tax map often enough that the two runs then read different *sources*. That reads as
+records moving when nothing in this repo moved: 17 of 39,918 lots and 2 of 40,229 footprints came back
+different between 30 July and 2 August 2026, which was 58 records. `REFRESH=1` pins the vintage, and
+the drill counts the readings whose parcel geometry differed between its own two runs and says so
+rather than letting it pass for a placement that shifted.
 
 Almost every query is "what is up today", so the records are split by whether they still are.
 `open.bin` (138 KB) holds the sheds still standing and answers that query on its own; `closed.bin`
@@ -1601,6 +1621,15 @@ the graph's key column, per query: a day's standing set is ~13k spans against 53
 the keys that day wants is a hundredth of the size of a map of every edge. A key this graph has no
 edge for — a source segment the rebuild dropped, or one whose contraction changed enough to break the
 key — contributes no coverage, which is the correct answer rather than a silent misplacement.
+
+A key survives a rebuild; it does not promise to still name the same edge across one. A conflation
+fix that stopped a second OSM mapping of a street becoming a spur left 2,284 of 302,985 keys naming
+an edge a **median 26 m** from the one they had named. So the header's graph hash is a **gate**, not
+a note: the client reads its own graph's hash out of `routing/version.json` — recomputing it is
+~0.5 s of FNV over 30 MB on a laptop, to arrive at a number the deploy already wrote down — and an
+artifact naming any other graph resolves **nothing at all**. The band, the router and the shadow
+caster all resolve through the one call, so they go quiet together: a day of bare pavement is a
+failure anyone can see, scaffolding down the wrong street is not.
 
 `t0`/`t1` are how far along the edge the shed runs, as `round(fraction * 255)`. Confidence is
 `round(value * 255)` capped at 254, as the graph's cover and scenic bytes are. `depth` is how deep
@@ -1787,6 +1816,51 @@ where the replay that produced it started, not only on the day it reached. Rewin
 catching up left 27 of 64,080 closed records disagreeing, and a 92-byte `closed.bin`. The fix is the
 second property above, and it settled the argument the other way from what this used to guess: the
 shed that stood in 2024 was the length the feed gave in 2024, and a full rebuild now says so too.
+
+#### Refreshing the sources — the re-place rides with it
+
+Everything the graph reads is a deliberate refresh, roughly annual: `.cache/` never expires on its
+own, so a re-run reads whatever it read last time and only `--refresh` goes back to the network. The
+mapping campaign is the reason to do it at all — OSM's sidewalk network tripled between 2022 and
+2026, and the Bronx frontier is where the derived offsets are still standing in for pavement nobody
+has mapped yet.
+
+**Every refresh re-places the whole shed history, in the same push.** A span names its edge by a
+durable key, but the ordinal in that key is a within-build disambiguator with no cross-build duty, so
+a rebuilt graph is a rebuilt key space — which is why the header carries the graph's hash and why
+`shedsOn` resolves *nothing at all* against any other graph. It is a hash gate, not a key check:
+there is no test of key stability cheaper than the re-placement it would be trying to avoid, so a
+refresh that moved nothing near a shed still blanks until `build-sheds` runs. When the OSM-primary
+sidewalk network landed, the committed artifact resolved 14,402 of 14,402 standing spans against the
+graph it named and **0** against the new one.
+
+1. Re-fetch and commit the sources — `bun run build-tree-data -- --refresh`, plus whichever of
+   `build-buildings`, `build-dining`, `build-landuse`, `build-openstreets` the refresh covers. These
+   are LFS blobs: commit them with **git**, not `sl`, and push the objects (above).
+2. `bun run build-tiles` — the graph, its `version.json` hash, the SHDB bake and every pyramid.
+3. `bun run build-sheds` — re-derives all 72,020 records against the new graph from the DOB history
+   and the tax lots. Two minutes, deterministic, disk-cached; it is not a migration and keeps no
+   state from the old artifact.
+4. Commit `public/sheds/*.bin` (plain git — **never** LFS) alongside the sources, one push.
+5. `bun run check-sheds`, then dispatch the deploy.
+
+`check-sheds` compares the graph `build-tiles` wrote against the hash the committed artifact names,
+and `.github/workflows/build.yml` runs it between `bun export` and the Pages upload — so a refresh
+that forgets step 3 fails its deploy instead of shipping a map with no scaffolding on it. Nothing
+catches it earlier than that: a push or a PR builds no graph, so there is nothing there to compare
+against.
+
+Afterwards, three things say it worked: `check-sheds` passing in the deploy's own log, scaffolding
+actually drawn on the deployed site (the client blanks silently, so this is the only visual check),
+and the next morning's `sheds.yml` run going green — `update-sheds` refuses a graph the artifact was
+not placed against rather than re-stamping the header, so a red run the day after a refresh means the
+pairing, not the feed.
+
+**The live map is blank between the push and the deploy.** The artifact is committed before the
+deploy that catches the graph up, and the client fetches it off `main` while the graph comes from
+Pages, so for that window the two disagree and every shed goes quiet — as does the daily job, which
+refuses inside it and catches up the next day. Deploying first only moves the window and gives up the
+guarantee that the end state is consistent; keep the two close together instead.
 
 ## Adding a city
 
