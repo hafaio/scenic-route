@@ -148,6 +148,38 @@ penumbra is ~5 cm against 3.6 m pixels.
   hand-rolled TS writer and the Rust writer against a hand-rolled Rust reader, so a mistake mirrored
   into both would pass. The two agree today.
 
+## The walking network
+
+CSCL's street centrelines carry the sidewalks — one derived edge offset onto each side — and OSM's
+pedestrian and park network is conflated into them before the graph is noded. `scripts/README.md`
+says how it is built. This is why the seam between the two datasets is cut where it is.
+
+### The order conflation runs in
+
+Every pass is a rule about that seam and the order is the design: dedup OSM against CSCL, node the
+paths among themselves, dedup the named orphans a second time in a wider band, weld at-grade
+crossings, snap dangling entrances, apply the accumulated CSCL splits, then merge the dangling ends
+the network says are a block from what they touch. Every tolerance in it is a named constant
+carrying the Central Park measurement that chose it, so none of them should be moved by eye.
+
+**The two dedup bands are one rule split by how much evidence it has.** Between 6 and 10 m geometry
+alone cannot tell a re-mapped street from a path that merely runs beside one — at 10 m a single band
+would take the Jamaica Bay and Marine Park greenways with it — so the wider band asks for two more
+witnesses: the way must carry the same street name as the CSCL segment it parallels, OSM labelling
+it as the street it duplicates, and it must share no node with any other OSM way. A path network's
+members meet each other, and Central Park's interior paths, the tuning set for the 6 m band, are a
+connected net. What passes both tests is a second drawing of one named street lying inside its own
+right-of-way.
+
+**A gap and a network distance are different questions, and the last pass needs both.** A degree-1
+endpoint a couple of metres from another node, and a whole block from it *through the network*, is a
+seam between two mappings of the same place — the second OSM drawing of an alley ending 1.7 m from
+the corner the first one already reaches. The gap alone cannot say that: a pier tip, a cul-de-sac
+path and a fenced-off stub all sit metres from something. That is why this is a pass of its own and
+not a loosening of `graph.rs`'s 1 m near-miss union, which is a CSCL digitization sliver with no
+topology in it and stays as tight as it is. The end that moves is always OSM's: CSCL geometry feeds
+the corner and crossing construction downstream and is left exactly where the city drew it.
+
 ## Sidewalk sheds
 
 Scaffolding is the one thing on the map whose source changes every morning, so it is the one artifact
