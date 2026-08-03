@@ -33,7 +33,7 @@ tiler genus  --manifest … --palette … --data … --tiles …      # the genu
 tiler shade  --manifest … --data … --tiles … --params …       # the building- and tree-shadow pyramids
 tiler chunks --manifest … --data … --chunks … [--paths …]     # slices STRT (+PATH) into the client's street chunks
 tiler caster-chunks --manifest … --data … --chunks … --params …  # slices BLDG+CNPY+TREE into the client's shadow-caster chunks
-tiler graph  --streets <in.bin> --out <out.bin> [--paths …] [--ferries …] [--canopy …]  # contracts STRT (+PATH, +FERR) into the GRPH routing graph
+tiler graph  --streets <in.bin> --out <out.bin> [--paths …] [--sidewalks …] [--ferries …] [--canopy …]  # contracts STRT (+PATH, +SWLK, +FERR) into the GRPH routing graph
 ```
 
 Both scripts shell out with `cargo run --release`, which no-ops once the binary is built, so
@@ -226,6 +226,7 @@ in its own band.
 | canopy | NYC's 2017 LiDAR tree canopy, ArcGIS `TreeCanopy2017_Simplified_1ft` | the *measured* canopy footprint the cover field is blurred from, a committed source, magic `CNPY` — feeds the density blobs and, through them, routing; see below |
 | canopy heights | the 1 m LiDAR canopy height model of Ma et al. 2023, figshare doi `10.6084/m9.figshare.20522895` (`NY_CHM_10Int260m.tif`, CC BY 4.0) | a 243 MiB uint16 GeoTIFF of decimetres over UTM 18N, cached but never committed; `tiler heights` samples it per canopy polygon and writes the result *into* the `CNPY` file — see below |
 | paths | OSM pedestrian/park ways (footway/path/pedestrian/steps/cycleway/bridleway/track) plus park drives (roads closed to through motor traffic), via Overpass | the park, greenway and car-free-drive network CSCL lacks; a separate committed source, magic `PATH` — see below and "Binary layouts" |
+| sidewalks | OSM `footway=sidewalk`/`crossing`/`traffic_island` ways via Overpass, plus the NYC planimetric SIDEWALK polygons, Socrata `52n9-sdep` (`sub_code` 380000 = street right-of-way) | the ways are a committed source, magic `SWLK`; both together settle the four per-side sidewalk bits of every offsetted `STRT` record, and the ways themselves are the walking network wherever they exist — see below and "Binary layouts" |
 | ferries | the two NYC ferry GTFS feeds — Staten Island Ferry (NYC DOT) and NYC Ferry (Hornblower, via Connexionz) | consolidated to a time-independent ferry graph, a committed source, magic `FERR` — OSM- and canopy-independent, read by a later phase's routing graph, not the cover pipeline; see below and "Binary layouts" |
 | landmarks | NYC LPC Individual Landmark Sites, Socrata `buis-pvji` | ~1.5k designated historic/touristy sites, taken at their WGS84 centroid; a committed POI source, magic `LMRK` — fanned out into a per-edge routing discount, not the cover pipeline; see "Binary layouts" |
 | art | NYC PDC Outdoor Public Art Inventory (Socrata `2pg3-gcaa`) + OSM `tourism=artwork` via Overpass | public art and murals (OSM carries the murals the PDC set is thin on), deduped by proximity; a committed POI source, magic `ARTW` — its own routing discount, distinct scenery from landmarks; see "Binary layouts" |
@@ -354,7 +355,7 @@ not just the north side of the street.
 CSCL is a *street* centerline: it carries almost none of the interior of a park. Central Park is
 21 km of CSCL path against 89 km in OSM; Prospect Park is 1.3 km against 51 km — the router
 cannot enter their interiors at all. So OSM's pedestrian and park ways are ingested as a second
-committed network, `data/paths/nyc.bin`, magic `PATH`. Its byte layout is **STRT v5's exactly**,
+committed network, `data/paths/nyc.bin`, magic `PATH`. Its byte layout is **STRT's exactly**,
 so `binfmt.rs` reads it with the same code (`read_paths`) and `tiler densities` samples it with
 the same loop; only a few record fields are reinterpreted (see "Binary layouts").
 
@@ -371,10 +372,11 @@ segment carries `foot=no` and drops out); `bridleway` is the Central Park bridle
 park maintenance road. Bridge and tunnel promenades already ride in here — the East River bridges'
 paths are `footway`/`cycleway`, so Brooklyn/Manhattan/Williamsburg/Queensboro are captured (the
 Verrazzano is not: every one of its ways is `highway=motorway`, `foot=no`, `bicycle=no` — there is
-no shared-use path on it in OSM). **`footway=sidewalk`/`crossing`/`traffic_island` are excluded** —
-GRPH already derives sidewalks and crossings from CSCL, and ingesting OSM's would double the
-network; `area=yes` (plazas) is not an edge; `access`/`foot` `no`/`private` and `indoor=yes` are
-not walkable.
+no shared-use path on it in OSM). **`footway=sidewalk`/`crossing`/`traffic_island` are excluded here**
+and fetched as their own extract instead (`SWLK`, below), because the graph reads them under a
+different rule — they are the sidewalk network, not walks beside it, so none of the dedup bands the
+paths go through may touch them. `area=yes` (plazas) is not an edge; `access`/`foot` `no`/`private`
+and `indoor=yes` are not walkable.
 
 **Park drives** are roads open on foot but closed to through motor traffic — Central Park's East /
 West / Terrace Drives, Prospect Park's loop. The signal is `motor_vehicle`=`no`|`private` on an
@@ -402,6 +404,46 @@ Overpass — which fetches both the paths and the OSM trees — is the flakiest 
 the query rotates over three mirrors, backs off in minutes rather than seconds, and must send a
 `User-Agent` (an anonymous client gets a 429 on sight). Everything is cached, so this is a one-time
 cost.
+
+### The sidewalks (`SWLK` v1)
+
+The clause above's exact complement, fetched as a fourth committed network,
+`data/sidewalks/nyc.bin`, magic `SWLK` — the same highway classes and the same walkability
+filters, keeping the three `footway` values the walking net drops:
+
+    way["highway"~"^(footway|path|pedestrian|steps|cycleway|bridleway|track)$"]
+       ["footway"~"^(sidewalk|crossing|traffic_island)$"]["access"!~"^(no|private)$"]
+       ["area"!="yes"]["indoor"!="yes"]["foot"!~"^(no|private)$"]
+
+Traffic islands come along because crossings chain through them: leave the islands out and every
+median crossing is cut in two. Clipping, densification and name-uppercasing are the paths'
+exactly, and the layout is STRT's, so one reader serves it.
+
+The extract does two jobs. It is what the **per-side STRT bits** are matched from (a side counts as
+mapped when a sidewalk runs alongside it over most of the block), beside the second source those bits
+carry — the NYC planimetric **SIDEWALK polygons** (`52n9-sdep`, `sub_code` 380000 = street
+right-of-way), probed at the derived sidewalk position to say whether the city's survey drew a
+sidewalk there. The sibling *"Sidewalk Centerline"* layer (`a9xv-vek9`) is **not** that source and is
+not read: its capture rules take interior-campus walkways and explicitly exclude right-of-way
+sidewalks, so it cannot answer the sidedness question at all. And it is the geometry itself:
+`tiler graph --sidewalks` makes these ways the walking network wherever they exist ("the sidewalk
+network", below), which is why the extract is committed and frozen rather than four bits derived
+from it.
+
+Measured over the 10,521 km of offsetted CSCL centerline the bits cover: OSM maps sidewalks on
+both sides of 70.0% of it, one side of 13.4%, neither of 16.6% — but that is far from uniform
+(Brooklyn 7.6% unmapped against the Bronx's 40.5%, in contiguous neighbourhoods that do have
+sidewalks), which is exactly why the survey bit is carried alongside rather than OSM's absence
+being read as absence: OSM's silence is ambiguous — a mapping gap or no sidewalk — where the
+survey's is authoritative. The survey draws both sides of 72.3%, one of 16.2%, neither of 11.5%.
+
+**The survey probe's stations are the centres of equal pieces of the segment**, not every 15 m from
+its start: a CSCL segment ends at a junction, so a station on an end vertex probes across the cross
+street's roadway, and a segment under one step is decided by that one station alone. **And the fan
+at each station is wider where CSCL records no `streetwidth`**, since the offset it fans around is
+then the 30 ft citywide median standing in for an unknown rather than a measured width. Neither
+makes the probe's false negatives uniform — DESIGN.md, "Whether there is pavement at all", carries
+what is left of them by segment length and by whether a width was recorded.
 
 ### The ferry network (`FERR` v2)
 
@@ -670,7 +712,7 @@ GRPH edge record); the base elevations are still unread — folding them in woul
 terrain-aware, and bare-earth self-shadowing (hills/parks with no buildings) would need the separate
 1-ft LiDAR DEM.
 
-### `data/streets/<id>.bin` — the network, magic `STRT` (v5)
+### `data/streets/<id>.bin` — the network, magic `STRT` (v6)
 
 Header, 64 bytes:
 
@@ -705,7 +747,7 @@ Then one 24-byte record per segment, starting at the end of the header:
 | 20 | u8 | rw_type: 1 street, 3 bridge, 4 tunnel, 5 boardwalk, 6 path, 7 step street, 10 alley |
 | 21 | u8 | street width, feet, curb to curb (0 unknown) — the sidewalk offset comes from this |
 | 22 | u8 | posted speed, mph (0 unknown) |
-| 23 | u8 | flags: bit0 vehicular-only (`nonped='V'`), bit1 non-vehicular deck (`trafdir='NV'`), bit2 structure (a bridge or tunnel) |
+| 23 | u8 | flags: bit0 vehicular-only (`nonped='V'`), bit1 non-vehicular deck (`trafdir='NV'`), bit2 structure (a bridge or tunnel), bits 3-6 the per-side sidewalk bits below |
 
 `nonped='V'` streets are drawn by the overlay but a router must never walk them, so the router
 drops any segment with bit0 set. **Bridges and tunnels (rw_type 3/4) are included only when they
@@ -714,6 +756,49 @@ null or not `'V'`, so the Brooklyn Bridge promenade and the six other walkable E
 come in while the vehicular-only spans stay out. A non-vehicular deck (bit1) is itself the walking
 surface and gets no sidewalk offset; a vehicular bridge or tunnel has sidewalks like a street and
 is offset by its width.
+
+**The per-side sidewalk bits (v6, flags bits 3-6)** say what each of the segment's two sides
+actually carries, from the two sources `scripts/sidewalks.ts` reads:
+
+| bit | set when |
+| --- | --- |
+| 3 | an OSM `footway=sidewalk` way flanks the **left** side |
+| 4 | the same on the **right** side |
+| 5 | the NYC planimetric ROW-sidewalk polygons draw one on the **left** side |
+| 6 | the same on the **right** side |
+
+Left and right are the digitization direction's — left is 90° counter-clockwise of travel, the
+same convention the density blob's two bytes a vertex are ordered by and the one
+`crates/tiler/src/sidewalks.rs` offsets the left sidewalk along. A side is *mapped* when the
+corridor matcher finds an OSM sidewalk at ≥ 50% of the samples it takes every 20 m (perpendicular
+distance in [2 m, half-offset + 12 m], bearing within 30° mod 180°, side by cross product), and
+*surveyed* when a probe every 15 m — each fanned across the sidewalk's own width, ±1.5 m where CSCL
+records a `streetwidth` and −3 to +6 m in 1.5 m steps where it records none and the half-offset is
+the citywide median standing in for it — lands inside a `sub_code` 380000 polygon at ≥ 50% of its
+stations. "Surveyed", not "paved": the layer
+says the city's aerial survey drew a sidewalk there, and says nothing about its material. All four
+bits are **zero unless the segment is offsetted** (not `nonped='V'`, and a non-zero half-offset),
+since a street with no derived sidewalks has no sides to ask about.
+
+`tiler graph` reads them as the **existence gate**: a side has pavement at all if OSM maps a sidewalk
+there **or** the survey draws one, and a street both of whose sides come back silent is **demoted to
+its centreline** as a path edge. Existing is not the same as being *derived* — where OSM maps the
+pavement, OSM's own way is the sidewalk edge, and the per-stretch exclusivity under
+`public/routing/<id>.bin` cuts the derived offset back out of exactly the stretches it covers, so a
+side OSM maps end to end gets no derived edge at all. Both sources are needed and neither alone will
+do — OSM's silence is ambiguous (a mapping gap or genuinely no pavement: 40.5% of Bronx km is
+unmapped where only 24.0% is really bare), the survey's is authoritative. Demotion is never deletion:
+an alley has no sidewalk, but you walk the alley. Measured, the gate's own bits leave **15.4% of the
+two-sides-a-street an unconditional derivation would place** with no pavement from either source
+(Manhattan 11.0%, Brooklyn 11.1%, Queens 14.9%, the Bronx 17.2%, Staten Island 24.7%) and demote
+**98.7% of alley km**; an OSM-only gate would have taken 48.4% of the Bronx. What the build reports
+as `droppedSidewalkFraction` is a shade lower — 14.4%, and 97.2% of alley km demoted — because it
+scores the gate's bits **or** a stretch OSM covers, which is the pavement the corner fan actually
+works from: a run OSM maps is evidence the pavement is there whether or not it is enough of the side
+to set the bit. Two build guards stand behind that number, both catching the rule being wrong rather
+than the data being unusual: over 30% dropped citywide is an error (a STRT file whose bits were never
+stamped reads as a city with no pavement), and so is under 95% of alley km demoting (the rule the
+wrong way round).
 
 Then the **coordinate blob**: per segment, `vertex count` (longitude, latitude) varint-delta
 pairs, the first from the origin.
@@ -732,7 +817,7 @@ graph, not shipped to the client, so an offsets table would be ceremony.
 
 ### `data/paths/<id>.bin` — the OSM pedestrian/park network, magic `PATH` (v1)
 
-**Byte-for-byte the STRT v5 layout above** — the same 64-byte header, 24-byte records, coordinate
+**Byte-for-byte the STRT layout above** — the same 64-byte header, 24-byte records, coordinate
 blob, zeroed density blob (filled in place by `tiler densities`) and trailing name blob — so one
 reader and one sampler serve both files. Only the magic (`PATH`), the format version (1) and the
 meaning of a few record fields differ. Per 24-byte record:
@@ -756,6 +841,30 @@ ways' **uppercased** `name` tags, deduped and sorted, in PATH's own index space;
 concatenates them after the street names and offsets the path name-ids by the street name count.
 This is a committed **ODbL** source: it is an extract of OSM geometry, so its share-alike terms
 follow it (see `data/README.md`).
+
+### `data/sidewalks/<id>.bin` — the OSM sidewalk extract, magic `SWLK` (v1)
+
+**Byte-for-byte the STRT layout too** — the same header, records, coordinate blob, density blob and
+name blob, so the same reader serves it. It holds the OSM ways that describe a *street's own*
+pavement, the exact set the PATH ingest excludes: `footway=sidewalk`, `footway=crossing` and
+`footway=traffic_island` (crossings chain through median islands, so leaving the islands out would
+cut every median crossing in two). Per 24-byte record, where it differs from STRT:
+
+| offset | type | STRT meaning | SWLK meaning |
+| --- | --- | --- | --- |
+| 0 | u32 | physicalid | **OSM way id** (the ingest drops any way whose id exceeds a u32) |
+| 10 | u16 | name id | index into SWLK's own name blob (`0xFFFF` unnamed — 98.7% of them) |
+| 20 | u8 | rw_type | **kind: 20 = sidewalk, 21 = crossing, 22 = traffic island** |
+| 21 | u8 | street width | **0** — these have no roadway of their own |
+| 22 | u8 | posted speed | **0** |
+| 23 | u8 | flags | **bit2 structure** only (a bridge/tunnel deck or a non-zero `layer`) |
+
+The kinds sit outside CSCL's `rw_type` range (1..10) and PATH's 6/7 on purpose: a reader pointed at
+the wrong file gets a kind it cannot mistake for a road type. Geometry is land-clipped and
+densified at 25 m exactly as PATH's is, but the density blob stays zeroed and **no pass fills it**:
+`tiler densities` never samples this file. A sidewalk edge takes the cover byte of the street side
+the association matched it to instead, and one with no street beside it carries 0. This is a
+committed **ODbL** source, like PATH (see `data/README.md`).
 
 ### `data/ferries/<id>.bin` — the ferry network, magic `FERR` (v2)
 
@@ -993,52 +1102,153 @@ the client's to take.
 
 `tiler graph` contracts STRT into the graph the client routes on, then expands it into the edges a
 walker actually uses. When `--paths` is supplied it first **conflates** the OSM pedestrian/park
-network (`PATH`) into the CSCL edges (`conflate.rs`): the paths are deduped against CSCL, noded
+network (`PATH`) into the CSCL edges (`conflate.rs`). Step 0 nodes **CSCL against itself**: the
+contraction below nodes segments by their endpoints alone, which is all it takes wherever the city
+splits both lines at their junction — and is not how the city draws an alley. An alley's mouth is a
+T onto the *interior* of the street it opens off; measured, **3,795 alley ends stand on a street
+centreline (p50 0.00 m) with no node of their own**, against 63 street ends and 108 path ends that
+do the same, and the next-nearest alley end is 5 m away, so the 1 m tolerance is a coincidence test
+and not a weld. Each such end cuts the street there and moves onto the cut (`csclTSplits`, 3,597).
+Without it the alley lattice behind a block is a walkable island nothing on the street reaches:
+**269 of 312 km of alley sat off the main component, and the graph had 2,002 components against
+162** — the mouths then join the pavement through the ordinary corner fan, as any other CSCL T does.
+Then the paths are deduped against CSCL, noded
 among themselves, deduped a second time in a wider band (a *named* way that shares no node with any
 other OSM way and parallels a CSCL segment of the same name is a re-mapping of that street, not a
 walk beside it), welded at at-grade crossings, their dangling entrances snapped to the nearest
-street, the CSCL splits applied, and finally any dangling end left within 8 m of another node but
-more than 60 m from it through the network pulled onto it — so a greenway or step street joins the
-routable network, and a second mapping of an alley does not sit on top of the first as a dead-end
-spur. The entrance snap's continuation guard is waived below 8 m: inside the street's own
+**walking line**, the CSCL splits applied, and finally any dangling end left within 8 m of another
+node but more than 60 m from it through the network pulled onto it — so a greenway or step street
+joins the routable network, and a second mapping of an alley does not sit on top of the first as a
+dead-end spur. The entrance snap's continuation guard is waived below 8 m: inside the street's own
 right-of-way half-width there is nothing for it to guard against, and rejecting there costs a
 whole-block detour. Conflated edges carry the OSM flag (byte-23 bit3), and the pass reports
-`osmPathEdges`, `weldedVertices`, `entranceSnaps` (with `shortEntranceSnaps`, the share the waiver
-accepted), `osmTSplits`, `dedupedOrphanWays`, `mergedDanglingEnds`, `mergedNearNodes` and
-`droppedOsmIslands`.
+`osmPathEdges`, `weldedVertices`, `entranceSnaps` (with `entranceSnapsKerb` and
+`shortEntranceSnaps`, the shares that reached a sidewalk and that the waiver accepted),
+`osmTSplits`, `csclTSplits`, `dedupedOrphanWays`, `mergedDanglingEnds`, `mergedNearNodes` and
+`droppedOsmIslands`. The sidewalk pass reports `sidewalkWays`, `osmSidewalkEdges`/`osmSidewalkKm`,
+`derivedSidewalkKm`, `osmSideKm` (the street-side length OSM owns), `osmCoveredStreets`,
+`streetlessSidewalkKm`, `seamCorners`, `seamLinks`, `kerbCuts`, `suppressedCrossings` and the
+repair's `seamRepairLinks`/`seamRepairMeters`/`seamRepairLongest`/`seamGaps`.
+
+**The sidewalk network (`--sidewalks`) goes through the same conflation but skips three of its
+steps.** OSM's `footway=sidewalk`/`crossing`/`traffic_island` ways are noded among themselves and
+against the paths — which is what makes a park entrance meet the pavement at the node OSM already
+shares between them, rather than being re-invented — but they are exempt from the 6 m dedup band, the
+orphan band and the weld. The dedup band was tuned to shed on-street bike lanes and a narrow street's
+sidewalk sits at ~5.7 m, inside it; and welding a crossing onto the centreline it crosses would
+shatter that street and hang the walk off a node in the roadbed, which is the defect the whole swap
+exists to remove.
+
+**The entrance snap targets pavement, never a centreline with sidewalks beside it.** Its candidates
+are a street's sidewalk line on each side the gate found **pavement** on — the existence mask, not
+the derived one, so a block OSM maps end to end still offers its near kerb rather than leaving an
+entrance to find nothing or reach across the roadway for the far one — or the street's own centreline
+where that line *is* the walking surface: a boardwalk, a path, a step street, a street the existence
+gate demoted. Snapping
+to a sidewalked centreline was a live defect at Pearl and Water St: the walk turned 90° into the
+middle of the roadway and back out to reach a plaza path, because the sidewalks are offset off that
+centreline only *afterwards*, so the join was placed where nobody walks. A kerb join still records
+its split on the centreline — that is what cuts, and its corner node is where the walk arrives — and
+`graph.rs` binds the OSM end to that corner instead of to a path node. The guard and its waiver stay
+measured to the centreline, so moving the far end of the connector does not also change which
+entrances are accepted. A way's own terminal endpoint is likewise no longer welded to a centreline
+when it is the only way end there: nothing crosses where a way merely stops, so it is an entrance
+too. Measured, mid-block joins that dead-end inside a roadway fell from **13,588 to 878** on OSM
+paths, and the link edges those detours were drawn as from 22,942 to 6,143. The CSCL half of the same
+defect — 1,863 nodes where a **CSCL** pathlike segment, a boardwalk or walkway CSCL digitizes as
+meeting a road at its centreline, ends mid-roadway — is closed by the lone-path-end rule above, since
+the snap only ever runs on OSM ways and could not reach it.
 
 Steps 1–7 are the v1 contraction: vehicular-only segments (`nonped='V'`, flag
 bit 0) are dropped; endpoints are noded by exact quantized equality then near-misses within 1 m are
 union-found together; degree-2 shape joints are contracted where the two edges share a half-offset
 byte, GRPH flags **and street name** (a name change mid-block is kept, so a sidewalk edge never
-spans two names — reported as `nameBreakJoints`); polylines are pruned of collinear vertices
-(endpoints kept). Then every street becomes the things a walker uses:
+spans two names — reported as `nameBreakJoints`) **and their surviving sidewalk sides** (read
+mirrored where the two halves are digitized in opposite directions, so a block with pavement to the
+north only never contracts into one that has it to the south); polylines are pruned of collinear
+vertices (endpoints kept). Then every street becomes the things a walker uses:
 
 - At each node the incident street-ends are ordered by departure bearing; between consecutive ends
   sits a **corner node** on the gap bisector, one half-offset out (radius clamped to [1, 30] m).
-- A street becomes **two sidewalk edges** (left and right of the centreline), each with its **own
-  baked geometry** — the centreline offset perpendicular to its side by the half-offset, with the two
-  end vertices replaced by the corner nodes so it runs corner-to-corner with no overshoot into the
-  intersection — carrying opposite N/S/E/W side labels, each its own side's cover byte. Its length is
-  that offset polyline's geodesic sum.
+- **Where OSM maps the sidewalk, OSM's way is the sidewalk edge.** `association.rs` matches every
+  SWLK way against the CSCL street it flanks — 2 m to half-offset + 12 m off it, within 30° of its
+  bearing, side by cross product — and cuts the way where that match changes, absorbing any stretch
+  under 8 m into its longer neighbour so a corner wrap does not shed a sliver. Each stretch keeps its
+  own geometry and takes from the street its **name**, its **N/S/E/W side label**, its **half-offset
+  byte**, that side's **cover byte** and its **physicalid**: OSM way ids churn ~1.5–2%/yr and the shed
+  artifact hangs off these keys, so identity comes from the association, not the way. It also
+  measures which side of the way the roadway is on, since a mapper draws a way either way round, and
+  writes that as the record's geometry-right flag — the shed placement reads it to know which of the
+  two things flanking a pavement is the lot. A stretch with no street beside it (an esplanade, a
+  bridge walk, the FDR walks: ~155 km) stays a **path edge** under its own OSM way id.
+- **Per stretch, exclusivity**: the derived offset is cut back out of exactly the stretches OSM
+  covers, and that subtraction is the only thing keeping the network from doubling. It is per stretch
+  and not per side — a side is not all one thing, and no fraction of one is a threshold anywhere in
+  this path: the street is cut at every change in the mask, so a side OSM maps the first 40 m of
+  still carries a derived edge over the other 60. Each stretch OSM leaves alone becomes **one derived
+  sidewalk edge** per side the existence gate found pavement on (the STRT bits above: usually both,
+  one where the street is genuinely one-sided, and none where it demoted to a centreline path edge
+  instead), with its **own baked geometry** — the centreline offset perpendicular to its side by the
+  half-offset, with the two end vertices replaced by the corner nodes so it runs corner-to-corner with
+  no overshoot into the intersection — carrying opposite N/S/E/W side labels, each its own side's
+  cover byte. Its length is that offset polyline's geodesic sum.
+- **The seam.** A corner is placed wherever the side beside it has pavement, however that pavement is
+  drawn. Where OSM's own network already stands at one — its nearest unclaimed sidewalk node within
+  12 m — the corner **is** that node, so the mapped pavement and the derived pavement meet at one
+  point rather than a few metres apart with nothing between them (`seamCorners`). A corner the fan
+  still had to invent reaches 20 m and **links** to the mapped network instead (`seamLinks`).
+- **The kerb cut**, which is what gives the seam a node to find. Both halves above bind a corner to
+  a *node* of OSM's network, and where OSM draws a whole block as one unbroken way there is none:
+  the alley mouths off 49 ST in Sunnyside stand 5 m from a single 299 m sidewalk edge whose nearest
+  node is at the end of the block, so the walk went round it. So before the fans resolve, a corner
+  **cuts** the OSM sidewalk way it stands beside, at its own projection (`kerbCuts`, 21,134). A cut
+  is only a node — nothing else downstream changes — and it is bounded by the seam's own two
+  reaches rather than by numbers of its own: the corner must be inside the 12 m it would have to
+  resolve onto the cut, and the way's own nearest node must be further than the 20 m the seam
+  reaches, measured **along the pavement**, which is a lower bound on the walk the cut removes since
+  every route onto that way enters through one of its ends. Two further guards keep a line that
+  merely passes close from being welded to. The projection must fall inside the corner's own angular
+  gap: pavement across a roadway lies beyond one of the two street-ends bounding that gap, never
+  inside it, and 462 of the 21,388 corners in range were refused on exactly that. And neither the
+  way nor anything at the node may be a bridge or tunnel deck. A node with one street-end is skipped
+  outright — its single corner wraps the whole circle, so the gap test would have nothing to say.
+  Measured, 21,150 of the 21,593 cuts (97.9%) landed on pavement carrying the name of one of the two
+  streets bounding their own corner. Citywide the cut turns 20,929 seam links into seam corners, and
+  the walk from an alley mouth to the pavement it faces falls from a median of 32 m (p90 307 m, 1,074
+  mouths over 30 m) to a median of 0 m (p90 6 m, 13 mouths over 30 m); stranded alley falls from 6.0
+  to 0.4 of 312.8 km and the graph from 162 components to 80.
 - A node with total degree ≥ 3 and ≥ 2 street-ends emits one **crossing edge** per street, joining
   the two corners that flank it — no geometry, length the corner-to-corner great-circle distance,
-  cover the mean of the crossed street's two side bytes, the crossed street's name.
+  cover the mean of the crossed street's two side bytes, the crossed street's name. **OSM's crossings
+  are the crossings where OSM maps them**: a synthesized crossing whose two termini a mapped crossing
+  path already joins within 1.5× its own length is dropped (`suppressedCrossings`; the slack lets a
+  crossing that chains through a traffic island count). Every corner pair OSM does *not* serve keeps
+  its synthesized crossing, or the router would refuse the legal unmarked crossing and detour.
 - Path surfaces (boardwalks, paths, step streets, non-vehicular decks) stay single **path edges** on
-  their own geometry, tied into a corner fan by geometry-less **link edges**.
+  their own geometry, tied into a corner fan by geometry-less **link edges**. One that merely *ends*
+  at a street — the only path end at that node — binds straight to the corner in the gap it departs
+  into, since CSCL digitizes a boardwalk as meeting the road at its centreline and the walk arrives at
+  the kerb, not in the roadbed.
 
 Before that, a backstop leaves **one crossing per pair of nodes** whoever drew them
 (`collapsedCrossings`): a mapped crossing beats a synthesized one, and between two of the same
 provenance the shorter wins. Parallel edges are never the only path between their own two ends, so
 collapsing them cannot disconnect anything. A final mop-up adds a crossing at any isolated deg-2
-ring whose two sidewalk sides would otherwise be separate components (`mopupCrossings`), and the
-build asserts the walking component count equals the v1 count. Once every pass that places an edge
-has run, a second backstop drops each edge that runs from a node back to itself (`selfLoopEdges`) —
-a way the 1 m node merge folded into one node, an end an entrance snap bound to the node the other
-end already sat on, or a closed way OSM drew — and compacts the geometry the dropped edges owned.
-Taking such an edge pays its length and returns the walker to where they started, so no search can
-use it and dropping it cannot disconnect anything either. Nodes are sorted by (component, latitude,
-longitude) and renumbered, edges by (component, min node id).
+ring whose two sidewalk sides would otherwise be separate components (`mopupCrossings`). Then the
+**seam repair**: the swap makes the v1 component count a ceiling rather than a target — joining
+OSM's sidewalk network to the streets it flanks merges v1 components that only the mapped pavement
+connected — so what is asserted is that no v1 component's image *split*. Where OSM owns a side but
+its ways stop short of the block, the two halves stand apart with nothing between them; every such
+gap is inside one v1 component, which is what makes it repairable without inventing connectivity,
+and a link edge to the nearest peer within 60 m closes it (`seamRepairLinks`, `seamRepairMeters`,
+`seamRepairLongest`). The residue OSM's patchiness leaves is counted (`seamGaps`) rather than
+asserted away, and capped. Once every pass that places an edge has run, a second backstop drops each
+edge that runs from a node back to itself (`selfLoopEdges`) — a way the 1 m node merge folded into
+one node, an end an entrance snap bound to the node the other end already sat on, or a closed way
+OSM drew — and compacts the geometry the dropped edges owned. Taking such an edge pays its length
+and returns the walker to where they started, so no search can use it and dropping it cannot
+disconnect anything either. Nodes are sorted by (component, latitude, longitude) and renumbered,
+edges by (component, min node id).
 
 When `--ferries` is supplied (`data/ferries/<id>.bin`, magic `FERR`, referenced by convention — not
 the manifest), a final stage adds the ferry network **after** that walking assertion and renumber,

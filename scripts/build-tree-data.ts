@@ -13,13 +13,14 @@ import { CHM_ATTRIBUTION, CHM_SOURCE_URL, fetchChmRaster } from "./chm";
 import { ingestFerries } from "./ferries";
 import {
   boxOf,
-  COORD_SCALE,
+  buildNameTable,
   type CrownedTree,
+  densify,
   encodeCanopy,
+  encodeNetwork,
   encodePolygons,
   encodeTrees,
-  writeVarint,
-  zigzag,
+  UNNAMED_ID,
 } from "./geometry";
 import { ingestHighways } from "./highways";
 import { fetchNycLand, type LandContext } from "./land";
@@ -45,6 +46,7 @@ import {
   type PathWay,
   type Polygon,
 } from "./overpass";
+import { ingestSidewalks } from "./sidewalks";
 import { type Coord, fetchDataset, fetchNycTrees, type Tree } from "./socrata";
 import { runTiler } from "./tiler";
 
@@ -54,7 +56,8 @@ import { runTiler } from "./tiler";
 // never walkable.
 type RoadType = 1 | 3 | 4 | 5 | 6 | 7 | 10;
 
-// STRT record byte 23. A router reads these; the overlay ignores them.
+// STRT record byte 23, bits 0-2. A router reads these; the overlay ignores them. Bits 3-6 are the
+// per-side sidewalk bits, stamped in place by ingestSidewalks — scripts/sidewalks.ts owns them.
 const FLAG_VEHICULAR_ONLY = 1 << 0; // nonped === "V" — drawn, never routed
 const FLAG_NON_VEHICULAR = 1 << 1; // trafdir === "NV" — a dedicated ped/bike deck, offset 0
 const FLAG_STRUCTURE = 1 << 2; // rw_type 3 or 4 — a bridge or tunnel deck
@@ -123,14 +126,10 @@ interface Heights {
 const DATA_DIR = join(import.meta.dirname, "..", "data");
 const PARAMS_PATH = join(tmpdir(), "scenic-route-densities.json");
 
-const STREET_FORMAT = 5;
-const PATH_FORMAT = 1; // OSM pedestrian/park ways, STRT v5's byte layout with the PATH reinterpretations
+const STREET_FORMAT = 6; // v6 adds the per-side sidewalk bits (flags bits 3-6) scripts/sidewalks.ts writes
+const PATH_FORMAT = 1; // OSM pedestrian/park ways, STRT's byte layout with the PATH reinterpretations
 const PATH_KIND_PATH = 6; // record byte 20: an ordinary path, sampled and offset like rw_type 6
 const PATH_KIND_STEPS = 7; // record byte 20: a step street (highway=steps), like rw_type 7
-const STREET_HEADER_BYTES = 64;
-const STREET_RECORD_BYTES = 24;
-const STREET_SIDES = 2; // the density blob carries both sidewalks of every vertex, left then right
-const UNNAMED_ID = 0xffff; // the segment's name id when CSCL carries no label — measured zero for NYC
 const TREE_FORMAT = 3; // v3 adds a genus byte per tree; v2 added the crown byte, v1 was points only
 const LAND_FORMAT = 1;
 const CANOPY_FORMAT = 2; // the measured 2017 LiDAR canopy under magic CNPY; v2 adds a crown height per polygon
@@ -367,28 +366,6 @@ function crownOsmTrees(
   return { crowned, onLandCount, deduped, imputedCrowns };
 }
 
-// Splits every piece longer than DENSIFY_METERS, so the field is sampled often enough
-// along a road for its colour to vary rather than come out in one flat block.
-function densify(points: Coord[]): { points: Coord[]; lengthMeters: number } {
-  const dense: Coord[] = [points[0]];
-  let total = 0;
-  for (let index = 1; index < points.length; index++) {
-    const from = points[index - 1];
-    const to = points[index];
-    const meters = haversineMeters(from, to);
-    total += meters;
-    const steps = Math.max(1, Math.ceil(meters / DENSIFY_METERS));
-    for (let step = 1; step <= steps; step++) {
-      const along = step / steps;
-      dense.push({
-        lat: from.lat + (to.lat - from.lat) * along,
-        lng: from.lng + (to.lng - from.lng) * along,
-      });
-    }
-  }
-  return { points: dense, lengthMeters: total };
-}
-
 // A CSCL row is a MultiLineString, virtually always with a single part; a row with
 // several parts becomes several records sharing one physicalid.
 function toSegments(rows: StreetRow[]): Segment[] {
@@ -422,7 +399,7 @@ function toSegments(rows: StreetRow[]): Segment[] {
         degenerate += 1;
         continue;
       }
-      const dense = densify(points);
+      const dense = densify(points, DENSIFY_METERS);
       if (dense.lengthMeters < DROP_LENGTH_METERS) {
         degenerate += 1;
         continue;
@@ -444,33 +421,6 @@ function toSegments(rows: StreetRow[]): Segment[] {
     console.error(`  dropped ${degenerate} degenerate segments`);
   }
   return segments;
-}
-
-// Anything the encoder names: a street segment or a path way. Its `nameId` is stamped in place
-// by buildNameTable from its (already trimmed and, for paths, uppercased) `name`.
-interface Named {
-  name: string;
-  nameId: number;
-}
-
-// Collects the distinct names, sorts them, and stamps each record with its index into that
-// sorted table; a record with no label keeps UNNAMED_ID. Returns the table, which the encoder
-// writes once as the trailing name blob. Streets and paths each build their own.
-function buildNameTable(records: Named[]): string[] {
-  const distinct = new Set<string>();
-  for (const record of records) {
-    if (record.name) {
-      distinct.add(record.name);
-    }
-  }
-  const names = [...distinct].sort();
-  const idOf = new Map(names.map((name, index) => [name, index]));
-  for (const record of records) {
-    record.nameId = record.name
-      ? (idOf.get(record.name) ?? UNNAMED_ID)
-      : UNNAMED_ID;
-  }
-  return names;
 }
 
 async function fetchNycStreets(): Promise<Segment[]> {
@@ -515,7 +465,7 @@ function toPathSegments(
       overflow += 1;
       continue;
     }
-    const dense = densify(way.points);
+    const dense = densify(way.points, DENSIFY_METERS);
     if (dense.lengthMeters < DROP_LENGTH_METERS) {
       degenerate += 1;
       continue;
@@ -638,125 +588,8 @@ function distributionOf(raw: RawDistribution): Distribution {
   };
 }
 
-// One record of either network, mapped to the shared byte layout: the id at offset 0, the kind
-// at 20, and the width/speed/flags bytes. STRT fills all three; PATH leaves width and speed 0 and
-// uses only the structure flag.
-interface NetworkRecord {
-  id: number; // record offset 0 (u32): CSCL physicalid, or an OSM way id
-  nameId: number; // record offset 10
-  lengthMeters: number; // record offset 12 (f32)
-  kind: number; // record byte 20: rw_type, or the PATH kind
-  width: number; // record byte 21
-  speed: number; // record byte 22
-  flags: number; // record byte 23
-  points: Coord[];
-}
-
-// The one encoder both networks share: STRT v5's layout, parameterized by magic and format. The
-// density blob is written zeroed — two bytes a vertex, one sidewalk each — and filled in place by
-// `tiler densities`, so the coordinates it offsets the sidewalks from are the ones that ship
-// rather than a parallel copy. layout: scripts/README.md
-function encodeNetwork(
-  magic: string,
-  format: number,
-  records: NetworkRecord[],
-  names: string[],
-): Uint8Array {
-  let originLng = Number.POSITIVE_INFINITY;
-  let originLat = Number.POSITIVE_INFINITY;
-  let vertices = 0;
-  for (const record of records) {
-    vertices += record.points.length;
-    for (const { lat, lng } of record.points) {
-      originLng = Math.min(originLng, lng);
-      originLat = Math.min(originLat, lat);
-    }
-  }
-
-  const table = new Uint8Array(
-    STREET_HEADER_BYTES + records.length * STREET_RECORD_BYTES,
-  );
-  const view = new DataView(table.buffer);
-  // Two varints of at most five bytes each per vertex.
-  const blob = new Uint8Array(vertices * 10);
-  let blobEnd = 0;
-  let vertex = 0;
-
-  for (let index = 0; index < records.length; index++) {
-    const entry = records[index];
-    const start = blobEnd;
-    let previousX = 0;
-    let previousY = 0;
-    for (const { lat, lng } of entry.points) {
-      const quantizedX = Math.round((lng - originLng) / COORD_SCALE);
-      const quantizedY = Math.round((lat - originLat) / COORD_SCALE);
-      blobEnd = writeVarint(blob, blobEnd, zigzag(quantizedX - previousX));
-      blobEnd = writeVarint(blob, blobEnd, zigzag(quantizedY - previousY));
-      previousX = quantizedX;
-      previousY = quantizedY;
-    }
-
-    const record = STREET_HEADER_BYTES + index * STREET_RECORD_BYTES;
-    view.setUint32(record, entry.id, true);
-    view.setUint32(record + 4, start, true);
-    view.setUint16(record + 8, entry.points.length, true);
-    view.setUint16(record + 10, entry.nameId, true);
-    view.setFloat32(record + 12, entry.lengthMeters, true);
-    view.setUint32(record + 16, vertex, true);
-    table[record + 20] = entry.kind;
-    table[record + 21] = entry.width;
-    table[record + 22] = entry.speed;
-    table[record + 23] = entry.flags;
-    vertex += entry.points.length;
-  }
-
-  for (let index = 0; index < 4; index++) {
-    table[index] = magic.charCodeAt(index);
-  }
-  view.setUint16(4, format, true);
-  view.setUint16(6, STREET_HEADER_BYTES, true);
-  view.setUint16(8, STREET_RECORD_BYTES, true);
-  view.setUint32(12, records.length, true);
-  view.setFloat64(16, originLng, true);
-  view.setFloat64(24, originLat, true);
-  view.setFloat64(32, COORD_SCALE, true);
-  // The name blob is the file's final region: a u32 count, then each name as a u16 byte length
-  // and its UTF-8 bytes, back to back. Read once, sequentially, by the one Rust reader.
-  const encoder = new TextEncoder();
-  const nameBytes = names.map((name) => encoder.encode(name));
-  let nameBlobLength = 4;
-  for (const bytes of nameBytes) {
-    nameBlobLength += 2 + bytes.length;
-  }
-  const nameBlob = new Uint8Array(nameBlobLength);
-  const nameView = new DataView(nameBlob.buffer);
-  nameView.setUint32(0, names.length, true);
-  let nameCursor = 4;
-  for (const bytes of nameBytes) {
-    nameView.setUint16(nameCursor, bytes.length, true);
-    nameCursor += 2;
-    nameBlob.set(bytes, nameCursor);
-    nameCursor += bytes.length;
-  }
-
-  const densityBytes = STREET_SIDES * vertices;
-  const nameBlobOffset = table.length + blobEnd + densityBytes;
-  view.setUint32(40, table.length, true);
-  view.setUint32(44, blobEnd, true);
-  view.setUint32(48, table.length + blobEnd, true);
-  view.setUint32(52, densityBytes, true);
-  view.setUint32(56, nameBlobOffset, true);
-  view.setUint32(60, nameBlobLength, true);
-
-  const encoded = new Uint8Array(nameBlobOffset + nameBlobLength);
-  encoded.set(table);
-  encoded.set(blob.subarray(0, blobEnd), table.length);
-  encoded.set(nameBlob, nameBlobOffset);
-  return encoded;
-}
-
-// STRT v5: the CSCL street network. The record id is the physicalid; kind is rw_type; the
-// width/speed/flags bytes are all populated.
+// STRT v6: the CSCL street network. The record id is the physicalid; kind is rw_type; the
+// width/speed/flags bytes are all populated, the flags' per-side sidewalk bits by ingestSidewalks.
 function encodeStreets(segments: Segment[], names: string[]): Uint8Array {
   return encodeNetwork(
     "STRT",
@@ -1017,6 +850,13 @@ async function ingest(): Promise<void> {
   console.error(
     `${CITY.id}: canopy heights measured for ${heights.measured} of ${heights.polygons} polygons (${heights.skippedTiles} CHM tiles skipped)`,
   );
+  // OSM's own sidewalk/crossing/island ways, written as their own committed source, and the
+  // planimetric ROW-sidewalk polygons, which are only probed. Between them they settle the four
+  // per-side bits of every offsetted STRT record's flags byte, so this runs before the streets are
+  // encoded.
+  console.error(`${CITY.id}: fetching sidewalks`);
+  const sidewalks = await ingestSidewalks(CITY.id, segments, landContext);
+
   const streetPath = join(DATA_DIR, "streets", file);
   await mkdir(join(DATA_DIR, "streets"), { recursive: true });
   await writeFile(streetPath, encodeStreets(segments, names));
@@ -1160,7 +1000,7 @@ async function ingest(): Promise<void> {
   const megabytes = (bytes: number): string => (bytes / 1024 / 1024).toFixed(1);
   const seconds = ((performance.now() - started) / 1000).toFixed(1);
   console.error(
-    `${CITY.id}: wrote trees (${megabytes(treeFile.bytes)} MiB), canopy (${canopyOnLand.length} polygons, ${megabytes(canopyFile.bytes)} MiB), land (${megabytes(landFile.bytes)} MiB), streets (${segments.length} segments, ${vertices} vertices, ${megabytes(streetBytes.length)} MiB) and paths (${pathSegments.length} ways, ${pathVertices} vertices, ${megabytes(pathBytes.length)} MiB) in ${seconds}s`,
+    `${CITY.id}: wrote trees (${megabytes(treeFile.bytes)} MiB), canopy (${canopyOnLand.length} polygons, ${megabytes(canopyFile.bytes)} MiB), land (${megabytes(landFile.bytes)} MiB), streets (${segments.length} segments, ${vertices} vertices, ${megabytes(streetBytes.length)} MiB), paths (${pathSegments.length} ways, ${pathVertices} vertices, ${megabytes(pathBytes.length)} MiB) and sidewalks (${sidewalks.count} ways, ${megabytes(sidewalks.bytes)} MiB) in ${seconds}s`,
   );
 }
 

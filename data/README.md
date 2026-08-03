@@ -8,10 +8,11 @@ fetches. None of these files is ever served to a browser. Layouts are documented
 | file | what | source |
 | --- | --- | --- |
 | `trees/nyc.bin` | 925,338 tree points (899,394 standing ForMS street trees + 25,944 OSM `natural=tree`), each with its crown and genus — the genus overlay | NYC ForMS "Forestry Tree Points" (`hn5i-inap`) + **OpenStreetMap** |
-| `streets/nyc.bin` | the walkable street network, with the canopy cover at every vertex | NYC CSCL street centerline (`inkn-q76z`) |
+| `streets/nyc.bin` | the walkable street network, with the canopy cover at every vertex and, per side, whether OSM maps a sidewalk there and whether the planimetric layer paves it | NYC CSCL street centerline (`inkn-q76z`) + NYC planimetric SIDEWALK polygons (`52n9-sdep`) + **OpenStreetMap** |
 | `land/nyc.bin` | shoreline-clipped borough boundaries | NYC borough boundaries (`gthc-hcne`) |
 | `canopy/nyc.bin` | measured 2017 LiDAR tree-canopy polygons — the cover source | NYC OTI / NYC Parks |
 | `paths/nyc.bin` | OSM pedestrian/park ways (footway, path, greenway, steps…) and park drives (roads closed to through motor traffic), with the canopy cover at every vertex | **OpenStreetMap** |
+| `sidewalks/nyc.bin` | the OSM ways describing a street's own pavement — `footway=sidewalk`, `footway=crossing`, `footway=traffic_island` — the set the paths extract excludes | **OpenStreetMap** |
 | `ferries/nyc.bin` | the time-independent ferry graph (stops, crossings, per-segment crossing+wait time and drawing geometry) — OSM- and canopy-independent | NYC DOT Staten Island Ferry GTFS + NYC Ferry (Hornblower) GTFS |
 | `ferries/siferry-gtfs.zip`, `ferries/nycferry-gtfs.zip` | the two raw GTFS feeds, frozen so a later time-of-day pass can re-derive from the exact feeds a build read | NYC DOT + NYC Ferry (Hornblower) |
 | `landmarks/nyc.bin` | ~1,530 designated landmark sites (points) — the "passes a landmark" routing discount | NYC LPC Individual Landmark Sites (`buis-pvji`) |
@@ -45,9 +46,13 @@ The code in this repository is MIT. The data here is not all MIT, and the differ
 extract of OSM geometry — a *Derivative Database* in ODbL's terms — so its share-alike clause applies
 to it: reuse it, and what you build from it stays open under the same terms. `trees/nyc.bin` also
 folds in OSM `natural=tree` points alongside the NYC ForMS census, so the same ODbL terms reach it.
-The same reaches **`art/nyc.bin`** (which folds in OSM `tourism=artwork`), **`highways/nyc.bin`**
+The same reaches **`sidewalks/nyc.bin`** (OSM sidewalk, crossing and traffic-island ways extracted
+wholesale), **`art/nyc.bin`** (which folds in OSM `tourism=artwork`), **`highways/nyc.bin`**
 (highways and rail extracted wholesale from OSM), and **`dining/nyc.bin`** (which folds in OSM
-`outdoor_seating`).
+`outdoor_seating`). It reaches **`streets/nyc.bin`** too, for four bits a record: CSCL's own
+geometry carries no OSM, but the per-side "OSM maps a sidewalk here" bits are derived from the
+sidewalk extract, and this repository's line has been to let share-alike follow the derivation
+rather than argue de-minimis.
 
 `landmarks/nyc.bin`, `buildings/nyc.bin`, `landuse/nyc.bin`, and `openstreets/nyc.bin` are pure
 **NYC Open Data** (no OSM), so they carry no share-alike obligation — see below.

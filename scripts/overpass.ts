@@ -119,15 +119,23 @@ export interface PathWay {
 // the outdoor network, and anything barred to pedestrians (foot no|private) is not walkable.
 const WALKABLE = '["area"!="yes"]["indoor"!="yes"]["foot"!~"^(no|private)$"]';
 
-// The core walking net: dedicated foot and park ways. footway/path/pedestrian/steps are the
+// The highway classes the pedestrian network is drawn from: footway/path/pedestrian/steps are the
 // pedestrian core; cycleway brings the greenways (a bike-only segment carries foot=no and drops
-// out); bridleway is Central Park's bridle path; track is park maintenance roads. Bridge and
-// tunnel promenades ride in here already — the East River bridges' paths are footway/cycleway.
-// footway=sidewalk|crossing|traffic_island are excluded: GRPH derives those from CSCL, and
-// ingesting OSM's would double the sidewalk network. access no|private is not walkable.
+// out); bridleway is Central Park's bridle path; track is park maintenance roads.
+const FOOT_CLASSES =
+  '["highway"~"^(footway|path|pedestrian|steps|cycleway|bridleway|track)$"]';
+// The three `footway` values that describe a street's own pavement rather than a way of its own.
+const SIDEWALK_CLASSES = "^(sidewalk|crossing|traffic_island)$";
+
+// The core walking net: dedicated foot and park ways. Bridge and tunnel promenades ride in here
+// already — the East River bridges' paths are footway/cycleway. The sidewalk classes are excluded
+// because the graph reads them under a different rule: they are the sidewalk network itself, not a
+// walk beside it, so none of the dedup bands the paths go through may touch them. They are fetched
+// as their own extract by fetchSidewalks below, which is this clause's exact complement. access
+// no|private is not walkable.
 const FOOT_WAYS =
-  'way["highway"~"^(footway|path|pedestrian|steps|cycleway|bridleway|track)$"]' +
-  '["footway"!~"^(sidewalk|crossing|traffic_island)$"]["access"!~"^(no|private)$"]' +
+  `way${FOOT_CLASSES}["footway"!~"${SIDEWALK_CLASSES}"]` +
+  '["access"!~"^(no|private)$"]' +
   WALKABLE;
 
 // Park drives: a road open on foot but closed to through motor traffic — Central Park's East /
@@ -199,10 +207,67 @@ export async function fetchPaths(
   return ways;
 }
 
+// One OSM way describing a street's own pavement: which of the three `footway` values it carries,
+// and the same geometry/name/structure a PathWay does.
+export interface SidewalkWay {
+  id: number;
+  name?: string;
+  footway: "sidewalk" | "crossing" | "traffic_island";
+  structure: boolean;
+  points: Coord[];
+}
+
+const SIDEWALK_VALUES = ["sidewalk", "crossing", "traffic_island"] as const;
+
+// The exact complement of FOOT_WAYS: the same highway classes and the same walkability filters, but
+// keeping the sidewalk classes the walking net drops rather than dropping them. Crossings chain
+// through median islands, so excluding the islands would cut every median crossing in two.
+export async function fetchSidewalks(
+  south: number,
+  west: number,
+  north: number,
+  east: number,
+): Promise<SidewalkWay[]> {
+  const box = `${south},${west},${north},${east}`;
+  const clause =
+    `way${FOOT_CLASSES}["footway"~"${SIDEWALK_CLASSES}"]` +
+    '["access"!~"^(no|private)$"]' +
+    WALKABLE;
+  const query = `[out:json][timeout:${QUERY_TIMEOUT_SECONDS}];${clause}(${box});out geom;`;
+  const elements = await overpassQuery("overpass-sidewalks", query);
+  const ways: SidewalkWay[] = [];
+  for (const element of elements) {
+    if (element.type !== "way" || element.id === undefined) {
+      continue;
+    }
+    const geometry = element.geometry ?? [];
+    if (geometry.length < 2) {
+      continue;
+    }
+    const tags = element.tags ?? {};
+    const footway = SIDEWALK_VALUES.find((value) => value === tags.footway);
+    if (footway === undefined) {
+      continue;
+    }
+    const layer = Number.parseInt(tags.layer ?? "", 10);
+    ways.push({
+      id: element.id,
+      name: tags.name,
+      footway,
+      structure:
+        tagged(tags.bridge) ||
+        tagged(tags.tunnel) ||
+        (tags.layer !== undefined && layer !== 0),
+      points: toCoords(geometry),
+    });
+  }
+  return ways;
+}
+
 // One OSM natural=tree node: a point, and the crown diameter the mapper recorded when there is
-// one. Phase 3 of the park-paths plan supplements the ForMS street-tree census with these where
-// ForMS is a hole — Central Park is managed by the Conservancy and carries only 697 ForMS trees
-// against ~3,945 OSM ones, so its paths would otherwise read bare. scripts/README.md
+// one. These supplement the ForMS street-tree census where ForMS is a hole — Central Park is
+// managed by the Conservancy and carries only 697 ForMS trees against ~3,945 OSM ones, so its
+// paths would otherwise read bare. scripts/README.md
 export interface OsmTree {
   lat: number;
   lng: number;

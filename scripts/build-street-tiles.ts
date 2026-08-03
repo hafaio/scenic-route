@@ -156,6 +156,11 @@ async function inputsHash(cities: City[]): Promise<string> {
       "dining",
       "openstreets",
       "buildings",
+      // The graph's existence gate reads the per-side sidewalk bits, and `scripts/sidewalks.ts`
+      // stamps those from this extract in the same run that writes it — so a sidewalk re-ingest that
+      // does not move a bit must still be seen here, or a later reader of the extract itself would
+      // stay falsely fresh.
+      "sidewalks",
     ].map((kind) => sourcePath(kind, `${city.id}.bin`)),
   );
   const present = await Promise.all(
@@ -387,6 +392,7 @@ async function build(): Promise<void> {
     // (data/<kind>/<id>.bin), not the manifest — its versioned CityEntry schema would throw for
     // existing cities if bumped — so each is passed only when its committed file is present.
     for (const [flag, kind] of [
+      ["--sidewalks", "sidewalks"],
       ["--ferries", "ferries"],
       ["--landmarks", "landmarks"],
       ["--art", "art"],

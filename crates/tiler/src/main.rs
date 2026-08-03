@@ -7,6 +7,7 @@
 // expansion steps allow.
 #![recursion_limit = "256"]
 
+mod association;
 mod binfmt;
 mod canopy;
 mod caster_chunks;
@@ -40,7 +41,7 @@ const USAGE: &str = "usage:
   tiler canopy --manifest <file.json> --ramp <file.bin> --data <dir> --tiles <dir>
   tiler shade --manifest <file.json> --data <dir> --tiles <dir> --params <file.json>
   tiler genus-field --manifest <file.json> --data <dir> --tiles <dir>
-  tiler graph --streets <file.bin> [--paths <file.bin>] [--ferries <file.bin>] [--landmarks <file.bin>] [--art <file.bin>] [--highways <file.bin>] [--commercial <file.bin>] [--canopy <file.bin>] [--buildings <file.bin> --shade-params <file.json> --shade-dir <dir>] --out <file.bin>
+  tiler graph --streets <file.bin> [--paths <file.bin>] [--sidewalks <file.bin>] [--ferries <file.bin>] [--landmarks <file.bin>] [--art <file.bin>] [--highways <file.bin>] [--commercial <file.bin>] [--canopy <file.bin>] [--buildings <file.bin> --shade-params <file.json> --shade-dir <dir>] --out <file.bin>
 ";
 
 fn flags(mut args: impl Iterator<Item = String>) -> Fallible<HashMap<String, String>> {
@@ -106,6 +107,7 @@ fn run() -> Fallible<()> {
         "graph" => graph::run(&graph::Args {
             streets: path(&flags, "streets")?,
             paths: flags.get("paths").map(PathBuf::from),
+            sidewalks: flags.get("sidewalks").map(PathBuf::from),
             ferries: flags.get("ferries").map(PathBuf::from),
             landmarks: flags.get("landmarks").map(PathBuf::from),
             art: flags.get("art").map(PathBuf::from),

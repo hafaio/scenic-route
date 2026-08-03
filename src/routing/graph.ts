@@ -124,7 +124,7 @@ export interface RoutingGraph {
   edgeDurationSeconds: Float32Array; // a ferry edge's crossing-plus-wait seconds; 0 for every other kind
   ferryEdges: Uint32Array; // ids of the ferry edges, for the A* ferry-credit heuristic
   minFerrySecPerMetre: number; // min over ferry edges of duration/length, Infinity when there are none
-  edgeFlags: Uint8Array; // bit0 structure, bit1 steps, bit2 geometry-right (sidewalks)
+  edgeFlags: Uint8Array; // bit0 structure, bit1 steps, bit2 geometry-right (sidewalks), bit3 OSM-sourced
   names: string[];
   geometry: Uint8Array;
   // Per ferry edge, its two terminal stop names at the node-a and node-b ends (aligned to

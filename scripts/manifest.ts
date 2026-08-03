@@ -129,7 +129,7 @@ export interface StreetLayer {
   sourceUrl: string;
 }
 
-// data/paths/<id>.bin: the OSM pedestrian/park network, magic `PATH`. STRT v5's byte layout,
+// data/paths/<id>.bin: the OSM pedestrian/park network, magic `PATH`. STRT's byte layout,
 // reinterpreted per record (offset 0 = OSM way id, 20 = kind 6 path / 7 steps); it carries the
 // same canopy cover at every vertex, filled by `tiler densities`. layout: scripts/README.md
 export interface PathLayer {

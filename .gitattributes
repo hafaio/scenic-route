@@ -10,5 +10,6 @@ data/landmarks/*.bin filter=lfs diff=lfs merge=lfs -text
 data/landuse/*.bin filter=lfs diff=lfs merge=lfs -text
 data/openstreets/*.bin filter=lfs diff=lfs merge=lfs -text
 data/paths/*.bin filter=lfs diff=lfs merge=lfs -text
+data/sidewalks/*.bin filter=lfs diff=lfs merge=lfs -text
 data/streets/*.bin filter=lfs diff=lfs merge=lfs -text
 data/trees/*.bin filter=lfs diff=lfs merge=lfs -text
