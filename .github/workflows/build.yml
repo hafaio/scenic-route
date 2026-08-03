@@ -19,11 +19,9 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      # Only the deploy path reads data/, and that is the whole LFS payload — ~135 MB, most of it the
-      # canopy and building blobs. Fetching it on every push and PR burned 13.5 GB of LFS bandwidth in
-      # nine days, against an account-wide 10 GiB a month that only downloads draw on. That exhausted
-      # the budget and left checkout failing on every run. lint and tests read nothing under data/, so
-      # they take the pointers.
+      # LFS checkout is off except on the deploy path: the large blobs under data/ are only needed to
+      # build the map, and downloads are the sole draw on the account's monthly LFS bandwidth. lint
+      # and tests read nothing under data/, so they take the pointers.
       - uses: actions/checkout@v7
         with:
           lfs: ${{ inputs.upload-pages == true }}
