@@ -1019,10 +1019,18 @@ spans two names — reported as `nameBreakJoints`); polylines are pruned of coll
 - Path surfaces (boardwalks, paths, step streets, non-vehicular decks) stay single **path edges** on
   their own geometry, tied into a corner fan by geometry-less **link edges**.
 
-A final mop-up adds a crossing at any isolated deg-2 ring whose two sidewalk sides would otherwise
-be separate components (`mopupCrossings`), and the build asserts the walking component count equals
-the v1 count. Nodes are sorted by (component, latitude, longitude) and renumbered, edges by
-(component, min node id).
+Before that, a backstop leaves **one crossing per pair of nodes** whoever drew them
+(`collapsedCrossings`): a mapped crossing beats a synthesized one, and between two of the same
+provenance the shorter wins. Parallel edges are never the only path between their own two ends, so
+collapsing them cannot disconnect anything. A final mop-up adds a crossing at any isolated deg-2
+ring whose two sidewalk sides would otherwise be separate components (`mopupCrossings`), and the
+build asserts the walking component count equals the v1 count. Once every pass that places an edge
+has run, a second backstop drops each edge that runs from a node back to itself (`selfLoopEdges`) —
+a way the 1 m node merge folded into one node, an end an entrance snap bound to the node the other
+end already sat on, or a closed way OSM drew — and compacts the geometry the dropped edges owned.
+Taking such an edge pays its length and returns the walker to where they started, so no search can
+use it and dropping it cannot disconnect anything either. Nodes are sorted by (component, latitude,
+longitude) and renumbered, edges by (component, min node id).
 
 When `--ferries` is supplied (`data/ferries/<id>.bin`, magic `FERR`, referenced by convention — not
 the manifest), a final stage adds the ferry network **after** that walking assertion and renumber,
