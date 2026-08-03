@@ -143,6 +143,7 @@ struct Edge {
 /// geometry entries (`NO_GEOMETRY` for the geometry-less crossings and links); `name_id` is still
 /// the original STRT id here and is remapped to the compact table at write time. `source_id` is the
 /// contracted street or path edge this was derived from, `NO_SOURCE_ID` for the derived kinds.
+#[derive(Clone)]
 struct V2Edge {
     a: u32,
     b: u32,
@@ -567,6 +568,81 @@ fn prune_collinear(xs: &[i32], ys: &[i32]) -> (Vec<i32>, Vec<i32>) {
         keep.iter().map(|&index| xs[index]).collect(),
         keep.iter().map(|&index| ys[index]).collect(),
     )
+}
+
+/// Which of two crossings over one pair of nodes the graph keeps. A mapped crossing beats a
+/// synthesized one — it is drawn on the ground rather than inferred, and it carries the geometry the
+/// straight corner-to-corner line has none of. Between two of the same provenance the shorter wins:
+/// the duplicate is a second way round the same roadway, and the walk is the short side of it. An
+/// exact tie keeps the incumbent, so the survivor is the earlier edge rather than a hash order.
+fn crossing_supersedes(candidate: &V2Edge, incumbent: &V2Edge) -> bool {
+    let candidate_mapped = candidate.flags & GRPH_OSM != 0;
+    let incumbent_mapped = incumbent.flags & GRPH_OSM != 0;
+    if candidate_mapped == incumbent_mapped {
+        candidate.length < incumbent.length
+    } else {
+        candidate_mapped
+    }
+}
+
+/// Drops every edge that runs from a node back to itself, returning the ones it dropped. Both ends of
+/// a walking line can land on one node: the 1 m near-node merge folds a way shorter than itself into a
+/// single base node, an entrance snap binds one end to the very node the other end already sits on, or
+/// OSM draws a closed way that arrives back where it left. What comes out carries nobody anywhere —
+/// taking it pays its length and returns the walker to the node they started from, so no search can
+/// ever take it — and for that same reason dropping it cannot disconnect anything: a node is already
+/// reachable from itself.
+fn drop_self_loops(edges: &mut Vec<V2Edge>) -> Vec<V2Edge> {
+    let mut dropped: Vec<V2Edge> = Vec::new();
+    edges.retain(|edge| {
+        if edge.a == edge.b {
+            dropped.push(edge.clone());
+            false
+        } else {
+            true
+        }
+    });
+    dropped
+}
+
+/// Leaves one crossing over each pair of nodes and drops the rest, returning how many it dropped.
+/// Parallel edges are never the only path between their own two ends, so this cannot disconnect
+/// anything: every pair it touches keeps a crossing.
+fn collapse_parallel_crossings(edges: &mut Vec<V2Edge>) -> usize {
+    let mut kept: HashMap<(u32, u32), usize> = HashMap::new();
+    let mut dropped = vec![false; edges.len()];
+    for edge_id in 0..edges.len() {
+        let edge = &edges[edge_id];
+        if edge.kind != KIND_CROSSING {
+            continue;
+        }
+        let pair = (edge.a.min(edge.b), edge.a.max(edge.b));
+        match kept.get(&pair).copied() {
+            None => {
+                kept.insert(pair, edge_id);
+            }
+            Some(incumbent) => {
+                let (winner, loser) = if crossing_supersedes(edge, &edges[incumbent]) {
+                    (edge_id, incumbent)
+                } else {
+                    (incumbent, edge_id)
+                };
+                dropped[loser] = true;
+                kept.insert(pair, winner);
+            }
+        }
+    }
+    let collapsed = dropped.iter().filter(|&&drop| drop).count();
+    if collapsed > 0 {
+        let mut survivors: Vec<V2Edge> = Vec::with_capacity(edges.len() - collapsed);
+        for (edge, drop) in edges.drain(..).zip(&dropped) {
+            if !drop {
+                survivors.push(edge);
+            }
+        }
+        *edges = survivors;
+    }
+    collapsed
 }
 
 /// The ordinal half of the durable key, over the final edge order: for each edge carrying a source
@@ -1205,10 +1281,24 @@ pub fn run(args: &Args) -> Fallible<()> {
         // Crossings at a real intersection (degree >= 3, at least two streets): one per street,
         // joining the two corners that flank it, carrying its name, cover and structure/steps.
         if street_count >= 2 && degree >= 3 {
+            // Two street-ends at one node can flank the same pair of corners — a street that both
+            // arrives and leaves has an end in two slots, and where the fan gives it only two gaps
+            // both slots name the same two corners. Emitting per slot then writes the same crossing
+            // twice: same pair of nodes, same name, same length, one on top of the other.
+            let mut crossed_pairs: Vec<(u32, u32)> = Vec::with_capacity(street_count);
             for slot in 0..street_count {
                 let crossed = &final_edges[ends[slot].edge as usize];
                 let corner_a = corner_ids[fan.corner_right[slot] as usize];
                 let corner_b = corner_ids[fan.corner_left[slot] as usize];
+                let pair = if corner_a <= corner_b {
+                    (corner_a, corner_b)
+                } else {
+                    (corner_b, corner_a)
+                };
+                if crossed_pairs.contains(&pair) {
+                    continue;
+                }
+                crossed_pairs.push(pair);
                 let length = node_distance(
                     &v2_x, &v2_y, corner_a, corner_b, origin_lng, origin_lat, scale,
                 );
@@ -1393,7 +1483,7 @@ pub fn run(args: &Args) -> Fallible<()> {
     // Links, one per deduped (path node, corner) pair, emitted in key order: a hash map's iteration
     // order is seeded per process, and the edge sort below breaks ties only on the smaller node id,
     // so leaving it would shuffle a handful of edge ids between two runs over identical inputs.
-    let link_count = link_pairs.len();
+    let mut link_count = link_pairs.len();
     let mut link_list: Vec<((u32, u32), u8)> = link_pairs.into_iter().collect();
     link_list.sort_unstable();
     for ((node, corner), cover) in link_list {
@@ -1413,8 +1503,16 @@ pub fn run(args: &Args) -> Fallible<()> {
         });
     }
 
+    // The backstop, over whatever the passes above left: one crossing per pair of nodes, whoever
+    // drew them. Collapsing here catches the duplicates no rule upstream can see — a synthesized
+    // crossing and a mapped one over the same two kerbs, or two mapped ways over one roadway —
+    // because it asks only what the finished graph says, which is where the defect is visible.
+    let collapsed_crossings = collapse_parallel_crossings(&mut v2_edges);
+    crossing_count -= collapsed_crossings;
+
     // Connectivity mop-up: union-find over the v2 graph, then add a latent crossing at any deg-2
-    // joint whose two sides are still separated, until every v1 component's image is whole.
+    // joint whose two sides are still separated, until every v1 component's image is whole. Nothing
+    // it adds can duplicate: it only joins two corners no edge already joins.
     let v2_node_count = v2_x.len();
     let mut v2_parent: Vec<u32> = (0..v2_node_count as u32).collect();
     for edge in &v2_edges {
@@ -1442,6 +1540,46 @@ pub fn run(args: &Args) -> Fallible<()> {
             });
             union(&mut v2_parent, corner_a, corner_b);
             mopup_crossings += 1;
+        }
+    }
+
+    // The degenerate backstop, run once every pass that can place an edge has run: an edge from a node
+    // back to itself is no edge, whichever pass drew it. Its kind is what the counts have to be told,
+    // because they were taken as the edges were built.
+    let self_loops = drop_self_loops(&mut v2_edges);
+    for edge in &self_loops {
+        match edge.kind {
+            KIND_SIDEWALK => sidewalk_count -= 1,
+            KIND_CROSSING => crossing_count -= 1,
+            KIND_LINK => link_count -= 1,
+            _ => {
+                path_edge_count -= 1;
+                if edge.flags & GRPH_OSM != 0 {
+                    osm_path_edges -= 1;
+                    osm_path_km -= f64::from(edge.length) / 1000.0;
+                }
+            }
+        }
+    }
+    // A dropped walking line took its polyline with it, and nothing else points at it, so the table is
+    // compacted and the survivors renumbered onto it — an entry no edge names would still be written.
+    let mut geometry_slot: Vec<u32> = vec![u32::MAX; geometry_polys.len()];
+    for edge in &v2_edges {
+        if edge.geom != NO_GEOMETRY {
+            geometry_slot[edge.geom as usize] = 0;
+        }
+    }
+    let mut kept_polys: Vec<(Vec<i32>, Vec<i32>)> = Vec::with_capacity(geometry_polys.len());
+    for (index, slot) in geometry_slot.iter_mut().enumerate() {
+        if *slot != u32::MAX {
+            *slot = kept_polys.len() as u32;
+            kept_polys.push(std::mem::take(&mut geometry_polys[index]));
+        }
+    }
+    let mut geometry_polys = kept_polys;
+    for edge in &mut v2_edges {
+        if edge.geom != NO_GEOMETRY {
+            edge.geom = geometry_slot[edge.geom as usize];
         }
     }
 
@@ -2111,6 +2249,8 @@ pub fn run(args: &Args) -> Fallible<()> {
         "pathNodes": path_node_count,
         "nameBreakJoints": name_break_joints,
         "mopupCrossings": mopup_crossings,
+        "collapsedCrossings": collapsed_crossings,
+        "selfLoopEdges": self_loops.len(),
         "lengthClamped": length_clamped,
         "coverClamped": cover_clamped,
         "durableIdEdges": durable_id_edges,
@@ -2159,6 +2299,90 @@ mod tests {
             flags: 0,
             source_id,
         }
+    }
+
+    fn crossing(a: u32, b: u32, length: f32, mapped: bool) -> V2Edge {
+        V2Edge {
+            kind: KIND_CROSSING,
+            a,
+            b,
+            length,
+            flags: if mapped { GRPH_OSM } else { 0 },
+            ..keyed(NO_SOURCE_ID, SIDE_NONE)
+        }
+    }
+
+    #[test]
+    fn a_mapped_crossing_takes_the_pair_from_a_synthesized_one_however_far_it_doglegs() {
+        // What the suppression's length slack cannot reach: the mapped crossing rounds a kerb and
+        // runs to twice the straight line the synthesis drew between the same two corners.
+        let mut edges = vec![crossing(4, 9, 10.9, false), crossing(9, 4, 21.8, true)];
+        assert_eq!(collapse_parallel_crossings(&mut edges), 1);
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].length, 21.8);
+    }
+
+    #[test]
+    fn two_mapped_crossings_over_one_pair_leave_the_shorter() {
+        // An island drawn as a closed way, cut at two nodes: both ways round it join the same pair.
+        let mut edges = vec![
+            crossing(4, 9, 28.4, true),
+            crossing(1, 2, 12.0, false),
+            crossing(9, 4, 8.5, true),
+        ];
+        assert_eq!(collapse_parallel_crossings(&mut edges), 1);
+        assert_eq!(
+            edges.iter().map(|edge| edge.length).collect::<Vec<f32>>(),
+            vec![12.0, 8.5]
+        );
+    }
+
+    #[test]
+    fn a_crossing_pair_nothing_else_joins_is_left_alone() {
+        let mut edges = vec![
+            crossing(4, 9, 10.9, false),
+            crossing(9, 12, 10.9, false),
+            V2Edge {
+                a: 4,
+                b: 9,
+                ..keyed(3, SIDE_NORTH)
+            },
+        ];
+        assert_eq!(collapse_parallel_crossings(&mut edges), 0);
+        assert_eq!(edges.len(), 3);
+    }
+
+    #[test]
+    fn an_edge_from_a_node_back_to_itself_is_no_edge_of_any_kind() {
+        let mut edges = vec![
+            crossing(9, 9, 0.62, true),
+            V2Edge {
+                a: 4,
+                b: 4,
+                length: 0.79,
+                kind: KIND_PATH,
+                flags: GRPH_OSM,
+                ..keyed(NO_SOURCE_ID, SIDE_NONE)
+            },
+            crossing(4, 9, 10.9, false),
+        ];
+        let dropped = drop_self_loops(&mut edges);
+        assert_eq!(
+            dropped
+                .iter()
+                .map(|edge| (edge.kind, edge.a))
+                .collect::<Vec<(u8, u32)>>(),
+            vec![(KIND_CROSSING, 9), (KIND_PATH, 4)]
+        );
+        assert_eq!(edges.len(), 1);
+        assert_eq!((edges[0].a, edges[0].b), (4, 9));
+    }
+
+    #[test]
+    fn an_edge_between_two_nodes_is_left_alone() {
+        let mut edges = vec![crossing(4, 9, 10.9, false), crossing(9, 4, 10.9, true)];
+        assert!(drop_self_loops(&mut edges).is_empty());
+        assert_eq!(edges.len(), 2);
     }
 
     #[test]
