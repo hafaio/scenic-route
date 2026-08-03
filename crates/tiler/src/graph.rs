@@ -922,7 +922,8 @@ pub fn run(args: &Args) -> Fallible<()> {
     }
 
     // Conflate the two sources into one segment list, then node it exactly as before.
-    let (protos, conflate_stats) = conflate::conflate(street_protos, path_protos, meters_per_unit);
+    let (protos, conflate_stats) =
+        conflate::conflate(street_protos, path_protos, &all_names, meters_per_unit);
 
     // Node the endpoints of every proto by exact quantized equality.
     let mut node_index: HashMap<(i32, i32), u32> = HashMap::new();
@@ -2257,10 +2258,14 @@ pub fn run(args: &Args) -> Fallible<()> {
         "maxOrdinal": max_ordinal,
         "dedupedWays": conflate_stats.deduped_ways,
         "dedupedKm": conflate_stats.deduped_km,
+        "dedupedOrphanWays": conflate_stats.deduped_orphan_ways,
+        "dedupedOrphanKm": conflate_stats.deduped_orphan_km,
         "osmTSplits": conflate_stats.osm_t_splits,
         "weldedVertices": conflate_stats.welded_vertices,
         "entranceSnaps": conflate_stats.entrance_snaps,
+        "shortEntranceSnaps": conflate_stats.short_entrance_snaps,
         "danglingEnds": conflate_stats.dangling_ends,
+        "mergedDanglingEnds": conflate_stats.merged_dangling_ends,
         "csclSplits": conflate_stats.cscl_splits,
         "osmWays": conflate_stats.osm_ways,
         "osmKm": conflate_stats.osm_km,

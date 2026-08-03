@@ -994,10 +994,18 @@ the client's to take.
 `tiler graph` contracts STRT into the graph the client routes on, then expands it into the edges a
 walker actually uses. When `--paths` is supplied it first **conflates** the OSM pedestrian/park
 network (`PATH`) into the CSCL edges (`conflate.rs`): the paths are deduped against CSCL, noded
-among themselves, welded at at-grade crossings, their dangling entrances snapped to the nearest
-street, and the CSCL splits applied — so a greenway or step street joins the routable network.
-Conflated edges carry the OSM flag (byte-23 bit3), and the pass reports `osmPathEdges`,
-`weldedVertices`, `entranceSnaps`, `osmTSplits`, `mergedNearNodes` and `droppedOsmIslands`.
+among themselves, deduped a second time in a wider band (a *named* way that shares no node with any
+other OSM way and parallels a CSCL segment of the same name is a re-mapping of that street, not a
+walk beside it), welded at at-grade crossings, their dangling entrances snapped to the nearest
+street, the CSCL splits applied, and finally any dangling end left within 8 m of another node but
+more than 60 m from it through the network pulled onto it — so a greenway or step street joins the
+routable network, and a second mapping of an alley does not sit on top of the first as a dead-end
+spur. The entrance snap's continuation guard is waived below 8 m: inside the street's own
+right-of-way half-width there is nothing for it to guard against, and rejecting there costs a
+whole-block detour. Conflated edges carry the OSM flag (byte-23 bit3), and the pass reports
+`osmPathEdges`, `weldedVertices`, `entranceSnaps` (with `shortEntranceSnaps`, the share the waiver
+accepted), `osmTSplits`, `dedupedOrphanWays`, `mergedDanglingEnds`, `mergedNearNodes` and
+`droppedOsmIslands`.
 
 Steps 1–7 are the v1 contraction: vehicular-only segments (`nonped='V'`, flag
 bit 0) are dropped; endpoints are noded by exact quantized equality then near-misses within 1 m are
