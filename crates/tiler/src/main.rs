@@ -3,6 +3,10 @@
 //! encodes the `.bin`s and owns the manifest and the colour ramp; everything numeric is here.
 //! See scripts/README.md.
 
+// graph.rs's stats object is one `serde_json::json!` literal with more keys than the default 128
+// expansion steps allow.
+#![recursion_limit = "256"]
+
 mod binfmt;
 mod canopy;
 mod caster_chunks;
