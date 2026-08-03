@@ -73,6 +73,13 @@ jobs:
           key: tiles-${{ hashFiles('data/**', 'crates/tiler/**', 'scripts/*.ts', 'src/tree-cover/manifest.json', 'src/tree-cover/ramp.ts', 'src/tree-cover/genus.ts', 'Cargo.toml', 'Cargo.lock') }}
       - if: inputs.upload-pages
         run: bun export
+      # The committed shed artifact names the graph it was placed against and the client resolves
+      # nothing against any other one, so a deploy whose graph inputs moved without a `build-sheds`
+      # re-place in the same push makes every shed on the map vanish rather than misplacing one —
+      # correct, and invisible until someone looks. This is the last step that holds both halves, the
+      # graph having only just been built, so the pairing is blocked here instead of being remembered.
+      - if: inputs.upload-pages
+        run: bun run check-sheds
       # The route-level checks (tests/route-sampling.test.ts) cannot run with lint and tests above:
       # they read the graph this build just made, which is gitignored, and two LFS files under data/
       # that the non-deploy checkout deliberately takes as pointers. This is the one path with both,

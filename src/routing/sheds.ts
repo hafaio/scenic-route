@@ -1,18 +1,8 @@
 // The SHED artifact: every sidewalk shed New York has permitted since 2017-12-28, as the graph edges
-// it stands on and the days it stood there. Layout: scripts/README.md (magic `SHED`, v1). Written by
-// scripts/shed-encode.ts; this is the only thing that reads it.
-//
-// A span names its edge by the graph's DURABLE key — the source segment's CSCL physicalid, its
-// N/E/S/W side and an ordinal — not by the edge's position in the graph, which shifts on every
-// rebuild. Resolving that back to an edge index is one pass over the graph's own key column, done per
-// query rather than as a standing index: the standing set is ~13k spans against 531k edges, so a
-// Map of the keys a day actually wants is a hundredth of the size of a Map of every edge.
-//
-// It ships as two files because almost every query is "today". `open.bin` holds the sheds still up —
-// 80 KB, and a query for today reads nothing else. `closed.bin` holds the ones that have come down,
-// sorted by the day they did, so a query for a past day seeks into it with `index.bin` and decodes
-// only the suffix that could still have been standing. Reading a day eight years back costs the whole
-// file; reading today costs a tenth of it.
+// it stands on and the days it stood there. Written by scripts/shed-encode.ts; this is the only thing
+// that reads it. scripts/README.md has the layout (magic `SHED`, v2) — the open/closed split almost
+// every query is "today" pays for, and why a span names its edge by the graph's durable key rather
+// than by its position, resolved per query. DESIGN.md, "Sidewalk sheds", is why any of that is so.
 
 import { rainTau } from "../shade/phenology";
 import { type Cursor, readUnsignedVarint, readVarint } from "../tiles/varint";
@@ -72,23 +62,12 @@ const EPOCH_MS = Date.UTC(2017, 11, 28); // the first DOB snapshot; every day nu
 // the earliest one worth offering.
 export const SHED_EPOCH_DAY = new Date(EPOCH_MS).toISOString().slice(0, 10);
 
-// Where the day's artifact comes from: `public/sheds/` on `main`, read over
-// raw.githubusercontent.com rather than out of the deploy. The sheds change every morning and the
-// site does not — the daily job (.github/workflows/sheds.yml) commits the three files to `main`,
-// while Pages ships on `workflow_dispatch` alone, so anything read same-origin would be exactly as
-// fresh as the last manual deploy: ~16 new permits a day against ~13k standing, so a month between
-// deploys is ~4% of the standing set wrong. `raw` decouples the two — it serves any branch with
-// `access-control-allow-origin: *`, gzip, an etag, a five-minute cache and range requests.
-//
-// `main` rather than a side branch because that is where the artifact is committed, and because
-// `main` always exists: there is no branch to bootstrap before the client can read anything. LFS is
-// the one store this may never move to (DESIGN.md), and `raw` would serve a pointer's text rather
-// than its bytes anyway.
-//
-// In development it stays on the local `public/sheds/` — every other artifact a dev server reads
-// comes out of local `public/` (the graph, the tile pyramids, the caster chunks), and this is also
-// the only way to see a pipeline change before it is pushed. NEXT_PUBLIC_SHED_BASE overrides either
-// way.
+// Where the day's artifact comes from: `public/sheds/` on `main`, which the daily job
+// (.github/workflows/sheds.yml) commits the three files to, read over raw.githubusercontent.com
+// rather than out of the deploy — DESIGN.md, "Sidewalk sheds", for why not same-origin. In
+// development it stays on the local `public/sheds/`, as every other artifact a dev server reads does,
+// and that is also the only way to see a pipeline change before it is pushed. NEXT_PUBLIC_SHED_BASE
+// overrides either way.
 const SHED_MAIN_URL =
   "https://raw.githubusercontent.com/hafaio/scenic-route/main/public/sheds";
 const SHED_BASE =
@@ -366,12 +345,26 @@ function resolveSpans(graph: RoutingGraph, sheds: readonly Shed[]): void {
   }
 }
 
-// Every shed standing on `day`, both halves together, with their spans resolved onto `graph`.
+// Whether the artifact names edges in THIS graph. A durable key survives a rebuild but does not
+// promise to mean the same edge across one: a conflation fix left 2,284 of 302,985 keys naming an
+// edge a median 26 m from the one they had named. So an artifact placed against another graph
+// resolves nothing at all — bare pavement is a failure anyone can see, scaffolding down the wrong
+// street is not.
+function sameGraph(graph: RoutingGraph, history: ShedHistory): boolean {
+  return graph.hash === history.graphHash;
+}
+
+// Every shed standing on `day`, both halves together, with their spans resolved onto `graph`. None
+// of them when the artifact was placed against a different graph, which is what the display layer,
+// the router and the shadow caster all go quiet on.
 export function shedsOn(
   graph: RoutingGraph,
   history: ShedHistory,
   day: number,
 ): Shed[] {
+  if (!sameGraph(graph, history)) {
+    return [];
+  }
   const standing = [...openOn(history.open, day), ...closedOn(history, day)];
   resolveSpans(graph, standing);
   return standing;
@@ -561,12 +554,21 @@ export function shedShade(
 // Build the graph's scaffolding field for a date. The canopy half of shelter needs no artifact, so it
 // lands first and a slow or failed fetch leaves the shelter slider working on trees alone rather than
 // inert; the sheds standing that day replace it once they arrive.
+//
+// A stale artifact throws rather than resolving to nothing quietly: the field is already seeded, so
+// the caller's catch leaves routing working on trees alone, and the mismatch is the one thing here
+// worth saying out loud. The other two readers have no such channel and simply draw nothing.
 export async function computeEdgeSheds(
   graph: RoutingGraph,
   date: Date,
 ): Promise<void> {
   graph.sheds = shedField(graph, new Map(), date);
   const history = await loadSheds();
+  if (!sameGraph(graph, history)) {
+    throw new Error(
+      `the shed artifact was placed against graph ${history.graphHash}, this one is ${graph.hash || "unknown"}`,
+    );
+  }
   graph.sheds = shedField(
     graph,
     shedCoverage(graph, history, shedDay(date)),

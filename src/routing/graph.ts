@@ -73,6 +73,10 @@ const SIDE_LABELS: readonly SideLabel[] = [
 ];
 
 export interface RoutingGraph {
+  // What this graph IS: FNV-1a 64 over the GRPH file's own bytes, as routing/version.json spells it.
+  // An artifact placed against a graph names the one it was placed against by this, and resolving it
+  // onto any other graph is what `sheds.ts` refuses to do.
+  hash: string;
   nodeCount: number;
   edgeCount: number;
   originLng: number;
@@ -137,13 +141,17 @@ const FORMAT_VERSION = 6;
 const HEADER_BYTES = 64;
 const EDGE_RECORD_BYTES = 34;
 const GRAPH_URL = "routing/nyc.bin"; // relative, so it picks up the deploy basePath
+const VERSION_URL = "routing/version.json"; // written beside the graph by the same `tiler graph` run
 const PATH_CACHE_LIMIT = 512;
 
 function fourByteAlign(offset: number): number {
   return (offset + 3) & ~3;
 }
 
-export function decodeGraph(buffer: ArrayBuffer): RoutingGraph {
+// `hash` is what these bytes hash to, which the bytes themselves cannot carry — a file cannot hold
+// its own FNV. The deploy writes it beside the graph and the pipeline recomputes it; either way the
+// caller is the one that knows.
+export function decodeGraph(buffer: ArrayBuffer, hash: string): RoutingGraph {
   const bytes = new Uint8Array(buffer);
   const view = new DataView(buffer);
   const magic = String.fromCharCode(bytes[0], bytes[1], bytes[2], bytes[3]);
@@ -256,6 +264,7 @@ export function decodeGraph(buffer: ArrayBuffer): RoutingGraph {
   );
 
   return {
+    hash,
     nodeCount,
     edgeCount,
     originLng,
@@ -363,16 +372,34 @@ export function edgeGeometryRight(graph: RoutingGraph, edge: number): boolean {
 
 let graphPromise: Promise<RoutingGraph> | null = null;
 
+// What the graph beside it hashes to, read out of the deploy's own record rather than recomputed
+// here: FNV-1a over 30 MB of graph is ~0.5 s of blocked main thread on a laptop and several times
+// that on a phone, to arrive at a number `tiler graph` already wrote down. The two files are written
+// by one run, so they cannot skew. An unreadable version file leaves the hash unknown, which no
+// artifact then matches — the graph itself still loads, so only what is placed against it goes quiet.
+async function fetchGraphHash(): Promise<string> {
+  try {
+    const response = await fetch(VERSION_URL);
+    if (!response.ok) {
+      throw new Error(`${response.status} ${response.statusText}`);
+    }
+    return ((await response.json()) as { hash: string }).hash;
+  } catch (error: unknown) {
+    console.error(`${VERSION_URL} is unreadable:`, error);
+    return "";
+  }
+}
+
 export function loadGraph(): Promise<RoutingGraph> {
   if (!graphPromise) {
-    graphPromise = fetch(GRAPH_URL)
-      .then(async (response) => {
+    graphPromise = Promise.all([fetch(GRAPH_URL), fetchGraphHash()])
+      .then(async ([response, hash]) => {
         if (!response.ok) {
           throw new Error(
             `${GRAPH_URL}: ${response.status} ${response.statusText}`,
           );
         }
-        return decodeGraph(await response.arrayBuffer());
+        return decodeGraph(await response.arrayBuffer(), hash);
       })
       .catch((error: unknown) => {
         graphPromise = null; // a failed load must not be memoized

@@ -434,8 +434,15 @@ Scaffolding is the one thing on the map whose source changes every morning, so i
 rebuilt by a daily job rather than by a deploy — and therefore the one committed thing under
 `public/`, since a job that runs no build has to be able to read the last one out of the checkout.
 The client does not read it out of the deploy either: Pages ships on `workflow_dispatch` and the
-artifact changes every morning, so it is fetched off `main` through raw.githubusercontent.com and is
-as fresh as the job. `scripts/README.md` says what it holds; this is why.
+artifact changes every morning, so anything read same-origin would be exactly as fresh as the last
+manual deploy — ~16 new permits a day against ~13k standing, so a month between deploys is ~4% of the
+standing set wrong. It is fetched off `main` through raw.githubusercontent.com instead, which is as
+fresh as the job: `raw` serves any branch with `access-control-allow-origin: *`, gzip, an etag, a
+five-minute cache and range requests. `main` rather than a side branch because that is where the
+artifact is committed and because `main` always exists — there is no branch to bootstrap before the
+client can read anything. It is also why this is the one store that may never move to LFS (above):
+`raw` would serve a pointer's text rather than its bytes. A dev server reads the local `public/sheds/`
+like every other artifact. `scripts/README.md` says what it holds; this is why.
 
 ### The feed is a git repo with four traps in it
 
@@ -478,31 +485,109 @@ right length on the correct block face and lets it slide along it, which is what
 confidence exists to record. Footprints still come in per BBL from Socrata, to pick which part of a
 multi-part lot is in use — so the 32 MB LFS building blob is never touched by this pipeline.
 
-**A permit longer than its frontage genuinely wraps corners**, so the walk that spends the overrun has
-to be bounded rather than forbidden: 80 Pine Street really does run onto Pearl, Maiden and Water. The
-bound is a 10 m budget for coverage that is off both the permit's street and the lot's own frontage.
-At 0 m the 80 Pine wrap breaks; past 15 m the walk buys more off-lot error than placed length. The
-exchange rate turns over somewhere in that interval and the constant sits in the middle of it. Every
-constant in `shed-map.ts` was picked by scoring the whole 61,331-permit feed against it, so none of
-them should be tuned by eye.
+**A shed stands on the frontage of the lot its permit was pulled for, and on nothing else.** A corner
+lot fronts two streets and both frontages are its own, so a run wraps its own corner — 80 Pine Street
+really does run onto Pearl, Maiden and Water, because 80 Pine is the whole block. The pavement in
+front of the next building along is not the lot's, however much length the permit declares, so the
+overrun is DROPPED rather than run on down the block. The declared linear feet is a ceiling on the
+run and never a target for it: it is a number on a permit, and nothing about it entitles a structure
+to stand in front of a building whose permit it is not.
+
+*A frontage is the boundary a lot sweeps along one pavement, not the span between its two ends.* It
+was read as the interval from the first facing boundary sample to the last, which is a different
+thing wherever a lot reaches the same pavement twice: a through-block lot with an arcade arm either
+side of a neighbour's building, a U around a rear yard, a corner arm projecting onto the far end of
+the same edge. The span between them covers the neighbour, and it is not a rounding — **414 of
+108,803 spans, 8,214 m in all, stood off their own lot**, up to 193 m of one edge at a time. The
+frontage is now walked out from the lot's closest approach to that pavement, sample by sample, and
+stopped where the boundary leaves — including where it leaves by running past the end of the edge,
+which a projection reports as the end rather than as a gap. **0 of 108,457 spans** are off their lot
+after it.
+
+That is a hard constraint with no tolerance, so it costs placed length and is meant to. Against
+declared length the placement falls from **96.37% to 83.52%** — corner lots 95.48% → 89.03%,
+mid-block lots 99.38% → 64.72% — and **439.1 of 2,483.1 declared miles** now have nowhere legitimate
+to go. Against the denominator that means something, the lot's own frontage, it rises to **99.51%**
+(corner 99.45%, mid-block 99.83%): the shed uses what its property has. 56.93% of permits declare
+more than their lot's frontage holds, by a median of 2.2 m and a p99 of 100.4 m, and that excess is
+now a printed diagnostic — a permit declaring far more than its lot can hold is usually a bad
+geocode — rather than something the placement chases.
+
+What the old rule cost is easiest to see span by span. Measured back to the lot it was placed for,
+placed length used to sit a median **6.78 m** away and **49.39% of it was more than 7 m off** — half
+the scaffolding in the city was in front of somebody else's building. It now sits a median 1.89 m
+off, p95 5.11 m, with 2.63% beyond 7 m. The corroboration falls out of an unrelated number: 121,057
+of 121,058 spans now measure their own deck depth against a lot boundary standing behind them, where
+6,069 of 118,014 had no frontage behind them to measure at all.
+
+Every constant in `shed-map.ts` was picked by scoring the whole 61,331-permit feed against it, so
+none of them should be tuned by eye. What tells a lot's own pavement from the pavement across a road
+is the same side band that already told the permit's street from its opposite side, measured from the
+lot's closest approach to its own street: over the feed, pavement the lot fronts is within 4.0 m of it
+at p95, and pavement across a street is never nearer than 7.2 m.
+
+**Pavement is continuous; the edges it is cut into are not.** The walk has to be written against the
+first and never against the second, because a graph rebuild re-cuts one kerb into different edges
+wherever anything nearby changes, and two places took an edge for the pavement.
+
+*Where along the frontage the shed sits.* A permit shorter than its lot's frontage is one run anchored
+on the building, and the anchor used to be a position along whichever candidate edge came nearest the
+lot — so a rebuild that split that edge in two handed the anchor to the other half and clamped it to
+the new edge's end, sliding the shed tens of metres down its own block face with its street, its side
+and its length all unchanged. It is now the point of the measured frontage nearest the building's
+centre, and the edge holding that point follows from it. The distances the old choice ranked are as
+close as they sound: the gap between the nearest candidate edge and the runner-up is under a
+centimetre for 1,438 of 59,773 placements and under a metre for 9,824, while the same gap measured to
+the next distinct *pavement* — the (source id, side) group — is an order of magnitude wider at the
+same quantiles. What is left is an exact tie, the anchor landing on the node two pieces of one
+pavement share, and that is settled on the arcs' own coordinates rather than on edge ids.
+
+*Getting past a corner, and the step across that was rejected.* A block face's pavement now stops at
+every kerb: **152,629 sidewalk ends have no other sidewalk on them, against 54** in the derived
+network this replaced, and what carries the pavement to the next block face is a crossing edge over
+the roadway. A walk that steps only from sidewalk to sidewalk therefore stops dead at the first
+corner — 57.2% of runs ended with nothing to continue on to, against none at all before.
+
+Letting the walk step over one crossing or link to a sidewalk of the same street and the same side
+was built and measured against the whole feed. It works, on the number it was aimed at: placed
+against claimed length on corner lots went **94.67%** on the old network, **86.33%** when the network
+moved, **95.28%** with the step across, and 97.31% if a crossed continuation is also allowed to beat
+a direct one on straightness. It is rejected anyway, and the reason is what the step physically is:
+crossing a side street's roadway and resuming on the NEXT BLOCK, in front of buildings whose permit
+this is not. No amount of recovered length buys that. The graph no longer indexes crossings at all,
+so the walk cannot take one.
+
+What the step was reaching for is met inside the lot instead. The lot's own frontage is a **single
+walkable piece for 98.40%** of lots, so those kerbs almost never cut one lot's frontage in two — and
+where they do (0.95% rejoined only across a crossing, 0.65% not rejoined at all), and at the corners
+the network fails to node, the recovery pass spends the stranded run on the lot's own unreached
+frontage without walking to it. That is why the corner wrap does not depend on the step across:
+**68.70%** of corner lots can reach their second frontage sidewalk to sidewalk, only 2.40% need a
+crossing to, and the remaining 28.90% could never have been walked to at all. Recovered length is
+discounted in the confidence, because which piece of its own lot the structure occupies is inferred
+from the length rather than traced on foot.
 
 **How deep the deck is, measured rather than assumed.** A shed spans the pavement from the building
 face out to roughly the kerb, and no dataset New York publishes carries a sidewalk width. Two lines
 pin it. The kerb falls out of the graph: a sidewalk's baked polyline is the centreline offset by half
 the CSCL kerb-to-kerb roadway plus a fixed `sidewalkInsetMeters`, so the kerb is always exactly that
 inset inboard of the line — the offset byte measures the ROADWAY and stops there, and knows nothing
-about the pavement beyond it. The building line is the tax lot the frontage is already measured
-against, taken as the median SIGNED offset of the lot's street-wall samples from the polyline, signed
+about the pavement beyond it, so the baked line is where the inset says the middle of the pavement is
+rather than where it is. The building line is the tax lot the frontage is already measured against,
+taken as the median SIGNED offset of the lot's street-wall samples from the polyline, signed
 off the graph's own geometry-right flag rather than off the wall's normal, which is unreliable
 exactly where the baked line lands inside the lot.
 
 Over the whole feed that comes out as a clean bell around **3.7 m** — a 12 ft sidewalk, which is what
 New York builds — which is why the flat 4 m it replaced looked defensible in aggregate and was wrong
 in every particular place: a Midtown avenue reads 6 m and a Queens side street 2.5 m. The artifact
-stores it clamped into **[0.1 m, 8 m]**. The ceiling is where the distribution stops falling and goes
-flat out to 32 m — 3.7% of spans, and superblocks, forecourts and plazas rather than pavement, where
-the lot line is not the building line at all. The floor is the encoding's alone: a depth rounds to
-decimetres and zero decimetres is the byte that means "not measured".
+stores it clamped into **[0.1 m, 8 m]**. The ceiling is 26 ft, wider than a Midtown avenue's pavement,
+and is where the distribution stops falling and goes flat out to 32 m — 3.7% of spans, and
+superblocks, forecourts and plazas rather than pavement, where the lot line is not the building line
+at all. Those are clamped rather than discarded because clamping is the honest drawing: the deck runs
+out from the kerb over as much pavement as there can be, and the ground between it and a tower set
+20 m back is not decked by anyone. The floor is the encoding's alone: a depth rounds to decimetres and
+zero decimetres is the byte that means "not measured".
 
 **What cannot be built is corrected by the reader, at 2.4 m.** The code wants 5 ft of clear path
 under a shed (BC 3307.6.2; BC 3307.6.3 has the deck cover the whole pavement bar 18 in at the kerb),
@@ -532,6 +617,42 @@ over 531,520 keys is expected to collide about 33 times, which is 33 sheds silen
 street. A rebuild settled it: 13,666 of 13,671 standing spans landed on a different edge id, not one
 changed street, and the 7 that moved more than 5 m were the same source row contracted differently.
 
+### A source refresh and its re-place are one deploy
+
+A durable key survives a rebuild without promising to still name the same edge across one — the
+ordinal in it is a within-build disambiguator and nothing more. So the artifact's header carries the
+graph's hash and `shedsOn` resolves nothing at all against any other graph. That is the fail-safe
+direction: bare pavement is a failure anyone can see, scaffolding down the wrong street is not. What
+it costs is a deploy discipline the rest of the site does not have, because every shed vanishing is
+also invisible until someone looks at the map.
+
+The gate is on the hash rather than on the keys, and deliberately so. Proving a key still means what
+it meant takes the re-placement it would be trying to avoid, so a refresh that moved nothing near any
+shed blanks exactly as one that moved everything does. Re-placement is the rectification: it
+re-derives all 72,020 records from the DOB history and the tax lots against the new graph, keeping
+nothing from the old artifact, which is why a forgotten re-place cannot corrupt anything and the next
+`build-sheds` heals it. A graph-change table that migrated the old keys was evaluated and declined —
+it would make `closed.bin` a function of the chain of graphs it migrated through, the exact property
+the 27-record replay bug was fixed to remove, and it buys only the two minutes a cached re-place
+costs.
+
+**Enforcement sits at the deploy, because that is the only place holding both halves.** The graph is
+built by the deploy and never committed; the artifact is committed and never built by one. A push or
+a PR therefore has nothing to compare — `build.yml` runs `check-sheds` between the tile build and the
+Pages upload, and a refresh that forgot `build-sheds` fails there rather than shipping. That is late,
+but it is not after the fact: nothing reaches the site.
+
+**The daily job has to refuse rather than re-stamp**, which is the sharper edge of the same rule. It
+carries every held record forward untouched and writes the header itself, so stamping the deployed
+graph's hash over an artifact placed against another one would hand the client old keys wearing the
+new graph's name — turning the blank map into a wrong one within a day of the mistake, and healing
+the one symptom anybody would have noticed. It reads the deployed graph first and stops on the
+disagreement instead, leaving the map blank until the pairing is fixed.
+
+What is left is a window rather than a hole: the artifact is committed before the deploy that catches
+the graph up, so the live map draws no sheds between the two, and the daily job refuses inside it.
+`scripts/README.md` has the procedure.
+
 ### A function of its end date, and nothing else
 
 The daily job has to land on the bytes a full rebuild would write, however far back the chain started,
@@ -556,7 +677,9 @@ Verifying the fix turned up a quieter version of the same defect: the fallback r
 billing lot to the base lots under it ran only over the permits' own BBLs, so whether a shed found its
 lot depended on whether some *other* permit in the batch happened to name that BBL. A placement has to
 be a function of its own permit — anything read out of the batch it was fetched in is this bug wearing
-different clothes.
+different clothes. `scripts/shed-drill.ts` is what holds it to that: drop one permit, rebuild, and no
+surviving record may have moved. Run it after anything that moves the graph, since placement snaps
+against the graph and the artifact outlives it.
 
 ### How it casts, and how it shelters
 
@@ -598,9 +721,15 @@ above.
 
 ### Known gaps
 
-- **19.8% of placed coverage sits on an edge whose street name does not match the permit.** Much of it
-  is legitimate corner wrap and nothing separates the two, so that is an upper bound on the error and
-  not a measurement of it. A further 1.28% sits more than 20 m from the permit's own lot.
+- **32.0% of placed coverage sits on an edge whose street name does not match the permit**, and the
+  undifferentiated figure reads as a defect when most of it is not one. It splits: **30.8 points** are
+  runs whose permit DID find its own street on the lot and wrapped onto the lot's other one, which is
+  the corner rule working; **1.2 points** are permits naming a street nothing near the lot spells the
+  same way, where the placement falls back to the nearest frontage there is — a misspelling ("AUDOBON
+  AVENUE"), a form the city does not use ("WEST WASHINGTON PLACE" against WASHINGTON PL), or a street
+  renamed since the permit ("7 AVENUE" against ADAM CLAYTON POWELL JR BLVD). Real error lives inside
+  the first figure and nothing separates it out, so that is still an upper bound rather than a
+  measurement.
 - 1.5% of the backfill places nowhere at all, against 26 of today's 7,535; the commonest reason by
   some way is a permit naming a street no sidewalk near its lot matches. Confidence is below 0.4 for
   4.2% of permits, and nothing costs on it — it is a diagnostic in the artifact, not a routing input.
