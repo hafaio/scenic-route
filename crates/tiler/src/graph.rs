@@ -31,6 +31,7 @@ use crate::conflate::{self, ProtoEdge, SIDEWALK_LEFT, SIDEWALK_RIGHT, swap_sidew
 use crate::corners::{self, EdgeEnd};
 use crate::direct_canopy;
 use crate::geometry::{METERS_PER_DEGREE_LAT, round_half_up};
+use crate::invariants;
 use crate::scenic;
 use crate::shade;
 use crate::sidewalks::{self, FLAG_NON_VEHICULAR};
@@ -84,15 +85,15 @@ const GRPH_BUILDING_RIGHT: u8 = 1 << 4;
 // ferry reuses the two cover/half-offset bytes (20-21) to carry a u16 crossing-plus-wait duration.
 pub const KIND_SIDEWALK: u8 = 0;
 pub const KIND_CROSSING: u8 = 1;
-const KIND_LINK: u8 = 2;
+pub const KIND_LINK: u8 = 2;
 pub const KIND_PATH: u8 = 3;
 const KIND_FERRY: u8 = 4;
 const KIND_MASK: u8 = 0x7;
 const SIDE_SHIFT: u8 = 3;
 pub const SIDE_NONE: u8 = 0;
-const SIDE_NORTH: u8 = 1;
-const SIDE_EAST: u8 = 2;
-const SIDE_SOUTH: u8 = 3;
+pub const SIDE_NORTH: u8 = 1;
+pub const SIDE_EAST: u8 = 2;
+pub const SIDE_SOUTH: u8 = 3;
 const SIDE_WEST: u8 = 4;
 const FLAG_GEOMETRY_RIGHT: u8 = 1 << 2; // this sidewalk lies right of its stored geometry direction
 
@@ -174,6 +175,61 @@ const SEAM_REPAIR_METERS: f64 = 60.0;
 // networks stop meeting, without failing over the residue OSM's own patchiness leaves.
 const MEASURED_SEAM_GAPS: usize = 80;
 const MAX_SEAM_GAPS: usize = 6 * MEASURED_SEAM_GAPS;
+// The pavement-coverage grid: half-kilometre cells, and how much walking network a cell needs before
+// it is scored at all. Half a kilometre is a couple of blocks — small enough that a neighbourhood
+// losing its pavement is its own cell rather than an average, large enough that an ordinary block
+// with one demoted service road is not the worst cell in the city.
+const PAVEMENT_CELL_METERS: f64 = 500.0;
+const PAVEMENT_CELL_KM: f64 = 2.0;
+// The whole-city bounds. Each sits in a gap that was measured from both sides: the finished city on
+// one, and a build of the same city with the fix that closed the defect taken back out on the other.
+//
+// 0.42 of 303.1 km of alley (0.14%) hangs off the main walking component. Without the mouth noding
+// that reads 264.1 of 303.2 (87.1%) and without the kerb cuts 5.98 of 302.1 (2.0%), so 1% separates
+// the city from both, at seven times what it measures.
+const MAX_STRANDED_ALLEY_FRACTION: f64 = 0.01;
+// An alley mouth stands on mapped pavement at the median, walks 37 m at the 90th percentile, and
+// none of the 3,813 fails to reach any. Without the kerb cuts that reads 108 m, 349 m and 94, and
+// without the mouth noding 3.6 m, 205 m and 61. The median is a near-zero property and 10 m is its
+// margin — half the mouths would have to leave the pavement they stand on to reach it. 120 m is
+// between the 37 the city measures and the 205 of the milder regression, and 10 stranded is a margin
+// on nothing at all.
+const MAX_ALLEY_MOUTH_MEDIAN_METERS: f64 = 10.0;
+const MAX_ALLEY_MOUTH_P90_METERS: f64 = 120.0;
+const MAX_STRANDED_ALLEY_MOUTHS: usize = 10;
+// 25 of the 14,961 one-sided keys carry pavement on two opposing winds, which is a residue rather
+// than a rate: a loop street wraps round onto its own far wind and labels the same pavement twice.
+// This bound has no measured far side — a build that computes the gate and then hands the offsetter
+// both sides anyway does not get this far, it dies on the corner assignment above — so 200 is eight
+// times the residue and two orders under the ~14,961 a gate that stopped being honoured would make.
+const MAX_PHANTOM_SIDEWALKS: usize = 200;
+// The link edges reach 32 m at the 99th percentile, and the longest is the seam repair's own longest
+// to the centimetre: every link the graph draws is a repair or an entrance snap, so the whole
+// distribution is bounded above by SEAM_REPAIR_METERS by construction, and a link past it is
+// something other than a repair claiming to be one. 50 m is the 99th percentile's own room — over
+// the 40 m a build without the kerb cuts reaches, under the reach that makes them.
+const MAX_LINK_P99_METERS: f64 = 50.0;
+// A tenth of the city's half-kilometre cells are over 9.4% streets the gate found no pavement on.
+// The failure this bounds is a whole neighbourhood's survey going missing while the citywide average
+// hides it: a borough is about a fifth of the 2,877 scored cells, so a borough at ~100% unpaved puts
+// the 90th percentile itself at 1.0. 30% is three times what the city measures and nowhere near it.
+const MAX_CELL_DEMOTED_SHARE: f64 = 0.30;
+// Every bound above is held over a population the build classifies for itself, so each one passes
+// on the empty set: stop `road_types == ALLEY` matching and there is no stranded alley km, no mouth
+// that fails to reach pavement, no phantom on a street the gate never called one-sided, and no link
+// whose length could be over the ceiling. These floors are what makes the passes above mean
+// something. Each is roughly a sixth of what the city measures — 303.1 km of alley over 3,813
+// mouths, 14,961 one-sided keys, 2,877 scored cells and 15,539 links — far enough under to survive a
+// year of OSM edits and orders of magnitude over the nothing a classifier that stopped matching
+// would leave.
+const MIN_ALLEY_KM: f64 = 50.0;
+const MIN_ALLEY_MOUTHS: usize = 600;
+const MIN_ONE_SIDED_KEYS: usize = 2_500;
+const MIN_PAVEMENT_CELLS: usize = 500;
+const MIN_LINK_EDGES: usize = 2_500;
+// The same emptiness on the existence gate's own denominators: no derived side km makes the drop
+// 0%, and no alley km makes the demoted share whatever the missing-denominator branch says.
+const MIN_DERIVED_SIDEWALK_KM: f64 = 400.0;
 
 pub struct Args {
     pub streets: PathBuf,
@@ -229,6 +285,17 @@ struct Edge {
 /// Whether the given end of an edge is a kerb-bound entrance snap.
 fn kerb_end(edge: &Edge, node: u32) -> bool {
     (edge.a == node && edge.kerb_a) || (edge.b == node && edge.kerb_b)
+}
+
+/// What an OSM sidewalk way becomes. A traffic island is part of the crossing it chains through and
+/// is costed as one: an island read as anything else leaves the two halves of every divided street's
+/// crossing joined to nothing, so the walker crosses to the median and the route stops there.
+fn swlk_kind(road_type: u8) -> u8 {
+    if road_type == SWLK_SIDEWALK {
+        KIND_SIDEWALK
+    } else {
+        KIND_CROSSING
+    }
 }
 
 /// The existence gate: which sides of an offsetted street have pavement at all — OSM maps a sidewalk
@@ -1702,12 +1769,7 @@ pub fn run(args: &Args) -> Fallible<()> {
                 name_id,
                 osm: true,
                 source_id: ways.ids[segment],
-                // A traffic island is part of the crossing it chains through, and is costed as one.
-                kind: if ways.road_types[segment] == SWLK_SIDEWALK {
-                    KIND_SIDEWALK
-                } else {
-                    KIND_CROSSING
-                },
+                kind: swlk_kind(ways.road_types[segment]),
                 side: SIDE_NONE,
                 sidewalks: 0,
                 paved: 0,
@@ -1748,6 +1810,12 @@ pub fn run(args: &Args) -> Fallible<()> {
     let mut osm_side_km = 0.0f64; // of those, the sides OSM maps for itself
     let mut alley_km = 0.0f64;
     let mut demoted_alley_km = 0.0f64;
+    // What the whole-city invariants below need from the gate, keyed by physicalid so each can be
+    // read back off the finished edges: which streets are alleys, which the gate demoted, and how
+    // much pavement it left each street with.
+    let mut alley_ids: HashSet<u32> = HashSet::new();
+    let mut demoted_ids: HashSet<u32> = HashSet::new();
+    let mut kept_sides: HashMap<u32, u32> = HashMap::new();
     for (proto_index, proto) in street_protos.iter_mut().enumerate() {
         if proto.offset == 0 {
             proto.flags |= GRPH_PATHLIKE;
@@ -1781,7 +1849,13 @@ pub fn run(args: &Args) -> Fallible<()> {
         osm_side_km += owned_meters / 1000.0;
         if streets.road_types[segment] == ALLEY {
             alley_km += km;
+            alley_ids.insert(proto.source_id);
         }
+        // The most pavement any record under this physicalid was left with. CSCL splits a street
+        // across records, and a key that is one-sided on one record and two-sided on another is not
+        // the one-sided case the phantom invariant is about.
+        let sides = kept_sides.entry(proto.source_id).or_insert(0);
+        *sides = (*sides).max(exists.count_ones());
         match exists.count_ones() {
             0 => {
                 proto.offset = 0;
@@ -1789,6 +1863,7 @@ pub fn run(args: &Args) -> Fallible<()> {
                 proto.kind = KIND_PATH;
                 demoted_streets += 1;
                 demoted_km += km;
+                demoted_ids.insert(proto.source_id);
                 if streets.road_types[segment] == ALLEY {
                     demoted_alley_km += km;
                 }
@@ -3437,6 +3512,166 @@ pub fn run(args: &Args) -> Fallible<()> {
         return Err("the CSR half-edge count is not 2E".into());
     }
 
+    // The whole-city invariants (invariants.rs), read off the finished edges. A CSCL key is only a
+    // CSCL key on an edge that took one: an OSM way id and a physicalid are both u32 and do collide,
+    // and only a derived edge or a mapped sidewalk matched to a street is keyed by the street.
+    let invariant_edges: Vec<invariants::Edge> = v2_edges
+        .iter()
+        .map(|edge| {
+            let straight = [
+                [node_lng[edge.a as usize], node_lng[edge.b as usize]],
+                [node_lat[edge.a as usize], node_lat[edge.b as usize]],
+            ];
+            let (poly_x, poly_y) = match edge.geom {
+                NO_GEOMETRY => (&straight[0][..], &straight[1][..]),
+                geom => {
+                    let (poly_x, poly_y) = &geometry_polys[geom as usize];
+                    (&poly_x[..], &poly_y[..])
+                }
+            };
+            let osm = edge.flags & GRPH_OSM != 0;
+            let cscl = !osm || edge.kind == KIND_SIDEWALK;
+            invariants::Edge {
+                a: edge.a,
+                b: edge.b,
+                length: edge.length,
+                kind: edge.kind,
+                side: edge.side,
+                source_id: edge.source_id,
+                osm,
+                alley: cscl && alley_ids.contains(&edge.source_id),
+                demoted: cscl && demoted_ids.contains(&edge.source_id),
+                bearing_a: departure_bearing(
+                    poly_x,
+                    poly_y,
+                    true,
+                    meters_per_unit_lng,
+                    meters_per_unit_lat,
+                ),
+                bearing_b: departure_bearing(
+                    poly_x,
+                    poly_y,
+                    false,
+                    meters_per_unit_lng,
+                    meters_per_unit_lat,
+                ),
+            }
+        })
+        .collect();
+    let walk = invariants::Walk {
+        node_count,
+        node_x: &node_lng,
+        node_y: &node_lat,
+        meters_per_unit,
+        edges: &invariant_edges,
+    };
+    let one_sided_ids: HashSet<u32> = kept_sides
+        .iter()
+        .filter(|&(_, &sides)| sides == 1)
+        .map(|(&id, _)| id)
+        .collect();
+    let alley_reach = invariants::alley_reach(&walk);
+    let mouth_walk = invariants::alley_mouth_walk(&walk);
+    let crossings_to_nowhere = invariants::crossings_to_nowhere(&walk);
+    let phantoms = invariants::phantom_sidewalks(&walk, &one_sided_ids);
+    let link_lengths = invariants::link_lengths(&walk);
+    let pavement_cells = invariants::pavement_cells(&walk, PAVEMENT_CELL_METERS, PAVEMENT_CELL_KM);
+    let seam_hairpins = invariants::seam_hairpins(&walk);
+    // Every failure is collected before any is raised, so one build says everything it has to say.
+    // The two counts nothing bounds — the crossings that stop in the middle of the road and the
+    // hairpin hand-offs — go to the stats below to be watched instead: both are dominated by shapes
+    // that are correct (a mapped crossing stub OSM simply drew short, a cul-de-sac wrapping round its
+    // own head), so neither has a line worth holding, and the regressions that move them move the
+    // bounded numbers above far harder.
+    let mut broken: Vec<String> = Vec::new();
+    // The populations first, so a bound that passed because it had nothing to hold says so instead
+    // of reading as a clean city.
+    for (population, floor, what) in [
+        (alley_reach.total_km, MIN_ALLEY_KM, "km of alley"),
+        (
+            mouth_walk.mouths as f64,
+            MIN_ALLEY_MOUTHS as f64,
+            "alley mouths",
+        ),
+        (
+            one_sided_ids.len() as f64,
+            MIN_ONE_SIDED_KEYS as f64,
+            "streets the gate left pavement on one side of",
+        ),
+        (
+            pavement_cells.cells as f64,
+            MIN_PAVEMENT_CELLS as f64,
+            "scored half-kilometre cells",
+        ),
+        (
+            link_lengths.links as f64,
+            MIN_LINK_EDGES as f64,
+            "link edges",
+        ),
+    ] {
+        if population < floor {
+            broken.push(format!(
+                "the city has {population:.1} {what}, under the {floor:.0} floor: the bounds below \
+                 are held over that population, so they would pass on it whatever the graph looks \
+                 like"
+            ));
+        }
+    }
+    if alley_reach.off_component_km > MAX_STRANDED_ALLEY_FRACTION * alley_reach.total_km {
+        broken.push(format!(
+            "{:.1} of {:.1} km of alley hangs off the main walking component, over the {:.0}% \
+             ceiling: an alley nothing reaches still routes internally, so a trip that ends on one \
+             silently snaps to the street instead",
+            alley_reach.off_component_km,
+            alley_reach.total_km,
+            100.0 * MAX_STRANDED_ALLEY_FRACTION
+        ));
+    }
+    if mouth_walk.median_meters > MAX_ALLEY_MOUTH_MEDIAN_METERS
+        || mouth_walk.p90_meters > MAX_ALLEY_MOUTH_P90_METERS
+        || mouth_walk.stranded > MAX_STRANDED_ALLEY_MOUTHS
+    {
+        broken.push(format!(
+            "an alley mouth walks {:.0} m to mapped pavement at the median and {:.0} m at the 90th \
+             percentile, with {} of {} reaching none at all, over {MAX_ALLEY_MOUTH_MEDIAN_METERS:.0} \
+             / {MAX_ALLEY_MOUTH_P90_METERS:.0} m and {MAX_STRANDED_ALLEY_MOUTHS}: the mouth is \
+             metres from the pavement it faces and is going round the block to reach it",
+            mouth_walk.median_meters, mouth_walk.p90_meters, mouth_walk.stranded, mouth_walk.mouths
+        ));
+    }
+    if phantoms > MAX_PHANTOM_SIDEWALKS {
+        broken.push(format!(
+            "{phantoms} of the {} streets the gate left pavement on one side of carry it on both, \
+             over the {MAX_PHANTOM_SIDEWALKS} ceiling: the graph is walking people down the side of \
+             the street that has no sidewalk",
+            one_sided_ids.len()
+        ));
+    }
+    if link_lengths.p99_meters > MAX_LINK_P99_METERS
+        || link_lengths.longest_meters > SEAM_REPAIR_METERS
+    {
+        broken.push(format!(
+            "the link edges reach {:.0} m at the 99th percentile and {:.0} m at the longest, over \
+             {MAX_LINK_P99_METERS:.0} and the {SEAM_REPAIR_METERS:.0} m the seam repair itself \
+             reaches: a link is the stitch into a park or a plaza, and a long one is a walker sent \
+             out to the roadway and back",
+            link_lengths.p99_meters, link_lengths.longest_meters
+        ));
+    }
+    if pavement_cells.p90_demoted_share > MAX_CELL_DEMOTED_SHARE {
+        broken.push(format!(
+            "a tenth of the city's {} half-kilometre cells are over {:.0}% streets with no \
+             pavement, over the {:.0}% ceiling: a neighbourhood has lost its sidewalks while the \
+             citywide average hid it",
+            pavement_cells.cells,
+            100.0 * pavement_cells.p90_demoted_share,
+            100.0 * MAX_CELL_DEMOTED_SHARE
+        ));
+    }
+    if !broken.is_empty() {
+        return Err(broken.join("; and ").into());
+    }
+
     // The durable key's ordinals, over the exact order the records are written in — the walking sort
     // and the ferry append are both behind us, so an edge id here is the id the file ships.
     let edge_ordinals = assign_ordinals(&v2_edges)?;
@@ -3633,11 +3868,17 @@ pub fn run(args: &Args) -> Fallible<()> {
     }
 
     // The gate's two guards. Neither is a tolerance on the data: each catches the rule being wrong.
-    let dropped_fraction = if derived_side_km > 0.0 {
-        1.0 - kept_side_km / derived_side_km
-    } else {
-        0.0
-    };
+    // Both are shares, so each needs its denominator to exist before the share means anything — a
+    // gate handed no offsettable street and no alley at all would otherwise report a perfect city.
+    if derived_side_km < MIN_DERIVED_SIDEWALK_KM || alley_km < MIN_ALLEY_KM {
+        return Err(format!(
+            "the gate was handed {derived_side_km:.1} km of derived sidewalk and {alley_km:.1} km \
+             of alley, under the {MIN_DERIVED_SIDEWALK_KM:.0} / {MIN_ALLEY_KM:.0} km floors: the \
+             two shares below are held over those, so an empty one passes them both"
+        )
+        .into());
+    }
+    let dropped_fraction = 1.0 - kept_side_km / derived_side_km;
     if dropped_fraction > MAX_DROPPED_SIDEWALK_FRACTION {
         return Err(format!(
             "the existence gate dropped {:.1}% of derived sidewalk km, over the {:.0}% ceiling: the \
@@ -3647,11 +3888,7 @@ pub fn run(args: &Args) -> Fallible<()> {
         )
         .into());
     }
-    let demoted_alley_fraction = if alley_km > 0.0 {
-        demoted_alley_km / alley_km
-    } else {
-        1.0
-    };
+    let demoted_alley_fraction = demoted_alley_km / alley_km;
     if demoted_alley_fraction < MIN_DEMOTED_ALLEY_FRACTION {
         return Err(format!(
             "only {:.1}% of alley km demoted to its centreline, under the {:.0}% floor: alleys have \
@@ -3747,6 +3984,25 @@ pub fn run(args: &Args) -> Fallible<()> {
         "ferryDroppedSameNode": ferry_dropped_same_node,
         "ferryDroppedDuplicate": ferry_dropped_duplicate,
         "names": used_names.len(),
+        "alleyKm": alley_reach.total_km,
+        "alleyOffComponentKm": alley_reach.off_component_km,
+        "alleyMouths": mouth_walk.mouths,
+        "alleyMouthsStranded": mouth_walk.stranded,
+        "alleyMouthWalkMedianM": mouth_walk.median_meters,
+        "alleyMouthWalkP90M": mouth_walk.p90_meters,
+        "crossingsToNowhere": crossings_to_nowhere,
+        "oneSidedKeys": one_sided_ids.len(),
+        "phantomSidewalks": phantoms,
+        // The finished network's own count, which is the population the bound below is held over —
+        // `linkEdges` counts them before the seam's repair pass adds its own.
+        "linkEdgesScored": link_lengths.links,
+        "linkP99M": link_lengths.p99_meters,
+        "linkLongestM": link_lengths.longest_meters,
+        "pavementCells": pavement_cells.cells,
+        "pavementCellP90DemotedShare": pavement_cells.p90_demoted_share,
+        "pavementCellP99DemotedShare": pavement_cells.p99_demoted_share,
+        "pavementCellWorstDemotedShare": pavement_cells.worst_demoted_share,
+        "seamHairpins": seam_hairpins,
         "totalKm": total_km,
         "bytes": bytes.len(),
     });
@@ -3901,6 +4157,18 @@ mod tests {
         // The other flag bits share the byte and must not be read as sides.
         let alley = FLAG_VEHICULAR_ONLY | FLAG_STRUCTURE | (1 << 1);
         assert_eq!(gated_sidewalks(alley), 0);
+    }
+
+    #[test]
+    fn a_traffic_island_is_part_of_the_crossing_it_chains_through() {
+        // 20 is a sidewalk, 21 a marked crossing and 22 the island between the two halves of one.
+        // The island has to read as a crossing: a divided street's crossing is drawn as way, island,
+        // way, and an island that is anything else costs differently at best and, if the ingest ever
+        // stops carrying it, leaves both halves ending in the middle of the road — which is the
+        // shape `invariants::crossings_to_nowhere` counts over the finished city.
+        assert_eq!(swlk_kind(SWLK_SIDEWALK), KIND_SIDEWALK);
+        assert_eq!(swlk_kind(21), KIND_CROSSING);
+        assert_eq!(swlk_kind(22), KIND_CROSSING);
     }
 
     #[test]
