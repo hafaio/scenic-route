@@ -343,9 +343,9 @@ to OSM, but route diffs between deploys now include OSM edits, which they did no
 Every pass is a rule about that seam and the order is the design: node the CSCL network against
 itself, dedup OSM against CSCL, node the paths among themselves, dedup the named orphans a second
 time in a wider band, weld at-grade crossings, snap dangling entrances, apply the accumulated CSCL
-splits, then merge the dangling ends the network says are a block from what they touch. Every
-tolerance in it is a named constant carrying the Central Park measurement that chose it, so none of
-them should be moved by eye.
+splits, merge the dangling ends the network says are a block from what they touch, then node the
+components nothing anchors onto the network they stand on. Every tolerance in it is a named constant
+carrying the Central Park measurement that chose it, so none of them should be moved by eye.
 
 **The first pass exists because the city does not node an alley's mouth.** `graph.rs` nodes protos by
 their endpoints alone, which is all it takes wherever the city splits both lines at their junction —
@@ -373,6 +373,30 @@ path and a fenced-off stub all sit metres from something. That is why this is a 
 not a loosening of `graph.rs`'s 1 m near-miss union, which is a CSCL digitization sliver with no
 topology in it and stays as tight as it is. The end that moves is always OSM's: CSCL geometry feeds
 the corner and crossing construction downstream and is left exactly where the city drew it.
+
+**The last pass is the first one again, read over the walking network.** Step 0 exists because the
+city does not node an alley's mouth; step 7 exists because OSM does not node a trail that crosses a
+lane it drew separately. The defect looks identical from the graph's side — a walkable lattice all
+present, all internally connected and all unreachable — and the evidence has the same shape. Of the
+2,233 components the island drop would take, **437 come within 1 m of a component it keeps**, at p50
+0.02 m and with 369 of them inside 0.1 m; the next band, 1 to 4 m, holds 34, and past 4 m the count
+climbs again. Below 1 m the two lines cross in plan view and only the node is missing; above 4 m the
+distance is a gap in what OSM drew, and a pass that reached across it would be inventing a walk
+rather than repairing a noding. So a vertex of an unanchored component standing within 1 m of an
+anchored line cuts it there and moves onto the cut, and the island drop below is left judging only
+what is genuinely out of reach. It runs last because it can only ask its question of a network every
+other pass has finished with, and it runs to a fixed point because joining one component can bring a
+second within reach of the first. **The island takes one join, not one per touch**: reachability
+needs a single node, and a second would invent a second junction OSM never drew. Neither side may be
+a bridge or tunnel deck — a trail under a viaduct is a metre from it in plan and a storey below it on
+the ground — which is the same grade-separation guard the weld and the dangling-end merge carry, and
+it is what keeps a trail net from being welded to the highway or rail cut it passes beneath.
+
+What the pass deliberately does not do is close the gaps above 4 m, and the measurement is why.
+Conditioned on parkland, on the connector continuing the way's exit direction within
+`CONTINUATION_DEGREES`, and on the connector crossing no other line, the distribution past 4 m stays
+a smooth continuum with no trough anywhere in it — 4 to 8 m holds 89 components, 8 to 20 m holds 402,
+20 to 50 m holds 521. There is no bound in that range a measurement can defend, so none is taken.
 
 ### What the whole city is held to
 
@@ -404,7 +428,7 @@ shed pairing check.
 Those bounds are calibrated against a floor and a ceiling the app itself imposes: the floor is a
 plain shortest path with every scenic weight at zero, which no cost-model change can go below, and
 the ceiling is the strongest bias one slider can ask for. At n = 400 a borough on the graph of
-2026-08-02 (627,106 edges), over Manhattan, the Bronx, Brooklyn, Queens and Staten Island, the app's
+2026-08-02 (628,693 edges), over Manhattan, the Bronx, Brooklyn, Queens and Staten Island, the app's
 defaults give a **detour ratio** median of 1.305/1.325/1.333/1.327/1.415 and a p90 of
 1.451/1.539/1.652/1.547/1.873, a **reversal share** of 2.0/6.8/26.0/22.8/3.3% of which
 0.0/0.0/0.3/0.0/0.0% are avoidable, a **longest crossing run** of 4/5/5/6/4, and no routing failure
@@ -413,18 +437,22 @@ anywhere. Flat weights move the detour median to 1.221/1.250/1.272/1.268/1.344, 
 share **0.0% in every borough** — which is what says that bound measures the cost model rather than
 the network, since an avoidable reversal is strictly extra distance and a shortest path would never
 buy one. The tree slider at maximum reaches a median 1.354/1.365/1.368/1.369/1.476, a p90 of
-1.568/1.670/1.763/1.683/2.188 and 3.0/8.8/31.0/27.5/4.3% reversing, of which 0.0/0.0/0.3/0.0/0.3%
+1.568/1.670/1.763/1.683/2.188 and 3.0/9.0/31.0/27.5/4.3% reversing, of which 0.0/0.0/0.3/0.0/0.3%
 avoidable.
 
 ### The overlay may not offer a walk the router cannot give
 
 The tree-cover overlay and the routing graph are built from different sets. `tiler chunks` draws
 straight from `data/paths/<id>.bin`; `tiler graph` conflates that same file against CSCL and then
-**drops whole OSM path components nothing anchors** — 2,199 islands, 245.5 km — as unreachable. So
-the map painted 4,704 ways green and tree-lined that no route could enter or leave, 2,921 of them
-(145.2 km) with no graph geometry anywhere along them: Floyd Bennett Field's North Forty, the Staten
-Island Greenbelt, Ferry Point Park, Alley Pond. Asked for a walk between two ends of one of those
-trails, the app answered with a 2.3 mi road detour while drawing the trail underneath it.
+**drops whole OSM path components nothing anchors** — 1,815 islands, 211.2 km, once step 7 above has
+noded onto the network everything that was standing on it — as unreachable. So the map paints 4,036
+ways green and tree-lined that no route can enter or leave, covering 3,979 `PATH` records and 204.5
+km: Floyd Bennett Field's North Forty, the Staten Island Greenbelt, Ferry Point Park, Alley Pond.
+Asked for a walk between two ends of one of those trails, the app answers with a 2.3 mi road detour
+while drawing the trail underneath it. Step 7 took 668 ways (656 records, 31.5 km) out of that set —
+the grave-row lattices of the Cypress Hills and Mount Judah cemeteries are the largest of them — and
+the overlay drew those again with no change to any of the code below, which is what the
+one-directional reconciliation is for.
 
 **The overlay is the side that gives way.** A green line is an offer, and the graph is the only thing
 that can honour one, so the graph now writes the ways it stranded (`public/routing/stranded.bin`) and
@@ -437,14 +465,18 @@ question, below.
 
 ### Known gaps
 
-- **145 km of genuinely walkable trail is drawn nowhere and routable nowhere.** The island drop is
-  right to refuse a component no route can reach — routing into one strands the walker — but the
-  reason these are unreachable is that OSM never draws the join between a park's trail net and the
-  street outside it, and the entrance snap cannot invent one. The fix is a conflation change (reach
-  a trail net's edge nodes to the nearest pavement, under some bound that does not also weld
-  unrelated ways together), not an overlay change, and it needs its own evidence: which of the 2,199
-  islands are parkland with a plausible entrance, and what bound joins those without joining
-  anything else. Until then the overlay's silence is honest and the trails are missing from both.
+- **204.5 km of walkable trail is still drawn nowhere and routable nowhere, and no measurement says
+  where to join it.** Step 7 above closed the half of this that was a noding defect: 384 components,
+  34.3 km, that were standing on the routable network with no node there. What is left is not that.
+  Measured over all 2,233 components the drop would take, the distance from the nearest one to the
+  network it would join is a continuum from 4 m out with no trough in it at any conditioning tried —
+  parkland, the entrance snap's continuation guard, or a connector that crosses no other line. Floyd
+  Bennett Field's North Forty, the worst single case, is **36.3 m** from anything anchored; the
+  premise that OSM merely leaves out the last few metres does not hold there, and a bound wide enough
+  to reach it welds 882 further components (127.6 km) that no evidence vouches for.
+  Closing this needs evidence the graph's own inputs do not carry — a parkland boundary, an OSM
+  `barrier`/`entrance` tag, or a survey of where park entrances actually are — not a wider tolerance.
+  Until then the overlay's silence is honest and those trails are missing from both.
 - **The per-borough drop criterion was waived in the Bronx, and nobody has checked it by eye.** The
   criterion was that no borough lose much more derived sidewalk than the city as a whole, and the
   Bronx came in 2.8 pp above it (25.7% against 22.9%), which is a fail. It was waived on the

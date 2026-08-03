@@ -70,6 +70,15 @@ const DANGLING_DETOUR_METERS: f64 = 60.0;
 // one: a mid-block entrance splits the block, but an entrance beside an intersection joins the node
 // rather than shedding a 2 m sliver edge.
 const SPLIT_MERGE_METERS: f64 = 2.0;
+// Step 7's tolerance: how far a vertex of an unanchored walking component may stand from the
+// routable network and still be standing *on* it. Like step 0 this is a coincidence test rather
+// than a reach — the two lines cross in plan view and only the noding is missing — so the distance
+// is zero and the tolerance only has to survive quantization. Measured over the 2,233 components
+// the island drop would take: 437 come within 1 m of the network (p50 0.02 m, 369 of them inside
+// 0.1 m), the next band [1, 4) holds 34, and it climbs again from 4 m as real gaps in what OSM
+// drew. Any tolerance in that trough picks out the same set (437 against 472 at 4 m); this one
+// matches CSCL_TOUCH_METERS and graph.rs's own node merge radius.
+const ISLAND_TOUCH_METERS: f64 = 1.0;
 // Step 0's tolerance: how far a CSCL endpoint may stand from the CSCL line it opens off and still be
 // the same place. This is a coincidence test, not a weld — the city draws an alley's mouth *on* the
 // street's centreline and simply does not node it there, so the distance is zero and the tolerance
@@ -155,6 +164,7 @@ pub struct ConflateStats {
     pub short_entrance_snaps: usize, // of those, accepted only because the connector was under 8 m
     pub dangling_ends: usize, // degree-1 OSM endpoints left unconnected after every step
     pub merged_dangling_ends: usize, // dangling ends pulled onto a node a block away by network
+    pub island_touch_cuts: usize, // unanchored components noded onto the network they stand on
     pub cscl_splits: usize,  // interior cuts applied to CSCL segments (weld + entrance)
     pub osm_ways: usize,     // OSM ways read (before dedup)
     pub osm_km: f64,
@@ -1218,7 +1228,12 @@ pub fn conflate(
     // the steps above made.
     let merged_dangling_ends = merge_dangling_ends(&mut combined, meters_per_unit);
 
+    // Step 7: node the walking components nothing anchors against the network they stand on, so the
+    // island drop is left judging only what is genuinely out of reach.
+    let (combined, island_touch_cuts) = cut_island_touches(combined, meters_per_unit);
+
     let stats = ConflateStats {
+        island_touch_cuts,
         deduped_ways,
         deduped_km,
         deduped_orphan_ways,
@@ -1363,6 +1378,218 @@ fn merge_dangling_ends(protos: &mut [ProtoEdge], meters_per_unit: (f64, f64)) ->
         }
     }
     merged
+}
+
+/// Step 7: the island touch cut — the same rule as step 0, read over the walking network instead of
+/// the CSCL one. A connected component of the conflated network that holds no CSCL segment and no
+/// mapped sidewalk is what `graph.rs`'s island drop is about to delete; where a vertex of one stands
+/// within `ISLAND_TOUCH_METERS` of a component that *is* anchored, the two lines cross in plan view
+/// and only the node is missing, so the anchored line is cut at the projection and the island vertex
+/// moves onto the cut. DESIGN.md, "The order conflation runs in", is why this runs last and why the
+/// island takes at most one join. Returns the number of components noded.
+///
+/// Neither side may be a bridge or tunnel deck: a trail passing under a viaduct is a metre from it
+/// in plan view and a storey below it on the ground, and the plan view cannot tell the two apart.
+/// A projection landing on the anchored line's own end is left alone — those two are already one
+/// node, or `graph.rs`'s near-node merge is about to make them one.
+fn cut_island_touches(
+    protos: Vec<ProtoEdge>,
+    meters_per_unit: (f64, f64),
+) -> (Vec<ProtoEdge>, usize) {
+    let mut protos = protos;
+    let mut cuts = 0usize;
+    // Joining one island can bring a second within reach of the first, so the pass runs to a fixed
+    // point rather than once; the round count is bounded by the chain's depth and is small.
+    loop {
+        let round = cut_island_touch_round(&mut protos, meters_per_unit);
+        cuts += round;
+        if round == 0 {
+            return (protos, cuts);
+        }
+    }
+}
+
+/// One round of step 7: every component that is unanchored *now* takes at most one join.
+fn cut_island_touch_round(protos: &mut Vec<ProtoEdge>, meters_per_unit: (f64, f64)) -> usize {
+    let (component, anchored) = walking_components(protos);
+    let anchored_protos: Vec<usize> = (0..protos.len())
+        .filter(|&proto| anchored.contains(&component[proto]))
+        .collect();
+    if anchored_protos.len() == protos.len() {
+        return 0;
+    }
+    let grid = SegmentGrid::new(
+        anchored_protos
+            .iter()
+            .map(|&proto| (&protos[proto].poly_x[..], &protos[proto].poly_y[..])),
+        meters_per_unit,
+    );
+
+    // The best touch found for each island component: the island's proto and vertex, the anchored
+    // proto and the point on it the vertex moves to, keyed by the component so it takes one join.
+    struct Touch {
+        distance: f64,
+        island: usize,
+        vertex: usize,
+        target: usize,
+        along: f64,
+        point: Point,
+    }
+    let mut best: HashMap<u32, Touch> = HashMap::new();
+    for (island, proto) in protos.iter().enumerate() {
+        let root = component[island];
+        if anchored.contains(&root) || proto.flags & STRUCTURE_FLAG != 0 {
+            continue;
+        }
+        for vertex in 0..proto.poly_x.len() {
+            let point = (proto.poly_x[vertex], proto.poly_y[vertex]);
+            for (line, sub) in grid.nearby(point, ISLAND_TOUCH_METERS, meters_per_unit) {
+                let target = anchored_protos[line as usize];
+                let candidate = &protos[target];
+                if candidate.flags & STRUCTURE_FLAG != 0 {
+                    continue;
+                }
+                let (sub, last) = (sub as usize, candidate.poly_x.len() - 1);
+                let (distance, param, projected) = project(
+                    point,
+                    (candidate.poly_x[sub], candidate.poly_y[sub]),
+                    (candidate.poly_x[sub + 1], candidate.poly_y[sub + 1]),
+                    meters_per_unit,
+                );
+                if distance > ISLAND_TOUCH_METERS
+                    || best
+                        .get(&root)
+                        .is_some_and(|incumbent| incumbent.distance <= distance)
+                {
+                    continue;
+                }
+                let ends = [
+                    (candidate.poly_x[0], candidate.poly_y[0]),
+                    (candidate.poly_x[last], candidate.poly_y[last]),
+                ];
+                if ends.iter().any(|&end| {
+                    meters_between(projected, end, meters_per_unit) <= SPLIT_MERGE_METERS
+                }) {
+                    continue;
+                }
+                best.insert(
+                    root,
+                    Touch {
+                        distance,
+                        island,
+                        vertex,
+                        target,
+                        along: along_at(
+                            &candidate.poly_x,
+                            &candidate.poly_y,
+                            sub,
+                            param,
+                            meters_per_unit,
+                        ),
+                        point: projected,
+                    },
+                );
+            }
+        }
+    }
+    if best.is_empty() {
+        return 0;
+    }
+
+    let mut target_splits: HashMap<usize, Vec<Split>> = HashMap::new();
+    let mut island_cuts: HashMap<usize, Vec<usize>> = HashMap::new();
+    let mut moved: HashMap<Point, Point> = HashMap::new();
+    let mut touches: Vec<&Touch> = best.values().collect();
+    touches.sort_by_key(|touch| (touch.island, touch.vertex));
+    for touch in &touches {
+        let proto = &protos[touch.island];
+        let point = (proto.poly_x[touch.vertex], proto.poly_y[touch.vertex]);
+        if moved.contains_key(&point) {
+            continue; // two islands already sharing this coordinate cut the line once
+        }
+        target_splits.entry(touch.target).or_default().push(Split {
+            along: touch.along,
+            point: touch.point,
+        });
+        if touch.vertex != 0 && touch.vertex != proto.poly_x.len() - 1 {
+            island_cuts
+                .entry(touch.island)
+                .or_default()
+                .push(touch.vertex);
+        }
+        moved.insert(point, touch.point);
+    }
+    let joined = moved.len();
+
+    let mut relocate: HashMap<Point, Point> = HashMap::new();
+    let mut rebuilt: Vec<ProtoEdge> = Vec::with_capacity(protos.len() + 2 * joined);
+    for (index, proto) in protos.drain(..).enumerate() {
+        match (target_splits.remove(&index), island_cuts.remove(&index)) {
+            (Some(mut splits), _) => {
+                let (pieces, _) = apply_splits(proto, &mut splits, &mut relocate, meters_per_unit);
+                rebuilt.extend(pieces);
+            }
+            (None, Some(mut vertices)) => {
+                vertices.sort_unstable();
+                rebuilt.extend(split_at_vertices(&proto, &vertices, meters_per_unit));
+            }
+            (None, None) => rebuilt.push(proto),
+        }
+    }
+    // The moves last, so an island whose cut was merged onto an existing vertex follows it there
+    // rather than to the projection that vertex stood in for. Only the island moves: CSCL geometry
+    // and OSM's mapped pavement stay where they were drawn.
+    let (component, anchored) = walking_components(&rebuilt);
+    for (index, proto) in rebuilt.iter_mut().enumerate() {
+        if anchored.contains(&component[index]) {
+            continue;
+        }
+        for vertex in 0..proto.poly_x.len() {
+            let Some(&cut) = moved.get(&(proto.poly_x[vertex], proto.poly_y[vertex])) else {
+                continue;
+            };
+            let cut = relocate.get(&cut).copied().unwrap_or(cut);
+            proto.poly_x[vertex] = cut.0;
+            proto.poly_y[vertex] = cut.1;
+        }
+    }
+    *protos = rebuilt;
+    joined
+}
+
+/// The conflated network's connected components, keyed per proto by their root, and which of those
+/// roots `graph.rs`'s island drop will keep: the ones holding a CSCL segment or a mapped sidewalk.
+/// The two must agree, so the anchoring test is the drop's own.
+fn walking_components(protos: &[ProtoEdge]) -> (Vec<u32>, HashSet<u32>) {
+    let mut node_of: HashMap<Point, u32> = HashMap::new();
+    let mut ends: Vec<(u32, u32)> = Vec::with_capacity(protos.len());
+    for proto in protos {
+        let last = proto.poly_x.len() - 1;
+        let mut intern = |point: Point| -> u32 {
+            let next = node_of.len() as u32;
+            *node_of.entry(point).or_insert(next)
+        };
+        ends.push((
+            intern((proto.poly_x[0], proto.poly_y[0])),
+            intern((proto.poly_x[last], proto.poly_y[last])),
+        ));
+    }
+    let mut parent: Vec<u32> = (0..node_of.len() as u32).collect();
+    for &(node_a, node_b) in &ends {
+        let (root_a, root_b) = (find(&mut parent, node_a), find(&mut parent, node_b));
+        parent[root_a as usize] = root_b;
+    }
+    let component: Vec<u32> = ends
+        .iter()
+        .map(|&(node_a, _)| find(&mut parent, node_a))
+        .collect();
+    let mut anchored: HashSet<u32> = HashSet::new();
+    for (proto, &root) in protos.iter().zip(&component) {
+        if !proto.osm || proto.kind == KIND_SIDEWALK {
+            anchored.insert(root);
+        }
+    }
+    (component, anchored)
 }
 
 /// What a bounded walk needs of a network: a node's neighbours, each with its length in metres. It
@@ -1573,6 +1800,103 @@ mod tests {
     fn with_source_id(mut edge: ProtoEdge, source_id: u32) -> ProtoEdge {
         edge.source_id = source_id;
         edge
+    }
+
+    // OSM's own pavement: the island drop keeps whatever component holds one, so it stands for the
+    // routable network in the step 7 fixtures without dragging a CSCL street's dedup and weld in.
+    fn mapped_sidewalk(poly: &[(i32, i32)]) -> ProtoEdge {
+        let mut edge = path(poly);
+        edge.kind = KIND_SIDEWALK;
+        edge
+    }
+
+    // How many components the conflated list has, and how many of them the island drop would keep.
+    fn components(protos: &[ProtoEdge]) -> (usize, usize) {
+        let (component, anchored) = walking_components(protos);
+        let roots: HashSet<u32> = component.iter().copied().collect();
+        (roots.len(), anchored.len())
+    }
+
+    #[test]
+    fn a_component_nothing_anchors_is_noded_onto_the_line_it_stands_on() {
+        // The trail's end lies on the pavement's interior with no node there: OSM's own T-split
+        // wants a shared vertex and the pavement has none at (50, 0), so before step 7 nothing
+        // joins the two and the island drop takes the trail whole.
+        let pavement = mapped_sidewalk(&[(0, 0), (100, 0)]);
+        let trail = path(&[(50, 0), (50, 40), (90, 40)]);
+        let (combined, stats) = conflate(vec![], vec![pavement, trail], &[], MPU);
+        assert_eq!(stats.island_touch_cuts, 1);
+        assert_eq!(
+            combined
+                .iter()
+                .filter(|edge| edge.kind == KIND_SIDEWALK)
+                .count(),
+            2,
+            "the pavement was cut at the touch"
+        );
+        assert_eq!(
+            components(&combined),
+            (1, 1),
+            "and nothing is left stranded"
+        );
+    }
+
+    #[test]
+    fn a_component_standing_clear_of_the_network_is_left_for_the_island_drop() {
+        // The same trail 3 m off the pavement. That is a gap in what OSM drew, not a missing node,
+        // and inventing the walk across it is what the tolerance exists to refuse.
+        let pavement = mapped_sidewalk(&[(0, 0), (100, 0)]);
+        let trail = path(&[(50, 3), (50, 40), (90, 40)]);
+        let (combined, stats) = conflate(vec![], vec![pavement, trail], &[], MPU);
+        assert_eq!(stats.island_touch_cuts, 0);
+        assert_eq!(
+            components(&combined),
+            (2, 1),
+            "the trail is still an island"
+        );
+    }
+
+    #[test]
+    fn a_deck_over_the_network_is_not_noded_to_what_runs_beneath_it() {
+        // A footbridge crosses the pavement a storey up. In plan view it stands on it exactly as the
+        // trail above does, and only the structure flag can tell the two apart.
+        let pavement = mapped_sidewalk(&[(0, 0), (100, 0)]);
+        let mut deck = path(&[(50, 0), (50, 40), (90, 40)]);
+        deck.flags |= STRUCTURE_FLAG;
+        let (combined, stats) = conflate(vec![], vec![pavement, deck], &[], MPU);
+        assert_eq!(stats.island_touch_cuts, 0);
+        assert_eq!(components(&combined), (2, 1));
+    }
+
+    #[test]
+    fn a_component_that_touches_twice_is_joined_once() {
+        // Both ends of the loop stand on the pavement. One join is what reachability needs; a second
+        // would invent a second junction OSM never drew.
+        let pavement = mapped_sidewalk(&[(0, 0), (100, 0)]);
+        let loop_way = path(&[(30, 0), (30, 40), (70, 40), (70, 0)]);
+        let (combined, stats) = conflate(vec![], vec![pavement, loop_way], &[], MPU);
+        assert_eq!(stats.island_touch_cuts, 1);
+        assert_eq!(
+            combined
+                .iter()
+                .filter(|edge| edge.kind == KIND_SIDEWALK)
+                .count(),
+            2,
+            "the pavement was cut once"
+        );
+        assert_eq!(components(&combined), (1, 1));
+    }
+
+    #[test]
+    fn an_island_the_first_join_brings_within_reach_is_joined_too() {
+        // The spur stands on the trail, which stands on the pavement. Nothing anchors the trail
+        // until the pass has run once, so a single sweep would leave the spur stranded.
+        let pavement = mapped_sidewalk(&[(0, 0), (100, 0)]);
+        let trail = path(&[(50, 0), (50, 50)]);
+        let spur = path(&[(20, 25), (50, 25)]);
+        let (combined, stats) = conflate(vec![], vec![pavement, trail, spur], &[], MPU);
+        assert_eq!(stats.island_touch_cuts, 2);
+        assert_eq!(components(&combined), (1, 1));
     }
 
     #[test]
