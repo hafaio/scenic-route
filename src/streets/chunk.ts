@@ -5,7 +5,7 @@
 // a truncated or malformed chunk throws a clear error rather than reading past the buffer and drawing
 // silent garbage geometry / NaN coordinates.
 
-const CHUNK_FORMAT = 3;
+const CHUNK_FORMAT = 4;
 const SIDES = 2; // density bytes per street vertex: left sidewalk then right, interleaved
 const METERS_PER_DECIMETER = 0.1;
 
@@ -21,6 +21,9 @@ export interface StreetSegment {
   // Half the distance between the two sidewalks, in metres. Zero for a path or a boardwalk, which *is*
   // the walking surface and is drawn as a single line on its centreline.
   offsetMeters: number;
+  // An OSM path whose whole component the routing graph dropped, so no route can reach it. Drawing it
+  // would offer a walk the router will never return. Always false for a street.
+  stranded: boolean;
 }
 
 // A varint's bytes may run off the end of a truncated chunk; each read is guarded so it throws the
@@ -41,10 +44,11 @@ function readVarint(bytes: Uint8Array, cursor: { offset: number }): number {
   return (value >>> 1) ^ -(value & 1);
 }
 
-// Decode one STCK v3 street chunk into its full segments. Header: magic "STCK", version u16 at 4, the
-// body offset u16 at 6, the segment count u32 at 8, then the origin lng/lat and scale as f64 at 16, 24
-// and 32. Each segment is a u16 vertex count, a byte at +2 giving the sidewalk offset in decimetres,
-// then zigzag-varint delta lng/lat per vertex, then SIDES * vertices density bytes.
+// Decode one STCK v4 street chunk into its full segments. Header: magic "STCK", version u16 at 4, the
+// body offset u16 at 6, the segment count u32 at 8, the stranded bitmap's offset u32 at 12, then the
+// origin lng/lat and scale as f64 at 16, 24 and 32. Each segment is a u16 vertex count, a byte at +2
+// giving the sidewalk offset in decimetres, then zigzag-varint delta lng/lat per vertex, then
+// SIDES * vertices density bytes. The bitmap trails the segments, one bit each in their own order.
 export function decodeStreetChunk(buffer: ArrayBuffer): StreetSegment[] {
   const bytes = new Uint8Array(buffer);
   const view = new DataView(buffer);
@@ -55,6 +59,10 @@ export function decodeStreetChunk(buffer: ArrayBuffer): StreetSegment[] {
   }
 
   const count = view.getUint32(8, true);
+  const strandedOffset = view.getUint32(12, true);
+  if (strandedOffset + Math.ceil(count / 8) > bytes.length) {
+    throw new Error("street chunk truncated");
+  }
   const originLng = view.getFloat64(16, true);
   const originLat = view.getFloat64(24, true);
   const scale = view.getFloat64(32, true);
@@ -89,7 +97,9 @@ export function decodeStreetChunk(buffer: ArrayBuffer): StreetSegment[] {
       cursor.offset + SIDES * vertices,
     );
     cursor.offset += SIDES * vertices;
-    segments.push({ lngs, lats, densities, offsetMeters });
+    const stranded =
+      (bytes[strandedOffset + (segment >> 3)] & (1 << (segment & 7))) !== 0;
+    segments.push({ lngs, lats, densities, offsetMeters, stranded });
   }
   return segments;
 }

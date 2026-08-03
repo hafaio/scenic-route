@@ -416,8 +416,35 @@ buy one. The tree slider at maximum reaches a median 1.354/1.365/1.368/1.369/1.4
 1.568/1.670/1.763/1.683/2.188 and 3.0/8.8/31.0/27.5/4.3% reversing, of which 0.0/0.0/0.3/0.0/0.3%
 avoidable.
 
+### The overlay may not offer a walk the router cannot give
+
+The tree-cover overlay and the routing graph are built from different sets. `tiler chunks` draws
+straight from `data/paths/<id>.bin`; `tiler graph` conflates that same file against CSCL and then
+**drops whole OSM path components nothing anchors** — 2,199 islands, 245.5 km — as unreachable. So
+the map painted 4,704 ways green and tree-lined that no route could enter or leave, 2,921 of them
+(145.2 km) with no graph geometry anywhere along them: Floyd Bennett Field's North Forty, the Staten
+Island Greenbelt, Ferry Point Park, Alley Pond. Asked for a walk between two ends of one of those
+trails, the app answered with a 2.3 mi road detour while drawing the trail underneath it.
+
+**The overlay is the side that gives way.** A green line is an offer, and the graph is the only thing
+that can honour one, so the graph now writes the ways it stranded (`public/routing/stranded.bin`) and
+the second chunk pass marks them undrawn. That is not a claim the trails are unwalkable — most plainly
+are. It is that a layer must not advertise what the router will refuse.
+
+The reconciliation is one-directional and deliberately so: the drawn set is filtered down to the
+routable one, not the other way round. Making those components *routable* is a different and larger
+question, below.
+
 ### Known gaps
 
+- **145 km of genuinely walkable trail is drawn nowhere and routable nowhere.** The island drop is
+  right to refuse a component no route can reach — routing into one strands the walker — but the
+  reason these are unreachable is that OSM never draws the join between a park's trail net and the
+  street outside it, and the entrance snap cannot invent one. The fix is a conflation change (reach
+  a trail net's edge nodes to the nearest pavement, under some bound that does not also weld
+  unrelated ways together), not an overlay change, and it needs its own evidence: which of the 2,199
+  islands are parkland with a plausible entrance, and what bound joins those without joining
+  anything else. Until then the overlay's silence is honest and the trails are missing from both.
 - **The per-borough drop criterion was waived in the Bronx, and nobody has checked it by eye.** The
   criterion was that no borough lose much more derived sidewalk than the city as a whole, and the
   Bronx came in 2.8 pp above it (25.7% against 22.9%), which is a fail. It was waived on the

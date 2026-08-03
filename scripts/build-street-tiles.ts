@@ -54,6 +54,8 @@ const CASTER_DIR = join(PUBLIC_DIR, "casters");
 // scripts/build-commercial.ts after the chunks exist. Derived, gitignored, like the chunks.
 const COMMERCIAL_DIR = join(PUBLIC_DIR, "commercial");
 const ROUTING_DIR = join(PUBLIC_DIR, "routing");
+// The graph's list of the OSM paths its island drop stranded, which the second chunk pass reads back.
+const STRANDED_PATH = join(ROUTING_DIR, "stranded.bin");
 const STAMP_PATH = join(CANOPY_TILE_DIR, ".stamp");
 // Committed point/line sources served to the client verbatim for the map overlays (dots and lines).
 // Not rendered by the tiler, so they are copied straight across whenever their file is present.
@@ -429,7 +431,18 @@ async function build(): Promise<void> {
         join(ROUTING_DIR, "shade"),
       );
     }
+    graphArgs.push("--stranded", STRANDED_PATH);
     runTiler(graphArgs, false);
+  }
+
+  // The chunks above were written before the graph existed, so they still offer every OSM path the
+  // source network carries — including the ones the island drop took away, which the overlay would
+  // draw as a tree-lined walk no route can follow. Re-run over the same inputs with the graph's
+  // answer: only the trailing stranded bitmap changes, so the commercial signals keyed on the
+  // segment index stay aligned and need no rebuild. One paths layer means one stranded list, as the
+  // chunk pass itself assumes.
+  if (withPaths?.paths) {
+    runTiler([...chunksArgs, "--stranded", STRANDED_PATH], false);
   }
   await writeFile(STAMP_PATH, hash);
 }
