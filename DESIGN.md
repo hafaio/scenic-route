@@ -476,7 +476,9 @@ question, below.
   to reach it welds 882 further components (127.6 km) that no evidence vouches for.
   Closing this needs evidence the graph's own inputs do not carry — a parkland boundary, an OSM
   `barrier`/`entrance` tag, or a survey of where park entrances actually are — not a wider tolerance.
-  Until then the overlay's silence is honest and those trails are missing from both.
+  Until then the overlay's silence is honest and those trails are missing from both. **Worth doing,
+  not urgent**: nothing is wrong on the map today, the router simply cannot offer a trail nobody has
+  drawn a way onto, so this waits for whoever wants to bring an entrance source to it.
 - **The per-borough drop criterion was waived in the Bronx, and nobody has checked it by eye.** The
   criterion was that no borough lose much more derived sidewalk than the city as a whole, and the
   Bronx came in 2.8 pp above it (25.7% against 22.9%), which is a fail. It was waived on the
