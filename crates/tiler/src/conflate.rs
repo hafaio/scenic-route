@@ -1,16 +1,17 @@
 //! Conflation: the OSM pedestrian/park network (PATH v1) merged into the CSCL sidewalk network
 //! (STRT v5) before `graph.rs` nodes and contracts it. The committed source files stay pure; this
-//! runs entirely on the decoded, quantized proto-edges and hands `graph.rs` one combined list. The
-//! ordered algorithm — dedup against CSCL, node the paths among themselves, weld at-grade
-//! crossings, snap dangling entrances, then apply the CSCL splits — is decision 3 of the park-paths
-//! plan; every tolerance is a named constant with the Central Park measurement that chose it. See
-//! scripts/README.md.
+//! runs entirely on the decoded, quantized proto-edges and hands `graph.rs` one combined list.
+//! DESIGN.md, "The order conflation runs in", is why the passes are ordered as they are and what
+//! each of them is a rule about; every tolerance below is a named constant with the Central Park
+//! measurement that chose it. See scripts/README.md.
 //!
 //! All coordinates are quantized i32 in the streets file's frame (graph.rs re-quantizes the paths
 //! against the streets origin first), so `meters_per_unit` converts a unit delta to metres on each
 //! axis at the city's reference latitude — the same equirectangular frame the corners live in.
 
-use std::collections::{HashMap, HashSet};
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::ops::ControlFlow;
 
 use crate::geometry::round_half_up;
 
@@ -25,6 +26,11 @@ const DEDUP_BEARING_DEGREES: f64 = 25.0;
 // A way ≥80% covered by an aligned CSCL segment is a duplicate; 25–75% partial overlaps (a path
 // that runs 5 m beside a drive then peels away) are a real distinct walk and are kept whole.
 const DEDUP_FRACTION: f64 = 0.8;
+// The orphan band (step 2b). 10 m is where the first band's evidence runs out: an off-street
+// greenway sits more than 10 m from the centreline it follows, a re-mapped street sits inside the
+// right-of-way. Only a named, standalone way tested against a CSCL segment of the same name reaches
+// this band, so it never touches a path that is part of a network or that OSM names for itself.
+const ORPHAN_DEDUP_METERS: f64 = 10.0;
 // One sample every 10 m over each way: fine enough that a 6 m match band is not stepped over,
 // coarse enough that 2,700 km of paths costs a few hundred thousand point queries.
 const DEDUP_SAMPLE_METERS: f64 = 10.0;
@@ -43,6 +49,20 @@ const ENTRANCE_METERS: f64 = 20.0;
 // direction within 75°. A fence-parallel path exits along the fence, so its connector to the curb
 // runs ~90° across it and is rejected — Green-Wood's interior paths stay inside Green-Wood.
 const CONTINUATION_DEGREES: f64 = 75.0;
+// The guard only has something to guard beyond the street's own half-width. NYC's standard
+// right-of-way is 60 ft, so a CSCL centreline is ~9 m from the property line and an endpoint within
+// 8 m of it is standing in the roadbed or on its sidewalk — there is no fence between the two, and
+// whatever direction the way exits, that curb is the one it belongs to. Below 8 m the guard is
+// skipped: at that range rejecting costs a whole-block detour (Coenties Alley's 6 m-offset second
+// mapping exits at 88° to its connector and was left a dead-end spur 1.7 m from the corner).
+const CONTINUATION_FREE_METERS: f64 = 8.0;
+// The dangling-end merge (step 6). The radius is the same right-of-way half-width the continuation
+// guard uses: within it the two nodes are the same piece of street, outside it a dead end may be
+// honestly separated from what it faces. The detour is what makes the pair unambiguous — 60 m is
+// longer than any real corner-to-corner walk between two nodes 8 m apart, so anything past it means
+// the network has no short way round and the gap is a seam, not a barrier.
+const DANGLING_MERGE_METERS: f64 = 8.0;
+const DANGLING_DETOUR_METERS: f64 = 60.0;
 // Two CSCL split positions, or a split and an existing vertex/endpoint, within 2 m are merged to
 // one: a mid-block entrance splits the block, but an entrance beside an intersection joins the node
 // rather than shedding a 2 m sliver edge.
@@ -77,10 +97,14 @@ pub struct ProtoEdge {
 pub struct ConflateStats {
     pub deduped_ways: usize, // whole OSM ways dropped as CSCL duplicates
     pub deduped_km: f64,
+    pub deduped_orphan_ways: usize, // ways dropped by the wider orphan band (step 2b)
+    pub deduped_orphan_km: f64,
     pub osm_t_splits: usize, // OSM ways cut at a shared interior vertex (T-junctions)
     pub welded_vertices: usize, // OSM vertices moved onto a CSCL segment at an at-grade crossing
     pub entrance_snaps: usize, // dangling OSM endpoints snapped to a curb, guard accepted
+    pub short_entrance_snaps: usize, // of those, accepted only because the connector was under 8 m
     pub dangling_ends: usize, // degree-1 OSM endpoints left unconnected after every step
+    pub merged_dangling_ends: usize, // dangling ends pulled onto a node a block away by network
     pub cscl_splits: usize,  // interior cuts applied to CSCL segments (weld + entrance)
     pub osm_ways: usize,     // OSM ways read (before dedup)
     pub osm_km: f64,
@@ -301,6 +325,96 @@ fn dedup_samples(poly_x: &[i32], poly_y: &[i32], meters_per_unit: (f64, f64)) ->
     samples
 }
 
+/// The share of a way's samples that lie within `band` metres of a CSCL sub-segment running the
+/// same way (within `DEDUP_BEARING_DEGREES`) — the duplicate test, with the band as a parameter so
+/// the orphan pass can ask the same question of a wider one, and with an optional name the matched
+/// segment must also carry.
+fn aligned_fraction(
+    way: &ProtoEdge,
+    grid: &SegmentGrid,
+    streets: &[ProtoEdge],
+    band: f64,
+    same_name_as: Option<&str>,
+    names: &[String],
+    meters_per_unit: (f64, f64),
+) -> f64 {
+    let samples = dedup_samples(&way.poly_x, &way.poly_y, meters_per_unit);
+    let mut matched = 0usize;
+    for (sample, bearing) in &samples {
+        let is_duplicate =
+            grid.nearby(*sample, band, meters_per_unit)
+                .into_iter()
+                .any(|(proto_index, vertex)| {
+                    let proto = &streets[proto_index as usize];
+                    if same_name_as.is_some()
+                        && street_key(proto.name_id, names).as_deref() != same_name_as
+                    {
+                        return false;
+                    }
+                    let from = (proto.poly_x[vertex as usize], proto.poly_y[vertex as usize]);
+                    let to = (
+                        proto.poly_x[vertex as usize + 1],
+                        proto.poly_y[vertex as usize + 1],
+                    );
+                    let (distance, _, _) = project(*sample, from, to, meters_per_unit);
+                    distance <= band
+                        && line_angle(*bearing, bearing_degrees(from, to, meters_per_unit))
+                            <= DEDUP_BEARING_DEGREES
+                });
+        if is_duplicate {
+            matched += 1;
+        }
+    }
+    matched as f64 / samples.len() as f64
+}
+
+/// A name reduced to a comparison key: upper case, alphanumeric words, with CSCL's suffix
+/// abbreviations spelled out, so the city's "COENTIES ALY" and OSM's "Coenties Alley" compare equal.
+/// Only a non-leading word is expanded — CSCL's "ST NICHOLAS AVE" opens with Saint, not Street — and
+/// an unrecognized abbreviation simply fails to match, which keeps the way.
+fn street_key(name_id: u16, names: &[String]) -> Option<String> {
+    let name = names.get(name_id as usize)?;
+    let words: Vec<String> = name
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(str::to_uppercase)
+        .collect();
+    if words.is_empty() {
+        return None;
+    }
+    let expanded: Vec<&str> = words
+        .iter()
+        .enumerate()
+        .map(|(index, word)| {
+            if index == 0 {
+                return word.as_str();
+            }
+            match word.as_str() {
+                "ST" => "STREET",
+                "AVE" | "AV" => "AVENUE",
+                "ALY" => "ALLEY",
+                "BLVD" => "BOULEVARD",
+                "PKWY" | "PKY" => "PARKWAY",
+                "DR" => "DRIVE",
+                "RD" => "ROAD",
+                "LN" => "LANE",
+                "CT" => "COURT",
+                "PL" => "PLACE",
+                "TER" | "TERR" => "TERRACE",
+                "SQ" => "SQUARE",
+                "PLZ" => "PLAZA",
+                "CIR" => "CIRCLE",
+                "TPKE" => "TURNPIKE",
+                "EXPY" => "EXPRESSWAY",
+                "HWY" => "HIGHWAY",
+                "BRG" => "BRIDGE",
+                other => other,
+            }
+        })
+        .collect();
+    Some(expanded.join(" "))
+}
+
 /// Cut a proto at a sorted, distinct set of interior vertex indices, dividing the stored length by
 /// each piece's share of the parent's geodesic length. Every field but the geometry and length is
 /// inherited (per-side cover is the parent's block-half approximation).
@@ -347,11 +461,12 @@ struct CsclSplit {
     point: Point,
 }
 
-/// Decision 3, steps 1–5. `streets` and `paths` are the per-source proto lists (paths carry
+/// Decision 3, steps 1–6. `streets` and `paths` are the per-source proto lists (paths carry
 /// `osm = true`); the return is the combined list `graph.rs` nodes and contracts.
 pub fn conflate(
     streets: Vec<ProtoEdge>,
     paths: Vec<ProtoEdge>,
+    names: &[String],
     meters_per_unit: (f64, f64),
 ) -> (Vec<ProtoEdge>, ConflateStats) {
     let osm_ways = paths.len();
@@ -364,29 +479,16 @@ pub fn conflate(
     let mut deduped_km = 0.0;
     let mut ways: Vec<ProtoEdge> = Vec::with_capacity(paths.len());
     for way in paths {
-        let samples = dedup_samples(&way.poly_x, &way.poly_y, meters_per_unit);
-        let mut matched = 0usize;
-        for (sample, bearing) in &samples {
-            let is_duplicate = grid
-                .nearby(*sample, DEDUP_METERS, meters_per_unit)
-                .into_iter()
-                .any(|(proto_index, vertex)| {
-                    let proto = &streets[proto_index as usize];
-                    let from = (proto.poly_x[vertex as usize], proto.poly_y[vertex as usize]);
-                    let to = (
-                        proto.poly_x[vertex as usize + 1],
-                        proto.poly_y[vertex as usize + 1],
-                    );
-                    let (distance, _, _) = project(*sample, from, to, meters_per_unit);
-                    distance <= DEDUP_METERS
-                        && line_angle(*bearing, bearing_degrees(from, to, meters_per_unit))
-                            <= DEDUP_BEARING_DEGREES
-                });
-            if is_duplicate {
-                matched += 1;
-            }
-        }
-        if matched as f64 >= DEDUP_FRACTION * samples.len() as f64 {
+        if aligned_fraction(
+            &way,
+            &grid,
+            &streets,
+            DEDUP_METERS,
+            None,
+            names,
+            meters_per_unit,
+        ) >= DEDUP_FRACTION
+        {
             deduped_ways += 1;
             deduped_km += f64::from(way.length) / 1000.0;
         } else {
@@ -419,6 +521,46 @@ pub fn conflate(
         }
     }
     let ways = noded;
+
+    // Step 2b: the orphan band — the wider dedup, which asks for two more witnesses than geometry
+    // (same street name as the CSCL segment it parallels, and no node shared with any other OSM
+    // way). DESIGN.md, "The order conflation runs in", is why both are required.
+    let mut way_ends: HashMap<Point, usize> = HashMap::new();
+    for way in &ways {
+        let last = way.poly_x.len() - 1;
+        *way_ends.entry((way.poly_x[0], way.poly_y[0])).or_default() += 1;
+        *way_ends
+            .entry((way.poly_x[last], way.poly_y[last]))
+            .or_default() += 1;
+    }
+    let mut deduped_orphan_ways = 0usize;
+    let mut deduped_orphan_km = 0.0;
+    let mut kept: Vec<ProtoEdge> = Vec::with_capacity(ways.len());
+    for way in ways {
+        let last = way.poly_x.len() - 1;
+        let standalone = way.flags & STRUCTURE_FLAG == 0
+            && way_ends[&(way.poly_x[0], way.poly_y[0])] == 1
+            && way_ends[&(way.poly_x[last], way.poly_y[last])] == 1;
+        let way_name = street_key(way.name_id, names);
+        if standalone
+            && way_name.is_some()
+            && aligned_fraction(
+                &way,
+                &grid,
+                &streets,
+                ORPHAN_DEDUP_METERS,
+                way_name.as_deref(),
+                names,
+                meters_per_unit,
+            ) >= DEDUP_FRACTION
+        {
+            deduped_orphan_ways += 1;
+            deduped_orphan_km += f64::from(way.length) / 1000.0;
+        } else {
+            kept.push(way);
+        }
+    }
+    let ways = kept;
 
     // Step 3: weld at-grade crossings — move each vertex of a non-structure OSM way onto the nearest
     // non-structure CSCL segment within 4 m and record the CSCL split there.
@@ -480,6 +622,7 @@ pub fn conflate(
             .or_default() += 1;
     }
     let mut entrance_snaps = 0usize;
+    let mut short_entrance_snaps = 0usize;
     let mut dangling_ends = 0usize;
     for way in &mut ways {
         for at_start in [true, false] {
@@ -494,7 +637,7 @@ pub fn conflate(
             if connected {
                 continue;
             }
-            let Some((proto_index, seg, param, projected, _)) = nearest_street(
+            let Some((proto_index, seg, param, projected, gap)) = nearest_street(
                 &grid,
                 &streets,
                 endpoint,
@@ -522,9 +665,13 @@ pub fn conflate(
                 meters_per_unit,
             );
             let connector = bearing_degrees(endpoint, projected, meters_per_unit);
-            if directed_angle(exit, connector) > CONTINUATION_DEGREES {
+            let turned = directed_angle(exit, connector) > CONTINUATION_DEGREES;
+            if turned && gap > CONTINUATION_FREE_METERS {
                 dangling_ends += 1;
                 continue;
+            }
+            if turned {
+                short_entrance_snaps += 1;
             }
             let along = street_along(&streets[proto_index], seg, param, meters_per_unit);
             cscl_splits_by_proto
@@ -669,18 +816,239 @@ pub fn conflate(
 
     let mut combined = split_streets;
     combined.extend(ways);
+
+    // Step 6: the dangling-end merge, run on the finished list so it sees every weld, snap and split
+    // the steps above made.
+    let merged_dangling_ends = merge_dangling_ends(&mut combined, meters_per_unit);
+
     let stats = ConflateStats {
         deduped_ways,
         deduped_km,
+        deduped_orphan_ways,
+        deduped_orphan_km,
         osm_t_splits,
         welded_vertices,
         entrance_snaps,
+        short_entrance_snaps,
         dangling_ends,
+        merged_dangling_ends,
         cscl_splits,
         osm_ways,
         osm_km,
     };
     (combined, stats)
+}
+
+/// Step 6: pull a dangling OSM end onto the node it is standing on — one within
+/// `DANGLING_MERGE_METERS` of it and more than `DANGLING_DETOUR_METERS` away through the network.
+/// DESIGN.md, "The order conflation runs in", is why both conditions are required and why the end
+/// that moves is always OSM's. Returns the number of ends moved.
+fn merge_dangling_ends(protos: &mut [ProtoEdge], meters_per_unit: (f64, f64)) -> usize {
+    let mut node_of: HashMap<Point, u32> = HashMap::new();
+    let mut node_point: Vec<Point> = Vec::new();
+    let mut ends: Vec<(u32, u32)> = Vec::with_capacity(protos.len());
+    for proto in protos.iter() {
+        let last = proto.poly_x.len() - 1;
+        let mut intern = |point: Point| -> u32 {
+            let next = node_point.len() as u32;
+            *node_of.entry(point).or_insert_with(|| {
+                node_point.push(point);
+                next
+            })
+        };
+        let node_a = intern((proto.poly_x[0], proto.poly_y[0]));
+        let node_b = intern((proto.poly_x[last], proto.poly_y[last]));
+        ends.push((node_a, node_b));
+    }
+    let node_count = node_point.len();
+
+    // The conflated network as an adjacency list, plus the two facts a merge is judged on: whether
+    // a node is a bridge or tunnel deck (grade separation the plan-view geometry cannot see), and its
+    // one incident proto when it is dangling.
+    let mut adjacency: Vec<Vec<(u32, f64)>> = vec![Vec::new(); node_count];
+    let mut structure: Vec<bool> = vec![false; node_count];
+    let mut sole_proto: Vec<u32> = vec![u32::MAX; node_count];
+    for (proto_index, &(node_a, node_b)) in ends.iter().enumerate() {
+        let proto = &protos[proto_index];
+        let length = f64::from(proto.length).max(0.0);
+        adjacency[node_a as usize].push((node_b, length));
+        adjacency[node_b as usize].push((node_a, length));
+        for node in [node_a, node_b] {
+            structure[node as usize] |= proto.flags & STRUCTURE_FLAG != 0;
+            sole_proto[node as usize] = proto_index as u32;
+        }
+    }
+
+    let cell_units_x = (GRID_CELL_METERS / meters_per_unit.0).floor().max(1.0) as i32;
+    let cell_units_y = (GRID_CELL_METERS / meters_per_unit.1).floor().max(1.0) as i32;
+    let mut cells: HashMap<Point, Vec<u32>> = HashMap::new();
+    for (node, point) in node_point.iter().enumerate() {
+        cells
+            .entry((
+                point.0.div_euclid(cell_units_x),
+                point.1.div_euclid(cell_units_y),
+            ))
+            .or_default()
+            .push(node as u32);
+    }
+
+    let mut parent: Vec<u32> = (0..node_count as u32).collect();
+    let mut merged = 0usize;
+    for node in 0..node_count {
+        if adjacency[node].len() != 1 || structure[node] {
+            continue;
+        }
+        let proto_index = sole_proto[node] as usize;
+        if !protos[proto_index].osm {
+            continue;
+        }
+        let point = node_point[node];
+        let cell = (
+            point.0.div_euclid(cell_units_x),
+            point.1.div_euclid(cell_units_y),
+        );
+        let mut candidates: Vec<(f64, u32)> = Vec::new();
+        for cell_x in cell.0 - 1..=cell.0 + 1 {
+            for cell_y in cell.1 - 1..=cell.1 + 1 {
+                for &other in cells.get(&(cell_x, cell_y)).into_iter().flatten() {
+                    if other as usize == node || structure[other as usize] {
+                        continue;
+                    }
+                    let gap = meters_between(point, node_point[other as usize], meters_per_unit);
+                    if gap <= DANGLING_MERGE_METERS {
+                        candidates.push((gap, other));
+                    }
+                }
+            }
+        }
+        if candidates.is_empty() {
+            continue;
+        }
+        candidates.sort_by(|left, right| left.0.total_cmp(&right.0).then(left.1.cmp(&right.1)));
+        let reached = reachable_within(
+            &adjacency,
+            node as u32,
+            DANGLING_DETOUR_METERS,
+            &candidates.iter().map(|&(_, other)| other).collect(),
+        );
+        // The other end of the dangling proto is where it already leads; merging onto that (or onto
+        // anything already fused with it) would fold the proto into a degenerate loop.
+        let own_far_end = if ends[proto_index].0 == node as u32 {
+            ends[proto_index].1
+        } else {
+            ends[proto_index].0
+        };
+        for &(_, other) in &candidates {
+            if reached.contains(&other) {
+                continue;
+            }
+            let (from_root, to_root) = (find(&mut parent, node as u32), find(&mut parent, other));
+            if from_root == to_root || to_root == find(&mut parent, own_far_end) {
+                continue;
+            }
+            parent[from_root as usize] = to_root;
+            merged += 1;
+            break;
+        }
+    }
+    if merged == 0 {
+        return 0;
+    }
+
+    for (proto_index, proto) in protos.iter_mut().enumerate() {
+        let last = proto.poly_x.len() - 1;
+        for (vertex, node) in [(0, ends[proto_index].0), (last, ends[proto_index].1)] {
+            let target = node_point[find(&mut parent, node) as usize];
+            proto.poly_x[vertex] = target.0;
+            proto.poly_y[vertex] = target.1;
+        }
+    }
+    merged
+}
+
+/// What a bounded walk needs of a network: a node's neighbours, each with its length in metres. It
+/// is a trait because callers hold their adjacency differently — indexed by node here, keyed by it
+/// in `graph.rs` — and nothing else about the walk changes with that.
+pub trait Adjacency {
+    fn neighbours(&self, node: u32) -> &[(u32, f64)];
+}
+
+impl Adjacency for [Vec<(u32, f64)>] {
+    fn neighbours(&self, node: u32) -> &[(u32, f64)] {
+        &self[node as usize]
+    }
+}
+
+/// Everything within `cap` metres of `source` through the network, in ascending distance — a Dijkstra
+/// that stops at the cap, so it walks a block, not a borough. `settle` sees each node once, at its
+/// own distance, and breaks the walk off as soon as it has seen enough.
+pub fn walk_within<A: Adjacency + ?Sized>(
+    adjacency: &A,
+    source: u32,
+    cap: f64,
+    mut settle: impl FnMut(u32) -> ControlFlow<()>,
+) {
+    let mut best: HashMap<u32, f64> = HashMap::from([(source, 0.0)]);
+    // Centimetres, so the queue orders on an integer key; the cap keeps the frontier tiny.
+    let mut queue: BinaryHeap<Reverse<(u64, u32)>> = BinaryHeap::from([Reverse((0, source))]);
+    while let Some(Reverse((centimetres, node))) = queue.pop() {
+        let distance = centimetres as f64 / 100.0;
+        if best
+            .get(&node)
+            .is_some_and(|&incumbent| distance > incumbent + 0.01)
+        {
+            continue;
+        }
+        if settle(node).is_break() {
+            return;
+        }
+        for &(next, length) in adjacency.neighbours(node) {
+            let step = distance + length;
+            if step > cap {
+                continue;
+            }
+            if best.get(&next).is_none_or(|&incumbent| step < incumbent) {
+                best.insert(next, step);
+                queue.push(Reverse(((step * 100.0) as u64, next)));
+            }
+        }
+    }
+}
+
+/// Which of `targets` lie within `cap` metres of `source` through the network.
+fn reachable_within(
+    adjacency: &[Vec<(u32, f64)>],
+    source: u32,
+    cap: f64,
+    targets: &HashSet<u32>,
+) -> HashSet<u32> {
+    let mut reached: HashSet<u32> = HashSet::new();
+    walk_within(adjacency, source, cap, |node| {
+        if targets.contains(&node) {
+            reached.insert(node);
+            if reached.len() == targets.len() {
+                return ControlFlow::Break(());
+            }
+        }
+        ControlFlow::Continue(())
+    });
+    reached
+}
+
+/// Union-find over the merge groups: the root's coordinate is the one every end in the group lands
+/// on, and a group only ever grows toward the node a dangling end was pulled to.
+fn find(parent: &mut [u32], node: u32) -> u32 {
+    let mut root = node;
+    while parent[root as usize] != root {
+        root = parent[root as usize];
+    }
+    let mut walk = node;
+    while parent[walk as usize] != root {
+        let next = parent[walk as usize];
+        parent[walk as usize] = root;
+        walk = next;
+    }
+    root
 }
 
 /// The along-distance in metres to a projection at parameter `param` on sub-segment `seg` of a
@@ -774,7 +1142,7 @@ mod tests {
     fn duplicate_way_beside_a_street_is_dropped() {
         let streets = vec![street(&[(0, 0), (100, 0)])];
         let paths = vec![path(&[(0, 3), (100, 3)])]; // parallel, 3 m off, aligned bearing
-        let (combined, stats) = conflate(streets, paths, MPU);
+        let (combined, stats) = conflate(streets, paths, &[], MPU);
         assert_eq!(stats.deduped_ways, 1);
         assert!(
             combined.iter().all(|edge| !edge.osm),
@@ -788,7 +1156,7 @@ mod tests {
         // Crosses the street at a right angle: samples are within 6 m only briefly and never
         // bearing-aligned, so it survives.
         let paths = vec![path(&[(50, -40), (50, 40)])];
-        let (combined, stats) = conflate(streets, paths, MPU);
+        let (combined, stats) = conflate(streets, paths, &[], MPU);
         assert_eq!(stats.deduped_ways, 0);
         assert!(combined.iter().any(|edge| edge.osm));
     }
@@ -798,7 +1166,7 @@ mod tests {
         // Way A runs through a vertex that is way B's endpoint: A is T-split there.
         let through = path(&[(0, 0), (50, 0), (100, 0)]);
         let stem = path(&[(50, 0), (50, 50)]);
-        let (combined, stats) = conflate(vec![], vec![through, stem], MPU);
+        let (combined, stats) = conflate(vec![], vec![through, stem], &[], MPU);
         assert_eq!(stats.osm_t_splits, 1);
         assert_eq!(combined.iter().filter(|edge| edge.osm).count(), 3);
     }
@@ -811,7 +1179,7 @@ mod tests {
         ];
         // A vertex sits on each crossing (a shared OSM node), so both weld.
         let greenway = path(&[(-20, 0), (0, 0), (100, 0), (120, 0)]);
-        let (combined, stats) = conflate(streets, vec![greenway], MPU);
+        let (combined, stats) = conflate(streets, vec![greenway], &[], MPU);
         assert_eq!(stats.welded_vertices, 2);
         assert_eq!(stats.cscl_splits, 2);
         // Each street cut in two, the greenway cut at both crossings.
@@ -825,7 +1193,7 @@ mod tests {
         // A T-split among the ways and a weld-driven CSCL split, so both cut paths run.
         let greenway = with_source_id(path(&[(-20, 0), (0, 0), (20, 0)]), 22);
         let stem = with_source_id(path(&[(20, 0), (20, 40)]), 33);
-        let (combined, _) = conflate(streets, vec![greenway, stem], MPU);
+        let (combined, _) = conflate(streets, vec![greenway, stem], &[], MPU);
         assert_eq!(
             combined.iter().filter(|edge| edge.source_id == 11).count(),
             2,
@@ -850,7 +1218,7 @@ mod tests {
         // Runs parallel 15 m off (too far to dedup): its endpoints exit east/west while the
         // connector would cross south, ~90°, rejected.
         let fence = path(&[(-30, 15), (30, 15)]);
-        let (combined, stats) = conflate(streets, vec![entering, fence], MPU);
+        let (combined, stats) = conflate(streets, vec![entering, fence], &[], MPU);
         assert_eq!(stats.entrance_snaps, 1);
         // The accepted way grew a connector vertex reaching the curb.
         let reaches = combined
@@ -869,7 +1237,7 @@ mod tests {
         // radius, so they entrance-snap rather than weld): both snap to it, no sliver.
         let first = path(&[(1, 10), (1, 5)]);
         let second = path(&[(2, 12), (2, 5)]);
-        let (combined, stats) = conflate(streets, vec![first, second], MPU);
+        let (combined, stats) = conflate(streets, vec![first, second], &[], MPU);
         assert_eq!(stats.entrance_snaps, 2);
         assert_eq!(stats.cscl_splits, 0, "endpoint snaps add no interior cut");
         assert_eq!(
@@ -887,5 +1255,88 @@ mod tests {
             })
             .count();
         assert_eq!(on_origin, 2);
+    }
+
+    #[test]
+    fn a_short_connector_snaps_whatever_direction_it_turns() {
+        let streets = vec![street(&[(-50, 0), (50, 0)])];
+        // Ends 7 m from the curb running east, so the connector turns ~90° south to reach it —
+        // past the 6 m dedup band, inside the right-of-way half-width where the guard is waived.
+        let inside = path(&[(-20, 7), (20, 7)]);
+        let (_, stats) = conflate(streets.clone(), vec![inside], &[], MPU);
+        assert_eq!(stats.entrance_snaps, 2, "both ends reach the curb");
+        assert_eq!(
+            stats.short_entrance_snaps, 2,
+            "both only because of the waiver"
+        );
+        // The same way 12 m out is beyond the half-width: the guard turns both ends away.
+        let outside = path(&[(-20, 12), (20, 12)]);
+        let (_, stats) = conflate(streets, vec![outside], &[], MPU);
+        assert_eq!(stats.entrance_snaps, 0);
+    }
+
+    #[test]
+    fn a_named_orphan_lying_on_its_own_street_is_dropped() {
+        let names = vec!["COENTIES ALY".to_string(), "COENTIES ALLEY".to_string()];
+        let mut alley = street(&[(0, 0), (100, 0)]);
+        alley.name_id = 0;
+        // 8 m off — past the 6 m band — and standalone, so only the orphan band can see it.
+        let mut remapped = path(&[(0, 8), (100, 8)]);
+        remapped.name_id = 1;
+        let (combined, stats) = conflate(vec![alley.clone()], vec![remapped.clone()], &names, MPU);
+        assert_eq!(stats.deduped_ways, 0, "the 6 m band does not reach it");
+        assert_eq!(stats.deduped_orphan_ways, 1);
+        assert!(combined.iter().all(|edge| !edge.osm));
+
+        // The same geometry under any other name is a path that merely runs beside the street.
+        let mut greenway = remapped.clone();
+        greenway.name_id = UNNAMED_FIXTURE;
+        let (_, stats) = conflate(vec![alley.clone()], vec![greenway], &names, MPU);
+        assert_eq!(stats.deduped_orphan_ways, 0);
+
+        // And so is one that meets another way — a network member, not a lone re-mapping.
+        let joined = path(&[(100, 8), (140, 40)]);
+        let (_, stats) = conflate(vec![alley], vec![remapped, joined], &names, MPU);
+        assert_eq!(stats.deduped_orphan_ways, 0);
+    }
+
+    // The name id a PATH record carries when OSM gave the way no name.
+    const UNNAMED_FIXTURE: u16 = 0xFFFF;
+
+    #[test]
+    fn a_dangling_end_merges_onto_a_node_a_block_away_through_the_network() {
+        // A U of three ways: the free end of the right arm stops 2 m short of the left arm's, and
+        // the walk between them through the network is the whole 140 m of the U.
+        let left = path(&[(0, 0), (0, 50)]);
+        let base = path(&[(0, 0), (40, 0)]);
+        let right = path(&[(40, 0), (40, 50), (2, 50)]);
+        let (combined, stats) = conflate(vec![], vec![left, base, right], &[], MPU);
+        assert_eq!(stats.merged_dangling_ends, 1);
+        let free_ends: HashSet<Point> = combined
+            .iter()
+            .map(|edge| {
+                let last = edge.poly_x.len() - 1;
+                (edge.poly_x[last], edge.poly_y[last])
+            })
+            .collect();
+        assert_eq!(free_ends.len(), 2, "the two free ends became one node");
+        assert!(free_ends.contains(&(40, 0)));
+    }
+
+    #[test]
+    fn a_dangling_end_beside_its_own_junction_is_left_alone() {
+        // The same 2 m gap, but only 38 m apart through the network — a stub beside a junction it
+        // already reaches, not a seam.
+        let spine = path(&[(0, 0), (0, 10)]);
+        let arm = path(&[(0, 10), (10, 10), (10, 2), (0, 2)]);
+        let (combined, stats) = conflate(vec![], vec![spine, arm], &[], MPU);
+        assert_eq!(stats.merged_dangling_ends, 0);
+        assert!(
+            combined
+                .iter()
+                .any(|edge| *edge.poly_x.last().expect("a vertex") == 0
+                    && *edge.poly_y.last().expect("a vertex") == 2),
+            "the arm still ends where it did"
+        );
     }
 }
