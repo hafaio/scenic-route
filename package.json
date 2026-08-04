@@ -20,6 +20,7 @@
     "build-commercial": "bun run scripts/build-commercial.ts",
     "build-sheds": "bun run scripts/build-sheds.ts",
     "check-sheds": "bun run scripts/check-sheds.ts",
+    "check-shed-inputs": "bun run scripts/check-shed-inputs.ts",
     "test-routes": "bun test tests",
     "build-tiles": "bun run scripts/build-street-tiles.ts",
     "update-sheds": "bun run scripts/update-sheds.ts"

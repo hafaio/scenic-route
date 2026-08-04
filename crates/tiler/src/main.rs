@@ -43,6 +43,7 @@ const USAGE: &str = "usage:
   tiler shade --manifest <file.json> --data <dir> --tiles <dir> --params <file.json>
   tiler genus-field --manifest <file.json> --data <dir> --tiles <dir>
   tiler graph --streets <file.bin> [--paths <file.bin>] [--sidewalks <file.bin>] [--ferries <file.bin>] [--landmarks <file.bin>] [--art <file.bin>] [--highways <file.bin>] [--commercial <file.bin>] [--canopy <file.bin>] [--buildings <file.bin> --shade-params <file.json> --shade-dir <dir>] [--stranded <file.bin>] --out <file.bin>
+  tiler key-probe --streets <file.bin> [--paths <file.bin>] [--sidewalks <file.bin>] --out <file.bin>
 ";
 
 fn flags(mut args: impl Iterator<Item = String>) -> Fallible<HashMap<String, String>> {
@@ -121,6 +122,31 @@ fn run() -> Fallible<()> {
             shade_params: flags.get("shade-params").map(PathBuf::from),
             shade_dir: flags.get("shade-dir").map(PathBuf::from),
             canopy: flags.get("canopy").map(PathBuf::from),
+            probe: false,
+        }),
+        // The durable-key probe: the graph pipeline over a committed fixture, reported as the
+        // `keyHash` of its stats line. It is handed only the three sources that can put a key in the
+        // space at all — everything else `graph` takes bakes a per-edge attribute byte over edges
+        // already final, and moves no key — so what comes back is a stamp of the key assignment's
+        // BEHAVIOUR, which is what scripts/graph-inputs.ts wants and what a hash of the crate's
+        // source text can only stand in for. Every field is written out rather than defaulted: a new
+        // graph input then fails to compile here until someone says which side of the line it is on.
+        "key-probe" => graph::run(&graph::Args {
+            streets: path(&flags, "streets")?,
+            paths: flags.get("paths").map(PathBuf::from),
+            sidewalks: flags.get("sidewalks").map(PathBuf::from),
+            ferries: None,
+            landmarks: None,
+            art: None,
+            highways: None,
+            commercial: None,
+            out: path(&flags, "out")?,
+            stranded: None,
+            buildings: None,
+            shade_params: None,
+            shade_dir: None,
+            canopy: None,
+            probe: true,
         }),
         _ => Err(format!("unknown command \"{command}\"\n{USAGE}").into()),
     }

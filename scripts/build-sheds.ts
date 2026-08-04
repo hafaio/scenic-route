@@ -24,6 +24,7 @@ import {
   NO_SOURCE_ID,
   type RoutingGraph,
 } from "../src/routing/graph";
+import { writeShedInputs } from "./graph-inputs";
 import {
   CONFIDENCE_CEILING,
   DEPTH_CEILING,
@@ -461,6 +462,16 @@ export async function buildSheds(): Promise<void> {
     graph.keyHash,
     day,
     counts,
+  );
+  // What the durable key space of the graph these spans name is a function of, so `bun run
+  // check-shed-inputs` can tell on every push whether the placement is still current — the graph
+  // itself exists only inside a deploy. Written here and nowhere else: `update-sheds` extends the
+  // artifact against the graph the SITE is serving, so letting it re-stamp would launder an input
+  // change nobody re-placed.
+  const inputs = await writeShedInputs();
+  console.error(
+    `  inputs.json: ${inputs.files} committed key-space inputs stamped ${inputs.stamp}, key probe` +
+      ` ${inputs.keySpace}`,
   );
   summarize(permits, placementOf, lastDay);
 }

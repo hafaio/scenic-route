@@ -257,6 +257,12 @@ pub struct Args {
     // The measured canopy, read twice over: for the direct-canopy record byte, and — when the shade
     // bake runs — for the crowns that occlude the edges alongside the buildings.
     pub canopy: Option<PathBuf>,
+    // `tiler key-probe`: build the key space of a fixture rather than of a city, and report it. The
+    // bounds below — the alley reach, the pavement cells, the existence gate's two shares — are all
+    // held over a whole city's population and say nothing whatever about a few hundred blocks, so
+    // they are skipped, and nothing else is. What the probe reports is the `keyHash` this same run
+    // would give the city: scripts/graph-inputs.ts is what asks, and scripts/README.md says why.
+    pub probe: bool,
 }
 
 /// One edge, before and after contraction: the polyline runs a -> b with its endpoints pinned to
@@ -3781,7 +3787,9 @@ pub fn run(args: &Args) -> Fallible<()> {
             100.0 * MAX_CELL_DEMOTED_SHARE
         ));
     }
-    if !broken.is_empty() {
+    // Every one of these is a bound on a whole city, so `key-probe` — the same pipeline over a
+    // fixture of a few hundred blocks — reports them and holds none of them.
+    if !broken.is_empty() && !args.probe {
         return Err(broken.join("; and ").into());
     }
 
@@ -3948,12 +3956,8 @@ pub fn run(args: &Args) -> Fallible<()> {
         fs::create_dir_all(parent)?;
     }
     fs::write(&args.out, &bytes)?;
-    write_version(
-        &args.out,
-        &bytes,
-        edge_count,
-        key_space_hash(&v2_edges, &edge_ordinals),
-    )?;
+    let key_hash = key_space_hash(&v2_edges, &edge_ordinals);
+    write_version(&args.out, &bytes, edge_count, key_hash)?;
     if let Some(path) = &args.stranded {
         write_stranded(path, &stranded_ways)?;
     }
@@ -3988,36 +3992,39 @@ pub fn run(args: &Args) -> Fallible<()> {
         );
     }
 
+    let dropped_fraction = 1.0 - kept_side_km / derived_side_km;
+    let demoted_alley_fraction = demoted_alley_km / alley_km;
     // The gate's two guards. Neither is a tolerance on the data: each catches the rule being wrong.
     // Both are shares, so each needs its denominator to exist before the share means anything — a
     // gate handed no offsettable street and no alley at all would otherwise report a perfect city.
-    if derived_side_km < MIN_DERIVED_SIDEWALK_KM || alley_km < MIN_ALLEY_KM {
-        return Err(format!(
-            "the gate was handed {derived_side_km:.1} km of derived sidewalk and {alley_km:.1} km \
-             of alley, under the {MIN_DERIVED_SIDEWALK_KM:.0} / {MIN_ALLEY_KM:.0} km floors: the \
-             two shares below are held over those, so an empty one passes them both"
-        )
-        .into());
-    }
-    let dropped_fraction = 1.0 - kept_side_km / derived_side_km;
-    if dropped_fraction > MAX_DROPPED_SIDEWALK_FRACTION {
-        return Err(format!(
-            "the existence gate dropped {:.1}% of derived sidewalk km, over the {:.0}% ceiling: the \
-             STRT per-side bits look unstamped, which reads as a city with no pavement",
-            100.0 * dropped_fraction,
-            100.0 * MAX_DROPPED_SIDEWALK_FRACTION
-        )
-        .into());
-    }
-    let demoted_alley_fraction = demoted_alley_km / alley_km;
-    if demoted_alley_fraction < MIN_DEMOTED_ALLEY_FRACTION {
-        return Err(format!(
-            "only {:.1}% of alley km demoted to its centreline, under the {:.0}% floor: alleys have \
-             no sidewalks, so a build that keeps them has the gate the wrong way round",
-            100.0 * demoted_alley_fraction,
-            100.0 * MIN_DEMOTED_ALLEY_FRACTION
-        )
-        .into());
+    if !args.probe {
+        if derived_side_km < MIN_DERIVED_SIDEWALK_KM || alley_km < MIN_ALLEY_KM {
+            return Err(format!(
+                "the gate was handed {derived_side_km:.1} km of derived sidewalk and {alley_km:.1} \
+                 km of alley, under the {MIN_DERIVED_SIDEWALK_KM:.0} / {MIN_ALLEY_KM:.0} km \
+                 floors: the two shares below are held over those, so an empty one passes them both"
+            )
+            .into());
+        }
+        if dropped_fraction > MAX_DROPPED_SIDEWALK_FRACTION {
+            return Err(format!(
+                "the existence gate dropped {:.1}% of derived sidewalk km, over the {:.0}% \
+                 ceiling: the STRT per-side bits look unstamped, which reads as a city with no \
+                 pavement",
+                100.0 * dropped_fraction,
+                100.0 * MAX_DROPPED_SIDEWALK_FRACTION
+            )
+            .into());
+        }
+        if demoted_alley_fraction < MIN_DEMOTED_ALLEY_FRACTION {
+            return Err(format!(
+                "only {:.1}% of alley km demoted to its centreline, under the {:.0}% floor: alleys \
+                 have no sidewalks, so a build that keeps them has the gate the wrong way round",
+                100.0 * demoted_alley_fraction,
+                100.0 * MIN_DEMOTED_ALLEY_FRACTION
+            )
+            .into());
+        }
     }
 
     let total_km: f64 = v2_edges
@@ -4070,6 +4077,9 @@ pub fn run(args: &Args) -> Fallible<()> {
         "coverClamped": cover_clamped,
         "durableIdEdges": durable_id_edges,
         "maxOrdinal": max_ordinal,
+        // The whole point of `key-probe`, and worth a line in every build log besides: the one
+        // figure a committed shed artifact is gated on.
+        "keyHash": format!("{key_hash:016x}"),
         "dedupedWays": conflate_stats.deduped_ways,
         "dedupedKm": conflate_stats.deduped_km,
         "dedupedOrphanWays": conflate_stats.deduped_orphan_ways,

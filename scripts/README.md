@@ -34,10 +34,12 @@ tiler shade  --manifest … --data … --tiles … --params …       # the buil
 tiler chunks --manifest … --data … --chunks … [--paths …]     # slices STRT (+PATH) into the client's street chunks
 tiler caster-chunks --manifest … --data … --chunks … --params …  # slices BLDG+CNPY+TREE into the client's shadow-caster chunks
 tiler graph  --streets <in.bin> --out <out.bin> [--paths …] [--sidewalks …] [--ferries …] [--canopy …]  # contracts STRT (+PATH, +SWLK, +FERR) into the GRPH routing graph
+tiler key-probe --streets … [--paths …] [--sidewalks …] --out …  # the same pipeline over a fixture, for the durable key hash the shed gate stamps
 ```
 
 Both scripts shell out with `cargo run --release`, which no-ops once the binary is built, so
-`bun dev` and `bun export` need no extra step. `bun lint` and `bun fmt` cover the crate too.
+`bun dev` and `bun export` need no extra step (`key-probe` alone uses the debug profile — see the
+shed gate below). `bun lint` and `bun fmt` cover the crate too.
 
 The split is not only for speed. The Gaussian kernel, its 3σ truncation and the
 renormalization constant are the *model*; if the tiler were ported and the ingest were not,
@@ -1921,6 +1923,90 @@ actually drawn on the deployed site (the client blanks silently, so this is the 
 and the next morning's `sheds.yml` run going green — `update-sheds` refuses a graph the artifact was
 not placed against rather than re-stamping the header, so a red run the day after a refresh means the
 pairing, not the feed.
+
+**And a push that forgets step 3 is caught before any of that.** `check-sheds` needs a graph, so it
+can only run inside a deploy — by which time the artifact has been on `main`, and in front of the
+client, for however long it took someone to dispatch one. So `bun run check-shed-inputs`
+(`scripts/check-shed-inputs.ts`) runs on every push and pull request instead, over what the graph is
+built *from* rather than the graph itself: `scripts/graph-inputs.ts` stamps that, `build-sheds`
+records the stamp in `public/sheds/inputs.json` beside the artifact it places, and the two are
+compared. A change without a re-place fails the run and says which half moved.
+
+### What the stamp covers, and why it is so small
+
+It covers what can move a **durable key**, and nothing else. Not what can change the graph — the two
+are very different sets. A shed span resolves through `(source id, side, ordinal)` and through
+nothing else (`resolveSpans` is a set-membership lookup and consults no other field), so an input
+that only writes a per-edge attribute *byte* cannot misplace a shed, because the edge it is written
+onto was final before the bake ran. The set was 43 files once — every data blob on the chain plus the
+whole tiler crate and `Cargo.lock` — and that cost a full re-place for an edit to `shade.rs`. The one
+that provoked the narrowing touched `graph.rs`, went stale, and re-placed to a **byte-identical**
+artifact.
+
+**The data half** is three committed files, hashed as bytes:
+
+| in | why |
+| --- | --- |
+| `data/streets/<city>.bin` | the source ids themselves (CSCL physicalid), and how each record is cut sets its ordinals |
+| `data/paths/<city>.bin` | the same, for OSM way ids |
+| `data/sidewalks/<city>.bin` | a mapped sidewalk matched to a street is keyed by that street, and `trim_derived` cuts the derived pavement out wherever one exists — so it decides which keys exist and how many edges a source is split across |
+
+and everything else `tiler graph` reads is out, each for a reason that has to be refuted before it
+goes back in:
+
+| out | what it feeds | why it cannot move a key |
+| --- | --- | --- |
+| `data/ferries` | the KIND_FERRY edges | they carry `NO_SOURCE_ID`, and are appended after the walking sort and the node renumber onto nodes that already exist — `assign_ordinals` skips them and an append moves no earlier edge |
+| `data/landmarks`, `data/art`, `data/highways` | one scenic attribute byte each | read at `graph.rs:3501-3535`, after the last `v2_edges.push`, over a `scenic::Network` built from the finished edges |
+| `data/landuse`, `data/buildings`, `data/openstreets`, `data/dining` → `public/commercial-lines` | the commercial attribute byte | one more such byte, read at `graph.rs:3542`. `tiler chunks` and `build-commercial.ts` are on this branch and nowhere else |
+| `data/canopy` | the direct-canopy byte, and the crowns of the SHDE bake | integrated along edge polylines that are already final |
+| `data/buildings` + the shade params (`shade-schedule.ts`, `src/shade/sun.ts`) | the per-edge SHDE bake | it runs *after* `fs::write(&args.out)`; it cannot move a key in the file it is written beside |
+| `data/land`, `data/trees` | the canopy and genus pyramids | nothing on the graph's chain reads either |
+
+The TypeScript half is the import closure of `scripts/build-street-tiles.ts` — which decides *which*
+sources are handed over and under which flags, and a source withheld puts no key in the space — minus
+the three imports above, and whatever is reachable only through them. The closure is walked rather
+than listed so that a **new** import is in the set until someone argues it out; the exclusions are
+named as leaves in `ATTRIBUTE_ONLY_IMPORTS`.
+
+**The code half is not the crate's source text.** `crates/tiler/**` and `Cargo.lock` are out of the
+set entirely; in their place `tiler key-probe` runs the graph pipeline over
+`crates/tiler/fixtures/key-probe/` — nine 0.01° slices of the real city, 268 KB of plain committed
+bytes, 4,226 durable keys, 0.09 s — and the stamp records the `keyHash` it lands on. That is a stamp
+of what the key assignment **does**, which is the only thing that separates a change to `graph.rs`
+that moves keys from a comment in the same file that cannot. The probe skips the whole-city bounds
+(alley reach, pavement cells, the existence gate's two shares); every one of them is held over a
+city's population and says nothing about a fixture. Nothing else is skipped.
+
+The fixture is real geometry and not a drawn network because what the probe must be sensitive to is
+the pipeline's *near-threshold* decisions, and only real data has them in quantity. Measured, one
+constant at a time:
+
+| perturbation | probe |
+| --- | --- |
+| `MERGE_RADIUS_METERS` 1.0 → 1.05 | fires |
+| `SIDEWALK_INSET_METERS` 2.0 → 2.05 | fires |
+| `SEAM_RADIUS_METERS` (= the kerb cut) 12.0 → 12.1 | fires |
+| `SEAM_LINK_METERS` 20.0 → 20.5 | fires |
+| `SPLIT_MERGE_METERS` 2.0 → 2.05 / → 2.2 | silent / fires |
+| `SHORT_CHORD_METERS` 10.0 → 10.5 / → 40.0 | silent / fires |
+| `PRUNE_DEVIATION_UNITS`, `SUPPRESSION_SLACK`, `SEAM_REPAIR_METERS`, `GRID_METERS`, at any size | silent, and correctly: interior vertices, suppressed crossings, repair links and an index bucket size are all either not edges or not keyed |
+
+**The hole this leaves**, stated plainly: a threshold nudge too small to change any decision *in the
+fixture* while changing one somewhere in the city passes the gate silently. `SHORT_CHORD_METERS`
+10.0 → 10.5 is a real example — no street in the fixture has a whole-edge chord in that band. The
+consequence is not a blank map: the change lands, and `check-sheds` — which compares the real graph's
+key space, exactly — fails the next deploy with the same instruction. The land-time gate is the early
+warning; `check-sheds` is the guarantee. Widening the fixture narrows the hole; widening the *stamp*
+back to the crate's source text closes it only by charging a re-place for every comment.
+
+It costs nothing on the fast path. Every blob under `data/` is LFS-tracked, and what the repository
+holds is a pointer whose oid *is* the sha256 of the object — so hashing the pointer and hashing the
+object give the same stamp, and the push/PR job keeps `lfs: false` and downloads not one byte to
+check this. The fixture is under `crates/`, which no `.gitattributes` rule reaches, so it arrives as
+bytes; the probe builds the tiler in the **debug** profile, since the release profile is lto with one
+codegen unit and the optimizer buys a 0.09 s run nothing. Both profiles give the fixture the same
+key hash.
 
 **The live map is blank between the push and the deploy.** The artifact is committed before the
 deploy that catches the graph up, and the client fetches it off `main` while the graph comes from

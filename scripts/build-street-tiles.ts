@@ -82,6 +82,10 @@ const RAMP_PATH = join(
   "tree-cover",
   "ramp.ts",
 );
+// The sun-position grid scripts/shade-schedule.ts synthesises every bin from. It sits in src/ because
+// the client inverts the same grid, so the scripts/ glob below does not see it — and a bin boundary
+// moving there re-cuts both the shade pyramid and the graph's own per-edge bake.
+const SUN_PATH = join(import.meta.dirname, "..", "src", "shade", "sun.ts");
 // Build glue, not an artifact: the tiler is handed a fresh one on every run.
 const RAMP_LUT_PATH = join(tmpdir(), "scenic-route-ramp.bin");
 
@@ -132,6 +136,7 @@ async function inputsHash(cities: City[]): Promise<string> {
   const paths = [
     MANIFEST_PATH,
     RAMP_PATH,
+    SUN_PATH,
     ...scripts,
     ...(await tilerSources()),
     ...cities.flatMap((city) => [
