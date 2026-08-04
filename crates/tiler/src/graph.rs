@@ -1603,22 +1603,66 @@ fn write_shade(
     Ok(())
 }
 
-// `version.json`, written beside the graph: what the deployed graph *is*, so a job that only has the
-// live site can tell whether the artifact it snapped against is still the one being served. FNV-1a
-// 64 over the file's own bytes — this detects a rebuild, it does not defend against one, and a
-// hand-rolled hash beats a crypto dependency for that.
-fn write_version(out: &std::path::Path, bytes: &[u8], edge_count: usize) -> Fallible<()> {
+fn fnv1a64(bytes: &[u8]) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325u64;
     for byte in bytes {
         hash ^= u64::from(*byte);
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
+    hash
+}
+
+/// What the durable KEY SPACE of this graph is: FNV-1a 64 over the number of durable edges and then
+/// every durable key ascending, eight little-endian bytes each. A key is `(source id, side, ordinal)`
+/// packed as `durableKey` in src/routing/graph.ts packs it — `source << 11 | side << 8 | ordinal` —
+/// and the set is what a shed span resolves through and the ONLY thing it resolves through.
+///
+/// Deliberately integer-only. The blob hash beside it covers the f32 edge lengths, which the
+/// geodesic and offset maths land a ulp apart on macOS/aarch64 and Linux/x86_64: a graph built on one
+/// can never match an artifact placed on the other, though not one shed moves a millimetre between
+/// them. Nothing here is float-derived, so this figure is bit-identical wherever it is computed.
+fn key_space_hash(edges: &[V2Edge], ordinals: &[u8]) -> u64 {
+    let mut keys: Vec<u64> = edges
+        .iter()
+        .zip(ordinals)
+        .filter(|(edge, _)| edge.source_id != NO_SOURCE_ID)
+        .map(|(edge, &ordinal)| {
+            u64::from(edge.source_id) << 11 | u64::from(edge.side) << 8 | u64::from(ordinal)
+        })
+        .collect();
+    // Ascending, because the client resolves a span by looking its key up: two graphs whose edge
+    // ORDER differs but whose key set does not put every shed on the same pavement, and a hash that
+    // fired on the reordering would send someone re-placing 88,000 permits for nothing.
+    keys.sort_unstable();
+    let mut bytes = Vec::with_capacity(8 * (keys.len() + 1));
+    bytes.extend_from_slice(&(keys.len() as u64).to_le_bytes());
+    for key in keys {
+        bytes.extend_from_slice(&key.to_le_bytes());
+    }
+    fnv1a64(&bytes)
+}
+
+// `version.json`, written beside the graph: what the deployed graph *is*, so a job that only has the
+// live site can tell whether the artifact it snapped against is still the one being served. FNV-1a
+// 64 over the file's own bytes — this detects a rebuild, it does not defend against one, and a
+// hand-rolled hash beats a crypto dependency for that.
+//
+// `keyHash` is the narrower figure an artifact is gated on; `hash` stays what it has always been,
+// because it names these exact bytes and the client fetches it under that name.
+fn write_version(
+    out: &std::path::Path,
+    bytes: &[u8],
+    edge_count: usize,
+    key_hash: u64,
+) -> Fallible<()> {
+    let hash = fnv1a64(bytes);
     let generated = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_secs();
     let version = serde_json::json!({
         "graph": out.file_name().map(|name| name.to_string_lossy()),
         "hash": format!("{hash:016x}"),
+        "keyHash": format!("{key_hash:016x}"),
         "edges": edge_count,
         "bytes": bytes.len(),
         "generatedUnixSeconds": generated,
@@ -3904,7 +3948,12 @@ pub fn run(args: &Args) -> Fallible<()> {
         fs::create_dir_all(parent)?;
     }
     fs::write(&args.out, &bytes)?;
-    write_version(&args.out, &bytes, edge_count)?;
+    write_version(
+        &args.out,
+        &bytes,
+        edge_count,
+        key_space_hash(&v2_edges, &edge_ordinals),
+    )?;
     if let Some(path) = &args.stranded {
         write_stranded(path, &stranded_ways)?;
     }
@@ -4113,6 +4162,88 @@ mod tests {
             flags: if mapped { GRPH_OSM } else { 0 },
             ..keyed(NO_SOURCE_ID, SIDE_NONE)
         }
+    }
+
+    // The key space of a two-source graph: three sidewalk edges carrying keys, one crossing carrying
+    // none, and lengths that differ enough to move any figure taken over the bytes.
+    fn key_space_fixture() -> (Vec<V2Edge>, Vec<u8>) {
+        let edges = vec![
+            V2Edge {
+                length: 41.5,
+                ..keyed(88, SIDE_NORTH)
+            },
+            V2Edge {
+                length: 12.25,
+                ..keyed(88, SIDE_NORTH)
+            },
+            crossing(0, 1, 9.0, false),
+            V2Edge {
+                length: 7.5,
+                ..keyed(19, SIDE_WEST)
+            },
+        ];
+        let ordinals = assign_ordinals(&edges).unwrap();
+        (edges, ordinals)
+    }
+
+    #[test]
+    fn the_key_space_hash_ignores_what_a_shed_does_not_resolve_through() {
+        let (edges, ordinals) = key_space_fixture();
+        let before = key_space_hash(&edges, &ordinals);
+        // Every length a ulp longer, which is the whole of the macOS/Linux difference that made a
+        // gate on the graph's bytes unpassable, plus a cover byte and a name for good measure.
+        let moved: Vec<V2Edge> = edges
+            .iter()
+            .map(|edge| V2Edge {
+                length: f32::from_bits(edge.length.to_bits() + 1),
+                cover: 7,
+                name_id: 3,
+                ..*edge
+            })
+            .collect();
+        assert_eq!(key_space_hash(&moved, &ordinals), before);
+    }
+
+    #[test]
+    fn the_key_space_hash_ignores_the_order_the_keys_come_in() {
+        let (edges, ordinals) = key_space_fixture();
+        let mut reversed: Vec<V2Edge> = edges.iter().rev().cloned().collect();
+        let mut flipped: Vec<u8> = ordinals.iter().rev().copied().collect();
+        // The crossing's slot moves with it; the keys themselves are the same three.
+        reversed.swap(0, 3);
+        flipped.swap(0, 3);
+        assert_eq!(
+            key_space_hash(&reversed, &flipped),
+            key_space_hash(&edges, &ordinals)
+        );
+    }
+
+    #[test]
+    fn the_key_space_hash_fires_when_a_source_splits_differently() {
+        let (edges, ordinals) = key_space_fixture();
+        // One more edge off source 88's north side: the same street, cut in three where it was cut
+        // in two, so every span placed on the old ordinal 1 now names a different stretch.
+        let mut split = edges.clone();
+        split.push(V2Edge {
+            length: 12.25,
+            ..keyed(88, SIDE_NORTH)
+        });
+        let resplit = assign_ordinals(&split).unwrap();
+        assert_ne!(
+            key_space_hash(&split, &resplit),
+            key_space_hash(&edges, &ordinals)
+        );
+    }
+
+    #[test]
+    fn the_key_space_hash_fires_when_an_ordinal_shifts() {
+        let (edges, ordinals) = key_space_fixture();
+        let mut shifted = ordinals.clone();
+        shifted[1] = 2;
+        assert_ne!(
+            key_space_hash(&edges, &shifted),
+            key_space_hash(&edges, &ordinals)
+        );
     }
 
     #[test]

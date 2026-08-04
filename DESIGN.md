@@ -288,8 +288,8 @@ gives 293,797 pieces of **median length 4.2 m**, 52.3% of them under 8 m. At any
 about half collide with a neighbour at build time, and the geometry drifts underneath: 3.1% of way
 start nodes moved more than 8 m in two years, so a vacated bucket gets reoccupied by a drifted one.
 Both schemes turn a removal into a neighbour match, which is the one failure this artifact may not
-have. What makes them unnecessary is the hash gate — the artifact resolves nothing at all against any
-other graph — so an ordinal never has to survive a rebuild.
+have. What makes them unnecessary is the key-space gate — the artifact resolves nothing at all
+against a graph carrying a different set of keys — so an ordinal never has to survive a rebuild.
 
 ### The seam
 
@@ -682,14 +682,26 @@ changed street, and the 7 that moved more than 5 m were the same source row cont
 
 A durable key survives a rebuild without promising to still name the same edge across one — the
 ordinal in it is a within-build disambiguator and nothing more. So the artifact's header carries the
-graph's hash and `shedsOn` resolves nothing at all against any other graph. That is the fail-safe
-direction: bare pavement is a failure anyone can see, scaffolding down the wrong street is not. What
-it costs is a deploy discipline the rest of the site does not have, because every shed vanishing is
-also invisible until someone looks at the map.
+hash of the graph's whole **key space**, and `shedsOn` resolves nothing at all against a graph that
+does not carry the same one. That is the fail-safe direction: bare pavement is a failure anyone can
+see, scaffolding down the wrong street is not. What it costs is a deploy discipline the rest of the
+site does not have, because every shed vanishing is also invisible until someone looks at the map.
 
-The gate is on the hash rather than on the keys, and deliberately so. Proving a key still means what
-it meant takes the re-placement it would be trying to avoid, so a refresh that moved nothing near any
-shed blanks exactly as one that moved everything does. Re-placement is the rectification: it
+The gate is on the key space rather than on the graph's bytes, which is where it started and where it
+could not stay. The bytes carry an f32 length per edge, and the geodesic and offset maths land a few
+of them a ulp apart between a macOS laptop and the deploy's Linux — 95 build statistics agreeing to
+the last digit but one — so an artifact placed by hand could never match a graph CI built, and the
+deploy failed on a difference no shed can feel. The key space is `(source id, side, ordinal)` per
+durable edge, sorted and hashed: integers all the way down, and the only thing a span resolves
+through. Ordinals run 0..n-1 within a `(source id, side)`, so a source segment that splits into a
+different number of edges moves the set, which is the shape every conflation and re-noding change
+takes. What it cannot see is a rebuild that keeps every key and moves the pavement under it — the
+same street re-digitized in place — and that is why the re-place below is unconditional rather than
+conditional on the gate.
+
+Proving an individual key still means what it meant would take the re-placement it would be trying to
+avoid, so a refresh that moved nothing near any shed blanks exactly as one that moved everything
+does. Re-placement is the rectification: it
 re-derives all 72,020 records from the DOB history and the tax lots against the new graph, keeping
 nothing from the old artifact, which is why a forgotten re-place cannot corrupt anything and the next
 `build-sheds` heals it. A graph-change table that migrated the old keys was evaluated and declined —
@@ -705,8 +717,8 @@ but it is not after the fact: nothing reaches the site.
 
 **The daily job has to refuse rather than re-stamp**, which is the sharper edge of the same rule. It
 carries every held record forward untouched and writes the header itself, so stamping the deployed
-graph's hash over an artifact placed against another one would hand the client old keys wearing the
-new graph's name — turning the blank map into a wrong one within a day of the mistake, and healing
+graph's key space over an artifact placed against another one would hand the client old keys wearing
+the new graph's name — turning the blank map into a wrong one within a day of the mistake, and healing
 the one symptom anybody would have noticed. It reads the deployed graph first and stops on the
 disagreement instead, leaving the map blank until the pairing is fixed.
 

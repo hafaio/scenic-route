@@ -47,7 +47,7 @@ export function deckDepth(depth: number): number {
 }
 
 const MAGIC = "SHED";
-const FORMAT_VERSION = 2;
+const FORMAT_VERSION = 3;
 const CLOSED_FLAG = 0x1; // header byte 26, set in closed.bin
 const INDEX_ENTRY_BYTES = 8; // u16 month, u32 offset, u16 close day
 const FRACTION_SCALE = 255; // a span's t0/t1 are a fraction of its edge; 255 is exactly 1.0
@@ -117,7 +117,7 @@ interface ShedFile {
 }
 
 export interface ShedHistory {
-  graphHash: string; // FNV-1a 64 of the GRPH bytes, as routing/version.json spells it
+  graphKeyHash: string; // FNV-1a 64 of the graph's durable key space, as routing/version.json spells it
   lastDay: number; // the newest usable DOB snapshot the artifact was built through
   open: ShedFile;
   closed: ShedFile;
@@ -162,9 +162,9 @@ function decodeFile(buffer: ArrayBuffer, closed: boolean): ShedFile {
   };
 }
 
-// The 64-bit graph hash as the hex routing/version.json carries, read as its two halves so nothing
-// here needs BigInt.
-function decodeGraphHash(view: DataView): string {
+// The 64-bit key-space hash as the hex routing/version.json carries, read as its two halves so
+// nothing here needs BigInt.
+function decodeGraphKeyHash(view: DataView): string {
   const low = view.getUint32(16, true);
   const high = view.getUint32(20, true);
   return `${high.toString(16).padStart(8, "0")}${low.toString(16).padStart(8, "0")}`;
@@ -177,11 +177,11 @@ export function decodeSheds(
 ): ShedHistory {
   const open = decodeFile(openBuffer, false);
   const closed = decodeFile(closedBuffer, true);
-  const openHash = decodeGraphHash(new DataView(openBuffer));
-  const closedHash = decodeGraphHash(new DataView(closedBuffer));
+  const openHash = decodeGraphKeyHash(new DataView(openBuffer));
+  const closedHash = decodeGraphKeyHash(new DataView(closedBuffer));
   if (openHash !== closedHash) {
     throw new Error(
-      `shed halves were baked against different graphs (${openHash}, ${closedHash})`,
+      `shed halves were baked against different key spaces (${openHash}, ${closedHash})`,
     );
   }
 
@@ -201,7 +201,7 @@ export function decodeSheds(
     throw new Error("the shed halves were built through different days");
   }
   return {
-    graphHash: openHash,
+    graphKeyHash: openHash,
     lastDay,
     open,
     closed,
@@ -347,11 +347,18 @@ function resolveSpans(graph: RoutingGraph, sheds: readonly Shed[]): void {
 
 // Whether the artifact names edges in THIS graph. A durable key survives a rebuild but does not
 // promise to mean the same edge across one: a conflation fix left 2,284 of 302,985 keys naming an
-// edge a median 26 m from the one they had named. So an artifact placed against another graph
-// resolves nothing at all — bare pavement is a failure anyone can see, scaffolding down the wrong
-// street is not.
+// edge a median 26 m from the one they had named. So the gate is the whole KEY SPACE — every
+// `(source id, side, ordinal)` the graph carries, hashed — rather than any single key. Ordinals are
+// handed out 0..n-1 within a `(source id, side)`, so a source segment that splits into a different
+// number of edges moves the set, and an artifact placed against another set resolves nothing at all:
+// bare pavement is a failure anyone can see, scaffolding down the wrong street is not.
+//
+// The GRAPH'S BYTES are not the gate, and were until 2026-08. They carry f32 edge lengths that the
+// geodesic and offset maths land a ulp apart on macOS/aarch64 and on Linux/x86_64, so an artifact
+// placed on a laptop could never match the graph a deploy builds — a blank map over a difference no
+// shed can feel. The key space is integers all the way down.
 function sameGraph(graph: RoutingGraph, history: ShedHistory): boolean {
-  return graph.hash === history.graphHash;
+  return graph.keyHash === history.graphKeyHash;
 }
 
 // Every shed standing on `day`, both halves together, with their spans resolved onto `graph`. None
@@ -566,7 +573,8 @@ export async function computeEdgeSheds(
   const history = await loadSheds();
   if (!sameGraph(graph, history)) {
     throw new Error(
-      `the shed artifact was placed against graph ${history.graphHash}, this one is ${graph.hash || "unknown"}`,
+      `the shed artifact was placed against key space ${history.graphKeyHash}, this graph's is` +
+        ` ${graph.keyHash || "unknown"}`,
     );
   }
   graph.sheds = shedField(
