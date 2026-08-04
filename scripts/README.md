@@ -1446,11 +1446,23 @@ served — and so the client, which fetches it with the graph, can tell whether 
 against a graph is the one it is holding:
 
 ```json
-{"graph":"nyc.bin","hash":"08da264f5836fa95","edges":531520,"bytes":27423072,"generatedUnixSeconds":1785384926}
+{"graph":"nyc.bin","hash":"7e8a6417abd7ed45","keyHash":"efb0f19bed045be2","edges":628693,"bytes":37417012,"generatedUnixSeconds":1785814737}
 ```
 
 `hash` is FNV-1a 64 over the GRPH file's own bytes, hex — it detects a rebuild, it does not defend
 against one, so a hand-rolled hash beats a crypto dependency here.
+
+`keyHash` is the narrower figure the SHED artifact is gated on: the same FNV over the count of
+**durable edges** and then every durable key ascending, eight little-endian bytes each, a key being
+`(source id, side, ordinal)` packed as `source << 11 | side << 8 | ordinal`. That is the whole of
+what a shed span resolves through, and it is integers all the way down — where `hash` covers the f32
+edge lengths, which macOS and Linux land a ulp apart on the same inputs, so no artifact placed on one
+could ever pass a gate on a graph built by the other. `hash` was left alone rather than redefined:
+it names these exact bytes, and it is what tells two builds of the same graph apart at all.
+
+Both are written by `write_version`/`key_space_hash` in crates/tiler/src/graph.rs and recomputed by
+`graphHashOf`/`graphKeyHashOf` in scripts/shed-encode.ts, which `bun run check-sheds` runs against
+each other on every deploy.
 
 It is only worth reading because the bake is **reproducible**: identical inputs give identical bytes.
 Two places had to be pinned for that. The link edges and the deduped ferry edges are emitted in key
@@ -1511,7 +1523,7 @@ An edge reads positive when net sunlit and negative when net shaded; the clamp i
 `|attr| <= 127/128 < 1`, and with it the cost model's `1 - w*attr` positive for `|w| <= 1`. A ferry
 edge has no polyline and reads 0 in both rows — its cost never consults the attribute.
 
-### `public/sheds/` — the sidewalk-shed history, magic `SHED` (v2, derived, **committed**)
+### `public/sheds/` — the sidewalk-shed history, magic `SHED` (v3, derived, **committed**)
 
 Every scaffolding permit New York has issued since **2017-12-28**, placed on the GRPH edges it stands
 over. Not baked by `tiler`: `bun run build-sheds` (`scripts/build-sheds.ts`) does the whole pipeline
@@ -1599,11 +1611,11 @@ Header, 32 bytes plus each file's own trailing block, both record files:
 | offset | type | field |
 | --- | --- | --- |
 | 0 | u8[4] | magic `SHED` |
-| 4 | u16 | format version = 2 |
+| 4 | u16 | format version = 3 |
 | 6 | u16 | header bytes, and so where the records start: 32 plus whatever the block below runs to |
 | 8 | u32 | records in this file |
 | 12 | u32 | spans in this file |
-| 16 | u64 | graph hash — the FNV-1a 64 of the GRPH bytes `routing/version.json` carries |
+| 16 | u64 | graph key-space hash — the `keyHash` `routing/version.json` carries |
 | 24 | u16 | the day the file's delta chain starts from: its first record's own day |
 | 26 | u8 | flags: bit0 set in `closed.bin` |
 | 27 | u8 | reserved, zero |
@@ -1654,12 +1666,20 @@ key — contributes no coverage, which is the correct answer rather than a silen
 
 A key survives a rebuild; it does not promise to still name the same edge across one. A conflation
 fix that stopped a second OSM mapping of a street becoming a spur left 2,284 of 302,985 keys naming
-an edge a **median 26 m** from the one they had named. So the header's graph hash is a **gate**, not
-a note: the client reads its own graph's hash out of `routing/version.json` — recomputing it is
-~0.5 s of FNV over 30 MB on a laptop, to arrive at a number the deploy already wrote down — and an
-artifact naming any other graph resolves **nothing at all**. The band, the router and the shadow
-caster all resolve through the one call, so they go quiet together: a day of bare pavement is a
-failure anyone can see, scaffolding down the wrong street is not.
+an edge a **median 26 m** from the one they had named. So the header's key-space hash is a **gate**,
+not a note: the client reads its own graph's `keyHash` out of `routing/version.json` — recomputing it
+is a 368k-element sort and an FNV over 3 MB, to arrive at a number the deploy already wrote down —
+and an artifact naming any other key space resolves **nothing at all**. The band, the router and the
+shadow caster all resolve through the one call, so they go quiet together: a day of bare pavement is
+a failure anyone can see, scaffolding down the wrong street is not.
+
+The whole **set**, not the individual key, and not the graph's bytes. Ordinals are handed out 0..n-1
+within a `(source id, side)`, so a source segment that splits into a different number of edges — the
+shape every conflation and re-noding change takes — moves the set and fires the gate, while a
+rebuild that only landed some f32 lengths a ulp elsewhere does not. `SHED` v2 named the graph's
+bytes here, which meant an artifact placed on a laptop could never match a graph the deploy's Linux
+built; v3 is the same file with this field's meaning changed, so the version bump is what stops a v2
+artifact being read as if it named a key space.
 
 `t0`/`t1` are how far along the edge the shed runs, as `round(fraction * 255)`. Confidence is
 `round(value * 255)` capped at 254, as the graph's cover and scenic bytes are. `depth` is how deep
@@ -1857,25 +1877,41 @@ has mapped yet.
 
 **Every refresh re-places the whole shed history, in the same push.** A span names its edge by a
 durable key, but the ordinal in that key is a within-build disambiguator with no cross-build duty, so
-a rebuilt graph is a rebuilt key space — which is why the header carries the graph's hash and why
-`shedsOn` resolves *nothing at all* against any other graph. It is a hash gate, not a key check:
-there is no test of key stability cheaper than the re-placement it would be trying to avoid, so a
-refresh that moved nothing near a shed still blanks until `build-sheds` runs. When the OSM-primary
-sidewalk network landed, the committed artifact resolved 14,402 of 14,402 standing spans against the
-graph it named and **0** against the new one.
+a rebuilt graph is usually a rebuilt key space — which is why the header carries the hash of that key
+space and why `shedsOn` resolves *nothing at all* against any graph that does not carry it. When the
+OSM-primary sidewalk network landed, the committed artifact resolved 14,402 of 14,402 standing spans
+against the graph it named and **0** against the new one.
+
+The **key space** and not the graph's bytes, which the gate compared until 2026-08. Those carry an
+f32 length per edge, and the geodesic and offset maths land a few of them a ulp apart between
+macOS/aarch64 and the deploy's Linux/x86_64 — the same inputs, the same code, 95 stats agreeing to
+the last digit but one (`osmSideKm` 15519.703943263898 against 15519.703943263896, two nanometres
+over the whole city). An artifact placed by hand on a laptop could therefore never match a graph CI
+built, and the deploy failed on a difference no shed can feel. Nothing in the key space is
+float-derived, so it is bit-identical wherever it is computed.
+
+What that does and does not cover. It covers a source segment that splits into a different number of
+edges, or splits onto a different side, or disappears: ordinals are handed out 0..n-1 within a
+`(source id, side)`, so any of those moves the set. It does **not** cover a rebuild that keeps every
+key and moves the pavement under it — the same street re-digitized in place, or two edges of one
+source swapping ordinals. That is what step 3 below is unconditional for: a refresh re-places the
+whole history whether or not the gate would have fired, and the gate is the backstop for the refresh
+someone forgot, not a licence to skip one.
 
 1. Re-fetch and commit the sources — `bun run build-tree-data -- --refresh`, plus whichever of
    `build-buildings`, `build-dining`, `build-landuse`, `build-openstreets` the refresh covers. These
    are LFS blobs: commit them with **git**, not `sl`, and push the objects (above).
-2. `bun run build-tiles` — the graph, its `version.json` hash, the SHDB bake and every pyramid.
+2. `bun run build-tiles` — the graph, its `version.json` hashes, the SHDB bake and every pyramid.
 3. `bun run build-sheds` — re-derives all 72,020 records against the new graph from the DOB history
    and the tax lots. Two minutes, deterministic, disk-cached; it is not a migration and keeps no
    state from the old artifact.
 4. Commit `public/sheds/*.bin` (plain git — **never** LFS) alongside the sources, one push.
 5. `bun run check-sheds`, then dispatch the deploy.
 
-`check-sheds` compares the graph `build-tiles` wrote against the hash the committed artifact names,
-and `.github/workflows/build.yml` runs it between `bun export` and the Pages upload — so a refresh
+`check-sheds` compares the key space of the graph `build-tiles` wrote against the one the committed
+artifact names — recomputing it in TypeScript from the graph Rust wrote, so the two implementations
+check each other on every deploy — and `.github/workflows/build.yml` runs it between `bun export` and
+the Pages upload — so a refresh
 that forgets step 3 fails its deploy instead of shipping a map with no scaffolding on it. Nothing
 catches it earlier than that: a push or a PR builds no graph, so there is nothing there to compare
 against.

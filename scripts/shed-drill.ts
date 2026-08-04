@@ -381,7 +381,8 @@ export async function runDrill(chosen: readonly string[]): Promise<void> {
   const graph = loadGraphBytes(await readFile(GRAPH_PATH));
   const index = buildSidewalkIndex(graph);
   console.error(
-    `  graph ${graph.hash}, ${index.edges.length} sidewalk edges, ${permits.length} permits`,
+    `  graph ${graph.hash}, key space ${graph.keyHash}, ${index.edges.length} sidewalk edges,` +
+      ` ${permits.length} permits`,
   );
 
   const started = performance.now();

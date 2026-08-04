@@ -23,9 +23,10 @@
 // later cannot move a shed that has already come down — which is what lets `closed.bin` be appended
 // to rather than revisited. And spans are keyed by the graph's durable edge id, so within one graph
 // nothing has to be kept in order to place a span again: the day's new permits are the only thing
-// that ever needs placing. Across a rebuild the artifact means nothing at all — the header's hash is
-// what the client gates on — so a run that finds the site serving another graph STOPS rather than
-// carrying its records onto one they were never placed against.
+// that ever needs placing. Across a rebuild that moved the key space the artifact means nothing at
+// all — the header's key-space hash is what the client gates on — so a run that finds the site
+// serving another key space STOPS rather than carrying its records onto one they were never placed
+// against.
 //
 // What it costs in steady state: a shallow fetch of the DOB repo, the deployed graph off the Pages
 // site, and one Socrata batch for the ~16 permits that are new. No LFS object is touched on any path,
@@ -275,9 +276,9 @@ export async function updateSheds(): Promise<void> {
   // artifact holds is carried forward untouched, so it can only be extended against the graph it was
   // placed against: a deploy that moved a graph input without re-placing lands here, with the client
   // already showing bare pavement, and going on would replace that with the old keys re-stamped
-  // under the new hash — scaffolding on whatever streets they now happen to name.
+  // under the new key space — scaffolding on whatever streets they now happen to name.
   const graph = await loadDeployedGraph();
-  const mismatch = shedGraphMismatch(artifact, graph.hash);
+  const mismatch = shedGraphMismatch(artifact, graph.keyHash);
   if (mismatch !== null) {
     throw new Error(
       `${mismatch}. A graph-input change lands as one deploy: \`bun run build-sheds\`` +
@@ -317,7 +318,9 @@ export async function updateSheds(): Promise<void> {
   const parcels = await fetchShedParcels(parcelRequestsOf(attributes));
 
   const index = buildSidewalkIndex(graph);
-  console.error(`  graph ${graph.hash}, ${index.edges.length} sidewalk edges`);
+  console.error(
+    `  graph ${graph.hash}, key space ${graph.keyHash}, ${index.edges.length} sidewalk edges`,
+  );
   const placements = placeRecords(
     index,
     attributes.map((reading) => toShedRecord(reading, parcels)),
@@ -333,7 +336,7 @@ export async function updateSheds(): Promise<void> {
   );
 
   const records = reconcileSheds(artifact, permits, lastDay, placed);
-  await writeShedArtifact(records, graph.hash, shedDayOf(lastDay), counts);
+  await writeShedArtifact(records, graph.keyHash, shedDayOf(lastDay), counts);
   const stillUp = records.filter((record) => record.close === null).length;
   console.error(
     `sheds: ${stillUp} standing on ${lastDay}, ${records.length - stillUp} come down` +
