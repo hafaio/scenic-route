@@ -20,6 +20,7 @@ import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   decodeGraph,
+  type GraphIdentity,
   NO_SOURCE_ID,
   type RoutingGraph,
 } from "../src/routing/graph";
@@ -32,6 +33,7 @@ import {
   encodeSheds,
   FRACTION_SCALE,
   graphHashOf,
+  graphKeyHashOf,
   SIDE_BITS,
   shedDayOf,
 } from "./shed-encode";
@@ -95,15 +97,21 @@ export async function cloneSnapshots(): Promise<string> {
   return SNAPSHOT_DIR;
 }
 
-// The graph the placement snaps against, carrying what it hashes to. The hash is recomputed from the
-// bytes rather than taken on trust from version.json beside them, because the daily job reads a graph
-// off the live site where that file may be older than the deploy that put it there.
+// The graph the placement snaps against, carrying both figures it names itself by. They are
+// recomputed from the bytes rather than taken on trust from version.json beside them, because the
+// daily job reads a graph off the live site where that file may be older than the deploy that put it
+// there. The key space is a property of the decoded key column, so the decode runs once under the
+// blob hash alone and the graph is named with both on the way out.
 export function loadGraphBytes(source: Uint8Array): RoutingGraph {
   // Copied out of the read rather than viewed in place: decodeGraph takes typed-array views over the
   // buffer, and a Buffer from readFile can sit at an offset in a pooled one.
   const bytes = new Uint8Array(source.byteLength);
   bytes.set(source);
-  return decodeGraph(bytes.buffer, graphHashOf(bytes));
+  const graph = decodeGraph(bytes.buffer, {
+    hash: graphHashOf(bytes),
+    keyHash: "",
+  });
+  return { ...graph, keyHash: graphKeyHashOf(graph) };
 }
 
 async function loadGraph(): Promise<RoutingGraph> {
@@ -112,10 +120,11 @@ async function loadGraph(): Promise<RoutingGraph> {
     | string
     | null;
   if (version !== null) {
-    const declared = (JSON.parse(version) as { hash: string }).hash;
-    if (declared !== graph.hash) {
+    const declared = JSON.parse(version) as GraphIdentity;
+    if (declared.hash !== graph.hash || declared.keyHash !== graph.keyHash) {
       throw new Error(
-        `${GRAPH_PATH} hashes to ${graph.hash}, version.json says ${declared}`,
+        `${GRAPH_PATH} is ${graph.hash}/${graph.keyHash}, version.json beside it says` +
+          ` ${declared.hash}/${declared.keyHash}`,
       );
     }
   }
@@ -301,11 +310,11 @@ export function encodedShedsOf(
 
 export async function writeShedArtifact(
   encoded: readonly EncodedShed[],
-  hash: string,
+  graphKeyHash: string,
   lastDay: number,
   counts: readonly number[],
 ): Promise<void> {
-  const artifact = encodeSheds(encoded, hash, lastDay, counts);
+  const artifact = encodeSheds(encoded, graphKeyHash, lastDay, counts);
   await mkdir(SHED_DIR, { recursive: true });
   for (const [name, bytes] of [
     ["open.bin", artifact.open],
@@ -449,7 +458,7 @@ export async function buildSheds(): Promise<void> {
       }),
       day,
     ),
-    graph.hash,
+    graph.keyHash,
     day,
     counts,
   );

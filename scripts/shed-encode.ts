@@ -8,10 +8,14 @@
 // overall but 30% BIGGER on open.bin, which is the only file the common query reads, because an open
 // shed's earlier closed intervals would have to ride in the hot file.
 
-import { durableKey } from "../src/routing/graph";
+import {
+  durableKey,
+  edgeDurableKey,
+  type RoutingGraph,
+} from "../src/routing/graph";
 
 const MAGIC = "SHED";
-const FORMAT_VERSION = 2;
+const FORMAT_VERSION = 3;
 const HEADER_BYTES = 32;
 const CLOSED_FLAG = 0x1;
 const MILLISECONDS_PER_DAY = 86_400_000;
@@ -63,10 +67,10 @@ export interface ShedArtifact {
   index: Uint8Array;
 }
 
-// What the header's graph field carries: FNV-1a 64 over the GRPH file's own bytes, the same figure
-// `tiler graph` writes into routing/version.json (crates/tiler/src/graph.rs). Run on 16-bit limbs:
-// the 64-bit multiply has to be exact well past 2^53, and a BigInt one over 27 MB of graph costs
-// minutes where this costs under a second.
+// FNV-1a 64 over the GRPH file's own bytes, the same figure `tiler graph` writes into
+// routing/version.json as `hash` (crates/tiler/src/graph.rs). Run on 16-bit limbs: the 64-bit
+// multiply has to be exact well past 2^53, and a BigInt one over 37 MB of graph costs minutes where
+// this costs under a second.
 export function graphHashOf(bytes: Uint8Array): string {
   const LOW = 0x01b3; // 0x100000001b3, as its two non-zero 16-bit limbs
   const HIGH = 0x0100;
@@ -88,6 +92,40 @@ export function graphHashOf(bytes: Uint8Array): string {
   return [limb3, limb2, limb1, limb0]
     .map((limb) => limb.toString(16).padStart(4, "0"))
     .join("");
+}
+
+// What the header's graph field carries, and what `tiler graph` writes into routing/version.json as
+// `keyHash`: FNV-1a 64 over the count of durable edges and then every durable key ascending, eight
+// little-endian bytes each. `key_space_hash` in crates/tiler/src/graph.rs is the other half of this,
+// and `bun run check-sheds` compares the two on every deploy.
+//
+// The key SET, not the graph. A span names its edge by `(source id, side, ordinal)` and by nothing
+// else, so a graph carrying the same keys puts every shed on the same pavement — while the blob hash
+// beside it moves on any rebuild, including a Linux one that landed an f32 length a ulp away from the
+// macOS one an artifact was placed against. Ascending, because the edge ORDER a key arrives in is
+// positional and no shed reads it.
+export function graphKeyHashOf(graph: RoutingGraph): string {
+  const keys = new Float64Array(graph.edgeCount);
+  let count = 0;
+  for (let edge = 0; edge < graph.edgeCount; edge++) {
+    const key = edgeDurableKey(graph, edge);
+    if (key >= 0) {
+      keys[count] = key;
+      count += 1;
+    }
+  }
+  const durable = keys.subarray(0, count).sort();
+  const bytes = new Uint8Array(8 * (count + 1));
+  const view = new DataView(bytes.buffer);
+  // A key runs to a u32 source id times 2048, past what a u32 holds and well inside an exact double,
+  // so each is written as the two halves of its u64 rather than through BigInt.
+  const HALF = 0x1_0000_0000;
+  view.setUint32(0, count, true);
+  for (const [order, key] of durable.entries()) {
+    view.setUint32(8 * order + 8, key % HALF, true);
+    view.setUint32(8 * order + 12, Math.floor(key / HALF), true);
+  }
+  return graphHashOf(bytes);
 }
 
 // The day number an ISO calendar date falls on. Dates in the feed are New York calendar days and
@@ -136,7 +174,7 @@ function header(
   records: readonly EncodedShed[],
   firstDay: number,
   closed: boolean,
-  graphHash: string,
+  graphKeyHash: string,
   lastDay: number,
   extension: Uint8Array,
 ): Uint8Array {
@@ -162,8 +200,8 @@ function header(
   );
   // The hash is written as its two halves, matching how the reader takes it apart, so nothing here
   // needs BigInt.
-  view.setUint32(16, Number.parseInt(graphHash.slice(8), 16), true);
-  view.setUint32(20, Number.parseInt(graphHash.slice(0, 8), 16), true);
+  view.setUint32(16, Number.parseInt(graphKeyHash.slice(8), 16), true);
+  view.setUint32(20, Number.parseInt(graphKeyHash.slice(0, 8), 16), true);
   view.setUint16(24, firstDay, true);
   bytes[26] = closed ? CLOSED_FLAG : 0;
   view.setUint16(28, lastDay, true);
@@ -293,7 +331,7 @@ function jobBlock(records: readonly EncodedShed[]): Uint8Array {
 // job order because that is the order its identity column is a delta chain over.
 function encodeOpen(
   records: readonly EncodedShed[],
-  graphHash: string,
+  graphKeyHash: string,
   lastDay: number,
 ): Uint8Array {
   const anchor = records.length > 0 ? records[0].first : 0;
@@ -306,7 +344,7 @@ function encodeOpen(
     writeSpans(writer, record);
   }
   return join(
-    header(records, anchor, false, graphHash, lastDay, jobBlock(records)),
+    header(records, anchor, false, graphKeyHash, lastDay, jobBlock(records)),
     writer.bytes,
   );
 }
@@ -321,7 +359,7 @@ function encodeOpen(
 // reached, so its close days are all later than every close day already in the file.
 function encodeClosed(
   records: readonly EncodedShed[],
-  graphHash: string,
+  graphKeyHash: string,
   lastDay: number,
   counts: readonly number[],
 ): { closed: Uint8Array; index: Uint8Array } {
@@ -333,7 +371,7 @@ function encodeClosed(
     ordered,
     anchor,
     true,
-    graphHash,
+    graphKeyHash,
     lastDay,
     windowBytes(counts),
   );
@@ -373,20 +411,20 @@ function encodeClosed(
 // truncation window it picks the feed up with.
 export function encodeSheds(
   records: readonly EncodedShed[],
-  graphHash: string,
+  graphKeyHash: string,
   lastDay: number,
   counts: readonly number[] = [],
 ): ShedArtifact {
   const { closed, index } = encodeClosed(
     records.filter((record) => record.close !== null),
-    graphHash,
+    graphKeyHash,
     lastDay,
     counts,
   );
   return {
     open: encodeOpen(
       records.filter((record) => record.close === null),
-      graphHash,
+      graphKeyHash,
       lastDay,
     ),
     closed,
@@ -398,7 +436,7 @@ export function encodeSheds(
 // to see them exactly as they were written — the quantized bytes, and the file order, which is the
 // job order `open.bin` was built in and the close-day order `closed.bin` was.
 export interface DecodedShedArtifact {
-  graphHash: string;
+  graphKeyHash: string;
   lastDay: number; // the newest usable DOB snapshot the artifact was built through
   counts: number[]; // the truncation window a walk resuming from `lastDay` has to be seeded with
   open: EncodedShed[];
@@ -479,13 +517,13 @@ export function decodeShedArtifact(
 ): DecodedShedArtifact {
   const openView = readHeader(openBytes, false);
   const closedView = readHeader(closedBytes, true);
-  const graphHash =
+  const graphKeyHash =
     closedView.getUint32(20, true).toString(16).padStart(8, "0") +
     closedView.getUint32(16, true).toString(16).padStart(8, "0");
   const lastDay = openView.getUint16(28, true);
   if (
     lastDay !== closedView.getUint16(28, true) ||
-    graphHash !==
+    graphKeyHash !==
       openView.getUint32(20, true).toString(16).padStart(8, "0") +
         openView.getUint32(16, true).toString(16).padStart(8, "0")
   ) {
@@ -537,24 +575,27 @@ export function decodeShedArtifact(
       spans: readSpans(closedReader),
     });
   }
-  return { graphHash, lastDay, counts, open, closed };
+  return { graphKeyHash, lastDay, counts, open, closed };
 }
 
-// Why the artifact does not mean anything against `graphHash`, or null when it does. A durable key
+// Why the artifact does not mean anything against `graphKeyHash`, or null when it does. A durable key
 // survives a rebuild without promising to name the same edge across one, so the client resolves
-// nothing at all against a graph the header does not name (`shedsOn`, src/routing/sheds.ts) — a
-// visible failure rather than scaffolding down the wrong street.
+// nothing at all against a graph whose key space the header does not name (`shedsOn`,
+// src/routing/sheds.ts) — a visible failure rather than scaffolding down the wrong street.
 //
 // Every WRITER has to stop on the same disagreement rather than re-stamp the header. Carrying
-// records forward under a hash they were not placed under is exactly the misplacement the gate
+// records forward under a key space they were not placed under is exactly the misplacement the gate
 // exists to rule out, and it would heal the blank map into a wrong one within a day.
 export function shedGraphMismatch(
   artifact: DecodedShedArtifact,
-  graphHash: string,
+  graphKeyHash: string,
 ): string | null {
-  if (artifact.graphHash === graphHash) {
+  if (artifact.graphKeyHash === graphKeyHash) {
     return null;
   } else {
-    return `the shed artifact was placed against graph ${artifact.graphHash}, this one is ${graphHash}`;
+    return (
+      `the shed artifact was placed against key space ${artifact.graphKeyHash},` +
+      ` this graph's is ${graphKeyHash}`
+    );
   }
 }

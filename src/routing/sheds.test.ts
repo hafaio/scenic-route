@@ -34,7 +34,7 @@ import {
   fixtureDepth,
   fixtureDurable,
   fixtureJob,
-  GRAPH_HASH,
+  GRAPH_KEY_HASH,
   INDEX_BASE64,
   LAST_DAY,
   OPEN_BASE64,
@@ -86,8 +86,8 @@ const SIDE_SHIFT = 3; // the graph's kind-and-side byte, bits 3-5
 
 // A graph of straight edges out of one node, edge `i` running at `bearings[i]` (degrees) for ~110 m.
 // Geometry-less, so edgePath reads the node coordinates — which is all the shed field needs of a
-// graph. It names itself with the hash the fixture's artifact was placed against, or nothing it
-// carries would resolve onto it.
+// graph. It names itself with the key space the fixture's artifact was placed against, or nothing
+// it carries would resolve onto it.
 function straightGraph(edgeCount: number, ...bearings: number[]): RoutingGraph {
   const nodeQx = new Int32Array(edgeCount + 1);
   const nodeQy = new Int32Array(edgeCount + 1);
@@ -104,7 +104,7 @@ function straightGraph(edgeCount: number, ...bearings: number[]): RoutingGraph {
     edgeNodeB[edge] = edge + 1;
   }
   return {
-    hash: GRAPH_HASH,
+    keyHash: GRAPH_KEY_HASH,
     edgeCount,
     nodeCount: edgeCount + 1,
     originLat: MIDTOWN.lat,
@@ -194,7 +194,7 @@ function fromReader(sheds: Shed[]): string {
 }
 
 test("the header describes the two halves it was written with", () => {
-  expect(history.graphHash).toBe(GRAPH_HASH);
+  expect(history.graphKeyHash).toBe(GRAPH_KEY_HASH);
   const open = SHEDS.filter((shed) => shed.close === null);
   const closed = SHEDS.filter((shed) => shed.close !== null);
   expect(history.open.count).toBe(open.length);
@@ -210,7 +210,7 @@ test("the header describes the two halves it was written with", () => {
 test("the encoder writes the bytes checked in beside the records", () => {
   // Fed the fixture's declared records — which came from the prototype's CSV rows, not from any
   // encoder — our writer has to land on the three blobs checked in beside them, byte for byte.
-  const rebuilt = encodeSheds(DURABLE_SHEDS, GRAPH_HASH, LAST_DAY);
+  const rebuilt = encodeSheds(DURABLE_SHEDS, GRAPH_KEY_HASH, LAST_DAY);
   expect(rebuilt.open).toEqual(new Uint8Array(buffer(OPEN_BASE64)));
   expect(rebuilt.closed).toEqual(new Uint8Array(buffer(CLOSED_BASE64)));
   expect(rebuilt.index).toEqual(new Uint8Array(buffer(INDEX_BASE64)));
@@ -222,8 +222,13 @@ test("the daily job's window in the header moves the records, not the answers", 
   // has to have moved by. Same records, same days, from a file the reader has to measure rather than
   // assume the shape of.
   const counts = Array.from({ length: 30 }, (_, order) => 8_900 + order);
-  const withWindow = encodeSheds(DURABLE_SHEDS, GRAPH_HASH, LAST_DAY, counts);
-  const bare = encodeSheds(DURABLE_SHEDS, GRAPH_HASH, LAST_DAY);
+  const withWindow = encodeSheds(
+    DURABLE_SHEDS,
+    GRAPH_KEY_HASH,
+    LAST_DAY,
+    counts,
+  );
+  const bare = encodeSheds(DURABLE_SHEDS, GRAPH_KEY_HASH, LAST_DAY);
 
   expect(withWindow.closed.length).toBe(bare.closed.length + 2 * counts.length);
   expect(withWindow.open).toEqual(bare.open);
@@ -329,11 +334,11 @@ test("a shed lands on the same street after a rebuild renumbers every edge", () 
 });
 
 // What the durable key cannot promise on its own (`sameGraph`, sheds.ts): an artifact whose header
-// names another graph resolves NOTHING rather than whatever its keys happen to hit. That is the
+// names another key space resolves NOTHING rather than whatever its keys happen to hit. That is the
 // guarantee every reader here rests on, since wrong-and-invisible is the one failure a blank map
 // cannot be mistaken for.
-test("an artifact placed against another graph resolves no span at all", () => {
-  const stale: ShedHistory = { ...history, graphHash: "0000000000000000" };
+test("an artifact placed against another key space resolves no span at all", () => {
+  const stale: ShedHistory = { ...history, graphKeyHash: "0000000000000000" };
   let resolved = 0;
   for (const day of probeDays()) {
     expect(shedsOn(graph, stale, day)).toEqual([]);
@@ -519,10 +524,10 @@ test("a graph the artifact was not placed against costs no scaffolding", async (
   serveFixture();
   const { day } = COVERAGE[COVERAGE.length - 1];
   const other = namedGraph(EDGE_COUNT);
-  other.hash = "0000000000000000";
+  other.keyHash = "0000000000000000";
   await expect(
     computeEdgeSheds(other, new Date(2017, 11, 28 + day)),
-  ).rejects.toThrow(GRAPH_HASH);
+  ).rejects.toThrow(GRAPH_KEY_HASH);
 
   const sheds = other.sheds as NonNullable<RoutingGraph["sheds"]>;
   expect(sheds.maxCoverage).toBe(0);
@@ -686,10 +691,11 @@ test("re-aiming the sun moves the shade without rebuilding the coverage", () => 
   );
 });
 
-// The graph hash the artifact's header carries. Recomputed from the graph's own bytes rather than
-// read out of routing/version.json, because the daily job snaps against whatever graph the live site
-// is serving and that deploy can predate the version file. Pinned against the FNV-1a 64 reference
-// vectors, not against `tiler graph`'s output, so the two implementations stay independent.
+// The hash both of the artifact's graph figures are built on. Recomputed from the graph's own bytes
+// rather than read out of routing/version.json, because the daily job snaps against whatever graph
+// the live site is serving and that deploy can predate the version file. Pinned against the FNV-1a
+// 64 reference vectors, not against `tiler graph`'s output, so the two implementations stay
+// independent.
 test("the graph hash is FNV-1a 64", () => {
   const of = (text: string): string =>
     graphHashOf(new TextEncoder().encode(text));

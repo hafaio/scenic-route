@@ -72,11 +72,17 @@ const SIDE_LABELS: readonly SideLabel[] = [
   "west",
 ];
 
-export interface RoutingGraph {
-  // What this graph IS: FNV-1a 64 over the GRPH file's own bytes, as routing/version.json spells it.
-  // An artifact placed against a graph names the one it was placed against by this, and resolving it
-  // onto any other graph is what `sheds.ts` refuses to do.
+// The two figures routing/version.json names a graph by, both FNV-1a 64 in hex.
+export interface GraphIdentity {
+  // What this graph IS: the hash of the GRPH file's own bytes. It changes on any rebuild at all,
+  // including one that only moved an f32 length, so nothing an artifact is gated on rides on it.
   hash: string;
+  // What a placed artifact resolves THROUGH: the hash of the durable key space — every
+  // `(source id, side, ordinal)` the graph carries, ascending. `sheds.ts` gates on this one.
+  keyHash: string;
+}
+
+export interface RoutingGraph extends GraphIdentity {
   nodeCount: number;
   edgeCount: number;
   originLng: number;
@@ -148,10 +154,14 @@ function fourByteAlign(offset: number): number {
   return (offset + 3) & ~3;
 }
 
-// `hash` is what these bytes hash to, which the bytes themselves cannot carry — a file cannot hold
-// its own FNV. The deploy writes it beside the graph and the pipeline recomputes it; either way the
-// caller is the one that knows.
-export function decodeGraph(buffer: ArrayBuffer, hash: string): RoutingGraph {
+// `identity` is what these bytes hash to and what their key space hashes to, neither of which the
+// bytes themselves can carry — a file cannot hold its own FNV, and walking 600k keys to recover the
+// second is work `tiler graph` already did. The deploy writes both beside the graph and the pipeline
+// recomputes them; either way the caller is the one that knows.
+export function decodeGraph(
+  buffer: ArrayBuffer,
+  identity: GraphIdentity,
+): RoutingGraph {
   const bytes = new Uint8Array(buffer);
   const view = new DataView(buffer);
   const magic = String.fromCharCode(bytes[0], bytes[1], bytes[2], bytes[3]);
@@ -264,7 +274,7 @@ export function decodeGraph(buffer: ArrayBuffer, hash: string): RoutingGraph {
   );
 
   return {
-    hash,
+    ...identity,
     nodeCount,
     edgeCount,
     originLng,
@@ -372,34 +382,37 @@ export function edgeGeometryRight(graph: RoutingGraph, edge: number): boolean {
 
 let graphPromise: Promise<RoutingGraph> | null = null;
 
-// What the graph beside it hashes to, read out of the deploy's own record rather than recomputed
+// How the graph beside it names itself, read out of the deploy's own record rather than recomputed
 // here: FNV-1a over 30 MB of graph is ~0.5 s of blocked main thread on a laptop and several times
-// that on a phone, to arrive at a number `tiler graph` already wrote down. The two files are written
-// by one run, so they cannot skew. An unreadable version file leaves the hash unknown, which no
-// artifact then matches — the graph itself still loads, so only what is placed against it goes quiet.
-async function fetchGraphHash(): Promise<string> {
+// that on a phone, and the key space would want a 600k-element sort on top, to arrive at two numbers
+// `tiler graph` already wrote down. The two files are written by one run, so they cannot skew. An
+// unreadable version file leaves both unknown, which no artifact then matches — the graph itself
+// still loads, so only what is placed against it goes quiet. A version file from before `keyHash`
+// existed is the same case.
+async function fetchGraphIdentity(): Promise<GraphIdentity> {
   try {
     const response = await fetch(VERSION_URL);
     if (!response.ok) {
       throw new Error(`${response.status} ${response.statusText}`);
     }
-    return ((await response.json()) as { hash: string }).hash;
+    const version = (await response.json()) as Partial<GraphIdentity>;
+    return { hash: version.hash ?? "", keyHash: version.keyHash ?? "" };
   } catch (error: unknown) {
     console.error(`${VERSION_URL} is unreadable:`, error);
-    return "";
+    return { hash: "", keyHash: "" };
   }
 }
 
 export function loadGraph(): Promise<RoutingGraph> {
   if (!graphPromise) {
-    graphPromise = Promise.all([fetch(GRAPH_URL), fetchGraphHash()])
-      .then(async ([response, hash]) => {
+    graphPromise = Promise.all([fetch(GRAPH_URL), fetchGraphIdentity()])
+      .then(async ([response, identity]) => {
         if (!response.ok) {
           throw new Error(
             `${GRAPH_URL}: ${response.status} ${response.statusText}`,
           );
         }
-        return decodeGraph(await response.arrayBuffer(), hash);
+        return decodeGraph(await response.arrayBuffer(), identity);
       })
       .catch((error: unknown) => {
         graphPromise = null; // a failed load must not be memoized
