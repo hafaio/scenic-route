@@ -415,6 +415,13 @@ to measure, the bound says so. And a property that cannot separate a real defect
 topology, like the hairpin at a cul-de-sac head, is counted and reported rather than asserted:
 inventing a join over an arbitrary distance would be a worse lie than the honest break.
 
+**One caller runs the pipeline and holds none of them.** `tiler key-probe` builds a graph out of nine
+slices of the city so the shed gate can stamp what the key assignment *does* rather than what its
+source text says (`scripts/README.md`, "What the stamp covers"). Every bound above is held over a
+whole city's population — a fixture has 17 km of alley where the floor is 50, and seven scored cells
+where it is 500 — so on that path they are reported and not asserted. It is the one place a fixture
+*is* the point: what is being measured is the key space, not the network.
+
 **A walk has properties no edge can answer**, and four of the same campaign's findings are of that
 kind: how far a route goes against the straight line, whether it doubles back over a street it has
 just crossed, whether it threads roadway to roadway, and whether it arrives at all. None of them
