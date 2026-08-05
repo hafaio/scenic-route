@@ -150,6 +150,7 @@ function DoubleTapZoom({
     let zoomFrom: { zoom: number; clientY: number } | null = null;
     let gesture: { zoom: number; center: L.LatLng } | null = null;
     let animFrame: number | undefined;
+    let priorTouchAction = "";
 
     const screenPoint = ({ clientX, clientY }: Touch): L.Point =>
       L.point(clientX, clientY);
@@ -170,6 +171,7 @@ function DoubleTapZoom({
       }
       if (dragSuspended) {
         dragSuspended = false;
+        container.style.touchAction = priorTouchAction;
         map.dragging.enable();
       }
     };
@@ -210,6 +212,13 @@ function DoubleTapZoom({
         ) {
           lastTap = null;
           armed = true;
+          if (!picking) {
+            // Both mobile browsers ship double-tap-and-drag as a page zoom of their own and commit
+            // to it here unless the second tap is prevented; once committed they never hand it
+            // back. Only ours to claim when we zoom instead, and only on the second tap: a first
+            // tap keeps its synthesised click, which the pick flow runs on.
+            event.preventDefault();
+          }
           cancelPickRef.current(); // the first tap was half of a zoom, not a point
           // while following, anchor on the centre so the zoom can't drift off the user
           const at = following
@@ -230,12 +239,20 @@ function DoubleTapZoom({
       ) {
         return;
       }
+      // every move of an armed gesture, the slop window included: leaving even the first few
+      // unprevented is enough for the browser to start its own double-tap-drag page zoom
+      event.preventDefault();
       const [touch] = event.touches;
       if (!zoomFrom) {
         // beat Leaflet's Draggable to its own 3px tolerance — ours is on the container, its on the
         // document — so nothing pans and no dragstart fires to disengage follow
         if (!dragSuspended) {
           dragSuspended = true;
+          // dragging.disable() drops leaflet-touch-drag, and with it the container's
+          // `touch-action: none`, exactly as the drag starts; an inline value outranks the class
+          // rules and comes back off in reset()
+          priorTouchAction = container.style.touchAction;
+          container.style.touchAction = "none";
           map.dragging.disable();
         }
         if (screenPoint(touch).distanceTo(start) <= TAP_MOVE_SLOP) {
@@ -270,7 +287,6 @@ function DoubleTapZoom({
         undefined,
         true,
       );
-      event.preventDefault();
     };
 
     const onEnd = (event: TouchEvent) => {
@@ -307,7 +323,7 @@ function DoubleTapZoom({
       lastTap = null;
     };
 
-    container.addEventListener("touchstart", onStart, { passive: true });
+    container.addEventListener("touchstart", onStart, { passive: false });
     container.addEventListener("touchmove", onMove, { passive: false });
     container.addEventListener("touchend", onEnd, { passive: false });
     container.addEventListener("touchcancel", onCancel, { passive: true });
