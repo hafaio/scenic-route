@@ -68,7 +68,7 @@ import {
 } from "../src/url-state";
 import AboutDialog from "./about-dialog";
 import FollowToggle from "./follow-toggle";
-import type { MapTarget } from "./map";
+import type { MapTarget, PickMode } from "./map";
 import PinEditor from "./pin-editor";
 import RoutePanel from "./route-panel";
 import SignInDialog from "./sign-in-dialog";
@@ -337,6 +337,14 @@ export default function MapApp() {
   // from the panel overrides which end the next tap sets.
   const effectivePickTarget: "start" | "dest" | null =
     pickTarget ?? (routingOpen && dest === null ? "dest" : null);
+  // Only a field armed from the panel commits on the tap itself; the default is deferred, so opening
+  // the panel never costs the user a double-tap zoom.
+  const pickMode: PickMode =
+    pickTarget !== null
+      ? "immediate"
+      : effectivePickTarget !== null
+        ? "deferred"
+        : "off";
 
   // While a preference reads the clock, follow it: each tick re-costs the route against the sun's new
   // position, and a tick that lands on a new day also restands the scaffolding. The store only ticks in
@@ -1196,7 +1204,7 @@ export default function MapApp() {
         routeResult={routeResult}
         routeDest={routeDest}
         routeStart={routeStart}
-        picking={effectivePickTarget !== null}
+        pickMode={pickMode}
         onMapPick={handleMapPick}
         dragging={dragging}
         initialCamera={initialCamera}

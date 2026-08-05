@@ -1,7 +1,14 @@
 "use client";
 
 import L from "leaflet";
-import { Fragment, useEffect, useMemo, useRef } from "react";
+import {
+  Fragment,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   MapContainer,
   Marker,
@@ -27,6 +34,12 @@ export interface MapTarget {
   zoom?: number;
 }
 
+// How a map tap becomes a point. "immediate" is a field the user armed from the panel: they asked to
+// place a point, so the tap commits and the zoom gestures stay out of the way. "deferred" is the
+// panel's auto-armed destination, which nobody asked for — it must not cost the user their double-tap
+// zoom, so it waits out the double-tap window before committing.
+export type PickMode = "off" | "immediate" | "deferred";
+
 interface MapViewProps {
   pins: Pin[];
   draft: PinDraft | null;
@@ -37,7 +50,7 @@ interface MapViewProps {
   routeResult: RouteResult | null;
   routeDest: { lat: number; lng: number } | null;
   routeStart: { lat: number; lng: number } | null;
-  picking: boolean;
+  pickMode: PickMode;
   dragging: boolean; // an endpoint marker is being dragged; the route reframe goes zoom-out-only
   initialCamera: Camera | null; // a shared link's camera, applied once; null leaves the map alone
   preframedDest: { lat: number; lng: number } | null; // a dest whose framing the link already chose
@@ -65,14 +78,21 @@ const draftIcon = L.divIcon({
 
 // A map click sets the armed field's location. Mounted only while a field has armed pick mode, so
 // ordinary browsing never intercepts clicks; pin markers stop propagation, so they still select.
+// Leaflet fires click for each half of a double click, so dblclick — which lands after both — is what
+// drops a deferred pick the halves scheduled, leaving the double click as a plain zoom.
 function PickCatcher({
   onMapPick,
+  onCancelPick,
 }: {
   onMapPick: (lat: number, lng: number) => void;
+  onCancelPick: () => void;
 }) {
   useMapEvents({
     click: (event) => {
       onMapPick(event.latlng.lat, event.latlng.lng);
+    },
+    dblclick: () => {
+      onCancelPick();
     },
   });
   return null;
@@ -107,11 +127,17 @@ const ZOOM_PX_PER_LEVEL = 128; // matching MapLibre's quick zoom
 function DoubleTapZoom({
   following,
   picking,
+  onCancelPick,
 }: {
   following: boolean;
   picking: boolean;
+  onCancelPick: () => void;
 }) {
   const map = useMap();
+  // Through a ref rather than a dep: re-running the effect between the two taps would wipe lastTap,
+  // and the second tap would read as a fresh first one.
+  const cancelPickRef = useRef(onCancelPick);
+  cancelPickRef.current = onCancelPick;
   useEffect(() => {
     const container = map.getContainer();
     const internals = map as unknown as MapZoomInternals;
@@ -184,6 +210,7 @@ function DoubleTapZoom({
         ) {
           lastTap = null;
           armed = true;
+          cancelPickRef.current(); // the first tap was half of a zoom, not a point
           // while following, anchor on the centre so the zoom can't drift off the user
           const at = following
             ? map.getSize().divideBy(2)
@@ -255,8 +282,9 @@ function DoubleTapZoom({
         const tapped = anchor;
         end();
         lastTap = null;
-        event.preventDefault();
         if (tapped && !picking) {
+          // suppressing the browser's own double-tap zoom is only ours to do when we zoom instead
+          event.preventDefault();
           map.setZoomAround(tapped.latLng, map.getZoom() + 1, {
             animate: true,
           });
@@ -426,7 +454,7 @@ export default function MapView({
   routeResult,
   routeDest,
   routeStart,
-  picking,
+  pickMode,
   dragging,
   initialCamera,
   preframedDest,
@@ -437,6 +465,40 @@ export default function MapView({
   onEndpointDrag,
   onPinSelect,
 }: MapViewProps) {
+  const picking = pickMode !== "off";
+  // A deferred pick's point, held until the double-tap window passes. The pin is drawn from it right
+  // away — the wait is only to keep a first tap from becoming a destination, not to withhold feedback.
+  const [pendingDest, setPendingDest] = useState<{
+    lat: number;
+    lng: number;
+  } | null>(null);
+  const cancelPendingPick = useCallback(() => setPendingDest(null), []);
+
+  // The wait itself, and the ways it can end without committing: the arm state changing out from under
+  // it (the panel closing, a field arming explicitly, the commit landing) and unmount.
+  useEffect(() => {
+    if (pickMode !== "deferred") {
+      setPendingDest(null);
+      return;
+    } else if (!pendingDest) {
+      return;
+    } else {
+      const timer = window.setTimeout(() => {
+        setPendingDest(null);
+        onMapPick(pendingDest.lat, pendingDest.lng);
+      }, DOUBLE_TAP_MS);
+      return () => window.clearTimeout(timer);
+    }
+  }, [pickMode, pendingDest, onMapPick]);
+
+  const handlePick = (lat: number, lng: number) => {
+    if (pickMode === "deferred") {
+      setPendingDest({ lat, lng });
+    } else {
+      onMapPick(lat, lng);
+    }
+  };
+
   const markers = useMemo(
     () =>
       pins.map((pin) => (
@@ -499,8 +561,15 @@ export default function MapView({
         onEndpointDragMove={onEndpointDragMove}
         onEndpointDrag={onEndpointDrag}
       />
-      {picking ? <PickCatcher onMapPick={onMapPick} /> : null}
-      <DoubleTapZoom following={following} picking={picking} />
+      {picking ? (
+        <PickCatcher onMapPick={handlePick} onCancelPick={cancelPendingPick} />
+      ) : null}
+      {/* a deferred pick doesn't block the zoom: it gets cancelled by the gesture instead */}
+      <DoubleTapZoom
+        following={following}
+        picking={pickMode === "immediate"}
+        onCancelPick={cancelPendingPick}
+      />
       {markers}
       {userLocation ? (
         <Marker
@@ -510,6 +579,15 @@ export default function MapView({
       ) : null}
       {draft ? (
         <Marker position={[draft.lat, draft.lng]} icon={draftIcon} />
+      ) : null}
+      {pendingDest ? (
+        // Non-interactive, unlike the committed destination: a draggable marker under the first tap
+        // would take the second tap's touch and its click, leaving the double tap undetectable.
+        <Marker
+          position={[pendingDest.lat, pendingDest.lng]}
+          icon={savedIcon}
+          interactive={false}
+        />
       ) : null}
     </MapContainer>
   );
