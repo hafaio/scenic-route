@@ -320,16 +320,20 @@ count and carries on rather than failing the build.
 varies, the same `MAX_SHADE_ALPHA * intensity * fraction` scale and 8-step quantisation, and a tile
 with nothing painted in it is not written at all — the client reads the 404 as transparent.
 
-Two things differ from a building. A crown **floats in the air**, so its shadow is the polygon simply
-TRANSLATED by `CROWN_BASE_FRACTION * height / tan(elevation)` (clipped to the same 500 m) — there is
-no wall connecting it to the ground, so there is nothing to sweep, which is both cheaper and more
-correct than the building's swept hull. The **0.4** is the crown BASE: the LiDAR outline is the
-crown's widest cross-section, which on the half-ellipsoid and ovoid crowns urban broadleaves take
-sits at or near the base, so casting from the polygon's own height would model the crown as a flat
-sheet at the top of the tree and throw the shadow about a crown radius too far — far enough at a low
-sun to detach it from its tree. It is an assumption anchored on crown ratio (0.39–0.60 for hardwoods,
-Russell & Weiskittel 2011 Table 1), not a measured height to largest crown width; the published HLCW
-work is all conifer. `src/tiles/sweep.ts` translates by the same fraction, or the client's swept
+Two things differ from a building. A crown **floats in the air**, so no wall connects it to the ground
+and its shadow is not a swept footprint but the union of its own **slices**, each swept between two
+airborne cross-sections of itself. The crown is a spheroid spanning `CROWN_BASE_FRACTION * height` to
+the full height — a point at the trunk, widest at the middle of that span, a point at the top — so
+slice `j`, the outline inset by `j / 4` of the crown radius, is swept between the ground displacements
+of the two heights where the crown draws in to that radius (each clipped to the same 500 m). Those
+heights straddle the widest section, so the union comes out a lens: the shadow narrows at the end
+nearest the tree as well as at its tip. The **0.4** is the crown BASE, an assumption anchored on crown
+ratio (0.39–0.60 for hardwoods, Russell & Weiskittel 2011 Table 1) — crown length over tree height,
+which is the quantity that means it. Where the crown is WIDEST inside that span is the unsourced half:
+the published height-to-largest-crown-width work is all conifer, so the midpoint is taken. Casting the
+whole crown from the polygon's own height instead would model it as a flat sheet at the top of the tree
+and throw the shadow about a crown radius too far — far enough at a low sun to detach it from its tree.
+`src/tiles/sweep.ts` cuts the same slices, or the client's swept
 tiles and the baked pyramid would disagree at the handoff. And it is cast from the bin's **centre
 sun-disk sample alone**: a 10 m crown's
 penumbra is ~5 cm against a 3.6 m pixel at z15, so the other five samples would paint the same
@@ -970,7 +974,7 @@ it — differ only there, leaving `public/commercial/{x}/{y}.bin` keyed on the s
 
 Decoded by `components/street-score-layer.tsx`, which applies the offset in *pixels*.
 
-### `public/casters/{x}/{y}.bin` — the shadow casters, magic `CSTR` (v2, derived, gitignored)
+### `public/casters/{x}/{y}.bin` — the shadow casters, magic `CSTR` (v3, derived, gitignored)
 
 The footprints, crowns and trunks that touch one **z15** tile, so the client can generate their
 shadows itself past where the baked pyramid stops — the pyramid's z15 level alone is two thirds of
@@ -1013,13 +1017,30 @@ Header, 44 bytes:
 | 32 | f64 | coordinate scale, degrees per quantized unit (1e-6, ~0.1 m — the grid both sources are stored on) |
 | 40 | u32 | trunk count |
 
-Then the `building record count` buildings, then the `crown record count` crowns, back to back, each:
+Then the `building record count` buildings, each:
 
-- `varint` height, **decimetres** — a roof height or a measured crown height
+- `varint` height, **decimetres** — a roof height
 - `varint` ring count, the outer ring first
 - per ring, a `varint` vertex count and that many (longitude, latitude) pairs as zigzag LEB128
   varint deltas. The delta chain runs on **across a record's rings**, so an inner ring starts from
   the outer ring's last vertex rather than from the chunk origin again.
+
+Then the `crown record count` crowns. A crown ships as its **slices** — the nested rings
+`crates/tiler/src/crown.rs` cuts it into, one per band of its height — so v3 gives it a level of
+nesting a building does not have:
+
+- `varint` height, **decimetres** — the measured crown height
+- `varint` slice count (4 today, `CROWN_SEGMENTS`), outermost first
+- per slice, a `varint` ring count and that many rings, each a `varint` vertex count and its zigzag
+  deltas, on the same chain, which runs across the whole record
+
+A slice can hold **several** rings or none: eroding a blob splits it long before it vanishes, and the
+chunk clip splits it again. Which slice a ring is in is what says how far down the shadow it is swept,
+which is why a crown stays ONE record where a building splits into one per clipped piece — a record is
+what carries the slice structure. Slice 0 is the outline and slice `j` is that outline inset by
+`j / 4` of the crown radius; `src/tiles/casters.ts` decodes them into a per-ring `levels` array and
+`src/tiles/sweep.ts` sweeps slice `j` between the two heights, straddling the crown's widest section,
+where the crown draws in to that radius.
 
 Then the `trunk count` trunks, each four varints — a zigzag (longitude, latitude) step from the
 previous trunk on the same quantized grid, a **radius in centimetres** and a **height in
@@ -1039,7 +1060,9 @@ of it. That happens 37 times in the city.
 
 Which section a record came from is what it casts by, exactly as in `tiler shade`: a footprint is
 **swept** (its ring together with its translate, since a wall joins the roof to the ground) and a
-crown is only **translated**, floating free of the ground. A **trunk** is swept like a footprint, and
+crown is swept **slice by slice**, each between two airborne cross-sections of itself — there is still
+no wall under it, but a crown spans `0.4h..h` and its shadow is the union over that range, which at a
+5° sun is a smear tens of metres long. A **trunk** is swept like a footprint, and
 swept **opaquely, with the buildings rather than with the crowns**: the crown layer is thinned by the
 season's tau (`src/shade/phenology.ts`), where wood blocks the sun in February as well as in July.
 Its swept circle is a capsule, drawn as the quad without the two round caps — the median trunk is
