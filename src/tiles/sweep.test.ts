@@ -3,7 +3,7 @@ import { DECK_HEIGHT_METERS } from "../routing/sheds";
 import type { SunSample } from "../shade/sun";
 import { projectX, projectY } from "./mercator";
 import { packRuns, pixelsPerMeter, type ShedDecks } from "./shed-decks";
-import { castSheds, frameFor, type PolygonSink } from "./sweep";
+import { castSheds, crownSegments, frameFor, type PolygonSink } from "./sweep";
 
 // A shed deck is the one caster the client carries that no baked pyramid has a copy of, so nothing
 // else can catch it being thrown the wrong length, the wrong way round, or wound so that it subtracts
@@ -249,4 +249,88 @@ test("each deck is thrown at its own depth, not at the set's first", () => {
     .sort((left, right) => left - right);
   expect(heights[0]).toBeCloseTo(NARROW, 6);
   expect(heights[1]).toBeCloseTo(WIDE, 6);
+});
+
+// A crown's slices are the other thing only this side can be caught on. The bands here are the ones
+// crates/tiler/src/crown.rs cuts, and the pyramid it bakes hands over to this sweep at one zoom.
+
+test("nests a crown's slices around its widest section", () => {
+  // A 10 m crown at a 5 degree sun: 0.6 * 10 * 11.43 = 68.6 m of smear over 3.6 m pixels.
+  const low = crownSegments(10, 11.43, MAX_SHADOW_METERS, 3.6);
+  const middle = 0.7 * 10 * 11.43;
+  expect(low.map(({ level }) => level)).toEqual([0, 1, 2, 3]);
+  expect(low[0].fromM).toBeCloseTo(middle, 9);
+  expect(low[0].toM).toBeCloseTo(middle, 9);
+  for (const [slice, { fromM, toM }] of low.entries()) {
+    expect((fromM + toM) / 2).toBeCloseTo(middle, 9);
+    if (slice > 0) {
+      expect(fromM).toBeLessThan(low[slice - 1].fromM);
+      expect(toM).toBeGreaterThan(low[slice - 1].toM);
+    }
+  }
+  // Every band is inside the crown, and the innermost one all but spans it.
+  expect(low[3].fromM).toBeGreaterThan(0.4 * 10 * 11.43);
+  expect(low[3].toM).toBeLessThan(10 * 11.43);
+  expect(low[3].toM - low[3].fromM).toBeGreaterThan(0.96 * 0.6 * 10 * 11.43);
+
+  // The same crown at a 60 degree sun smears 3.5 m, under a pixel: one translated outline.
+  const high = crownSegments(10, 0.577, MAX_SHADOW_METERS, 3.6);
+  expect(high.map(({ level }) => level)).toEqual([0]);
+  expect(high[0].toM).toBeCloseTo(high[0].fromM, 9);
+});
+
+test("cuts the bands the tiler cuts", () => {
+  // (height, shadow per height, metres per pixel) and the slices they have to cut, in metres of
+  // shadow displacement. Duplicated verbatim in `cuts_the_bands_the_client_cuts` in
+  // crates/tiler/src/crown.rs: a table on each side is what catches either half drifting from the
+  // other at the zoom they hand over.
+  const cases: [number, number, number, [number, number, number][]][] = [
+    [
+      10,
+      5,
+      0.91,
+      [
+        [0, 35.0, 35.0],
+        [1, 30.05, 39.95],
+        [2, 25.1, 44.9],
+        [3, 20.15, 49.85],
+      ],
+    ],
+    [
+      18,
+      2,
+      0.91,
+      [
+        [0, 25.2, 25.2],
+        [1, 21.636, 28.764],
+        [2, 18.072, 32.328],
+        [3, 14.508, 35.892],
+      ],
+    ],
+    [
+      7,
+      11.43,
+      3.6,
+      [
+        [0, 56.007, 56.007],
+        [1, 48.08601, 63.92799],
+        [2, 40.16502, 71.84898],
+        [3, 32.24403, 79.76997],
+      ],
+    ],
+  ];
+  for (const [heightM, shadowPerHeight, metersPerPixel, expected] of cases) {
+    const cut = crownSegments(
+      heightM,
+      shadowPerHeight,
+      MAX_SHADOW_METERS,
+      metersPerPixel,
+    );
+    expect(cut.length).toBe(expected.length);
+    for (const [slice, [level, fromM, toM]] of expected.entries()) {
+      expect(cut[slice].level).toBe(level);
+      expect(cut[slice].fromM).toBeCloseTo(fromM, 6);
+      expect(cut[slice].toM).toBeCloseTo(toM, 6);
+    }
+  }
 });

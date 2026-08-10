@@ -18,12 +18,13 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::Fallible;
-use crate::binfmt::{self, Coord, Polygon};
+use crate::binfmt::{self, Coord, Polygon, Ring};
+use crate::crown;
 use crate::geometry::{self, METERS_PER_DEGREE_LAT, PolygonGrid, PolygonSet, round_half_up};
 use crate::manifest::{Bounds, City, Manifest};
 use crate::raster::{
-    MIN_ALPHA, TILE_SIZE, Tile, encode_webp_lossless, lat_to_pixel_y, lng_to_pixel_x,
-    pixel_x_to_lng, pixel_y_to_lat, plan_tiles,
+    EQUATOR_METERS_PER_PIXEL, MIN_ALPHA, TILE_SIZE, Tile, encode_webp_lossless, lat_to_pixel_y,
+    lng_to_pixel_x, pixel_x_to_lng, pixel_y_to_lat, plan_tiles,
 };
 
 // The alpha — the one channel that varies — is quantised to this step before encoding, which keeps
@@ -75,7 +76,7 @@ pub(crate) struct Bucket {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Params {
-    max_zoom: u32,
+    pub max_zoom: u32,
     pub max_shadow_meters: f64, // a shadow is clipped to this, so a lone tower does not streak the city
     pub buckets: Vec<Bucket>,
 }
@@ -98,7 +99,7 @@ struct BucketEntry {
 pub struct Casters {
     polygons: Vec<Polygon>,
     heights: Vec<f64>,
-    crowns: Vec<Polygon>,
+    crowns: Vec<crown::Crown>,
     crown_heights: Vec<f64>,
 }
 
@@ -176,7 +177,8 @@ fn read_city_shade(city: &City, data: &Path) -> Fallible<Option<CityShade>> {
         return Ok(None);
     }
     let (polygons, heights) = binfmt::read_buildings(&buildings)?;
-    let (crowns, crown_heights) = city_crowns(city, data)?;
+    let (crown_polygons, crown_heights) = city_crowns(city, data)?;
+    let crowns = crown::slice_crowns(&crown_polygons);
     let footprints = geometry::flatten(&polygons);
     let footprint_grid = PolygonGrid::new(&footprints);
     Ok(Some(CityShade {
@@ -236,6 +238,11 @@ fn convex_hull(points: &[Coord]) -> Vec<Coord> {
 // exact sweep costs a polygon per edge, and a low sun stretches each into a long grid-heavy sliver.
 const MIN_CONCAVITY_M2: f64 = 200.0;
 
+// Vertices one swept run is allowed before it is cut and carried on. A run is a strip as long as the
+// boundary it follows, and a park's boundary runs for hundreds of metres — which every tile that strip's
+// bounding box touches would then walk in full. Cutting keeps a strip's box near the ground it covers.
+const MAX_SWEEP_RUN: usize = 16;
+
 /// Twice the area a ring encloses, by the shoelace sum, unsigned so either winding works. Used only
 /// to weigh a footprint against its convex hull.
 fn double_area(ring: &[Coord]) -> f64 {
@@ -248,15 +255,146 @@ fn double_area(ring: &[Coord]) -> f64 {
     sum.abs()
 }
 
+/// Twice the area a ring encloses by the shoelace sum, SIGNED: positive counter-clockwise. Only the
+/// sign is read, to tell which side of an edge faces out.
+fn signed_double_area(ring: &[Coord]) -> f64 {
+    let mut sum = 0.0;
+    let mut previous = ring.len() - 1;
+    for current in 0..ring.len() {
+        sum += (ring[current].lng - ring[previous].lng) * (ring[current].lat + ring[previous].lat);
+        previous = current;
+    }
+    -sum
+}
+
+/// The ground a ring covers as it slides from `base` to `base + delta`, both displacements in degrees.
+/// A ring that its convex hull barely over-fills (a rectangle, a small notch) is swept as the single
+/// convex hull of the ring and its translate — exact for a convex ring, sub-pixel-close otherwise, and
+/// one cheap polygon. A real concavity is swept EXACTLY, as the union of the ring, its translate, and
+/// the strips its FRONT-FACING boundary drags along — so its notch is left unshaded rather than filled
+/// in. A displacement of nothing is the ring where it stands.
+///
+/// Only the front-facing edges need a strip, and the strips are per CHAIN rather than per edge. Both
+/// follow from the same fact. Every point of the swept region is either in the ring, in its translate,
+/// or on the last displaced copy that still holds it — whose boundary point must sit on an edge the
+/// sweep leads away from, which is what front-facing means. And a run of consecutive front-facing edges
+/// is strictly monotone across the sweep direction, since that is the same sign condition, so the run
+/// together with its own translate closes into a simple polygon that IS the union of that run's
+/// quads. A merged canopy blob has a few long front-facing runs where it has thousands of edges, and
+/// one polygon per run rather than per edge is the difference between two gigabytes and ten.
+fn append_sweep(
+    ring: &Ring,
+    base: (f64, f64),
+    delta: (f64, f64),
+    meters_per_lng: f64,
+    out: &mut Vec<Polygon>,
+) {
+    if ring.len() < 3 {
+        return;
+    }
+    let at = |vertex: &Coord| Coord {
+        lng: vertex.lng + base.0,
+        lat: vertex.lat + base.1,
+    };
+    let shift = |vertex: &Coord| Coord {
+        lng: vertex.lng + base.0 + delta.0,
+        lat: vertex.lat + base.1 + delta.1,
+    };
+    if delta.0 == 0.0 && delta.1 == 0.0 {
+        out.push(vec![ring.iter().map(at).collect()]);
+        return;
+    }
+
+    let ring_hull = convex_hull(ring);
+    let concavity_m2 = 0.5
+        * (double_area(&ring_hull) - double_area(ring))
+        * METERS_PER_DEGREE_LAT
+        * meters_per_lng;
+    let mut swept_hull = || {
+        let mut points: Vec<Coord> = Vec::with_capacity(ring.len() * 2);
+        for vertex in ring {
+            points.push(at(vertex));
+            points.push(shift(vertex));
+        }
+        let hull = convex_hull(&points);
+        if hull.len() >= 3 {
+            out.push(vec![hull]);
+        }
+    };
+    if concavity_m2 < MIN_CONCAVITY_M2 {
+        swept_hull();
+        return;
+    }
+
+    // An edge faces the sweep when its OUTWARD normal does, which is the cross product against the
+    // displacement read with the ring's own winding. An edge running along the sweep drags nothing and
+    // rides with whichever run it falls in.
+    let winding = if signed_double_area(ring) >= 0.0 {
+        1.0
+    } else {
+        -1.0
+    };
+    let facing = |index: usize| {
+        let from = ring[index];
+        let to = ring[(index + 1) % ring.len()];
+        let cross = (to.lng - from.lng) * delta.1 - (to.lat - from.lat) * delta.0;
+        winding * cross <= 0.0
+    };
+    // Starting on an edge that faces away is what keeps a run from wrapping past the ring's own end.
+    // Only a ring with no area can face the sweep the whole way round, and its hull is itself.
+    let Some(start) = (0..ring.len()).find(|index| !facing(*index)) else {
+        swept_hull();
+        return;
+    };
+
+    out.push(vec![ring.iter().map(at).collect()]);
+    out.push(vec![ring.iter().map(shift).collect()]);
+    let mut run: Vec<Coord> = Vec::new();
+    let close = |run: &mut Vec<Coord>, out: &mut Vec<Polygon>| {
+        if run.len() >= 2 {
+            let mut strip: Vec<Coord> = Vec::with_capacity(run.len() * 2);
+            strip.extend(run.iter().map(at));
+            strip.extend(run.iter().rev().map(shift));
+            out.push(vec![strip]);
+        }
+        // The next run carries on from this one's last vertex, so a run cut for length leaves no gap.
+        let carry = run.last().copied();
+        run.clear();
+        run.extend(carry);
+    };
+    for step in 0..ring.len() {
+        let index = (start + step) % ring.len();
+        if facing(index) {
+            if run.is_empty() {
+                run.push(ring[index]);
+            }
+            run.push(ring[(index + 1) % ring.len()]);
+            if run.len() >= MAX_SWEEP_RUN {
+                close(&mut run, out);
+            }
+        } else {
+            run.clear();
+        }
+    }
+    close(&mut run, out);
+}
+
+/// The displacement, in degrees, a shadow of `distance` metres carries at this latitude's scale.
+fn offset(distance: f64, sample: &Sample, meters_per_lng: f64) -> (f64, f64) {
+    (
+        distance * sample.east / meters_per_lng,
+        distance * sample.north / METERS_PER_DEGREE_LAT,
+    )
+}
+
 /// Append the shadow one building casts for one sample to `out`: the footprint's outer ring swept
-/// down the shadow by `min(max_shadow, height * shadowPerHeight)` metres. A ring that its convex hull
-/// barely over-fills (a rectangle, a small notch) is swept as the single convex hull of the ring and
-/// its translate — exact for a convex ring, sub-pixel-close otherwise, and one cheap polygon. A real
-/// concavity is instead swept EXACTLY as the Minkowski sum of the ring with that displacement — the
-/// union of the ring, its translate, and one parallelogram per edge, which the rasteriser composites
-/// for free since it unions the polygons it fills — so its notch is left unshaded rather than filled
-/// in. Nothing is appended when the building has no footprint or casts nothing (zero height or a sun
-/// at the zenith).
+/// down the shadow by `min(max_shadow, height * shadowPerHeight)` metres, since a wall joins the roof
+/// to the ground. A ring its convex hull barely over-fills is swept as that single hull; a real
+/// concavity is swept exactly, as the ring, its translate and one parallelogram per edge. Nothing is
+/// appended when the building has no footprint or casts nothing (zero height or a sun at the zenith).
+///
+/// A footprint is a few dozen vertices, so this stays on the parallelogram per edge that the client
+/// draws it with rather than the run-at-a-time sweep the canopy needs; the two cover the same ground.
 fn append_shadow(
     footprint: &Polygon,
     height: f64,
@@ -276,8 +414,7 @@ fn append_shadow(
     }
     // The east-west scale at the footprint's latitude; city-scale, so its first vertex stands in.
     let meters_per_lng = METERS_PER_DEGREE_LAT * outer[0].lat.to_radians().cos();
-    let d_lng = distance * sample.east / meters_per_lng;
-    let d_lat = distance * sample.north / METERS_PER_DEGREE_LAT;
+    let (d_lng, d_lat) = offset(distance, sample, meters_per_lng);
     let shift = |vertex: &Coord| Coord {
         lng: vertex.lng + d_lng,
         lat: vertex.lat + d_lat,
@@ -319,55 +456,56 @@ fn append_shadow(
     }
 }
 
-/// The share of a crown polygon's height its silhouette is cast from. The outline is the crown's
-/// WIDEST cross-section, and on the half-ellipsoid, ovoid and spherical crowns urban broadleaves take
-/// (Forests 13(5) 748, 2022) that sits at or near the crown BASE — so casting from the polygon's own
-/// height models the crown as a flat sheet at the very top of the tree and throws the shadow about a
-/// crown radius too far, far enough at a low sun to detach it from its tree.
+/// Append the shadow one crown casts for one sample to `out`: its slices, each SWEPT between where
+/// that band of the crown starts and where it ends.
 ///
-/// 0.4 is an ASSUMPTION, not a measurement. It is anchored on crown ratio (crown length over tree
-/// height), 0.39-0.60 for hardwoods across ~7000 trees in Russell & Weiskittel 2011, "Maximum and
-/// Largest Crown Width Equations for 15 Tree Species in Maine", Table 1 — which puts the crown base
-/// near 0.4h. The parameter this actually wants is height to largest crown width, a standard forestry
-/// quantity (Hann 1999, Forest Science 45(2) 217-225, splits the crown profile at exactly this
-/// point), but no published HLCW fraction for urban broadleaves could be found: the numeric work is
-/// all conifer, whose conic crowns are widest at the base by construction and answer differently.
-pub const CROWN_BASE_FRACTION: f64 = 0.4;
-
-/// Append the shadow one crown casts for one sample to `out`: its ring TRANSLATED down the shadow by
-/// `min(max_shadow, CROWN_BASE_FRACTION * height * shadowPerHeight)` metres. A crown floats in the
-/// air, so unlike a building there is no wall connecting it to the ground and nothing to sweep — the
-/// displaced ring alone is the shadow, which is both cheaper and more correct. Nothing is appended for
-/// a crown of unknown height.
+/// A crown floats in the air, so unlike a building there is no wall joining it to the ground — but it
+/// is not a sheet either. It spans `CROWN_BASE_FRACTION * h` up to `h`, and its shadow is the union
+/// over that range, which at a low sun is a long smear rather than the outline moved sideways. Each
+/// band is swept between two AIRBORNE slices, which is the crown's own projection and not a wall that
+/// is not there. Nothing is appended for a crown of unknown height.
 fn append_crown_shadow(
-    crown: &Polygon,
+    crown: &crown::Crown,
     height: f64,
     sample: &Sample,
     max_shadow_meters: f64,
+    meters_per_pixel: f64,
     out: &mut Vec<Polygon>,
 ) {
-    let Some(outer) = crown.first() else {
-        return;
-    };
-    if outer.len() < 3 || height <= 0.0 {
-        return;
+    for segment in crown::crown_segments(
+        height,
+        sample.shadow_per_height,
+        max_shadow_meters,
+        meters_per_pixel,
+    ) {
+        let Some(rings) = crown.levels.get(segment.level) else {
+            continue;
+        };
+        for ring in rings {
+            if ring.len() < 3 {
+                continue;
+            }
+            let meters_per_lng = METERS_PER_DEGREE_LAT * ring[0].lat.to_radians().cos();
+            let base = offset(segment.from_m, sample, meters_per_lng);
+            let end = offset(segment.to_m, sample, meters_per_lng);
+            append_sweep(
+                ring,
+                base,
+                (end.0 - base.0, end.1 - base.1),
+                meters_per_lng,
+                out,
+            );
+        }
     }
-    let distance = (CROWN_BASE_FRACTION * height * sample.shadow_per_height).min(max_shadow_meters);
-    if distance <= 0.0 {
-        return;
-    }
-    let meters_per_lng = METERS_PER_DEGREE_LAT * outer[0].lat.to_radians().cos();
-    let d_lng = distance * sample.east / meters_per_lng;
-    let d_lat = distance * sample.north / METERS_PER_DEGREE_LAT;
-    out.push(vec![
-        outer
-            .iter()
-            .map(|vertex| Coord {
-                lng: vertex.lng + d_lng,
-                lat: vertex.lat + d_lat,
-            })
-            .collect(),
-    ]);
+}
+
+/// The ground one pixel covers at a latitude at the zoom the CLIENT's own sweep takes over at, one
+/// past the pyramid's deepest baked level. That is the finest ground a crown is ever drawn on either
+/// side of the handover, so both halves cut the same number of slices where they meet — and reading it
+/// off the pyramid's own coarser level instead would leave the raster stepping twice as far as the
+/// vectors beside it.
+fn meters_per_pixel(lat: f64, max_zoom: u32) -> f64 {
+    EQUATOR_METERS_PER_PIXEL * lat.to_radians().cos() / f64::from(1u32 << (max_zoom + 1))
 }
 
 /// Every building's shadow for one sun-disk sample — each footprint that casts anything, swept.
@@ -386,17 +524,28 @@ fn hulls_for_sample(
     hulls
 }
 
-/// Every measured crown's shadow for one sun-disk sample — each crown's ring, translated. The crown
+/// Every measured crown's shadow for one sun-disk sample — each crown's slices, swept. The crown
 /// mirror of `hulls_for_sample`, shared by the display pyramid and the per-edge bake.
 fn crown_hulls_for_sample(
-    crowns: &[Polygon],
+    crowns: &[crown::Crown],
     heights: &[f64],
     sample: &Sample,
     max_shadow_meters: f64,
+    max_zoom: u32,
 ) -> Vec<Polygon> {
     let mut hulls: Vec<Polygon> = Vec::with_capacity(crowns.len());
     for (crown, height) in crowns.iter().zip(heights) {
-        append_crown_shadow(crown, *height, sample, max_shadow_meters, &mut hulls);
+        let Some(ring) = crown.levels.first().and_then(|level| level.first()) else {
+            continue;
+        };
+        append_crown_shadow(
+            crown,
+            *height,
+            sample,
+            max_shadow_meters,
+            meters_per_pixel(ring[0].lat, max_zoom),
+            &mut hulls,
+        );
     }
     hulls
 }
@@ -428,6 +577,7 @@ fn build_crown_set(
     shade: &CityShade,
     bucket: &Bucket,
     max_shadow_meters: f64,
+    max_zoom: u32,
 ) -> Option<SampleSet> {
     let sample = bucket.samples.first()?;
     if shade.casters.crowns.is_empty() {
@@ -438,6 +588,7 @@ fn build_crown_set(
         &shade.casters.crown_heights,
         sample,
         max_shadow_meters,
+        max_zoom,
     );
     let set = geometry::flatten(&hulls);
     drop(hulls); // the flattened copy is the one the tiles read; ~25 M vertices is worth not doubling
@@ -734,8 +885,9 @@ pub fn run(args: &Args) -> Fallible<()> {
             trees: cities
                 .iter()
                 .map(|city| {
-                    city.as_ref()
-                        .and_then(|shade| build_crown_set(shade, bucket, params.max_shadow_meters))
+                    city.as_ref().and_then(|shade| {
+                        build_crown_set(shade, bucket, params.max_shadow_meters, params.max_zoom)
+                    })
                 })
                 .collect(),
             intensity: bucket.intensity,
@@ -987,6 +1139,7 @@ fn bake_edge_shade(
     casters: &Casters,
     bins: &[Bucket],
     max_shadow_meters: f64,
+    max_zoom: u32,
     edge_polys: &[Vec<Coord>],
 ) -> (Vec<u8>, Vec<u8>, Vec<BinPosition>) {
     let edge_count = edge_polys.len();
@@ -1033,6 +1186,7 @@ fn bake_edge_shade(
                         &casters.crown_heights,
                         sample,
                         max_shadow_meters,
+                        max_zoom,
                     ),
                     &spec,
                     edge_polys,
@@ -1060,12 +1214,11 @@ fn bake_edge_shade(
 pub fn edge_shade_attrs(
     buildings_path: &Path,
     canopy_path: Option<&Path>,
-    bins: &[Bucket],
-    max_shadow_meters: f64,
+    params: &Params,
     edge_polys: &[Vec<Coord>],
 ) -> Fallible<(Vec<u8>, Vec<u8>, Vec<BinPosition>)> {
     let (polygons, heights) = binfmt::read_buildings(buildings_path)?;
-    let (crowns, crown_heights) = match canopy_path {
+    let (crown_polygons, crown_heights) = match canopy_path {
         Some(path) => read_crowns(path)?,
         None => (Vec::new(), Vec::new()),
     };
@@ -1073,11 +1226,12 @@ pub fn edge_shade_attrs(
         &Casters {
             polygons,
             heights,
-            crowns,
+            crowns: crown::slice_crowns(&crown_polygons),
             crown_heights,
         },
-        bins,
-        max_shadow_meters,
+        &params.buckets,
+        params.max_shadow_meters,
+        params.max_zoom,
         edge_polys,
     ))
 }
@@ -1092,8 +1246,9 @@ mod tests {
 
     // A 100 m building near (-74, 40.7) and, 850 m east of it, a 10 m crown and a crown of unknown
     // height, against two bins whose centre sample throws a shadow due north at 5 m per metre: 500 m
-    // for the building, 20 m for the crown (cast from its 4 m crown base, not its top), none for the
-    // unknown one. Each edge sits under one caster (or neither), so the two fractions separate.
+    // for the building and a smear from 20 m to 50 m for the crown — its slices swept from its 4 m
+    // crown base to its 10 m top, not its outline moved once — and nothing for the unknown one. Each
+    // edge sits under one caster (or neither), so the two fractions separate.
     #[test]
     fn bakes_building_and_crown_fractions() {
         let building: Polygon = vec![vec![
@@ -1155,10 +1310,11 @@ mod tests {
         let casters = Casters {
             polygons: vec![building],
             heights,
-            crowns,
+            crowns: crown::slice_crowns(&crowns),
             crown_heights,
         };
-        let (buildings, trees, positions) = bake_edge_shade(&casters, &bins, 500.0, &edge_polys);
+        let (buildings, trees, positions) =
+            bake_edge_shade(&casters, &bins, 500.0, 15, &edge_polys);
 
         assert_eq!(positions.len(), 2);
         let edge_count = edge_polys.len();
@@ -1175,7 +1331,7 @@ mod tests {
             );
             assert_eq!(tree_at(0), 0, "no crown is anywhere near it");
             assert_eq!(building_at(1), 0);
-            assert_eq!(tree_at(1), 255, "the translated crown ring covers it");
+            assert_eq!(tree_at(1), 255, "the crown's swept smear covers it");
             // A crown of unknown height casts nothing, so its edge is unoccluded by either caster.
             assert_eq!(building_at(2), 0);
             assert_eq!(tree_at(2), 0);

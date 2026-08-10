@@ -3969,13 +3969,8 @@ pub fn run(args: &Args) -> Fallible<()> {
         (&args.buildings, &args.shade_params, &args.shade_dir)
     {
         let params: shade::Params = serde_json::from_slice(&fs::read(shade_params_path)?)?;
-        let (building_bytes, tree_bytes, positions) = shade::edge_shade_attrs(
-            buildings_path,
-            args.canopy.as_deref(),
-            &params.buckets,
-            params.max_shadow_meters,
-            &edge_polys,
-        )?;
+        let (building_bytes, tree_bytes, positions) =
+            shade::edge_shade_attrs(buildings_path, args.canopy.as_deref(), &params, &edge_polys)?;
         assert_eq!(building_bytes.len(), positions.len() * v2_edges.len());
         assert_eq!(tree_bytes.len(), building_bytes.len());
         write_shade(

@@ -23,26 +23,47 @@ function zigzag(value: number): number {
   return value < 0 ? -2 * value - 1 : 2 * value;
 }
 
-// One record: its height in decimetres and its rings in degrees, quantized about the chunk origin with
-// the delta chain running across the rings and restarting here.
-function encodeRecord(
+// One building: its height in decimetres and its rings in degrees, quantized about the chunk origin
+// with the delta chain running across the rings and restarting here.
+function encodeBuilding(
   bytes: number[],
   heightDm: number,
   rings: [number, number][][],
 ): void {
   writeVarint(bytes, heightDm);
   writeVarint(bytes, rings.length);
-  let previousX = 0;
-  let previousY = 0;
+  encodeRings(bytes, rings, [0, 0]);
+}
+
+// One crown: its height, how many slices it carries, then per slice a ring count and those rings.
+function encodeCrown(
+  bytes: number[],
+  heightDm: number,
+  levels: [number, number][][][],
+): void {
+  writeVarint(bytes, heightDm);
+  writeVarint(bytes, levels.length);
+  const previous: [number, number] = [0, 0];
+  for (const rings of levels) {
+    writeVarint(bytes, rings.length);
+    encodeRings(bytes, rings, previous);
+  }
+}
+
+function encodeRings(
+  bytes: number[],
+  rings: [number, number][][],
+  previous: [number, number],
+): void {
   for (const ring of rings) {
     writeVarint(bytes, ring.length);
     for (const [lng, lat] of ring) {
       const x = Math.round((lng - ORIGIN_LNG) / SCALE);
       const y = Math.round((lat - ORIGIN_LAT) / SCALE);
-      writeVarint(bytes, zigzag(x - previousX));
-      writeVarint(bytes, zigzag(y - previousY));
-      previousX = x;
-      previousY = y;
+      writeVarint(bytes, zigzag(x - previous[0]));
+      writeVarint(bytes, zigzag(y - previous[1]));
+      previous[0] = x;
+      previous[1] = y;
     }
   }
 }
@@ -69,21 +90,21 @@ function encodeTrunks(
 
 function chunk(
   buildings: [number, number][][][],
-  crowns: [number, number][][][],
+  crowns: [number, number][][][][],
   trunks: [lng: number, lat: number, radiusCm: number, heightDm: number][] = [],
 ): ArrayBuffer {
   const body: number[] = [];
   for (const [index, rings] of buildings.entries()) {
-    encodeRecord(body, 100 + index, rings);
+    encodeBuilding(body, 100 + index, rings);
   }
-  for (const [index, rings] of crowns.entries()) {
-    encodeRecord(body, 50 + index, rings);
+  for (const [index, levels] of crowns.entries()) {
+    encodeCrown(body, 50 + index, levels);
   }
   encodeTrunks(body, trunks);
   const buffer = new ArrayBuffer(44 + body.length);
   const view = new DataView(buffer);
   new Uint8Array(buffer).set([...new TextEncoder().encode("CSTR")], 0);
-  view.setUint16(4, 2, true);
+  view.setUint16(4, 3, true);
   view.setUint16(6, 44, true);
   view.setUint32(8, buildings.length, true);
   view.setUint32(12, crowns.length, true);
@@ -119,11 +140,21 @@ const PLAIN: [number, number][][] = [
     [-74.008, 40.7112],
   ],
 ];
-const CROWN: [number, number][][] = [
+// A crown as it ships: its outline, then the slice that outline insets to.
+const CROWN: [number, number][][][] = [
   [
-    [-74.006, 40.712],
-    [-74.0058, 40.712],
-    [-74.0059, 40.7122],
+    [
+      [-74.006, 40.712],
+      [-74.0058, 40.712],
+      [-74.0059, 40.7122],
+    ],
+  ],
+  [
+    [
+      [-74.00595, 40.71205],
+      [-74.00585, 40.71205],
+      [-74.0059, 40.71215],
+    ],
   ],
 ];
 
@@ -136,10 +167,14 @@ test("decodes a chunk's records, rings and heights", () => {
   for (const [record, height] of [10, 10.1, 5].entries()) {
     expect(decoded.heights[record]).toBeCloseTo(height, 5);
   }
-  // The courtyard's two rings, then one apiece.
-  expect([...decoded.records]).toEqual([0, 2, 3, 4]);
+  // The courtyard's two rings, one for the plain footprint, then the crown's two slices.
+  expect([...decoded.records]).toEqual([0, 2, 3, 5]);
+  // Which slice a ring is in is what says how far down the shadow it is swept; a footprint's rings
+  // are all level 0.
+  expect([...decoded.levels]).toEqual([0, 0, 0, 0, 1]);
 
-  for (const [record, source] of [COURTYARD, PLAIN, CROWN].entries()) {
+  const flat = [COURTYARD, PLAIN, CROWN.flat()];
+  for (const [record, source] of flat.entries()) {
     for (const [offset, ring] of source.entries()) {
       const at = decoded.records[record] + offset;
       const from = decoded.rings[at];
@@ -162,15 +197,15 @@ test("decodes a chunk's records, rings and heights", () => {
 test("keeps a hull off the ring buffer and winds it positively", () => {
   const decoded = decodeChunk(chunk([COURTYARD, PLAIN], [CROWN]));
 
-  // Both footprints are rectangles, so both are swept as their own hull and neither is a crown's.
-  expect(decoded.hulls[1]).toBe(4);
-  expect(decoded.hulls[3]).toBe(4);
-  expect(decoded.hulls[5]).toBe(0);
-  expect(decoded.hullPoints.length / 2).toBe(8);
+  // A hull per RING now, since a crown's slices are swept as well: the courtyard's outer ring and its
+  // hole, the plain footprint, and the crown's two triangular slices.
+  expect([...decoded.hulls].filter((_, index) => index % 2 === 1)).toEqual([
+    4, 4, 4, 3, 3,
+  ]);
 
-  for (const record of [0, 1]) {
-    const from = decoded.hulls[record * 2];
-    const count = decoded.hulls[record * 2 + 1];
+  for (const ring of [0, 2, 3, 4]) {
+    const from = decoded.hulls[ring * 2];
+    const count = decoded.hulls[ring * 2 + 1];
     let area = 0;
     for (let step = 0; step < count; step++) {
       const next = from + ((step + 1) % count);

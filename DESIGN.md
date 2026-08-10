@@ -119,15 +119,69 @@ leafless/in-leaf ratios of 0.53/0.44/0.46/0.51 give ~0.49. Genus spans only 0.07
 while trunk size spans 0.154 — size matters twice as much as species, which is why neither is
 modelled per tree.
 
-**Crown geometry.** A crown is not swept like a building; its shadow is the polygon *translated*, and
-translated from the **crown base at ~0.4h, not the top**. The LiDAR outline is the crown's widest
-cross-section, and for the half-ellipsoid and ovoid shapes urban trees take that sits near the base;
-casting from the top overshot by about a crown radius, putting a median crown's shadow 35.8 m out
-instead of 14.3 m at a 12° sun and visibly detaching it from its own tree. 0.4 is an assumption
-anchored on crown ratio (0.39–0.60 for hardwoods, Russell & Weiskittel 2011 Table 1); "height to
-largest crown width" is the parameter it wants (Hann 1999) but no published figure exists for urban
-broadleaves. Cast crowns with **one** sun-disk sample where buildings get six: a 10 m crown's
-penumbra is ~5 cm against 3.6 m pixels.
+**Crown geometry.** A crown is a **spheroid spanning 0.4h to h**: a point where it meets the trunk,
+widest at the middle of that span, a point at the top. Nothing is cast from the polygon's own height —
+that would model the crown as a flat sheet at the top of the tree and overshoot by about a crown
+radius, putting the whole of a median crown's shadow 35.8 m out at a 12° sun, visibly detached from
+its own tree, where the crown it stands for reaches from 14.3 m. The 0.4 is an assumption, but crown ratio is the quantity that means
+it: crown length over tree height is 0.39–0.60 for hardwoods (Russell & Weiskittel 2011 Table 1), which
+puts the base near 0.4h. What has no source is where *within* that span the crown is widest — "height
+to largest crown width" (Hann 1999), for which no published urban-broadleaf figure exists — and the
+midpoint, 0.7h, is the assumption standing in for it. Cast crowns with **one** sun-disk sample where
+buildings get six: a 10 m crown's penumbra is ~5 cm against 3.6 m pixels.
+
+The crown is a sheet at no single height: its shadow is the union over the whole 0.4h–h span, which at
+a 5° sun is a smear tens of metres long. So `crates/tiler/src/crown.rs` cuts each crown into
+`CROWN_SEGMENTS` = 4 nested **slices**, slice `j` being the outline inset to the radius the crown keeps
+`j/3·0.99` of the way up its own half-height, and each is *swept* between the ground displacements of
+the two heights where the crown draws in to that radius.
+Those two heights straddle 0.7h, so the bands **nest outward from the middle** rather than stacking up
+from the base: the full-radius outline spans a single height and sweeps nothing, while the innermost
+ring spans nearly the whole crown and sweeps nearly the whole smear. The union is therefore a **lens** —
+the shadow narrows at the end nearest its tree as well as at its tip — which is what a crown that is
+not a bar casts. Sweeping between two airborne cross-sections is the crown volume's own projection, and
+does not contradict translating rather than sweeping *to the ground*, where there is no wall.
+
+Four choices carry that:
+
+- **The rings are cut by polygon offset with round joins.** An inward offset with round joins *is*
+  Euclidean erosion — a concave corner opens into an arc of the offset's own depth — and it is the one
+  detail a mitred or squared join would get wrong, cutting the corner off where the two offset edges
+  cross and losing `(1 − π/4)·d²` of it at a right angle. A blob that pinches in two on the way in
+  comes back as two rings, which is ordinary output for a merged canopy rather than a failure. The
+  outline is simplified *before* it is offset, not after: a raw trace is a 1-foot raster staircase, and
+  an offset opens every one of its concave steps into an arc, so the staircase bites a metre or two out
+  of a ring it should not touch — clearing the steps first is the difference between losing 1.7% and
+  3.3% of area at the deepest inset, and it makes the inner rings genuine offsets of the ring shipped
+  as slice 0 rather than of a curve nobody ships. What kept the simplification last before was the
+  curvature estimate, which is read off the raw trace and still is.
+- **The slice radius comes from boundary curvature, not area.** A merged canopy blob's edge is
+  scalloped by the crowns standing along it, so the local radius of curvature of that edge *is* the
+  radius of those trees — and a lone crown's outline is one circle, so the same measurement gives its
+  own radius. The estimate is the turning-weighted median of the circle through a chord pair, over the
+  convex samples only. A *signed* mean would collapse to `perimeter/2π` for any closed ring (its total
+  turning is exactly one revolution), and a plain mean of radii is unbounded, since a stretch that
+  happens to run straight has `dθ → 0` and pours its whole length in.
+- **Slices are spaced by equal height, not equal inset**: slice `j` is the cross-section at
+  `u_j = j/3·0.99` of the way from the widest section to the crown's point, so its band is
+  `0.7h ± 0.3h·u_j` and its radius `r·√(1 − u_j²)` — 100%, 94%, 75% and 14% of the outline's. The 0.99
+  rather than 1 is what stops the innermost ring degenerating to a point, where it would cast nothing
+  over the band it is the only slice covering, while still reaching 99% of the smear. Spacing by equal
+  inset instead — rings at `d_j = j·r/4` — samples the spheroid where its profile is flat and misses
+  where it is not: three of the four rings land within 25% of each other in width, pinning two thirds
+  of the shadow's length at one width and capping the widest swept section at `r·√(1 − 1/16)` = 75% of
+  true. For a 10 m tree with a 5 m crown radius at an 11.6° sun, whose true shadow is 29.2 m long and
+  10.0 m wide, that is 28.3 m and 7.50 m with 68.3% of the length at the maximum; at equal height it is
+  28.9 m and 9.44 m with 33.4% at the maximum, for the same four sweeps.
+- **Sweeping, not translating copies.** Translated copies leave along-sun gaps unless they overlap, and
+  avoiding banding by translation alone needs ~57 copies at z17 with a 5° sun. A sweep is gapless at
+  any altitude, and the residual is a step in WIDTH wherever one ring gives way to the next —
+  independent of the sun. Along the shadow the innermost ring stops at `u = 0.99` rather than at the
+  crown's two points, leaving the union 0.5% of the smear short at each end.
+
+All of one crown layer's slices go through **one** union — one `accumulate` in the bake, one Path2D or
+one stencil-cover pass on the client. They overlap almost entirely, and `1 − (1−b)(1−τ·t)` must never
+see `t > 1`. τ is still applied once to the finished crown layer, so the pyramid stays geometry-only.
 
 ### Known gaps
 
@@ -147,6 +201,60 @@ penumbra is ~5 cm against 3.6 m pixels.
 - The CSTR tests do not cross-check the two implementations: the TS reader is tested against a
   hand-rolled TS writer and the Rust writer against a hand-rolled Rust reader, so a mistake mirrored
   into both would pass. The two agree today.
+- **The stretched crown shadow is built but not visually verified.** Both halves are implemented — the
+  bake (`crown_segments`/`append_sweep` in `shade.rs`), the CSTR v3 artifact, and the client
+  (`castCrowns`/`traceRunSweep` in `src/tiles/sweep.ts`) — and `cargo test`, `bun test src` and
+  `bun run lint` pass. What has *not* happened: nobody has looked at a render. An attempt used
+  `?at=…&layers=shade` against the dev server and the camera parameter did not apply, so the
+  screenshots were of the wrong place with the wrong overlay and were discarded. Nothing about the
+  smear's appearance is confirmed — in particular whether the tip shows a stepped taper (too few
+  slices) and whether the z14/z15 seam is continuous. That, and a K=3 vs K=4 comparison, is the next
+  step, and it wants driving the map through the UI rather than the URL.
+  - What *is* measured: `crown.rs`'s disc-calibration test exists and passes — discs of R = 3, 5, 8 m
+    rasterized at 1 m read back 3.00, 5.00 and 7.91 m — and two merged 5 m discs read 5 m, which is the
+    self-calibration the whole estimator rests on. It fixed two constants the hard way. The turning has
+    to be read across a **chord** spanning twice the smoothing window, not between neighbouring
+    samples: a traced outline concentrates its turning at a handful of samples and leaves the rest dead
+    straight, and per-sample turning reads a 5 m disc at 3.4 m. And the radius has to be the exact
+    circle through the three points, `chord / 2sin(θ/2)`, not `arc/θ`, which is 20% low on a small
+    crown. With ±2 m smoothing and that chord, the `r̂` histogram over all 496,604 shipped NYC crowns
+    is `<1.25: 14,540 · <2: 64,797 · <3: 110,067 · <4: 146,904 · <6: 152,446 · <8: 7,750 · <12: 100 ·
+    ≥12: 0` — a peak across 3–6 m, 2.9% against the lower guard rail and nothing against the upper.
+  - Cost, measured on this machine over NYC, one bin at a time (the brief's "6.2 s/bin, 0.5 GB" does
+    not match what HEAD actually does here): baseline 19.4 / 20.2 / 18.7 s and 3.7–4.1 GB peak RSS for
+    the 5.6°, 11.6° and 23.6° bins; after, 31 / 31 / 25 s of render plus a **one-time** 20–23 s to slice
+    every crown, at 3.8–4.1 GB. So per-bin render is ~1.5× and peak memory is unchanged. CSTR goes
+    53.4 → 109.2 MiB (+55.8, above the +20–40 the design expected), which is why `CACHE_BYTES` in
+    `src/tiles/casters.ts` went 64 → 160 MiB.
+  - Two approaches were tried and rejected on cost, both worth not rediscovering. Sweeping a concave
+    crown as the ring, its translate and one parallelogram **per edge** — what `append_shadow` does for
+    buildings — gives 24.5 M polygons and 153.8 M vertices for one low bin, 6.7 GB and 78 s, because
+    `PolygonSet` costs ~200 bytes of `Vec` overhead per polygon. Emitting one strip per front-facing
+    **run** instead fixed the memory but cost *more* time (119 s), because a run along a park boundary
+    is a strip hundreds of metres long and every tile its bounding box touches walks all of it. Both
+    together — runs, capped at `MAX_SWEEP_RUN` = 16 vertices — are what land at 31 s.
+  - The 0.6 m Douglas-Peucker simplification moved out of `caster_chunks.rs` and into `crown.rs`, so it
+    now applies to the pyramid's rings too. That is not a cost dodge: the design requires both halves
+    to build slices from the same rings, and before this the chunks were simplified and the pyramid was
+    not, leaving the two halves half a metre apart at the zoom they hand over.
+  - `MAX_SWEEP_RUN` (16) is chosen, not measured.
+  - The rings were cut by raster erosion before — a 0.5 m grid, an exact distance transform,
+    thresholded and contoured — and are now `cavalier_contours`' polyline offset. Over all 1,076,146
+    NYC outlines the offset has no failures and no degenerate output, runs the whole pass in 7.2 s
+    against the erosion's 16.9 s, and comes back 1.7–6.5% smaller by level. The erosion was the larger
+    of the two: it traces cell *corners* around the cells whose *centres* pass the threshold, which
+    dilates every ring by a half-cell, and against an analytic disc the offset is the closer of the two.
+    Where the two disagree about whether a ring exists at all it is mostly the erosion's 0.5 m grid
+    failing to resolve one the offset finds — 61,695 crowns to 19,215 at the deepest inset.
+  - The adaptive slice count is a divisor of 4 — 1, 2 or 4, not the design's `clamp(⌈smearPx/2⌉,1,4)`.
+    The slices ship at fixed inset levels, so taking every stride-th of them is the only way both
+    halves can cut the same rings; 3 has no stride.
+  - **The pyramid and SHDB must ship from the same build.** Both read crown geometry through
+    `crown.rs`, so a pyramid baked before this change and a SHDB baked after would disagree about
+    sunset tree shade — the overlay would show a smear the router does not cost. The routing delta
+    itself is unmeasured: `|attr| < 1` still holds by construction (`attr = intensity·(1−2·shaded)`
+    with `intensity = sin(elevation) < 1`), and tree fractions can only grow, but the per-bin
+    distribution of edges whose tree fraction moves by more than 10/255 has not been computed.
 
 ## The walking network
 
