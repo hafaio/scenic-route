@@ -18,8 +18,8 @@ import {
 // The other half of the shade overlay: past the baked pyramid's deepest level the shadows are
 // GENERATED here, from the caster chunks (src/tiles/casters.ts), rather than magnified out of a raster
 // that stopped resolving. The model is the one crates/tiler/src/shade.rs bakes and has to stay it, or
-// the two halves would not join — a building is swept, a crown is only translated, both are punched by
-// the footprints, and the alpha comes out on the same scale. Trunks are the one thing here that the
+// the two halves would not join — a building is swept, a crown is swept slice by slice, both are
+// punched by the footprints, and the alpha comes out on the same scale. Trunks are the one thing here that the
 // pyramid has none of; they are a tenth of a pixel wide at the handoff, so the join survives them.
 //
 // Every polygon is emitted POSITIVELY WOUND so the nonzero fill unions them: a ring handed over the
@@ -34,10 +34,20 @@ export const SHADE_RGB: readonly [number, number, number] = [51, 65, 85];
 export const MAX_SHADE_ALPHA = 190;
 const SHADE_CSS = SHADE_RGB.join(", ");
 
-// The share of a crown polygon's height its silhouette is cast from: the outline is the crown's
-// widest cross-section, which sits near the crown BASE rather than the top. Keep in sync with
-// CROWN_BASE_FRACTION in crates/tiler/src/shade.rs, which carries the justification.
+// Where a crown starts, as a share of the tree's height: the foliage runs from there to the full
+// height and its shadow is the union over that range — a long smear at a low sun rather than the
+// outline moved sideways — so the chunks ship it as nested SLICES, each the cross-section the crown
+// keeps over one band of heights, and each is swept between where that band's two ends land. Keep all
+// three in sync with crates/tiler/src/crown.rs, which carries the justification and cuts the rings
+// both halves read.
 const CROWN_BASE_FRACTION = 0.4;
+const CROWN_SEGMENTS = 4;
+const CROWN_TIP_FRACTION = 0.99;
+const SMEAR_PIXELS_PER_SEGMENT = 2;
+
+// Vertices one swept run is allowed before it is cut and carried on. Keep in sync with MAX_SWEEP_RUN
+// in crates/tiler/src/shade.rs.
+const MAX_SWEEP_RUN = 16;
 
 // The baked pyramid snaps the sun to one of 58 gridded bins; the sweep can use where it actually is,
 // but switching at the handoff would slide a 100 m tower's shadow tip by up to 17.8 m in one zoom
@@ -149,6 +159,8 @@ function traceSweptHull(
   from: number,
   to: number,
   { scale, originX, originY }: Frame,
+  baseX: number,
+  baseY: number,
   shiftX: number,
   shiftY: number,
 ): void {
@@ -176,8 +188,8 @@ function traceSweptHull(
   }
 
   const chains: [number, number, number, number][] = [
-    [ahead, behind, 0, 0],
-    [behind, ahead, shiftX, shiftY],
+    [ahead, behind, baseX, baseY],
+    [behind, ahead, baseX + shiftX, baseY + shiftY],
   ];
   let started = false;
   for (const [start, stop, dx, dy] of chains) {
@@ -287,20 +299,23 @@ export function castBuildings(
         continue;
       }
       drawn += 1;
-      const hull = hulls[record * 2 + 1];
+      const outerRing = records[record];
+      const hull = hulls[outerRing * 2 + 1];
       if (hull > 0) {
-        const start = hulls[record * 2];
+        const start = hulls[outerRing * 2];
         traceSweptHull(
           path,
           hullPoints,
           start,
           start + hull,
           frame,
+          0,
+          0,
           shiftX,
           shiftY,
         );
       } else {
-        const outer = records[record];
+        const outer = outerRing;
         const from = rings[outer];
         const to = rings[outer + 1];
         const forward = wound[outer] === 1;
@@ -320,8 +335,10 @@ export function castBuildings(
 // own shadow — but it is emitted into the CROWN layer rather than the building one; the call site
 // says why. So the shadow is a capsule, drawn here as
 // the quad without its two round caps: a median trunk is 0.34 m across against a 0.91 m z17 pixel, so
-// the caps are a hundredth of a pixel of area. A trunk stands to its crown's BASE, which is where
-// that crown's shadow is cast from, so the two meet end to end. `minWidth` is one DEVICE pixel in
+// the caps are a hundredth of a pixel of area. A trunk stands to where its crown is WIDEST, so the
+// crown's shadow is at full width over the trunk's far end and swallows it; ending it at the crown
+// base would leave the last of it beside the narrow tip the crown reaches down to. `minWidth` is one
+// DEVICE pixel in
 // tile pixels, the floor the quad is drawn at, since a sliver thinner than a sample grid dashes or
 // drops out of the rasterizer altogether rather than reading as the faint line it should.
 export function castTrunks(
@@ -385,8 +402,154 @@ export function castTrunks(
   return drawn;
 }
 
-// Every crown shadow, which is the crown's ring TRANSLATED and nothing more: a crown floats free, so
-// there is no wall joining it to the ground and nothing to sweep.
+// The exact sweep of a ring too concave for its own hull to stand in: the ring where it starts, the
+// ring where it ends, and the strips its FRONT-FACING boundary drags between the two. Mirrors
+// `append_sweep` in crates/tiler/src/shade.rs, which carries the argument for why only those edges
+// need a strip and why a whole run of them closes into one — and a canopy blob has a few long runs
+// where it has thousands of edges, so run-at-a-time is what keeps a park tile drawable.
+function traceRunSweep(
+  path: PolygonSink,
+  points: Float64Array,
+  from: number,
+  to: number,
+  positive: boolean,
+  frame: Frame,
+  baseX: number,
+  baseY: number,
+  shiftX: number,
+  shiftY: number,
+): void {
+  const span = to - from;
+  traceRing(path, points, from, to, positive, frame, baseX, baseY);
+  traceRing(
+    path,
+    points,
+    from,
+    to,
+    positive,
+    frame,
+    baseX + shiftX,
+    baseY + shiftY,
+  );
+  const winding = positive ? 1 : -1;
+  const facing = (index: number): boolean => {
+    const next = from + ((index - from + 1) % span);
+    const cross =
+      (points[next * 2] - points[index * 2]) * shiftY -
+      (points[next * 2 + 1] - points[index * 2 + 1]) * shiftX;
+    return winding * cross <= 0;
+  };
+  // Starting on an edge that faces away is what keeps a run from wrapping past the ring's own end;
+  // only a ring with no area faces the sweep the whole way round, and it drags nothing anyway.
+  let start = -1;
+  for (let index = from; index < to; index++) {
+    if (!facing(index)) {
+      start = index;
+      break;
+    }
+  }
+  if (start < 0) {
+    return;
+  }
+
+  const { scale, originX, originY } = frame;
+  let run: number[] = [];
+  const close = (): void => {
+    if (run.length >= 2) {
+      // The strip is the run followed by its own translate walked back, and it winds the way
+      // traceEdgeSweep winds one edge's quad — the whole run shares that sign, so one test settles it,
+      // and running the strip backwards is what flips it.
+      const lead = run[0];
+      const next = run[1];
+      const walk =
+        (points[next * 2] - points[lead * 2]) * shiftY -
+          (points[next * 2 + 1] - points[lead * 2 + 1]) * shiftX >
+        0
+          ? run
+          : [...run].reverse();
+      let started = false;
+      const emit = (index: number, dx: number, dy: number): void => {
+        const x = points[index * 2] * scale - originX + dx;
+        const y = points[index * 2 + 1] * scale - originY + dy;
+        if (started) {
+          path.lineTo(x, y);
+        } else {
+          path.moveTo(x, y);
+          started = true;
+        }
+      };
+      for (const index of walk) {
+        emit(index, baseX, baseY);
+      }
+      for (let at = walk.length - 1; at >= 0; at--) {
+        emit(walk[at], baseX + shiftX, baseY + shiftY);
+      }
+      path.closePath();
+    }
+    // The next run carries on from this one's last vertex, so a run cut for length leaves no gap.
+    run = run.length > 0 ? [run[run.length - 1]] : [];
+  };
+  for (let step = 0; step < span; step++) {
+    const index = from + ((start - from + step) % span);
+    if (facing(index)) {
+      if (run.length === 0) {
+        run.push(index);
+      }
+      run.push(from + ((index - from + 1) % span));
+      if (run.length >= MAX_SWEEP_RUN) {
+        close();
+      }
+    } else {
+      run = [];
+    }
+  }
+  close();
+}
+
+// One swept slice of a crown: which of its rings to sweep, and how far down the shadow to sweep them
+// between, in metres. Mirrors `crown_segments` in crates/tiler/src/crown.rs, which carries why the
+// bands sit where they do — the two halves have to cut the same slices at the zoom they hand over or
+// the seam would show.
+export function crownSegments(
+  heightM: number,
+  shadowPerHeight: number,
+  maxShadowMeters: number,
+  metersPerPixel: number,
+): { level: number; fromM: number; toM: number }[] {
+  if (!(heightM > 0) || !(shadowPerHeight > 0)) {
+    return [];
+  }
+  const smearM = (1 - CROWN_BASE_FRACTION) * heightM * shadowPerHeight;
+  const wanted = Math.ceil(smearM / metersPerPixel / SMEAR_PIXELS_PER_SEGMENT);
+  let count = CROWN_SEGMENTS;
+  while (count > 1 && count / 2 >= wanted) {
+    count /= 2;
+  }
+  const stride = CROWN_SEGMENTS / count;
+  const middle = (1 + CROWN_BASE_FRACTION) / 2;
+  const halfHeight = (1 - CROWN_BASE_FRACTION) / 2;
+  const displacement = (shareOfHeight: number): number =>
+    Math.min(shareOfHeight * heightM * shadowPerHeight, maxShadowMeters);
+  const segments: { level: number; fromM: number; toM: number }[] = [];
+  for (let slice = 0; slice < count; slice++) {
+    const level = slice * stride;
+    // Half the band the crown stays at least this ring's radius over, centred on its widest section.
+    // The rings are spaced by equal HEIGHT, so the offsets are evenly spaced and this is just one.
+    const half = (level / (CROWN_SEGMENTS - 1)) * CROWN_TIP_FRACTION;
+    const fromM = displacement(middle - halfHeight * half);
+    const toM = displacement(middle + halfHeight * half);
+    // Slice 0 is the widest section, which spans one height and so sweeps nothing; past the shadow
+    // clip every other slice lands on the same ground, where slice 0's ring covers them all.
+    if (toM > fromM || slice === 0) {
+      segments.push({ level, fromM, toM });
+    }
+  }
+  return segments;
+}
+
+// Every crown shadow: each of a crown's slices SWEPT between where its band of the crown starts
+// casting and where it stops. A crown floats free, so there is no wall joining it to the ground — but
+// it is not a sheet either, and sweeping between two airborne slices is the crown's own projection.
 export function castCrowns(
   path: PolygonSink,
   chunks: CasterChunk[],
@@ -394,34 +557,86 @@ export function castCrowns(
   maxShadowMeters: number,
   frame: Frame,
 ): number {
+  const metersPerPixel = 1 / frame.pixelsPerMeter;
   let drawn = 0;
   for (const chunk of chunks) {
-    const { points, rings, records, heights, boxes, wound } = chunk;
+    const {
+      points,
+      rings,
+      records,
+      heights,
+      boxes,
+      hulls,
+      hullPoints,
+      wound,
+      levels,
+    } = chunk;
     for (let record = chunk.buildings; record < records.length - 1; record++) {
-      const distance = Math.min(
-        CROWN_BASE_FRACTION * heights[record] * sample.shadowPerHeight,
+      const segments = crownSegments(
+        heights[record],
+        sample.shadowPerHeight,
         maxShadowMeters,
+        metersPerPixel,
       );
-      if (!(distance > 0)) {
+      if (segments.length === 0) {
         continue;
       }
-      const shiftX = distance * sample.east * frame.pixelsPerMeter;
-      const shiftY = -distance * sample.north * frame.pixelsPerMeter;
-      if (!reaches(boxes, record, frame, shiftX, shiftY)) {
+      const reach = segments[segments.length - 1].toM * frame.pixelsPerMeter;
+      if (
+        !reaches(
+          boxes,
+          record,
+          frame,
+          reach * sample.east,
+          -reach * sample.north,
+        )
+      ) {
         continue;
       }
       drawn += 1;
-      const outer = records[record];
-      traceRing(
-        path,
-        points,
-        rings[outer],
-        rings[outer + 1],
-        wound[outer] === 1,
-        frame,
-        shiftX,
-        shiftY,
-      );
+      for (const { level, fromM, toM } of segments) {
+        const baseX = fromM * sample.east * frame.pixelsPerMeter;
+        const baseY = -fromM * sample.north * frame.pixelsPerMeter;
+        const shiftX = (toM - fromM) * sample.east * frame.pixelsPerMeter;
+        const shiftY = -(toM - fromM) * sample.north * frame.pixelsPerMeter;
+        for (let ring = records[record]; ring < records[record + 1]; ring++) {
+          if (levels[ring] !== level) {
+            continue;
+          }
+          const from = rings[ring];
+          const to = rings[ring + 1];
+          const positive = wound[ring] === 1;
+          if (shiftX === 0 && shiftY === 0) {
+            traceRing(path, points, from, to, positive, frame, baseX, baseY);
+          } else if (hulls[ring * 2 + 1] > 0) {
+            const start = hulls[ring * 2];
+            traceSweptHull(
+              path,
+              hullPoints,
+              start,
+              start + hulls[ring * 2 + 1],
+              frame,
+              baseX,
+              baseY,
+              shiftX,
+              shiftY,
+            );
+          } else {
+            traceRunSweep(
+              path,
+              points,
+              from,
+              to,
+              positive,
+              frame,
+              baseX,
+              baseY,
+              shiftX,
+              shiftY,
+            );
+          }
+        }
+      }
     }
   }
   return drawn;

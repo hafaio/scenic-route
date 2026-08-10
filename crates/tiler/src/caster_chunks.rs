@@ -10,9 +10,11 @@
 //! same shadow as sweeping the whole, and the pieces union back to the same footprint for the base
 //! punch-out.
 //!
-//! Footprints ship at full source detail; crown outlines are simplified first, by
-//! `CROWN_SIMPLIFY_METERS`, since theirs is a raster staircase no zoom this feeds can resolve. See
-//! scripts/README.md.
+//! Footprints ship at full source detail. A crown ships as the nested SLICES of crates/tiler/src/
+//! crown.rs — its outline and the rings that outline insets to, one per band of the crown's height —
+//! since a crown's shadow is the union over the heights it spans and not its outline moved sideways.
+//! The slices are cut once per crown, before any of this, so the pyramid `tiler shade` bakes and the
+//! chunks the client sweeps are built from the same rings. See scripts/README.md.
 
 use std::collections::HashMap;
 use std::fs;
@@ -23,7 +25,8 @@ use serde::Serialize;
 
 use crate::Fallible;
 use crate::binfmt::{self, Coord, DECIMETERS_PER_METER, Polygon, Ring, write_varint, zigzag};
-use crate::geometry::{Projection, round_half_up};
+use crate::crown;
+use crate::geometry::round_half_up;
 use crate::manifest::{City, Manifest};
 use crate::raster::{
     TILE_SIZE, lat_to_pixel_y, lng_to_pixel_x, pixel_x_to_lng, pixel_y_to_lat, tile_index,
@@ -31,20 +34,13 @@ use crate::raster::{
 use crate::shade;
 
 // layouts: scripts/README.md
-const CASTER_FORMAT: u16 = 2;
+const CASTER_FORMAT: u16 = 3;
 const CASTER_HEADER_BYTES: usize = 44;
 // Degrees per quantized unit, ~0.1 m — the grid the two sources are themselves stored on, so the
 // only coordinate error a chunk adds is the half unit of re-quantizing about its own origin.
 const CASTER_COORD_SCALE: f64 = 1e-6;
 // The zoom the baked pyramid stops at, so it is also the grid the client fetches its casters on.
 const CHUNK_ZOOM: u32 = 15;
-// Douglas-Peucker tolerance for crown outlines, DISPLAY ONLY — data/canopy/<id>.bin keeps the exact
-// rings and everything that reads them, the routing field and the baked pyramid alike, is untouched.
-// The outlines are traced from a 1-foot LiDAR raster, so they are a staircase of ~0.3 m steps; this
-// is two thirds of a z17 pixel (0.91 m), the finest ground these chunks are ever drawn at, and just
-// clear of the step, which is what collapses the whole staircase instead of decimating it.
-const CROWN_SIMPLIFY_METERS: f64 = 0.6;
-
 // The crown allometry of scripts/build-tree-data.ts run BACKWARDS, to recover the trunk the crown
 // radius was grown from: crownDiameter = exp(a + b*ln(ln(dbh_cm + 1)) + bias) is monotone in dbh, so
 // the inversion is exact wherever a dbh was what produced the crown.
@@ -66,11 +62,23 @@ pub struct Args {
     pub params: PathBuf, // the sun-position file `tiler shade` reads, for max_shadow_meters
 }
 
-/// One shadow caster as it ships: the source polygon's rings in degrees, outer first, and the height
-/// it casts from in decimetres — the unit both source files store.
+/// One shadow caster as it ships: its rings in degrees, in GROUPS, and the height it casts from in
+/// decimetres — the unit both source files store.
+///
+/// A building is one group: its outer ring first and its holes after. A crown is one group per SLICE,
+/// group `j` being its outline inset by `j / CROWN_SEGMENTS` of the crown radius, every ring of it a
+/// positively wound piece. Which group a ring is in is what says how far down the shadow it is swept.
 struct Caster {
-    rings: Polygon,
+    groups: Vec<Vec<Ring>>,
     height_dm: u16,
+}
+
+impl Caster {
+    /// The ring a caster is placed and clipped by: its outer one, which for a crown is its widest
+    /// slice and therefore contains every other.
+    fn outer(&self) -> &Ring {
+        &self.groups[0][0]
+    }
 }
 
 /// One trunk as it ships: where it stands, how thick it is in centimetres of RADIUS — the decimetre
@@ -132,15 +140,36 @@ fn casters(polygons: &[Polygon], heights: &[f64], holes: bool) -> Vec<Caster> {
                 rings.extend(polygon[1..].iter().filter(|ring| ring.len() >= 3).cloned());
             }
             Some(Caster {
-                rings,
+                groups: vec![rings],
                 height_dm: round_half_up(height * DECIMETERS_PER_METER) as u16,
             })
         })
         .collect()
 }
 
-/// The city's crowns and their measured heights, empty when it has no canopy layer or the file is
-/// missing. The 0 unknown sentinel is dropped downstream by `casters`, with the roofless footprints.
+/// The crowns as casters, each carrying its slices. A crown whose outline casts nothing — the canopy
+/// file's 0 unknown-height sentinel, or a ring with no area — is dropped exactly as `tiler shade`
+/// drops it.
+fn crown_casters(crowns: Vec<crown::Crown>, heights: &[f64]) -> Vec<Caster> {
+    crowns
+        .into_iter()
+        .zip(heights)
+        .filter_map(|(crown, height)| {
+            if crown.levels.is_empty() || *height <= 0.0 {
+                return None;
+            }
+            Some(Caster {
+                groups: crown.levels,
+                height_dm: round_half_up(height * DECIMETERS_PER_METER) as u16,
+            })
+        })
+        .collect()
+}
+
+/// The city's crowns that cast anything and their measured heights, empty when it has no canopy layer
+/// or the file is missing. The 0 unknown-height sentinel is dropped HERE rather than downstream, since
+/// slicing a crown is the expensive half of this pass and half the file's polygons carry it — the same
+/// filter `tiler shade` applies before it slices.
 fn city_crowns(city: &City, data: &Path) -> Fallible<(Vec<Polygon>, Vec<f64>)> {
     let Some(layer) = &city.field.canopy else {
         return Ok((Vec::new(), Vec::new()));
@@ -151,7 +180,12 @@ fn city_crowns(city: &City, data: &Path) -> Fallible<(Vec<Polygon>, Vec<f64>)> {
     }
     let canopy = binfmt::read_canopy(&path)?;
     let heights = canopy.heights_m();
-    Ok((canopy.polygons, heights))
+    Ok(canopy
+        .polygons
+        .into_iter()
+        .zip(heights)
+        .filter(|(_, height)| *height > 0.0)
+        .unzip())
 }
 
 /// The trunk radius a shipped crown radius implies, in metres. Two trees the inversion cannot know
@@ -213,10 +247,7 @@ fn ring_box(ring: &Ring) -> Rect {
 /// The search is per z15 tile, on the same buckets the chunks are cut on, and the box test is what
 /// keeps it off the rings: a trunk touches a handful of outlines out of its tile's hundreds.
 fn stand_trunks(trunks: Vec<Trunk>, crowns: &[Caster]) -> Vec<Trunk> {
-    let boxes: Vec<Rect> = crowns
-        .iter()
-        .map(|crown| ring_box(&crown.rings[0]))
-        .collect();
+    let boxes: Vec<Rect> = crowns.iter().map(|crown| ring_box(crown.outer())).collect();
     let mut by_tile: HashMap<(u32, u32), Vec<u32>> = HashMap::new();
     bucket(crowns, |key, index| {
         by_tile.entry(key).or_default().push(index);
@@ -231,106 +262,16 @@ fn stand_trunks(trunks: Vec<Trunk>, crowns: &[Caster]) -> Vec<Trunk> {
             let height_dm = by_tile.get(&tile)?.iter().find_map(|index| {
                 let crown = &crowns[*index as usize];
                 (boxes[*index as usize].contains(&trunk.coord)
-                    && point_inside_ring(&crown.rings[0], &trunk.coord))
+                    && point_inside_ring(crown.outer(), &trunk.coord))
                 .then_some(crown.height_dm)
             })?;
             Some(Trunk {
-                height_dm: round_half_up(f64::from(height_dm) * shade::CROWN_BASE_FRACTION) as u16,
+                height_dm: round_half_up(f64::from(height_dm) * crown::CROWN_WIDEST_FRACTION)
+                    as u16,
                 ..trunk
             })
         })
         .collect()
-}
-
-/// How far a point lies from a segment, all three in metres.
-fn segment_distance(point: (f64, f64), from: (f64, f64), to: (f64, f64)) -> f64 {
-    let (run, rise) = (to.0 - from.0, to.1 - from.1);
-    let length = run * run + rise * rise;
-    let along = if length == 0.0 {
-        0.0
-    } else {
-        (((point.0 - from.0) * run + (point.1 - from.1) * rise) / length).clamp(0.0, 1.0)
-    };
-    f64::hypot(
-        point.0 - from.0 - along * run,
-        point.1 - from.1 - along * rise,
-    )
-}
-
-/// One ring with everything Douglas-Peucker can drop dropped, and the worst deviation that cost, in
-/// metres. The kept vertices are the SOURCE coordinates, never a round trip through the projection,
-/// and they keep their order, so the ring closes and winds exactly as it did.
-///
-/// A closed ring has no pair of fixed ends to run the recursion between, so it is cut at its first
-/// vertex and the vertex farthest from that — a diameter of sorts — and each half simplified as a
-/// polyline. Distance is to the SEGMENT rather than to its infinite line, which is what makes the
-/// tolerance a true bound on how far the ring moves. A ring the tolerance would collapse below a
-/// triangle is smaller than the tolerance itself and is kept whole.
-fn simplify_ring(ring: &Ring, projection: &Projection, tolerance: f64) -> (Ring, f64) {
-    let mut metres: Vec<(f64, f64)> = ring
-        .iter()
-        .map(|point| (projection.x(point.lng), projection.y(point.lat)))
-        .collect();
-    metres.push(metres[0]);
-    let last = metres.len() - 1;
-    let reach =
-        |index: usize| f64::hypot(metres[index].0 - metres[0].0, metres[index].1 - metres[0].1);
-    let far = (1..last)
-        .max_by(|left, right| reach(*left).total_cmp(&reach(*right)))
-        .unwrap_or(0);
-
-    let mut keep = vec![false; metres.len()];
-    keep[0] = true;
-    keep[far] = true;
-    keep[last] = true;
-    let mut deviation = 0.0f64;
-    let mut spans = vec![(0, far), (far, last)];
-    while let Some((first, end)) = spans.pop() {
-        let Some((at, furthest)) = (first + 1..end)
-            .map(|index| {
-                (
-                    index,
-                    segment_distance(metres[index], metres[first], metres[end]),
-                )
-            })
-            .max_by(|left, right| left.1.total_cmp(&right.1))
-        else {
-            continue;
-        };
-        if furthest > tolerance {
-            keep[at] = true;
-            spans.push((first, at));
-            spans.push((at, end));
-        } else {
-            deviation = deviation.max(furthest);
-        }
-    }
-
-    let simplified: Ring = (0..ring.len())
-        .filter(|index| keep[*index])
-        .map(|index| ring[index])
-        .collect();
-    if simplified.len() < 3 {
-        (ring.clone(), 0.0)
-    } else {
-        (simplified, deviation)
-    }
-}
-
-/// Every crown's outline simplified, and the worst deviation that introduced anywhere in the city.
-///
-/// This runs BEFORE the bucketing and the clip, on whole polygons: two chunks that share a crown
-/// would otherwise each simplify their own side of the seam and leave a gap or an overlap along it,
-/// where simplifying first leaves every seam decided by the exact tile rectangle, as the clip alone
-/// decided it before.
-fn simplify_crowns(crowns: &mut [Caster], projection: &Projection) -> f64 {
-    let mut deviation = 0.0f64;
-    for crown in crowns {
-        let (simplified, moved) = simplify_ring(&crown.rings[0], projection, CROWN_SIMPLIFY_METERS);
-        crown.rings[0] = simplified;
-        deviation = deviation.max(moved);
-    }
-    deviation
 }
 
 /// Buckets casters into every z15 tile their outer ring's bounding box touches, as `tiler chunks`
@@ -340,7 +281,7 @@ fn simplify_crowns(crowns: &mut [Caster], projection: &Projection) -> f64 {
 /// viewport is the client's halo, which is what the manifest's `maxShadowMeters` is for.
 fn bucket(casters: &[Caster], mut push: impl FnMut((u32, u32), u32)) {
     for (index, caster) in casters.iter().enumerate() {
-        let rect = ring_box(&caster.rings[0]);
+        let rect = ring_box(caster.outer());
         let min_x = tile_index(lng_to_pixel_x(rect.west, CHUNK_ZOOM), CHUNK_ZOOM);
         let max_x = tile_index(lng_to_pixel_x(rect.east, CHUNK_ZOOM), CHUNK_ZOOM);
         let min_y = tile_index(lat_to_pixel_y(rect.north, CHUNK_ZOOM), CHUNK_ZOOM);
@@ -670,7 +611,7 @@ fn clip_ring(ring: &[Coord], rect: &Rect) -> Vec<Ring> {
     pieces
 }
 
-/// One caster as it ships in one chunk: its rings clipped to that chunk. A ring can clip into
+/// One BUILDING as it ships in one chunk: its rings clipped to that chunk. A ring can clip into
 /// several disjoint pieces, which the record format cannot hold — its ring list is one outer ring
 /// and its holes — so each piece ships as its own record, at the same height. That is exactly what
 /// the client already does with two casters that overlap: it unions their shadows and unions their
@@ -679,50 +620,99 @@ fn clip_ring(ring: &[Coord], rect: &Rect) -> Vec<Ring> {
 /// A footprint that splits AND has holes is the one case with nowhere to put a hole, since nothing
 /// in the format says which piece it belongs to; it ships whole, as it did before, which is
 /// trivially still correct because the pieces it duplicates are subsets of it.
-fn clip_caster(caster: &Caster, rect: &Rect, out: &mut Vec<Caster>) {
-    let mut pieces = clip_ring(&caster.rings[0], rect);
-    let holes = &caster.rings[1..];
+fn clip_building(caster: &Caster, rect: &Rect, out: &mut Vec<Caster>) {
+    let rings = &caster.groups[0];
+    let mut pieces = clip_ring(&rings[0], rect);
+    let holes = &rings[1..];
     if !holes.is_empty() && pieces.len() > 1 {
         out.push(Caster {
-            rings: caster.rings.clone(),
+            groups: caster.groups.clone(),
             height_dm: caster.height_dm,
         });
     } else if holes.is_empty() {
         out.extend(pieces.into_iter().map(|ring| Caster {
-            rings: vec![ring],
+            groups: vec![vec![ring]],
             height_dm: caster.height_dm,
         }));
     } else if let Some(outer) = pieces.pop() {
         // The clipped holes are the same intersection taken against the same rectangle, so they cut
         // the clipped outer exactly where they cut the whole one.
-        let mut rings = vec![outer];
+        let mut kept = vec![outer];
         for hole in holes {
-            rings.extend(clip_ring(hole, rect));
+            kept.extend(clip_ring(hole, rect));
         }
         out.push(Caster {
-            rings,
+            groups: vec![kept],
             height_dm: caster.height_dm,
         });
     }
 }
 
-/// One caster: its height, its ring count, then per ring a vertex count and the ring's varint deltas.
-/// The delta chain runs on across a record's rings, so an inner ring starts from the outer ring's
-/// last vertex rather than from the chunk origin again.
-fn encode_caster(caster: &Caster, origin_lng: f64, origin_lat: f64, bytes: &mut Vec<u8>) {
+/// One CROWN as it ships in one chunk: every slice clipped to it, each staying in its own group. The
+/// pieces a slice breaks into are not split across records the way a building's are — which slice a
+/// ring belongs to is what says how far it is swept, and a record is what carries that. Nothing ships
+/// when the outline misses the chunk; a deeper slice that clips away just leaves its group empty, and
+/// the client sweeps whatever the group holds.
+fn clip_crown(caster: &Caster, rect: &Rect) -> Option<Caster> {
+    let groups: Vec<Vec<Ring>> = caster
+        .groups
+        .iter()
+        .map(|rings| {
+            rings
+                .iter()
+                .flat_map(|ring| clip_ring(ring, rect))
+                .collect()
+        })
+        .collect();
+    groups
+        .first()
+        .is_some_and(|outline| !outline.is_empty())
+        .then_some(Caster {
+            groups,
+            height_dm: caster.height_dm,
+        })
+}
+
+/// A ring's vertex count and its varint deltas, carrying the record's running delta chain on — so a
+/// ring after the first starts from the one before it rather than from the chunk origin again.
+fn encode_ring(
+    ring: &Ring,
+    origin_lng: f64,
+    origin_lat: f64,
+    previous: &mut (i64, i64),
+    bytes: &mut Vec<u8>,
+) {
+    write_varint(bytes, ring.len() as u64);
+    for point in ring {
+        let x = round_half_up((point.lng - origin_lng) / CASTER_COORD_SCALE) as i64;
+        let y = round_half_up((point.lat - origin_lat) / CASTER_COORD_SCALE) as i64;
+        write_varint(bytes, zigzag(x - previous.0));
+        write_varint(bytes, zigzag(y - previous.1));
+        *previous = (x, y);
+    }
+}
+
+/// One building: its height, its ring count, then its rings, the outer one first.
+fn encode_building(caster: &Caster, origin_lng: f64, origin_lat: f64, bytes: &mut Vec<u8>) {
     write_varint(bytes, u64::from(caster.height_dm));
-    write_varint(bytes, caster.rings.len() as u64);
-    let mut previous_x = 0i64;
-    let mut previous_y = 0i64;
-    for ring in &caster.rings {
-        write_varint(bytes, ring.len() as u64);
-        for point in ring {
-            let x = round_half_up((point.lng - origin_lng) / CASTER_COORD_SCALE) as i64;
-            let y = round_half_up((point.lat - origin_lat) / CASTER_COORD_SCALE) as i64;
-            write_varint(bytes, zigzag(x - previous_x));
-            write_varint(bytes, zigzag(y - previous_y));
-            previous_x = x;
-            previous_y = y;
+    write_varint(bytes, caster.groups[0].len() as u64);
+    let mut previous = (0i64, 0i64);
+    for ring in &caster.groups[0] {
+        encode_ring(ring, origin_lng, origin_lat, &mut previous, bytes);
+    }
+}
+
+/// One crown: its height, how many slices it carries, then per slice a ring count and those rings.
+/// The slice count rides in the record rather than being assumed, so a chunk stays readable whatever
+/// the slicer is cutting crowns into.
+fn encode_crown(caster: &Caster, origin_lng: f64, origin_lat: f64, bytes: &mut Vec<u8>) {
+    write_varint(bytes, u64::from(caster.height_dm));
+    write_varint(bytes, caster.groups.len() as u64);
+    let mut previous = (0i64, 0i64);
+    for rings in &caster.groups {
+        write_varint(bytes, rings.len() as u64);
+        for ring in rings {
+            encode_ring(ring, origin_lng, origin_lat, &mut previous, bytes);
         }
     }
 }
@@ -779,15 +769,18 @@ fn encode_chunk(
     let mut bytes = vec![0u8; CASTER_HEADER_BYTES];
     let mut counts = [0u32; 2];
     let mut clipped: Vec<Caster> = Vec::new();
-    let sections = [(buildings, &members.buildings), (crowns, &members.crowns)];
-    for (count, (casters, indices)) in counts.iter_mut().zip(sections) {
-        for index in indices {
-            clipped.clear();
-            clip_caster(&casters[*index as usize], rect, &mut clipped);
-            *count += clipped.len() as u32;
-            for caster in &clipped {
-                encode_caster(caster, origin_lng, origin_lat, &mut bytes);
-            }
+    for index in &members.buildings {
+        clipped.clear();
+        clip_building(&buildings[*index as usize], rect, &mut clipped);
+        counts[0] += clipped.len() as u32;
+        for caster in &clipped {
+            encode_building(caster, origin_lng, origin_lat, &mut bytes);
+        }
+    }
+    for index in &members.crowns {
+        if let Some(caster) = clip_crown(&crowns[*index as usize], rect) {
+            counts[1] += 1;
+            encode_crown(&caster, origin_lng, origin_lat, &mut bytes);
         }
     }
 
@@ -870,30 +863,41 @@ pub fn run(args: &Args) -> Fallible<()> {
         };
         let (crown_polygons, crown_heights) = city_crowns(city, &args.data)?;
         let buildings = casters(&polygons, &heights, true);
-        let mut crowns = casters(&crown_polygons, &crown_heights, false);
+        let sliced = crown::slice_crowns(&crown_polygons);
+        let histogram = crown::radius_histogram(&sliced);
+        let crowns = crown_casters(sliced, &crown_heights);
         if buildings.is_empty() && crowns.is_empty() {
             continue;
         }
-        let vertices = |casters: &[Caster]| -> usize {
-            casters
-                .iter()
-                .map(|caster| caster.rings[0].len())
-                .sum::<usize>()
-        };
-        let source_vertices = vertices(&crowns);
-        let deviation = simplify_crowns(&mut crowns, &Projection::new(&city.bounds));
         let census = city_trunks(city, &args.data)?;
         let standing = census.len();
         let trunks = stand_trunks(census, &crowns);
+        let vertices: usize = crowns
+            .iter()
+            .flat_map(|caster| caster.groups.iter().flatten())
+            .map(Ring::len)
+            .sum();
         eprintln!(
-            "{}: {} footprints, {} crowns with a measured height, {} of their {source_vertices} \
-             outline vertices kept, moving them at most {deviation:.3} m, {} of {standing} census \
-             trunks standing under one",
+            "{}: {} footprints, {} crowns with a measured height cut into {} slice vertices, {} of \
+             {standing} census trunks standing under one",
             city.id,
             buildings.len(),
             crowns.len(),
-            vertices(&crowns),
+            vertices,
             trunks.len(),
+        );
+        eprintln!(
+            "  crown radius (m) {}: {}",
+            crown::RADIUS_BUCKETS
+                .iter()
+                .map(|edge| format!("<{edge}"))
+                .collect::<Vec<String>>()
+                .join(" "),
+            histogram
+                .iter()
+                .map(usize::to_string)
+                .collect::<Vec<String>>()
+                .join(" ")
         );
         entries.extend(write_chunks(&buildings, &crowns, &trunks, &args.chunks)?);
     }
@@ -921,22 +925,23 @@ pub fn run(args: &Args) -> Fallible<()> {
 mod tests {
     use super::*;
     use crate::geometry::METERS_PER_DEGREE_LAT;
-    use crate::manifest::Bounds;
 
     fn coord(lng: f64, lat: f64) -> Coord {
         Coord { lng, lat }
     }
 
-    /// One chunk read back: its two polygon sections, and its trunks as a point, a radius in metres
-    /// and a height in decimetres.
+    /// One chunk read back: its buildings as a height and their rings, its crowns as a height and
+    /// their rings BY SLICE, and its trunks as a point, a radius in metres and a height in decimetres.
     struct Decoded {
-        polygons: [Vec<(u16, Polygon)>; 2],
+        buildings: Vec<(u16, Vec<Ring>)>,
+        crowns: Vec<(u16, Vec<Vec<Ring>>)>,
         trunks: Vec<(Coord, f64, u16)>,
     }
 
-    /// Walks a chunk back the way the client will: the header, then each polygon section's records
-    /// as a height, a ring count, and per ring a vertex count and the running varint deltas, then
-    /// the trunks as their own running deltas, a radius and a height.
+    /// Walks a chunk back the way the client will: the header, then the buildings as a height, a ring
+    /// count and per ring a vertex count and the running varint deltas; then the crowns the same way
+    /// but with a slice count and a ring count per slice; then the trunks as their own running deltas,
+    /// a radius and a height.
     fn decode(bytes: &[u8]) -> Decoded {
         assert_eq!(&bytes[0..4], b"CSTR");
         let counts = [
@@ -960,30 +965,50 @@ mod tests {
                 }
             }
         };
-        let mut sections = counts.map(Vec::with_capacity);
-        for (section, count) in sections.iter_mut().zip(counts) {
-            for _ in 0..count {
-                let height_dm = varint(&mut offset) as u16;
-                let rings = varint(&mut offset) as usize;
-                let mut polygon: Polygon = Vec::with_capacity(rings);
-                let (mut x, mut y) = (0i64, 0i64);
-                for _ in 0..rings {
-                    let vertices = varint(&mut offset) as usize;
-                    let mut ring = Vec::with_capacity(vertices);
-                    for _ in 0..vertices {
-                        for axis in [&mut x, &mut y] {
-                            let zigzagged = varint(&mut offset);
-                            *axis += (zigzagged >> 1) as i64 ^ -((zigzagged & 1) as i64);
-                        }
-                        ring.push(coord(
-                            origin_lng + x as f64 * scale,
-                            origin_lat + y as f64 * scale,
-                        ));
-                    }
-                    polygon.push(ring);
+        let mut position = (0i64, 0i64);
+        let mut read_ring = |offset: &mut usize, position: &mut (i64, i64)| -> Ring {
+            let vertices = varint(offset) as usize;
+            let mut ring = Vec::with_capacity(vertices);
+            for _ in 0..vertices {
+                for axis in [&mut position.0, &mut position.1] {
+                    let zigzagged = varint(offset);
+                    *axis += (zigzagged >> 1) as i64 ^ -((zigzagged & 1) as i64);
                 }
-                section.push((height_dm, polygon));
+                ring.push(coord(
+                    origin_lng + position.0 as f64 * scale,
+                    origin_lat + position.1 as f64 * scale,
+                ));
             }
+            ring
+        };
+        let mut buildings = Vec::with_capacity(counts[0]);
+        for _ in 0..counts[0] {
+            let height_dm = varint(&mut offset) as u16;
+            let rings = varint(&mut offset) as usize;
+            position = (0, 0);
+            buildings.push((
+                height_dm,
+                (0..rings)
+                    .map(|_| read_ring(&mut offset, &mut position))
+                    .collect::<Vec<Ring>>(),
+            ));
+        }
+        let mut crowns = Vec::with_capacity(counts[1]);
+        for _ in 0..counts[1] {
+            let height_dm = varint(&mut offset) as u16;
+            let levels = varint(&mut offset) as usize;
+            position = (0, 0);
+            crowns.push((
+                height_dm,
+                (0..levels)
+                    .map(|_| {
+                        let rings = varint(&mut offset) as usize;
+                        (0..rings)
+                            .map(|_| read_ring(&mut offset, &mut position))
+                            .collect::<Vec<Ring>>()
+                    })
+                    .collect::<Vec<Vec<Ring>>>(),
+            ));
         }
 
         let mut trunks = Vec::new();
@@ -1002,7 +1027,8 @@ mod tests {
         }
         assert_eq!(offset, bytes.len(), "the chunk decodes with nothing left");
         Decoded {
-            polygons: sections,
+            buildings,
+            crowns,
             trunks,
         }
     }
@@ -1081,13 +1107,24 @@ mod tests {
             coord(-74.0045, 40.7090),
         ]];
         let buildings = casters(&[courtyard.clone(), straddler.clone()], &[42.5, 12.0], true);
-        // The second crown carries the canopy file's 0 unknown-height sentinel and must not ship.
-        let crowns = casters(
-            &[crown.clone(), crown.clone(), two_pronged.clone()],
-            &[9.3, 0.0, 5.0],
-            false,
-        );
-        assert_eq!(crowns.len(), 2);
+        // A whole crown, then one whose body sits outside the chunk with two prongs reaching in — and
+        // a second slice on it, so the record's slice structure has to survive the clip as well.
+        let inset: Polygon = vec![vec![
+            coord(-74.0058, 40.7116),
+            coord(-74.0052, 40.7116),
+            coord(-74.0052, 40.7119),
+            coord(-74.0058, 40.7119),
+        ]];
+        let crowns = vec![
+            Caster {
+                groups: vec![crown.clone(), Vec::new()],
+                height_dm: 93,
+            },
+            Caster {
+                groups: vec![two_pronged.clone(), inset.clone()],
+                height_dm: 50,
+            },
+        ];
 
         let members = Members {
             buildings: vec![0, 1],
@@ -1096,23 +1133,32 @@ mod tests {
         };
         let encoded = encode_chunk(&buildings, &crowns, &[], &members, &CHUNK);
         let Decoded {
-            polygons: [decoded_buildings, decoded_crowns],
+            buildings: decoded_buildings,
+            crowns: decoded_crowns,
             ..
         } = decode(&encoded);
 
-        // The two prongs are two records at the caster's own height, not one record and not a
-        // record joined across the chunk's edge by a bridge the client would sweep into a shadow.
+        // Two building records, since the straddler is one piece; the crowns stay ONE record apiece,
+        // their pieces gathered into the slice they came from rather than split into records of their
+        // own — which slice a ring is in is what says how far it is swept.
         assert_eq!(decoded_buildings.len(), 2);
-        assert_eq!(decoded_crowns.len(), 3);
+        assert_eq!(decoded_crowns.len(), 2);
         assert_eq!(decoded_buildings[0].0, 425);
         assert_eq!(decoded_crowns[0].0, 93);
         assert_eq!(decoded_crowns[1].0, 50);
-        assert_eq!(decoded_crowns[2].0, 50);
+        assert_eq!(decoded_crowns[0].1.len(), 2);
+        assert!(decoded_crowns[0].1[1].is_empty());
+        assert_eq!(decoded_crowns[1].1[0].len(), 2, "the two prongs");
+        assert_eq!(
+            decoded_crowns[1].1[1].len(),
+            1,
+            "the inset slice's own piece"
+        );
 
         // A caster wholly inside the chunk is untouched, ring for ring and vertex for vertex.
-        for (source, (_, rings)) in [
-            (&courtyard, &decoded_buildings[0]),
-            (&crown, &decoded_crowns[0]),
+        for (source, rings) in [
+            (&courtyard, &decoded_buildings[0].1),
+            (&crown, &decoded_crowns[0].1[0]),
         ] {
             assert_eq!(rings.len(), source.len());
             for (source, ring) in source.iter().zip(rings) {
@@ -1146,9 +1192,9 @@ mod tests {
         ];
         for prong in &prongs {
             assert!(
-                decoded_crowns[1..]
+                decoded_crowns[1].1[0]
                     .iter()
-                    .any(|(_, rings)| matches(&rings[0], prong))
+                    .any(|ring| matches(ring, prong))
             );
         }
     }
@@ -1220,11 +1266,11 @@ mod tests {
         ];
         let caster = &casters(std::slice::from_ref(&courtyard), &[20.0], true)[0];
         let mut clipped: Vec<Caster> = Vec::new();
-        clip_caster(caster, &CHUNK, &mut clipped);
+        clip_building(caster, &CHUNK, &mut clipped);
         assert_eq!(clipped.len(), 1);
-        assert_eq!(clipped[0].rings.len(), 2);
+        assert_eq!(clipped[0].groups[0].len(), 2);
         assert!(matches(
-            &clipped[0].rings[1],
+            &clipped[0].groups[0][1],
             &[
                 coord(-74.0058, 40.7102),
                 coord(CHUNK.east, 40.7102),
@@ -1270,7 +1316,16 @@ mod tests {
                 coord(lng, 40.7102),
             ]]
         };
-        let crowns = casters(&[square(-74.0100), square(-74.0090)], &[12.0, 8.0], false);
+        let crowns = crown_casters(
+            [square(-74.0100), square(-74.0090)]
+                .iter()
+                .map(|square| crown::Crown {
+                    levels: vec![square.clone()],
+                    radius_m: 3.0,
+                })
+                .collect(),
+            &[12.0, 8.0],
+        );
         let trunk = |lng: f64| Trunk {
             coord: coord(lng, 40.7101),
             radius_cm: 12,
@@ -1282,8 +1337,9 @@ mod tests {
             &crowns,
         );
         assert_eq!(standing.len(), 2);
-        assert_eq!(standing[0].height_dm, 48);
-        assert_eq!(standing[1].height_dm, 32);
+        // to where each crown is widest, not to where it starts
+        assert_eq!(standing[0].height_dm, 84);
+        assert_eq!(standing[1].height_dm, 56);
     }
 
     /// Trunks ride in their own section, needing no clip: every one that stands in the chunk comes
@@ -1317,75 +1373,5 @@ mod tests {
                     && *decoded_height == height_dm
             }));
         }
-    }
-
-    fn projection() -> Projection {
-        Projection::new(&Bounds {
-            south: CHUNK.south,
-            west: CHUNK.west,
-            north: CHUNK.north,
-            east: CHUNK.east,
-        })
-    }
-
-    /// A staircase of 0.5 m steps laid on the axis a degree measures loosest, which is what the
-    /// canopy's rings are: it collapses to the run it traces, keeping the winding and moving the
-    /// outline by less than a step. Run in degrees instead of metres it would keep every step, since
-    /// 0.5 m of longitude is 5.9e-6° here against the 5.4e-6° a 0.6 m tolerance would be.
-    #[test]
-    fn simplifies_a_staircase_in_metres() {
-        let projection = projection();
-        let step = 0.5 / projection.meters_per_degree_lng();
-        let rise = 2.0 / METERS_PER_DEGREE_LAT;
-        let mut ring: Ring = (0..20)
-            .map(|index| {
-                coord(
-                    -74.0100 + f64::from(index % 2) * step,
-                    40.7100 + f64::from(index) * rise,
-                )
-            })
-            .collect();
-        ring.push(coord(-74.0080, 40.7100 + 19.0 * rise));
-        ring.push(coord(-74.0080, 40.7100));
-        assert!(signed_double_area(&ring) < 0.0);
-
-        let (simplified, deviation) = simplify_ring(&ring, &projection, 0.6);
-        assert_eq!(simplified.len(), 4);
-        assert!(deviation < 0.5);
-        assert!(signed_double_area(&simplified) < 0.0);
-    }
-
-    /// Simplifying before the clip is what keeps a seam a seam: the pieces a crown leaves in two
-    /// neighbouring chunks still tile it exactly, with no gap and no overlap along the edge they
-    /// share. Simplifying each chunk's own piece afterwards would move the two sides of that edge
-    /// apart.
-    #[test]
-    fn keeps_seams_agreeing_across_chunks() {
-        let rise = 1.5 / METERS_PER_DEGREE_LAT;
-        let ring: Ring = (0..24)
-            .map(|index| {
-                let angle = f64::from(index) / 24.0 * std::f64::consts::TAU;
-                coord(
-                    CHUNK.east + 0.0004 * angle.cos(),
-                    40.7105 + 0.0003 * angle.sin() + f64::from(index % 2) * rise,
-                )
-            })
-            .collect();
-        let (simplified, _) = simplify_ring(&ring, &projection(), 0.6);
-        assert!(simplified.len() < ring.len());
-
-        let east = Rect {
-            west: CHUNK.east,
-            east: CHUNK.east + 0.0064,
-            south: CHUNK.south,
-            north: CHUNK.north,
-        };
-        let area: f64 = [CHUNK, east]
-            .iter()
-            .flat_map(|rect| clip_ring(&simplified, rect))
-            .map(|piece| signed_double_area(&piece))
-            .sum();
-        let whole = signed_double_area(&simplified);
-        assert!((area - whole).abs() < whole.abs() * 1e-9);
     }
 }

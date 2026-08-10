@@ -14,7 +14,7 @@ import { type Cursor, readUnsignedVarint, readVarint } from "./varint";
 const CHUNK_URL = "casters/{x}/{y}.bin";
 const MANIFEST_URL = "casters/manifest.json";
 const CASTER_MAGIC = "CSTR";
-const CASTER_FORMAT = 2;
+const CASTER_FORMAT = 3;
 const DECIMETERS_PER_METER = 10;
 const CENTIMETERS_PER_METER = 100;
 const TILE_SIZE = 256;
@@ -26,10 +26,10 @@ export const EQUATOR_METERS_PER_PIXEL = 156_543.033_92;
 const MIN_CONCAVITY_M2 = 200;
 
 // Decoded chunks held between draws. Sized off the measured worst case: a screenful of z15 tiles over
-// a canopy-heavy park gathers 48 chunks and 43 MiB decoded, and a working set that does not fit would
-// re-fetch on every pan. The geometry is sun-independent, so holding it also means a scrub through the
-// clock re-sweeps out of the cache without a fetch.
-const CACHE_BYTES = 64 * 1024 * 1024;
+// a canopy-heavy park gathers 48 chunks, which the crown slices took from 43 MiB decoded to about 100,
+// and a working set that does not fit would re-fetch on every pan. The geometry is sun-independent, so
+// holding it also means a scrub through the clock re-sweeps out of the cache without a fetch.
+const CACHE_BYTES = 160 * 1024 * 1024;
 
 export interface CasterManifest {
   chunkZoom: number;
@@ -40,20 +40,21 @@ export interface CasterManifest {
 
 // One z15 chunk's casters, flattened so a draw walks typed arrays rather than objects. Ring `r` covers
 // `points[2 * rings[r]]` up to `2 * rings[r + 1]`, and record `i` owns rings `records[i]` up to
-// `records[i + 1]`, its outer ring first.
+// `records[i + 1]`. A footprint's are its outer ring then its holes; a crown's are its SLICES, and
+// `levels` is what says which slice a ring belongs to and so how far down the shadow it is swept.
 export interface CasterChunk {
   points: Float64Array; // x/y interleaved, zoom-0 world pixels
   rings: Uint32Array;
   records: Uint32Array;
   heights: Float32Array; // metres
-  boxes: Float64Array; // per record, its outer ring's box as minX, minY, maxX, maxY
-  // Per record, its outer ring's convex hull as a start vertex and a count into `hullPoints`,
-  // positively wound. Empty for a footprint concave enough to need the exact sweep, and for every
-  // crown. Held apart from `points` because `rings` gives only ring ends, so the rings have to stay
-  // contiguous.
+  boxes: Float64Array; // per record, the box of everything it casts from, as minX, minY, maxX, maxY
+  // Per RING, its convex hull as a start vertex and a count into `hullPoints`, positively wound. Zero
+  // where the ring is concave enough to need the exact sweep, and for a footprint's holes. Held apart
+  // from `points` because `rings` gives only ring ends, so the rings have to stay contiguous.
   hulls: Uint32Array;
   hullPoints: Float64Array;
   wound: Uint8Array; // per ring, 1 when its own winding is already positive in world pixels
+  levels: Uint8Array; // per ring, which slice of its crown it is; 0 for every footprint ring
   buildings: number; // records below this are footprints, the rest crowns
   // The census trunks, which are points rather than records: x/y interleaved in zoom-0 world pixels,
   // then per trunk a radius and the height it stands to, both in metres.
@@ -131,9 +132,9 @@ function convexHull(points: number[], from: number, to: number): number[] {
   return hull;
 }
 
-// Walk one chunk back: the 44-byte header, then the buildings and the crowns back to back, each a
-// height, a ring count and per ring a vertex count and the running zigzag deltas, then the trunks as
-// their own chain of deltas, a radius and a height apiece.
+// Walk one chunk back: the 44-byte header, then the buildings — a height, a ring count and per ring a
+// vertex count and the running zigzag deltas — then the crowns, the same but with a SLICE count and a
+// ring count per slice, then the trunks as their own chain of deltas, a radius and a height apiece.
 export function decodeChunk(buffer: ArrayBuffer): CasterChunk {
   const bytes = new Uint8Array(buffer);
   const view = new DataView(buffer);
@@ -157,61 +158,35 @@ export function decodeChunk(buffer: ArrayBuffer): CasterChunk {
   const hullPoints: number[] = [];
   const rings: number[] = [0];
   const wound: number[] = [];
+  const levels: number[] = [];
+  const hulls: number[] = [];
   const records = new Uint32Array(count + 1);
   const heights = new Float32Array(count);
   const boxes = new Float64Array(count * 4);
-  const hulls = new Uint32Array(count * 2);
 
-  for (let record = 0; record < count; record++) {
-    // The chain runs across a record's rings but restarts at the chunk origin for each record.
-    let quantizedX = 0;
-    let quantizedY = 0;
-    heights[record] = readUnsignedVarint(bytes, cursor) / DECIMETERS_PER_METER;
-    const ringCount = readUnsignedVarint(bytes, cursor);
-    records[record + 1] = records[record] + ringCount;
-    for (let ring = 0; ring < ringCount; ring++) {
-      const vertices = readUnsignedVarint(bytes, cursor);
-      const start = points.length / 2;
-      for (let vertex = 0; vertex < vertices; vertex++) {
-        quantizedX += readVarint(bytes, cursor);
-        quantizedY += readVarint(bytes, cursor);
-        points.push(
-          projectX(originLng + quantizedX * scale, 0),
-          projectY(originLat + quantizedY * scale, 0),
-        );
-      }
-      const end = points.length / 2;
-      rings.push(end);
-      wound.push(
-        signedDoubleArea(points, end - start, (step) => start + step) > 0
-          ? 1
-          : 0,
+  // One ring's vertices, carrying the record's running delta chain on, plus what a sweep reads off it:
+  // its winding, its slice, and the convex hull that stands in for it when it is barely concave.
+  const readRing = (level: number, quantized: [number, number]): void => {
+    const vertices = readUnsignedVarint(bytes, cursor);
+    const start = points.length / 2;
+    for (let vertex = 0; vertex < vertices; vertex++) {
+      quantized[0] += readVarint(bytes, cursor);
+      quantized[1] += readVarint(bytes, cursor);
+      points.push(
+        projectX(originLng + quantized[0] * scale, 0),
+        projectY(originLat + quantized[1] * scale, 0),
       );
-      if (ring === 0) {
-        let minX = Number.POSITIVE_INFINITY;
-        let minY = Number.POSITIVE_INFINITY;
-        let maxX = Number.NEGATIVE_INFINITY;
-        let maxY = Number.NEGATIVE_INFINITY;
-        for (let index = start; index < end; index++) {
-          minX = Math.min(minX, points[index * 2]);
-          maxX = Math.max(maxX, points[index * 2]);
-          minY = Math.min(minY, points[index * 2 + 1]);
-          maxY = Math.max(maxY, points[index * 2 + 1]);
-        }
-        boxes[record * 4] = minX;
-        boxes[record * 4 + 1] = minY;
-        boxes[record * 4 + 2] = maxX;
-        boxes[record * 4 + 3] = maxY;
-      }
     }
-    if (record >= buildings) {
-      continue;
-    }
-    const outer = rings[records[record]];
-    const end = rings[records[record] + 1];
-    const hull = convexHull(points, outer, end);
+    const end = points.length / 2;
+    const area = signedDoubleArea(points, end - start, (step) => start + step);
+    rings.push(end);
+    wound.push(area > 0 ? 1 : 0);
+    levels.push(level);
+    hulls.push(0, 0);
+
+    const hull = convexHull(points, start, end);
     if (hull.length < 3) {
-      continue; // a ring with no area; the exact sweep handles it and produces nothing
+      return; // a ring with no area; the exact sweep handles it and produces nothing
     }
     const hullArea = signedDoubleArea(
       points,
@@ -219,24 +194,67 @@ export function decodeChunk(buffer: ArrayBuffer): CasterChunk {
       (step) => hull[step],
     );
     const concavity =
-      ((Math.abs(hullArea) -
-        Math.abs(
-          signedDoubleArea(points, end - outer, (step) => outer + step),
-        )) /
-        2) *
+      ((Math.abs(hullArea) - Math.abs(area)) / 2) *
       metersPerPoint *
       metersPerPoint;
     if (concavity >= MIN_CONCAVITY_M2) {
-      continue; // a courtyard or an L-block: swept exactly, so its notch stays unshaded
+      return; // a courtyard, an L-block, a park's canopy: swept exactly, so its notches stay unshaded
     }
     if (hullArea < 0) {
       hull.reverse();
     }
-    hulls[record * 2] = hullPoints.length / 2;
-    hulls[record * 2 + 1] = hull.length;
+    hulls[hulls.length - 2] = hullPoints.length / 2;
+    hulls[hulls.length - 1] = hull.length;
     for (const index of hull) {
       hullPoints.push(points[index * 2], points[index * 2 + 1]);
     }
+  };
+
+  for (let record = 0; record < count; record++) {
+    // The chain runs across a record's rings but restarts at the chunk origin for each record.
+    const quantized: [number, number] = [0, 0];
+    heights[record] = readUnsignedVarint(bytes, cursor) / DECIMETERS_PER_METER;
+    if (record < buildings) {
+      const ringCount = readUnsignedVarint(bytes, cursor);
+      records[record + 1] = records[record] + ringCount;
+      for (let ring = 0; ring < ringCount; ring++) {
+        readRing(0, quantized);
+      }
+    } else {
+      const levelCount = readUnsignedVarint(bytes, cursor);
+      records[record + 1] = records[record];
+      for (let level = 0; level < levelCount; level++) {
+        const ringCount = readUnsignedVarint(bytes, cursor);
+        records[record + 1] += ringCount;
+        for (let ring = 0; ring < ringCount; ring++) {
+          readRing(level, quantized);
+        }
+      }
+    }
+    // The box a record is gathered by covers its OUTERMOST rings — a footprint's outer ring, a crown's
+    // widest slice — which every other ring of it sits inside.
+    let minX = Number.POSITIVE_INFINITY;
+    let minY = Number.POSITIVE_INFINITY;
+    let maxX = Number.NEGATIVE_INFINITY;
+    let maxY = Number.NEGATIVE_INFINITY;
+    for (let ring = records[record]; ring < records[record + 1]; ring++) {
+      if (
+        levels[ring] !== 0 ||
+        (record < buildings && ring > records[record])
+      ) {
+        continue;
+      }
+      for (let index = rings[ring]; index < rings[ring + 1]; index++) {
+        minX = Math.min(minX, points[index * 2]);
+        maxX = Math.max(maxX, points[index * 2]);
+        minY = Math.min(minY, points[index * 2 + 1]);
+        maxY = Math.max(maxY, points[index * 2 + 1]);
+      }
+    }
+    boxes[record * 4] = minX;
+    boxes[record * 4 + 1] = minY;
+    boxes[record * 4 + 2] = maxX;
+    boxes[record * 4 + 3] = maxY;
   }
 
   const trunkCount = view.getUint32(40, true);
@@ -276,9 +294,10 @@ export function decodeChunk(buffer: ArrayBuffer): CasterChunk {
     records,
     heights,
     boxes,
-    hulls,
+    hulls: new Uint32Array(hulls),
     hullPoints: new Float64Array(hullPoints),
     wound: new Uint8Array(wound),
+    levels: new Uint8Array(levels),
     trunks,
     trunkRadii,
     trunkHeights,

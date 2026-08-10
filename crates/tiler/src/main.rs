@@ -14,6 +14,7 @@ mod caster_chunks;
 mod chunks;
 mod conflate;
 mod corners;
+mod crown;
 mod densities;
 mod direct_canopy;
 mod genus_field;
