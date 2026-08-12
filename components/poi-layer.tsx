@@ -5,6 +5,7 @@ import { useEffect } from "react";
 import { useMap } from "react-leaflet";
 import WorkerTileLayer from "../src/tiles/layer";
 import manifest from "../src/tree-cover/manifest.json";
+import { useCity } from "./city-context";
 
 // A point-of-interest overlay: the committed POI points (landmarks, public art) drawn as coloured
 // canvas dots at every zoom. Unlike the tree dots there is no raster pyramid below — a few thousand
@@ -30,6 +31,7 @@ export default function PoiLayer({
   labelAnchor: "top" | "bottom"; // which side of the dot the label sits, to deconflict two POI layers
 }) {
   const map = useMap();
+  const active = useCity();
 
   useEffect(() => {
     // A dedicated pane, so the dark-mode tile-pane invert leaves the dot colours true.
@@ -38,21 +40,23 @@ export default function PoiLayer({
       pane.style.zIndex = String(PANE_Z_INDEX);
     }
 
-    const layers = manifest.cities.map((city) => {
-      const { south, west, north, east } = city.bounds;
-      // Relative, so it picks up the basePath the deploy injects.
-      const url = `${dir}/${city.id}.bin`;
-      return new WorkerTileLayer(
-        () => ({ kind: "poi", url, magic, color, labelAnchor }),
-        {
-          pane: PANE_NAME,
-          bounds: L.latLngBounds([south, west], [north, east]),
-          minZoom: MIN_ZOOM,
-          maxZoom: MAX_ZOOM,
-          keepBuffer: 4,
-        },
-      );
-    });
+    const layers = manifest.cities
+      .filter((entry) => entry.id === active.id)
+      .map((city) => {
+        const { south, west, north, east } = city.bounds;
+        // Relative, so it picks up the basePath the deploy injects.
+        const url = `${dir}/${city.id}.bin`;
+        return new WorkerTileLayer(
+          () => ({ kind: "poi", url, magic, color, labelAnchor }),
+          {
+            pane: PANE_NAME,
+            bounds: L.latLngBounds([south, west], [north, east]),
+            minZoom: MIN_ZOOM,
+            maxZoom: MAX_ZOOM,
+            keepBuffer: 4,
+          },
+        );
+      });
     for (const layer of layers) {
       layer.addTo(map);
     }
@@ -61,7 +65,7 @@ export default function PoiLayer({
         layer.remove();
       }
     };
-  }, [map, dir, magic, color, labelAnchor]);
+  }, [map, dir, magic, color, labelAnchor, active.id]);
 
   return null;
 }

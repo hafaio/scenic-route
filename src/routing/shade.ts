@@ -18,9 +18,9 @@
 // src/shade/sun.ts), so the router agrees with the shade overlay at the departure instant.
 
 import * as SunCalc from "suncalc";
+import { activeCity } from "../cities";
 import { canopyTau } from "../shade/phenology";
 import { declinationOf, hourAngleOf, seasonBand } from "../shade/sun";
-import manifest from "../tree-cover/manifest.json";
 import type { RoutingGraph } from "./graph";
 
 const MAGIC = "SHDB";
@@ -57,10 +57,6 @@ const sun = SunCalc as unknown as {
     lng: number,
   ) => { altitude: number; azimuth: number };
 };
-
-const [city] = manifest.cities;
-const CENTRE_LAT = (city.bounds.north + city.bounds.south) / 2;
-const CENTRE_LNG = (city.bounds.east + city.bounds.west) / 2;
 
 // One baked bin: its file index, its (declination, hourAngle) grid cell (what a time is mapped on),
 // and the sun position (degrees) it stands for.
@@ -269,7 +265,8 @@ export function loadShadeBin(index: number): Promise<BinFractions> {
 // The sun over the city centroid at a given instant, in the same convention shade-layer's currentSun
 // uses so both agree on which bin a time maps to. Degrees; azimuth a compass bearing in [0, 360).
 export function sunAt(date: Date): { elevation: number; azimuth: number } {
-  const position = sun.getPosition(date, CENTRE_LAT, CENTRE_LNG);
+  const { lat, lng } = activeCity().center;
+  const position = sun.getPosition(date, lat, lng);
   return {
     elevation: position.altitude,
     azimuth: ((position.azimuth % 360) + 360) % 360,
@@ -296,8 +293,9 @@ function selectBlend(
   if (elevation <= HORIZON_DEG) {
     return null;
   }
-  const declination = declinationOf(elevation, azimuth, CENTRE_LAT);
-  const hourAngle = hourAngleOf(elevation, azimuth, CENTRE_LAT, declination);
+  const centreLat = activeCity().center.lat;
+  const declination = declinationOf(elevation, azimuth, centreLat);
+  const hourAngle = hourAngleOf(elevation, azimuth, centreLat, declination);
   const season = seasonBand(declination);
   const inBand = bins.filter((bin) => bin.season === season);
   const candidates = inBand.length > 0 ? inBand : bins;

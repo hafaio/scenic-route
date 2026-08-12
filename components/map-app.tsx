@@ -4,6 +4,16 @@ import dynamic from "next/dynamic";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { FiX } from "react-icons/fi";
 import {
+  activeCity,
+  CITY_ZOOM,
+  type City,
+  cityById,
+  containsPoint,
+  DEFAULT_CITY,
+  nearestCity,
+  setActiveCity,
+} from "../src/cities";
+import {
   type AuthInfo,
   createPin,
   deletePin,
@@ -67,6 +77,7 @@ import {
   type RouteUrlState,
 } from "../src/url-state";
 import AboutDialog from "./about-dialog";
+import { CityProvider } from "./city-context";
 import FollowToggle from "./follow-toggle";
 import type { MapTarget, PickMode } from "./map";
 import PinEditor from "./pin-editor";
@@ -108,26 +119,35 @@ const ART_WEIGHT_KEY = "scenic-route:art-weight";
 const HIGHWAY_WEIGHT_KEY = "scenic-route:highway-weight";
 const COMMERCIAL_WEIGHT_KEY = "scenic-route:commercial-weight";
 const OVERLAY_KEY = "scenic-route:overlay";
+const CITY_KEY = "scenic-route:city";
 const SEARCH_BIAS_KEY = "scenic-route:search-bias"; // "false" opts out of biasing search to the user
 const RESNAP_METERS = 25; // a followed location must drift this far before the route recomputes
 // How close to the route a POI must be to count as passed.
 const LANDMARK_PASS_METERS = 40;
 const ART_PASS_METERS = 40;
 
-// The graph and its snap index are fetched and built once, on first Directions use, and shared by
-// every recompute and the route layer's geometry lookups.
-let routingPromise: Promise<{ graph: RoutingGraph; index: SnapIndex }> | null =
-  null;
-function loadRouting(): Promise<{ graph: RoutingGraph; index: SnapIndex }> {
-  if (!routingPromise) {
-    routingPromise = loadGraph()
-      .then((graph) => ({ graph, index: buildSnapIndex(graph) }))
-      .catch((error: unknown) => {
-        routingPromise = null; // a failed load must not be memoized
-        throw error;
-      });
+// A city's graph and snap index are fetched and built once, on first Directions use, and shared by
+// every recompute and the route layer's geometry lookups. Keyed by city so switching and coming back
+// does not rebuild an index over 600k edges.
+const routingPromises = new Map<
+  string,
+  Promise<{ graph: RoutingGraph; index: SnapIndex }>
+>();
+function loadRouting(
+  cityId: string,
+): Promise<{ graph: RoutingGraph; index: SnapIndex }> {
+  const pending = routingPromises.get(cityId);
+  if (pending) {
+    return pending;
   }
-  return routingPromise;
+  const request = loadGraph(cityId)
+    .then((graph) => ({ graph, index: buildSnapIndex(graph) }))
+    .catch((error: unknown) => {
+      routingPromises.delete(cityId); // a failed load must not be memoized
+      throw error;
+    });
+  routingPromises.set(cityId, request);
+  return request;
 }
 
 // The weights the sliders last persisted, each falling back to its default. These are what a URL key
@@ -171,6 +191,10 @@ function storedOverlays(): string[] | null {
   return stored === null ? null : stored.split(",");
 }
 
+function storedCity(): string | null {
+  return window.localStorage.getItem(CITY_KEY);
+}
+
 function metersBetween(
   a: { lat: number; lng: number },
   b: { lat: number; lng: number },
@@ -187,13 +211,21 @@ function metersBetween(
   return 2 * 6_371_000 * Math.asin(Math.min(1, Math.sqrt(inner)));
 }
 
+// A point outside the city is a different failure from a point inside it with no pavement nearby, and
+// saying "300 m from a walkable street" about somewhere the app has never held data for reads as a gap
+// in the map rather than as the edge of what is covered.
 function messageFor(
   reason: "startTooFar" | "destTooFar" | "disconnected",
+  city: City,
+  point: LatLng | null,
 ): string {
   if (reason === "disconnected") {
     return "No walkable connection in the street data — likely separated by water.";
+  } else if (point && !containsPoint(city, point)) {
+    return `That point is outside ${city.name}. A route has to stay within one city.`;
+  } else {
+    return "That point is more than 300 m from a walkable street.";
   }
-  return "That point is more than 300 m from a walkable street.";
 }
 
 type Editing =
@@ -213,6 +245,10 @@ export default function MapApp() {
   const [logging, setLogging] = useState<boolean>(false);
   const [refreshing, setRefreshing] = useState<boolean>(false);
   const [following, setFollowing] = useState<boolean>(true);
+  // The one city whose graph, tiles and overlays are live. It follows the map centre, so panning to
+  // another city switches to it rather than leaving the previous city's data drawn under a view it
+  // does not cover.
+  const [city, setCity] = useState<City>(DEFAULT_CITY);
   // The overlays drawn over the basemap, a freely-combinable set (tree genus is the one exception —
   // it goes solo). The canopy cover is the only content a signed-out visitor has, so it starts on.
   // Hydrated from the URL hash or localStorage below; an empty set hides every overlay.
@@ -326,6 +362,8 @@ export default function MapApp() {
   const lastAppliedNonceRef = useRef<number>(0);
   // The URL hash at load has been applied, so the live hash writer may start.
   const [hashApplied, setHashApplied] = useState<boolean>(false);
+  // Whether the first location fix has been tested against the covered cities; only that one decides.
+  const coverageChecked = useRef<boolean>(false);
   // A shared link's camera, applied once by the map, and the destination it was framed around; null
   // leaves the map where it is and lets a fresh route frame itself.
   const [initialCamera, setInitialCamera] = useState<Camera | null>(null);
@@ -422,6 +460,21 @@ export default function MapApp() {
         const lng = position.coords.longitude;
         setUserLocation({ lat, lng });
         setLocationError(null);
+        // Following a visitor who is outside every city centres the map on ground the app has no data
+        // for — a blank basemap that reads as a broken page. Take them to the nearest city instead and
+        // say so. Only the first fix decides this, so a later pan is theirs to keep.
+        if (!coverageChecked.current) {
+          coverageChecked.current = true;
+          const nearest = nearestCity({ lat, lng });
+          if (!containsPoint(nearest, { lat, lng })) {
+            setFollowing(false);
+            setCity(nearest);
+            setTarget({ ...nearest.center, zoom: CITY_ZOOM });
+            setBanner(
+              `Scenic Route doesn't cover your area yet — showing ${nearest.name}.`,
+            );
+          }
+        }
       },
       (error) => {
         setLocationError(
@@ -435,6 +488,14 @@ export default function MapApp() {
 
   const handleToggleFollow = useCallback(() => {
     setFollowing((on) => !on);
+  }, []);
+
+  // Picking a city frames it and stops following, since the visitor has just said they want to look
+  // somewhere other than where they are.
+  const handleSelectCity = useCallback((picked: City) => {
+    setFollowing(false);
+    setCity(picked);
+    setTarget({ ...picked.center, zoom: CITY_ZOOM });
   }, []);
 
   // Toggle one overlay. Tree genus is exclusive: turning it on clears the rest, and turning on any
@@ -462,6 +523,32 @@ export default function MapApp() {
       return next;
     });
   }, []);
+
+  // Assigned during render, not in an effect: the layers below read it while their own effects run,
+  // which is before any effect of this component would have fired. Idempotent, so a repeated render
+  // cannot leave it wrong.
+  setActiveCity(city);
+
+  // Written only once the hash has been read, so the default city cannot overwrite a stored pick
+  // during the load that is about to restore it.
+  useEffect(() => {
+    if (hashApplied) {
+      window.localStorage.setItem(CITY_KEY, city.id);
+    }
+  }, [city, hashApplied]);
+
+  // Switching city swaps the whole layer set, so anything the new city does not offer goes off rather
+  // than staying lit with no data behind it, and the landmark and art points are dropped so the new
+  // city's are fetched instead of the old city's names surviving the move.
+  useEffect(() => {
+    setActiveOverlays((current) => {
+      const kept = new Set(
+        [...current].filter((id) => city.overlays.includes(id)),
+      );
+      return kept.size === current.size ? current : kept;
+    });
+    setPoiSets(null);
+  }, [city]);
 
   // stable identity for a long-lived map listener; functional updater keeps disengage idempotent
   const handleDisengageFollow = useCallback(() => {
@@ -561,7 +648,7 @@ export default function MapApp() {
       if (isNewTarget && !draggingRef.current && !isDropRefresh) {
         setRouteState({ kind: "loading" });
       }
-      loadRouting().then(
+      loadRouting(activeCity().id).then(
         async ({ graph, index }) => {
           if (cancelled) {
             return;
@@ -630,7 +717,16 @@ export default function MapApp() {
           }
           const pair = snapPair(graph, index, request.start, request.dest);
           if (!pair.ok) {
-            setRouteState({ kind: "error", message: messageFor(pair.reason) });
+            const offending =
+              pair.reason === "startTooFar"
+                ? request.start
+                : pair.reason === "destTooFar"
+                  ? request.dest
+                  : null;
+            setRouteState({
+              kind: "error",
+              message: messageFor(pair.reason, activeCity(), offending),
+            });
           } else if (draggingRef.current) {
             // Mid-drag: reuse a per-gesture solver rooted at the held endpoint for an approximate
             // route each frame; the drop recomputes exactly. Start-drags solve from the dest and flip.
@@ -656,7 +752,7 @@ export default function MapApp() {
             } else {
               setRouteState({
                 kind: "error",
-                message: messageFor("disconnected"),
+                message: messageFor("disconnected", activeCity(), null),
               });
             }
           } else {
@@ -676,7 +772,7 @@ export default function MapApp() {
               } else {
                 setRouteState({
                   kind: "error",
-                  message: messageFor("disconnected"),
+                  message: messageFor("disconnected", activeCity(), null),
                 });
               }
             }
@@ -724,7 +820,7 @@ export default function MapApp() {
         routedForRef.current = null;
       } else {
         // warm the graph so the first route lands without a fetch stall
-        void loadRouting();
+        void loadRouting(activeCity().id);
       }
       return !open;
     });
@@ -947,9 +1043,13 @@ export default function MapApp() {
     if (route.dest) {
       applyPick("dest", route.dest.lat, route.dest.lng);
       setRoutingOpen(true);
-      void loadRouting(); // warm the graph, as opening the panel by hand does
+      void loadRouting(activeCity().id); // warm the graph, as opening the panel by hand does
     }
     const view = decodeView(params);
+    const linked = cityById(view.city) ?? cityById(storedCity());
+    if (linked) {
+      setCity(linked);
+    }
     const overlays = view.overlays ?? storedOverlays();
     if (overlays) {
       // unknown ids (a stale "trees" from before the canopy switch) are dropped
@@ -959,12 +1059,23 @@ export default function MapApp() {
       setInitialCamera(view.camera);
       setPreframedDest(route.dest);
       setFollowing(false); // else the first location fix yanks the shared camera away
+    } else if (linked) {
+      // A chosen city with no camera to go with it still has to frame that city before the map
+      // settles: the camera is what decides which city is active, so opening on the default one and
+      // correcting afterwards would just switch straight back.
+      setInitialCamera({ center: linked.center, zoom: CITY_ZOOM });
     }
     setHashApplied(true);
   }, [applyPick]);
 
   const handleCamera = useCallback((camera: Camera) => {
     cameraRef.current = camera;
+    // Settled moves only, and setState bails when the id is unchanged, so this costs one lookup per
+    // gesture rather than one per frame.
+    setCity((current) => {
+      const nearest = nearestCity(camera.center);
+      return nearest.id === current.id ? current : nearest;
+    });
   }, []);
 
   // The link the share button copies: the route the hash already carries, plus the camera and overlay
@@ -979,15 +1090,17 @@ export default function MapApp() {
       customDay: day,
     });
     if (cameraRef.current) {
-      for (const [key, value] of encodeView(cameraRef.current, [
-        ...activeOverlays,
-      ])) {
+      for (const [key, value] of encodeView(
+        cameraRef.current,
+        [...activeOverlays],
+        city.id,
+      )) {
         params.append(key, value);
       }
     }
     const { origin, pathname, search } = window.location;
     return `${origin}${pathname}${search}${formatHash(params)}`;
-  }, [manualStart, dest, weights, activeOverlays]);
+  }, [manualStart, dest, weights, activeOverlays, city]);
 
   // A map tap sets the effective pick target's location; with nothing armed and a destination already
   // set, it does nothing.
@@ -1130,8 +1243,8 @@ export default function MapApp() {
     }
     let cancelled = false;
     Promise.all([
-      loadPois("landmarks/nyc.bin", "LMRK"),
-      loadPois("art/nyc.bin", "ARTW"),
+      loadPois(`landmarks/${city.id}.bin`, "LMRK"),
+      loadPois(`art/${city.id}.bin`, "ARTW"),
     ]).then(
       ([landmarks, art]) => {
         if (!cancelled) {
@@ -1143,7 +1256,7 @@ export default function MapApp() {
     return () => {
       cancelled = true;
     };
-  }, [routingOpen, poiSets]);
+  }, [routingOpen, poiSets, city.id]);
 
   const routeResult = routeState.kind === "ready" ? routeState.result : null;
   const directions = useMemo(() => {
@@ -1193,154 +1306,161 @@ export default function MapApp() {
   const routeDest = dest ? { lat: dest.lat, lng: dest.lng } : null;
 
   return (
-    <main className="relative h-dvh w-full overflow-hidden">
-      <MapView
-        pins={pins}
-        draft={draft}
-        target={target}
-        userLocation={userLocation}
-        following={following}
-        activeOverlays={activeOverlays}
-        routeResult={routeResult}
-        routeDest={routeDest}
-        routeStart={routeStart}
-        pickMode={pickMode}
-        onMapPick={handleMapPick}
-        dragging={dragging}
-        initialCamera={initialCamera}
-        preframedDest={preframedDest}
-        onCamera={handleCamera}
-        onDisengageFollow={handleDisengageFollow}
-        onEndpointDragMove={handleEndpointDragMove}
-        onEndpointDrag={handleEndpointDrag}
-        onPinSelect={handlePinSelect}
-      />
-      <Toolbar
-        auth={auth}
-        pinCount={pins.length}
-        activeOverlays={activeOverlays}
-        routing={routingOpen}
-        refreshingClaims={refreshing}
-        onToggleOverlay={handleToggleOverlay}
-        onToggleRouting={handleToggleRouting}
-        onSignIn={handleSignIn}
-        onSignOut={handleSignOut}
-        onRefreshClaims={handleRefreshClaims}
-        onAbout={() => setAboutOpen(true)}
-        onLogHere={handleLogHere}
-        logHereDisabled={userLocation === null}
-        logHereBusy={logging}
-        logHereHint={locationHint}
-        shareLocationForSearch={shareLocationForSearch}
-        onToggleSearchBias={handleToggleSearchBias}
-        composeShareUrl={composeShareUrl}
-      />
-      <UrlSync
-        start={manualStart}
-        dest={dest}
-        weights={weights}
-        enabled={hashApplied}
-      />
-      <FollowToggle active={following} onToggle={handleToggleFollow} />
-      {/* the active overlays' floating keys (genus only today); bottom-left keeps them clear of the
+    <CityProvider value={city}>
+      <main className="relative h-dvh w-full overflow-hidden">
+        <MapView
+          city={city}
+          pins={pins}
+          draft={draft}
+          target={target}
+          userLocation={userLocation}
+          following={following}
+          activeOverlays={activeOverlays}
+          routeResult={routeResult}
+          routeDest={routeDest}
+          routeStart={routeStart}
+          pickMode={pickMode}
+          onMapPick={handleMapPick}
+          dragging={dragging}
+          initialCamera={initialCamera}
+          preframedDest={preframedDest}
+          onCamera={handleCamera}
+          onDisengageFollow={handleDisengageFollow}
+          onEndpointDragMove={handleEndpointDragMove}
+          onEndpointDrag={handleEndpointDrag}
+          onPinSelect={handlePinSelect}
+        />
+        <Toolbar
+          auth={auth}
+          pinCount={pins.length}
+          city={city}
+          activeOverlays={activeOverlays}
+          routing={routingOpen}
+          refreshingClaims={refreshing}
+          onToggleOverlay={handleToggleOverlay}
+          onToggleRouting={handleToggleRouting}
+          onSignIn={handleSignIn}
+          onSignOut={handleSignOut}
+          onRefreshClaims={handleRefreshClaims}
+          onAbout={() => setAboutOpen(true)}
+          onLogHere={handleLogHere}
+          logHereDisabled={userLocation === null}
+          logHereBusy={logging}
+          logHereHint={locationHint}
+          shareLocationForSearch={shareLocationForSearch}
+          onToggleSearchBias={handleToggleSearchBias}
+          onSelectCity={handleSelectCity}
+          composeShareUrl={composeShareUrl}
+        />
+        <UrlSync
+          start={manualStart}
+          dest={dest}
+          weights={weights}
+          enabled={hashApplied}
+        />
+        <FollowToggle active={following} onToggle={handleToggleFollow} />
+        {/* the active overlays' floating keys (genus only today); bottom-left keeps them clear of the
           toolbar, follow toggle, attribution, and the centered route panel */}
-      <div className="pointer-events-none absolute bottom-3 left-3 z-[1000] max-w-[70vw]">
-        <div className="pointer-events-auto space-y-2">
-          {OVERLAYS.filter((overlay) => activeOverlays.has(overlay.id)).map(
-            (overlay) =>
-              overlay.legend ? (
-                <div key={overlay.id}>{overlay.legend}</div>
-              ) : null,
-          )}
+        <div className="pointer-events-none absolute bottom-3 left-3 z-[1000] max-w-[70vw]">
+          <div className="pointer-events-auto space-y-2">
+            {OVERLAYS.filter((overlay) => activeOverlays.has(overlay.id)).map(
+              (overlay) =>
+                overlay.legend ? (
+                  <div key={overlay.id}>{overlay.legend}</div>
+                ) : null,
+            )}
+          </div>
         </div>
-      </div>
-      {banner ? (
-        <div className="absolute top-16 left-1/2 z-[1200] flex max-w-[90vw] -translate-x-1/2 items-center gap-3 rounded-2xl bg-slate-900/90 px-4 py-2.5 text-sm font-medium text-white shadow-xl backdrop-blur-md dark:bg-slate-100/95 dark:text-slate-900">
-          <span>{banner}</span>
-          <button
-            type="button"
-            onClick={() => setBanner(null)}
-            aria-label="Dismiss"
-            className="grid h-6 w-6 shrink-0 place-items-center rounded-full text-white/70 hover:bg-white/10 hover:text-white dark:text-slate-500 dark:hover:bg-slate-900/10 dark:hover:text-slate-900"
-          >
-            <FiX />
-          </button>
-        </div>
-      ) : null}
-      {routingOpen ? (
-        <RoutePanel
-          startLabel={
-            manualStart
-              ? manualStart.label
-              : userLocation
-                ? "My location"
+        {banner ? (
+          <div className="absolute top-16 left-1/2 z-[1200] flex max-w-[90vw] -translate-x-1/2 items-center gap-3 rounded-2xl bg-slate-900/90 px-4 py-2.5 text-sm font-medium text-white shadow-xl backdrop-blur-md dark:bg-slate-100/95 dark:text-slate-900">
+            <span>{banner}</span>
+            <button
+              type="button"
+              onClick={() => setBanner(null)}
+              aria-label="Dismiss"
+              className="grid h-6 w-6 shrink-0 place-items-center rounded-full text-white/70 hover:bg-white/10 hover:text-white dark:text-slate-500 dark:hover:bg-slate-900/10 dark:hover:text-slate-900"
+            >
+              <FiX />
+            </button>
+          </div>
+        ) : null}
+        {routingOpen ? (
+          <RoutePanel
+            startLabel={
+              manualStart
+                ? manualStart.label
+                : userLocation
+                  ? "My location"
+                  : null
+            }
+            destLabel={dest?.label ?? null}
+            startSet={manualStart !== null}
+            destSet={dest !== null}
+            needsStart={(manualStart ?? userLocation) === null}
+            hasLiveLocation={userLocation !== null}
+            searchBias={searchBias}
+            pickTarget={effectivePickTarget}
+            status={routeState.kind}
+            errorMessage={
+              routeState.kind === "error" ? routeState.message : null
+            }
+            summary={
+              routeState.kind === "ready"
+                ? {
+                    walkMeters: routeState.result.walkMeters,
+                    travelSeconds: routeState.result.travelSeconds,
+                    factors: routeState.result.factors,
+                  }
                 : null
-          }
-          destLabel={dest?.label ?? null}
-          startSet={manualStart !== null}
-          destSet={dest !== null}
-          needsStart={(manualStart ?? userLocation) === null}
-          hasLiveLocation={userLocation !== null}
-          searchBias={searchBias}
-          pickTarget={effectivePickTarget}
-          status={routeState.kind}
-          errorMessage={routeState.kind === "error" ? routeState.message : null}
-          summary={
-            routeState.kind === "ready"
-              ? {
-                  walkMeters: routeState.result.walkMeters,
-                  travelSeconds: routeState.result.travelSeconds,
-                  factors: routeState.result.factors,
-                }
-              : null
-          }
-          treeWeight={treeWeight}
-          ferryWeight={ferryWeight}
-          allowFerries={allowFerries}
-          landmarkWeight={landmarkWeight}
-          artWeight={artWeight}
-          highwayWeight={highwayWeight}
-          commercialWeight={commercialWeight}
-          shadeWeight={shadeWeight}
-          shelterWeight={shelterWeight}
-          allowSheds={allowSheds}
-          directions={directions}
-          progress={progress}
-          directionsOpen={directionsOpen}
-          minimized={panelMinimized}
-          onTreeWeight={handleTreeWeight}
-          onFerryWeight={handleFerryWeight}
-          onAllowFerries={handleAllowFerries}
-          onLandmarkWeight={handleLandmarkWeight}
-          onArtWeight={handleArtWeight}
-          onHighwayWeight={handleHighwayWeight}
-          onCommercialWeight={handleCommercialWeight}
-          onShadeWeight={handleShadeWeight}
-          onShelterWeight={handleShelterWeight}
-          onAllowSheds={handleAllowSheds}
-          onStartSelect={handleStartSelect}
-          onDestSelect={handleDestSelect}
-          onStartClear={handleClearStart}
-          onDestClear={handleClearDest}
-          onUseCurrentLocation={handleClearStart}
-          onArmStart={handleArmStart}
-          onArmDest={handleArmDest}
-          onToggleDirections={handleToggleDirections}
-          onToggleMinimize={handleToggleMinimize}
-          onClose={handleToggleRouting}
-        />
-      ) : null}
-      {editing ? (
-        <PinEditor
-          target={editing.mode === "create" ? editing.draft : editing.pin}
-          mode={editing.mode}
-          onSave={handleSave}
-          onDelete={editing.mode === "edit" ? handleDelete : undefined}
-          onCancel={handleCancel}
-        />
-      ) : null}
-      {signingIn ? <SignInDialog onClose={handleCloseSignIn} /> : null}
-      {aboutOpen ? <AboutDialog onClose={() => setAboutOpen(false)} /> : null}
-    </main>
+            }
+            treeWeight={treeWeight}
+            ferryWeight={ferryWeight}
+            allowFerries={allowFerries}
+            landmarkWeight={landmarkWeight}
+            artWeight={artWeight}
+            highwayWeight={highwayWeight}
+            commercialWeight={commercialWeight}
+            shadeWeight={shadeWeight}
+            shelterWeight={shelterWeight}
+            allowSheds={allowSheds}
+            directions={directions}
+            progress={progress}
+            directionsOpen={directionsOpen}
+            minimized={panelMinimized}
+            onTreeWeight={handleTreeWeight}
+            onFerryWeight={handleFerryWeight}
+            onAllowFerries={handleAllowFerries}
+            onLandmarkWeight={handleLandmarkWeight}
+            onArtWeight={handleArtWeight}
+            onHighwayWeight={handleHighwayWeight}
+            onCommercialWeight={handleCommercialWeight}
+            onShadeWeight={handleShadeWeight}
+            onShelterWeight={handleShelterWeight}
+            onAllowSheds={handleAllowSheds}
+            onStartSelect={handleStartSelect}
+            onDestSelect={handleDestSelect}
+            onStartClear={handleClearStart}
+            onDestClear={handleClearDest}
+            onUseCurrentLocation={handleClearStart}
+            onArmStart={handleArmStart}
+            onArmDest={handleArmDest}
+            onToggleDirections={handleToggleDirections}
+            onToggleMinimize={handleToggleMinimize}
+            onClose={handleToggleRouting}
+          />
+        ) : null}
+        {editing ? (
+          <PinEditor
+            target={editing.mode === "create" ? editing.draft : editing.pin}
+            mode={editing.mode}
+            onSave={handleSave}
+            onDelete={editing.mode === "edit" ? handleDelete : undefined}
+            onCancel={handleCancel}
+          />
+        ) : null}
+        {signingIn ? <SignInDialog onClose={handleCloseSignIn} /> : null}
+        {aboutOpen ? <AboutDialog onClose={() => setAboutOpen(false)} /> : null}
+      </main>
+    </CityProvider>
   );
 }

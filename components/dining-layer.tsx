@@ -5,6 +5,7 @@ import { useEffect } from "react";
 import { useMap } from "react-leaflet";
 import WorkerTileLayer from "../src/tiles/layer";
 import manifest from "../src/tree-cover/manifest.json";
+import { useCity } from "./city-context";
 
 // The "commercial" overlay: charming low-rise retail strips, highlighted a whole block at a time.
 // The signals, the client-side gate and the drawing live in the tile worker
@@ -20,6 +21,7 @@ const MAX_ZOOM = 20;
 
 export default function DiningLayer() {
   const map = useMap();
+  const active = useCity();
 
   useEffect(() => {
     // A dedicated pane, so the dark-mode tile-pane invert leaves the violet true.
@@ -28,17 +30,19 @@ export default function DiningLayer() {
       pane.style.zIndex = String(PANE_Z_INDEX);
     }
 
-    const layers = manifest.cities.map((city) => {
-      const { south, west, north, east } = city.bounds;
-      return new WorkerTileLayer(() => ({ kind: "commercial" }), {
-        pane: PANE_NAME,
-        bounds: L.latLngBounds([south, west], [north, east]),
-        minZoom: MIN_ZOOM,
-        maxZoom: MAX_ZOOM,
-        // a wider ring, so a pan after a zoom doesn't immediately re-draw
-        keepBuffer: 4,
+    const layers = manifest.cities
+      .filter((entry) => entry.id === active.id)
+      .map((city) => {
+        const { south, west, north, east } = city.bounds;
+        return new WorkerTileLayer(() => ({ kind: "commercial" }), {
+          pane: PANE_NAME,
+          bounds: L.latLngBounds([south, west], [north, east]),
+          minZoom: MIN_ZOOM,
+          maxZoom: MAX_ZOOM,
+          // a wider ring, so a pan after a zoom doesn't immediately re-draw
+          keepBuffer: 4,
+        });
       });
-    });
     for (const layer of layers) {
       layer.addTo(map);
     }
@@ -47,7 +51,7 @@ export default function DiningLayer() {
         layer.remove();
       }
     };
-  }, [map]);
+  }, [map, active.id]);
 
   return null;
 }

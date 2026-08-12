@@ -5,6 +5,7 @@ import { useEffect } from "react";
 import { useMap } from "react-leaflet";
 import WorkerTileLayer from "../src/tiles/layer";
 import manifest from "../src/tree-cover/manifest.json";
+import { useCity } from "./city-context";
 
 // Pre-rendered by scripts/build-street-tiles.ts (`tiler canopy`): the measured 2017 LiDAR tree
 // canopy, rasterized to a per-pixel covered fraction, blurred, and coloured by the emerald ramp.
@@ -27,10 +28,12 @@ const Z_INDEX = 2;
 
 export default function CanopyLayer() {
   const map = useMap();
+  const active = useCity();
 
   useEffect(() => {
     // one layer per city that has a canopy source, each clipped to its own bbox
     const layers = manifest.cities
+      .filter((entry) => entry.id === active.id)
       .filter((city) => city.field.canopy)
       .map((city) => {
         const { south, west, north, east } = city.bounds;
@@ -61,7 +64,7 @@ export default function CanopyLayer() {
         layer.remove();
       }
     };
-  }, [map]);
+  }, [map, active.id]);
 
   return null;
 }

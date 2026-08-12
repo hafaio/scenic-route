@@ -1,3 +1,4 @@
+import { activeCity } from "../cities";
 import {
   edgeGeometryRight,
   type RoutingGraph,
@@ -10,7 +11,6 @@ import {
   type ShedHistory,
   shedsOn,
 } from "../routing/sheds";
-import manifest from "../tree-cover/manifest.json";
 import { projectX, projectY } from "./mercator";
 import type { PolygonSink } from "./sweep";
 
@@ -44,12 +44,12 @@ import type { PolygonSink } from "./sweep";
 const EARTH_CIRCUMFERENCE_METERS = 40_075_016.686;
 const TILE_SIZE = 256;
 
-const [city] = manifest.cities;
-const CENTRE_LAT = (city.bounds.north + city.bounds.south) / 2;
-// Kerb to the baked sidewalk line, the offset `tiler graph` bakes the sidewalks at.
-const SIDEWALK_INSET_METERS = city.streets.sidewalkInsetMeters;
 // What the deck stops short of the kerb by, as scripts/shed-map.ts measured the depth with.
 const KERB_MARGIN_METERS = 0.3;
+
+function sidewalkInset(): number {
+  return activeCity().sidewalkInsetMeters;
+}
 
 // A day's decks, flattened so a draw walks typed arrays rather than objects. Deck `d`'s ring runs
 // `points[2 * rings[d]]` up to `2 * rings[d + 1]`, closed by the reader.
@@ -84,7 +84,7 @@ export interface DeckGrid {
 // Web Mercator's ground resolution at the city's latitude, which is what turns the deck's metres
 // into the pixels it is drawn at.
 export function pixelsPerMeter(zoom: number): number {
-  const cosLat = Math.cos((CENTRE_LAT * Math.PI) / 180);
+  const cosLat = Math.cos((activeCity().center.lat * Math.PI) / 180);
   return (TILE_SIZE * 2 ** zoom) / (EARTH_CIRCUMFERENCE_METERS * cosLat);
 }
 
@@ -294,7 +294,8 @@ interface Step {
 // wall is. The kerb edge is the deck's depth back from there — the FLOORED depth, so a shed measured
 // narrower than one can be built keeps the wall it was measured from and reaches over the roadway.
 function buildingEdgeMeters(depth: number): number {
-  return measuredDepth(depth) + KERB_MARGIN_METERS - SIDEWALK_INSET_METERS;
+  // less the kerb-to-baked-sidewalk offset `tiler graph` lays the sidewalks at
+  return measuredDepth(depth) + KERB_MARGIN_METERS - sidewalkInset();
 }
 
 function spanPaths(graph: RoutingGraph, shed: Shed): SpanPath[] {

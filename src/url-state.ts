@@ -43,10 +43,13 @@ export interface Camera {
   zoom: number;
 }
 
-// Either half is null when the link doesn't carry it, which must leave that half of the app alone.
+// Every field is null when the link doesn't carry it, which must leave that part of the app alone.
 export interface ViewUrlState {
   camera: Camera | null;
   overlays: readonly string[] | null; // overlay ids; the caller validates them against the registry
+  // The city id, carried explicitly rather than inferred from the camera: a link's `layers` may name
+  // an overlay only some cities offer, and inferring would silently drop it. The caller validates it.
+  city: string | null;
 }
 
 export const DEFAULT_WEIGHTS: RouteWeights = {
@@ -115,7 +118,7 @@ const ROUTE_KEYS: readonly string[] = [
   "time",
   "date",
 ];
-const VIEW_KEYS: readonly string[] = ["at", "layers"];
+const VIEW_KEYS: readonly string[] = ["at", "layers", "city"];
 
 function round(value: number, digits: number): number {
   return Number(value.toFixed(digits));
@@ -237,12 +240,14 @@ export function decodeView(params: URLSearchParams): ViewUrlState {
   return {
     camera: center && Number.isFinite(level) ? { center, zoom: level } : null,
     overlays: layers === null ? null : layers.split(",").filter(Boolean),
+    city: params.get("city"),
   };
 }
 
 export function encodeView(
   camera: Camera,
   overlays: readonly string[],
+  city: string,
 ): URLSearchParams {
   const params = new URLSearchParams();
   params.set(
@@ -250,6 +255,7 @@ export function encodeView(
     `${formatPoint(camera.center)},${round(camera.zoom, ZOOM_DIGITS)}`,
   );
   params.set("layers", overlays.join(","));
+  params.set("city", city);
   return params;
 }
 

@@ -88,20 +88,23 @@ test("out-of-range weights clamp instead of breaking the search", () => {
   expect(decoded.weights.shade).toBe(-1);
 });
 
-test("no view keys leaves both halves of the view alone", () => {
+test("no view keys leaves every part of the view alone", () => {
   expect(decodeView(hashParams("#tree=0.5"))).toEqual({
     camera: null,
     overlays: null,
+    city: null,
   });
 });
 
 test("the view round trips, and an empty layer list stays distinct from none", () => {
   const camera = { center: { lat: 40.7128, lng: -74.006 }, zoom: 15.5 };
   const full = decodeView(
-    hashParams(formatHash(encodeView(camera, ["shade"]))),
+    hashParams(formatHash(encodeView(camera, ["shade"], "nyc"))),
   );
-  expect(full).toEqual({ camera, overlays: ["shade"] });
-  const bare = decodeView(hashParams(formatHash(encodeView(camera, []))));
+  expect(full).toEqual({ camera, overlays: ["shade"], city: "nyc" });
+  const bare = decodeView(
+    hashParams(formatHash(encodeView(camera, [], "nyc"))),
+  );
   expect(bare.overlays).toEqual([]);
 });
 

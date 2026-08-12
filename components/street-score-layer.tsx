@@ -5,6 +5,7 @@ import { useEffect } from "react";
 import { useMap } from "react-leaflet";
 import WorkerTileLayer from "../src/tiles/layer";
 import manifest from "../src/tree-cover/manifest.json";
+import { useCity } from "./city-context";
 
 // The canopy score along every street, one line per sidewalk. The decoding and the drawing live in
 // the tile worker (src/tiles/street-score.ts).
@@ -20,19 +21,22 @@ const Z_INDEX = 3;
 
 export default function StreetScoreLayer() {
   const map = useMap();
+  const active = useCity();
 
   useEffect(() => {
-    const layers = manifest.cities.map((city) => {
-      const { south, west, north, east } = city.bounds;
-      return new WorkerTileLayer(() => ({ kind: "street-score" }), {
-        bounds: L.latLngBounds([south, west], [north, east]),
-        minZoom: MIN_ZOOM,
-        maxZoom: MAX_ZOOM,
-        zIndex: Z_INDEX,
-        // a wider ring, so panning after a zoom doesn't immediately re-draw
-        keepBuffer: 4,
+    const layers = manifest.cities
+      .filter((entry) => entry.id === active.id)
+      .map((city) => {
+        const { south, west, north, east } = city.bounds;
+        return new WorkerTileLayer(() => ({ kind: "street-score" }), {
+          bounds: L.latLngBounds([south, west], [north, east]),
+          minZoom: MIN_ZOOM,
+          maxZoom: MAX_ZOOM,
+          zIndex: Z_INDEX,
+          // a wider ring, so panning after a zoom doesn't immediately re-draw
+          keepBuffer: 4,
+        });
       });
-    });
     for (const layer of layers) {
       layer.addTo(map);
     }
@@ -41,7 +45,7 @@ export default function StreetScoreLayer() {
         layer.remove();
       }
     };
-  }, [map]);
+  }, [map, active.id]);
 
   return null;
 }

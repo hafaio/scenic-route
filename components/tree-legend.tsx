@@ -9,6 +9,7 @@ import {
   toggleGenus,
 } from "../src/tree-cover/genus-filter";
 import manifest from "../src/tree-cover/manifest.json";
+import { useCity } from "./city-context";
 
 // The genus overlay's key: the 12 ranked genera (in id order) plus the "Other" bucket, each a
 // true-colour swatch beside its common name. Swatches use the same palette the tiles draw with
@@ -16,7 +17,9 @@ import manifest from "../src/tree-cover/manifest.json";
 // row is a toggle: clicking it hides or shows that genus across both halves of the overlay (the
 // raster tiles and the live dots), which read the same selection store.
 export default function TreeLegend() {
-  const genus = manifest.cities[0]?.field.genus;
+  const active = useCity();
+  const genus = manifest.cities.find((city) => city.id === active.id)?.field
+    .genus;
   const enabled = useSyncExternalStore(
     subscribeGenusFilter,
     getEnabledGenera,
