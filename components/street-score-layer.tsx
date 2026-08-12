@@ -31,7 +31,6 @@ export default function StreetScoreLayer() {
         zIndex: Z_INDEX,
         // a wider ring, so panning after a zoom doesn't immediately re-draw
         keepBuffer: 4,
-        attribution: `<a href="${city.streets.sourceUrl}" target="_blank" rel="noreferrer">${city.streets.attribution}</a>`,
       });
     });
     for (const layer of layers) {
