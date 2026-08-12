@@ -5,6 +5,7 @@
 // See scripts/README.md.
 
 import { createHash } from "node:crypto";
+import pRetry from "p-retry";
 import { cachedFile } from "./cache";
 
 // One file of figshare doi 10.6084/m9.figshare.20522895 — NY_CHM_10Int260m.tif, the CHM behind Ma
@@ -14,7 +15,8 @@ const DOWNLOAD_URL = "https://ndownloader.figshare.com/files/36733827";
 const EXPECTED_BYTES = 243_383_277;
 const EXPECTED_MD5 = "84e375d1ecfd090c8f5425a38fc6e957"; // figshare's own checksum for the file
 const MAX_ATTEMPTS = 3;
-const RETRY_DELAY_MS = 5_000;
+const RETRY_BASE_MS = 5_000;
+const RETRY_CAP_MS = 30_000;
 const PROGRESS_BYTES = 32 * 1024 * 1024;
 const USER_AGENT =
   "scenic-route/0.1 (+https://github.com/erikbrinkman/scenic-route)";
@@ -56,20 +58,20 @@ async function download(): Promise<Uint8Array> {
 // The path of the cached raster, downloaded on the first run and served from .cache/ after.
 export async function fetchChmRaster(): Promise<string> {
   return await cachedFile("figshare-nyc-chm", DOWNLOAD_URL, async () => {
-    let lastError: unknown;
-    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-      try {
-        return await download();
-      } catch (error) {
-        lastError = error;
-        console.error(`  attempt ${attempt}/${MAX_ATTEMPTS} failed: ${error}`);
-        if (attempt < MAX_ATTEMPTS) {
-          await new Promise((resolve) =>
-            setTimeout(resolve, RETRY_DELAY_MS * attempt),
+    try {
+      return await pRetry(download, {
+        retries: MAX_ATTEMPTS - 1,
+        minTimeout: RETRY_BASE_MS,
+        maxTimeout: RETRY_CAP_MS,
+        randomize: true,
+        onFailedAttempt: ({ error, attemptNumber }) => {
+          console.error(
+            `  attempt ${attemptNumber}/${MAX_ATTEMPTS} failed: ${error}`,
           );
-        }
-      }
+        },
+      });
+    } catch (error) {
+      throw new Error(`the CHM download failed: ${error}`);
     }
-    throw new Error(`the CHM download failed: ${lastError}`);
   });
 }

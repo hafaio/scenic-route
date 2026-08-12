@@ -4,6 +4,7 @@
 // the tiler blurs it for the fill pyramid and samples it at every sidewalk for the routing
 // density. See scripts/README.md.
 
+import pRetry from "p-retry";
 import { cached } from "./cache";
 import type { Polygon } from "./overpass";
 
@@ -15,7 +16,8 @@ const SERVICE =
 
 const PAGE_SIZE = 2000; // the service's maxRecordCount; a larger resultRecordCount is capped here
 const MAX_ATTEMPTS = 6;
-const RETRY_DELAY_MS = 5_000; // grows with the attempt, so a rate-limited service is given room
+const RETRY_BASE_MS = 5_000;
+const RETRY_CAP_MS = 30_000;
 const REQUEST_TIMEOUT_MS = 120_000; // only cuts off a request that hung, not one merely slow
 // ~1,077,146 polygons at the last probe (2026-07-17). A floor, not an exact count: it catches a
 // server-side page cut that would otherwise pass for the end of the layer, but tolerates the
@@ -53,38 +55,43 @@ function pageUrl(offset: number): string {
   return url.toString();
 }
 
-// One page, retried with a growing backoff over the service's rate limit. ArcGIS reports a query
-// error as a 200 with an `{ error }` body, so the status alone is not enough — an unchecked error
-// page would otherwise cache as a permanent empty page and truncate the layer.
+// One page, retried over the service's rate limit. ArcGIS reports a query error as a 200 with an
+// `{ error }` body, so the status alone is not enough — an unchecked error page would otherwise
+// cache as a permanent empty page and truncate the layer.
 async function fetchPage(url: string): Promise<EsriResponse> {
-  let lastError: unknown;
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-    try {
-      const response = await fetch(url, {
-        headers: { "user-agent": USER_AGENT },
-        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-      });
-      if (!response.ok) {
-        throw new Error(`${response.status} ${response.statusText}`);
-      }
-      const body = (await response.json()) as EsriResponse;
-      if (body.error) {
-        throw new Error(`ArcGIS ${body.error.code}: ${body.error.message}`);
-      } else if (!Array.isArray(body.features)) {
-        throw new Error("no features in the response");
-      }
-      return body;
-    } catch (error) {
-      lastError = error;
-      console.error(`  attempt ${attempt}/${MAX_ATTEMPTS} failed: ${error}`);
-      if (attempt < MAX_ATTEMPTS) {
-        await new Promise((resolve) =>
-          setTimeout(resolve, RETRY_DELAY_MS * attempt),
-        );
-      }
-    }
+  try {
+    return await pRetry(
+      async () => {
+        const response = await fetch(url, {
+          headers: { "user-agent": USER_AGENT },
+          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+        });
+        if (!response.ok) {
+          throw new Error(`${response.status} ${response.statusText}`);
+        }
+        const body = (await response.json()) as EsriResponse;
+        if (body.error) {
+          throw new Error(`ArcGIS ${body.error.code}: ${body.error.message}`);
+        } else if (!Array.isArray(body.features)) {
+          throw new Error("no features in the response");
+        }
+        return body;
+      },
+      {
+        retries: MAX_ATTEMPTS - 1,
+        minTimeout: RETRY_BASE_MS,
+        maxTimeout: RETRY_CAP_MS,
+        randomize: true,
+        onFailedAttempt: ({ error, attemptNumber }) => {
+          console.error(
+            `  attempt ${attemptNumber}/${MAX_ATTEMPTS} failed: ${error}`,
+          );
+        },
+      },
+    );
+  } catch (error) {
+    throw new Error(`canopy page ${url} failed: ${error}`);
   }
-  throw new Error(`canopy page ${url} failed: ${lastError}`);
 }
 
 // Pages the whole layer, each page cached by its request URL through scripts/cache.ts, so this
