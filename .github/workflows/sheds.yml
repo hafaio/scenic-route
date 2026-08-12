@@ -54,6 +54,17 @@ jobs:
         env:
           SOCRATA_APP_TOKEN: ${{ secrets.SOCRATA_APP_TOKEN }}
 
+      # The ferry timetable, riding along because it wants exactly the same thing: a daily look at a
+      # feed that rarely moves. It re-reads both GTFS zips and opens a new timetable only when the
+      # schedule itself changed — a record's body is a pure function of the feeds, so an unchanged day
+      # rewrites identical bytes and falls through the "nothing to commit" check below.
+      #
+      # It writes public/ferry-schedule/ and nothing else. The raw zips under data/ferries/ are
+      # LFS-tracked and are deliberately NOT refreshed here: this job must never write an LFS object.
+      # They stay whatever the last human-run build read, and drift from the live schedule by design —
+      # the artifact is what the client reads.
+      - run: bun run update-ferry-schedule
+
       # One ordinary commit on `main` a day. Not a size problem: packed git deltas these files to
       # 1.7-22 KB a day depending on the repack window, not the ~1 MB a day the raw size suggests
       # (DESIGN.md has the measurement). What the raw size WOULD cost is LFS, which deltas nothing:
@@ -62,26 +73,30 @@ jobs:
       # It must never clobber a human push, so no `--force` and no `--force-with-lease` either — a
       # lease is checked against what this checkout last fetched, which is exactly the push it would
       # be overwriting. Instead the commit is built on the tip the push is aimed at, and a rejected
-      # push re-reads `main` and rebuilds it on the new one. Only these three files are ever staged,
+      # push re-reads `main` and rebuilds it on the new one. Only these two directories are ever staged,
       # so rebuilding is a fresh commit rather than a rebase and has nothing to conflict with.
       #
-      # `build.yml` ignores this path, so the push does not fire a lint+test run.
-      - name: commit the artifact
+      # `build.yml` ignores both paths, so the push does not fire a lint+test run.
+      - name: commit the artifacts
         run: |
           staged="$(mktemp -d)"
-          cp public/sheds/*.bin "$staged/"
+          mkdir -p "$staged/sheds" "$staged/ferry-schedule"
+          cp public/sheds/*.bin "$staged/sheds/"
+          cp public/ferry-schedule/*.bin "$staged/ferry-schedule/"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           for attempt in 1 2 3; do
             git fetch --depth=1 origin main
             git reset --quiet --hard FETCH_HEAD
-            cp "$staged"/*.bin public/sheds/
-            git add public/sheds
+            mkdir -p public/sheds public/ferry-schedule
+            cp "$staged"/sheds/*.bin public/sheds/
+            cp "$staged"/ferry-schedule/*.bin public/ferry-schedule/
+            git add public/sheds public/ferry-schedule
             if git diff --quiet --cached; then
               echo "the artifact is unchanged; nothing to commit"
               exit 0
             fi
-            git commit --quiet -m "chore(sheds): update through $(date -u +%F)"
+            git commit --quiet -m "chore(data): update the daily artifacts through $(date -u +%F)"
             if git push origin HEAD:main; then
               exit 0
             fi
