@@ -82,13 +82,12 @@ const MIN_SAMPLES: usize = 12;
 // at the zoom they hand over. It runs after the curvature, which wants the exact trace — Douglas-
 // Peucker sharpens corners, the worst input a curvature estimate could have.
 const CROWN_SIMPLIFY_METERS: f64 = 0.6;
-// Chord tolerance the arcs an inward offset opens at concave corners are flattened to. Deliberately
-// far under CROWN_SIMPLIFY_METERS, so that the simplification of the offset ring — and not this — is
-// what sets how far a shipped ring may sit from the geometry it stands for.
+// Chord tolerance for the arcs an inward offset opens at concave corners. Far under
+// CROWN_SIMPLIFY_METERS, so the ring's own simplification is what sets how far it may sit from the
+// geometry it stands for.
 const JOIN_ARC_METERS: f64 = 0.05;
-// Below this two consecutive vertices are the same vertex, and the offset needs them merged: a
-// repeated position has no direction, so there is no line to offset it along. A micrometre is under
-// the decimetre the rings are stored on and far under anything the trace can resolve.
+// Consecutive vertices closer than this are one vertex, and a repeated position has no direction to
+// offset along.
 const REPEAT_POSITION_METERS: f64 = 1e-6;
 
 // Pixels of shadow smear one slice is allowed to step by. Below this the whole smear is shorter than
@@ -113,10 +112,9 @@ pub struct Segment {
     pub to_m: f64,
 }
 
-/// Where slice `level`'s ring sits, as an offset from the crown's widest section in units of the
-/// crown's own half-height. The offsets are spaced EVENLY, which is what makes the rings sample the
-/// crown at evenly spaced heights. The crown is at least that ring's width over `+/- this`, so it is
-/// half a band, not a height.
+/// Where slice `level`'s ring sits, as an offset from the crown's widest section in units of its own
+/// half-height — half a band, since the crown is at least that ring's width over `+/- this`. Spacing
+/// these EVENLY is what samples the crown at evenly spaced heights.
 fn band_offset(level: usize) -> f64 {
     level as f64 / (CROWN_SEGMENTS - 1) as f64 * CROWN_TIP_FRACTION
 }
@@ -230,10 +228,9 @@ pub fn crown_slices(outer: &Ring) -> Crown {
     let outline = simplified_or_whole(&metres);
     let mut levels = Vec::with_capacity(CROWN_SEGMENTS);
     levels.push(vec![frame.to_degrees(&outline)]);
-    // Cut from the EXACT trace, not from the simplified outline that ships. What separates one crown
-    // from the next in a merged blob is the neck between them, and a neck is a metre of outline that
-    // the shipping tolerance is entitled to drop — drop it first and the offset has nothing to pull
-    // apart, so a whole park comes back as one shape that never breaks into its trees.
+    // Cut from the EXACT trace: what separates one crown from the next in a merged blob is the neck
+    // between them, and the shipping tolerance is entitled to drop a neck. Drop it first and a whole
+    // park comes back as one shape that never breaks into its trees.
     for inset in offset_rings(&metres, &insets) {
         levels.push(inset.iter().map(|ring| frame.to_degrees(ring)).collect());
     }
@@ -495,27 +492,21 @@ fn offset_rings(outline: &[(f64, f64)], insets: &[f64]) -> Vec<Vec<Vec<(f64, f64
         .remove_repeat_pos(REPEAT_POSITION_METERS)
         .unwrap_or(source);
     let index = source.create_approx_aabb_index();
-    // An outline traced off a raster pinches, and the offset's own check that a candidate piece stands
-    // clear of it measures distance without a side — so a piece lying OUTSIDE at that distance passes
-    // too. The guards below are what catch those, rather than the crate's self-intersection path,
-    // which costs twice the bake and finds nothing they do not.
+    // The offset's own check that a piece stands clear of the outline measures distance without a
+    // side, so one lying OUTSIDE at that distance passes too. The guards below catch those; the
+    // crate's self-intersection path costs twice the bake and finds nothing they do not.
     let options = PlineOffsetOptions {
         aabb_index: Some(&index),
         ..Default::default()
     };
-    // Each level is cut from the one before it, so its rings enclose less between them than that one
-    // did. Where the outline all but touches itself the offset crosses itself too and throws loops
-    // that do not — inverted, or larger than what they were cut from — and a level that grows is the
-    // tell. Carrying the bound down the levels catches a loop that is small against the whole crown
-    // but larger than the ring it stands inside.
+    // Each level is cut from the one above, so it winds the same way and encloses less. Carrying the
+    // bound down catches a loop small against the whole crown but larger than the ring it stands in.
     let mut enclosed = signed_double_area(outline);
     insets
         .iter()
         .map(|inset| {
-            // An inset under the tolerance the outline is already flattened at asks the offset to cut
-            // by less than the vertex noise it is cutting from, which is where it crosses itself and
-            // answers with a shape that is not the outline drawn in at all. The outline itself IS that
-            // ring to within the tolerance both would ship at.
+            // Cutting by less than the vertex noise is where the offset crosses itself, and the
+            // outline IS that ring to within the tolerance both would ship at.
             if *inset < CROWN_SIMPLIFY_METERS {
                 return vec![outline.to_vec()];
             }
