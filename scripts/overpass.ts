@@ -2,6 +2,7 @@
 // supplement the ForMS street-tree census, plus the shared request helper and polygon-ring type
 // the rest of the ingest builds on. See scripts/README.md.
 
+import pRetry from "p-retry";
 import { cached } from "./cache";
 import type { Coord } from "./socrata";
 
@@ -45,8 +46,9 @@ const ENDPOINTS: readonly string[] = [
 // Required, not politeness: a mirror 429s an anonymous client on sight.
 const USER_AGENT =
   "scenic-route/0.1 (+https://github.com/erikbrinkman/scenic-route)";
-const MAX_ATTEMPTS = 6;
-const RETRY_DELAY_MS = 30_000; // a busy Overpass frees a slot in minutes, not seconds
+const ROTATIONS = 2;
+const MAX_ATTEMPTS = ROTATIONS * ENDPOINTS.length;
+const RETRY_BASE_MS = 30_000; // a busy Overpass frees a slot in minutes, not seconds
 const QUERY_TIMEOUT_SECONDS = 300; // the server's own budget, which it is given in full
 const REQUEST_TIMEOUT_MS = (QUERY_TIMEOUT_SECONDS + 60) * 1000; // only cuts off one that hung
 
@@ -54,53 +56,71 @@ function toCoords(geometry: OverpassPoint[]): Coord[] {
   return geometry.map(({ lat, lon }) => ({ lat, lng: lon }));
 }
 
+// Overpass answers a busy dispatcher with an HTML error page under a 200, so the body is checked
+// rather than just the status. An empty element list is not one of those failures: it is a box
+// with nothing mapped in it, and it stands.
+async function queryEndpoint(
+  endpoint: string,
+  overpassQl: string,
+): Promise<OverpassElement[]> {
+  const response = await fetch(endpoint, {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      "user-agent": USER_AGENT,
+    },
+    body: new URLSearchParams({ data: overpassQl }),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  });
+  const body = await response.text();
+  if (!response.ok) {
+    throw new Error(`${response.status} ${response.statusText}`);
+  } else if (!body.startsWith("{")) {
+    throw new Error(body.slice(0, 200).replace(/\s+/g, " "));
+  }
+  const parsed = JSON.parse(body) as { elements?: OverpassElement[] };
+  if (!Array.isArray(parsed.elements)) {
+    throw new Error("no elements in the response");
+  }
+  return parsed.elements;
+}
+
+// One pass over every mirror, which is the unit the backoff waits between: within a pass the next
+// endpoint may well be free, so a failure there moves straight on.
+async function queryRotation(
+  overpassQl: string,
+  rotation: number,
+): Promise<OverpassElement[]> {
+  let lastError: unknown;
+  for (const [index, endpoint] of ENDPOINTS.entries()) {
+    try {
+      return await queryEndpoint(endpoint, overpassQl);
+    } catch (error) {
+      lastError = error;
+      const attempt = (rotation - 1) * ENDPOINTS.length + index + 1;
+      console.error(
+        `  attempt ${attempt}/${MAX_ATTEMPTS} (${new URL(endpoint).host}) failed: ${error}`,
+      );
+    }
+  }
+  throw lastError;
+}
+
 // One Overpass request, cached under `cacheKey` by its exact QL, over the rotating mirrors.
-// Overpass answers a busy dispatcher with an HTML error page under a 200, so the body is
-// checked rather than just the status. An empty element list is not one of those failures:
-// it is a box with nothing mapped in it, and it stands.
 export async function overpassQuery(
   cacheKey: string,
   overpassQl: string,
 ): Promise<OverpassElement[]> {
   return cached(cacheKey, overpassQl, async () => {
-    let lastError: unknown;
-    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
-      const endpoint = ENDPOINTS[attempt % ENDPOINTS.length];
-      try {
-        const response = await fetch(endpoint, {
-          method: "POST",
-          headers: {
-            "content-type": "application/x-www-form-urlencoded",
-            "user-agent": USER_AGENT,
-          },
-          body: new URLSearchParams({ data: overpassQl }),
-          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-        });
-        const body = await response.text();
-        if (!response.ok) {
-          throw new Error(`${response.status} ${response.statusText}`);
-        } else if (!body.startsWith("{")) {
-          throw new Error(body.slice(0, 200).replace(/\s+/g, " "));
-        }
-        const parsed = JSON.parse(body) as { elements?: OverpassElement[] };
-        if (!Array.isArray(parsed.elements)) {
-          throw new Error("no elements in the response");
-        }
-        return parsed.elements;
-      } catch (error) {
-        lastError = error;
-        console.error(
-          `  attempt ${attempt + 1}/${MAX_ATTEMPTS} (${new URL(endpoint).host}) failed: ${error}`,
-        );
-        // Only wait once every endpoint has been tried; the next one may well be free.
-        if (attempt % ENDPOINTS.length === ENDPOINTS.length - 1) {
-          await new Promise((resolve) =>
-            setTimeout(resolve, RETRY_DELAY_MS * (1 + attempt)),
-          );
-        }
-      }
+    try {
+      return await pRetry((rotation) => queryRotation(overpassQl, rotation), {
+        retries: ROTATIONS - 1,
+        minTimeout: RETRY_BASE_MS,
+        randomize: true,
+      });
+    } catch (error) {
+      throw new Error(`Overpass query "${cacheKey}" failed: ${error}`);
     }
-    throw new Error(`Overpass query "${cacheKey}" failed: ${lastError}`);
   });
 }
 

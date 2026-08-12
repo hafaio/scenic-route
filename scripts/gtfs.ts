@@ -4,6 +4,7 @@
 // zip or csv dependency. See scripts/README.md.
 
 import { inflateRawSync } from "node:zlib";
+import pRetry from "p-retry";
 import { cached } from "./cache";
 
 // A browser-ish User-Agent: NYC DOT's Akamai edge answers the plain download with a 403 unless the
@@ -13,7 +14,8 @@ const BROWSER_USER_AGENT =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
   "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 const MAX_ATTEMPTS = 3;
-const RETRY_DELAY_MS = 2_000;
+const RETRY_BASE_MS = 2_000;
+const RETRY_CAP_MS = 30_000;
 
 // One parsed GTFS table: the header row keys each record, so a column is read by its name and a
 // column a feed omits simply comes back undefined rather than shifting every field.
@@ -33,27 +35,32 @@ export interface GtfsFeed {
 }
 
 async function download(url: string): Promise<Uint8Array> {
-  let lastError: unknown;
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-    try {
-      const response = await fetch(url, {
-        headers: { "user-agent": BROWSER_USER_AGENT, accept: "*/*" },
-      });
-      if (!response.ok) {
-        throw new Error(`${response.status} ${response.statusText}`);
-      }
-      return new Uint8Array(await response.arrayBuffer());
-    } catch (error) {
-      lastError = error;
-      console.error(`  attempt ${attempt}/${MAX_ATTEMPTS} failed: ${error}`);
-      if (attempt < MAX_ATTEMPTS) {
-        await new Promise((resolve) =>
-          setTimeout(resolve, RETRY_DELAY_MS * attempt),
-        );
-      }
-    }
+  try {
+    return await pRetry(
+      async () => {
+        const response = await fetch(url, {
+          headers: { "user-agent": BROWSER_USER_AGENT, accept: "*/*" },
+        });
+        if (!response.ok) {
+          throw new Error(`${response.status} ${response.statusText}`);
+        }
+        return new Uint8Array(await response.arrayBuffer());
+      },
+      {
+        retries: MAX_ATTEMPTS - 1,
+        minTimeout: RETRY_BASE_MS,
+        maxTimeout: RETRY_CAP_MS,
+        randomize: true,
+        onFailedAttempt: ({ error, attemptNumber }) => {
+          console.error(
+            `  attempt ${attemptNumber}/${MAX_ATTEMPTS} failed: ${error}`,
+          );
+        },
+      },
+    );
+  } catch (error) {
+    throw new Error(`failed to fetch ${url}: ${error}`);
   }
-  throw new Error(`failed to fetch ${url}: ${lastError}`);
 }
 
 // Downloads a feed zip once and keeps it in .cache/ as base64 (the cache stores JSON, so the raw
