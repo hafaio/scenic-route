@@ -138,7 +138,11 @@ export default function AboutDialog({ onClose }: AboutDialogProps) {
               label="Commercial streets"
               detail="PLUTO, Dining Out & Open Streets · NYC Open Data, and OpenStreetMap"
             />
-            <Source label="Basemap" detail="CARTO · OpenStreetMap" />
+            <Source
+              label="Basemap"
+              detail="CARTO tiles · OpenStreetMap contributors, ODbL"
+            />
+            <Source label="Map rendering" detail="Leaflet (BSD-2-Clause)" />
           </ul>
         </div>
       </div>

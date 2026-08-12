@@ -10,6 +10,7 @@ import {
   useState,
 } from "react";
 import {
+  AttributionControl,
   MapContainer,
   Marker,
   TileLayer,
@@ -546,10 +547,13 @@ export default function MapView({
       className={picking ? "h-dvh w-full scenic-picking" : "h-dvh w-full"}
       zoomControl={false}
       bounceAtZoomLimits={false}
+      attributionControl={false}
     >
+      {/* The full source list lives in About; the corner carries only the basemap credit. */}
+      <AttributionControl prefix={false} />
       <TileLayer
         url="https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png"
-        attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
+        attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a> &middot; <a href="https://carto.com/attributions">CARTO</a>'
         subdomains="abcd"
         maxZoom={20}
         keepBuffer={4}
