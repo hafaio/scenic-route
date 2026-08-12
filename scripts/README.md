@@ -933,6 +933,74 @@ and that many UTF-8 bytes, back to back — the GRPH/STRT trailing-name-blob lay
 `stop_name`s **and** the route display names together, deduped and sorted; a stop record's name id
 and a segment's routeNameId both index it.
 
+### `public/ferry-schedule/` — the ferry timetable, magic `FSCH` (v1, derived, **committed**)
+
+FERR above flattens the whole timetable into one crossing-plus-average-wait figure per stop pair,
+because a time-independent cost has nowhere to put anything else, and `tiler graph` bakes that figure
+into the routing graph. This is the timetable itself, kept out of the graph so it can be refreshed
+without one: a deploy rebuilds `public/routing/<id>.bin` in ~20 minutes and pushes it through LFS,
+which no daily job can do. `scripts/ferry-schedule.ts` writes it, `src/routing/ferry-schedule.ts`
+reads it, and the router falls back to the baked figure whenever it is missing.
+
+Two files per city, both **committed and never LFS-tracked** (raw.githubusercontent serves an LFS
+file's pointer text, which would break the client fetch — the same rule as `public/sheds/`):
+
+- **`<id>.bin`** — the one FSCH record in effect now.
+- **`<id>-past.bin`** — every superseded record, appended whole and never rewritten. Each carries the
+  day range it was in effect for, so a route planned on a past day is planned against the timetable
+  that actually ran that day. Walked front to back by record length; only a day before the standing
+  record's first day is worth fetching it for.
+
+The daily job (`.github/workflows/sheds.yml`) re-reads both GTFS feeds and compares everything past
+the header. That part is a **pure function of the two zips** — lanes, services and exceptions are all
+sorted before they are written — so an unchanged feed produces identical bytes and the job's
+"nothing to commit" path fires. A change closes the standing record the day before, appends it to
+the history file, and opens a new one from today.
+
+Header, 40 bytes, little-endian:
+
+| offset | type | field |
+| --- | --- | --- |
+| 0 | u8[4] | magic `FSCH` |
+| 4 | u16 | format version = 1 |
+| 6 | u16 | header bytes = 40 |
+| 8 | u32 | first day in effect, `YYYYMMDD` |
+| 12 | u32 | last day in effect, `YYYYMMDD`; **0 while this is the standing record** |
+| 16 | u32 | service count |
+| 20 | u32 | exception count |
+| 24 | u32 | lane count |
+| 28 | u32 | departure blob length |
+| 32 | u32 | name table offset, from the start of **this record** |
+| 36 | u32 | record bytes, padding included — what walks the history file |
+
+Then the sections back to back, each 4-byte aligned, their offsets implicit from the counts above.
+
+1. **Services** (count × 12): `u32 start day`, `u32 end day` (both `YYYYMMDD`), `u8 weekday mask`
+   (bit 0 Monday … bit 6 Sunday), 3 pad bytes. Straight out of `calendar.txt`. A service named only
+   by `calendar_dates.txt` gets a zero mask over a zero range, which never matches a weekday — which
+   is exactly what an exceptions-only service is.
+2. **Exceptions** (count × 8): `u32 day`, `u16 service index`, `u8 type` (1 = added, 2 = removed),
+   1 pad byte. `calendar_dates.txt`, and it applies **whatever the calendar range says** — a service
+   is active on a day when its mask matches inside its range, then these override.
+3. **Lanes** (count × 16): `u16 from-stop name id`, `u16 to-stop name id`, `u16 route name id`
+   (`0xFFFF` = none), `u16 service index`, `u16 departure count`, 2 pad bytes, `u32 offset into the
+   departure blob`. A lane is **directional** — the sailings out of one terminal toward the other —
+   and split by route as well, so the client can name the boat without a route id per departure. It
+   is keyed by stop **name** because that is the only thing about a ferry edge that survives a graph
+   rebuild (GRPH's byte-60 endpoint side table); the build fails loudly if two ferry stops share one.
+4. **Departure blob**: per lane, its sailings in order, each a pair of plain LEB128 varints — the
+   gap in seconds from the previous departure (the first absolute, from midnight of the service day,
+   so a GTFS `25:10:00` reads as 90600) then that sailing's own crossing seconds. Both non-negative,
+   so no zigzag. Zero-padded to 4 bytes.
+5. **Name table**: `u32 count`, then (count+1) × `u32` byte offsets into the following UTF-8 blob —
+   the GRPH name-table layout, so a name is an O(1) read. Stop names and route names share it.
+
+The client resolves a record against a departure instant in `resolveTimetable`: the services running
+on each of the **three** days around it, then per ferry edge the sailings out of each of its two
+terminals, merged across routes and shifted into seconds from midnight of the routed day. Three days
+because a walk beginning near midnight catches a boat on the next service day, and because GTFS
+writes an after-midnight sailing as the previous day's 25:10.
+
 ### `public/streets/{x}/{y}.bin` — the chunks (derived, gitignored)
 
 The segments touching one z12 tile. A segment goes into every z12 tile its bounding box
