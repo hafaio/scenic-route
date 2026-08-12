@@ -14,6 +14,7 @@ const NAME_NONE = 0xffff;
 const KIND_MASK = 0x7;
 const SIDE_SHIFT = 3;
 const SIDE_MASK = 0x7;
+const KIND_CROSSING = 1;
 const KIND_FERRY = 4;
 // flags byte bit 2 marks a sidewalk that lies to the right of its stored geometry direction.
 const GEOMETRY_RIGHT_FLAG = 0x4;
@@ -52,6 +53,30 @@ export function edgeDurableKey(graph: RoutingGraph, edge: number): number {
       graph.edgeOrdinal[edge],
     );
   }
+}
+
+// The nodes standing in a roadway rather than on pavement: those whose every edge is a crossing. A
+// marked crossing of a divided street is drawn as several ways chained through the islands between
+// them, so these are the joints inside one crossing. Charging a wait per crossing EDGE would bill a
+// wide avenue two or three times for a single wait.
+export function markMidRoadwayNodes(
+  nodeCount: number,
+  csr: Uint32Array,
+  adjacency: Uint32Array,
+  edgeKindSide: Uint8Array,
+): Uint8Array {
+  const midRoadway = new Uint8Array(nodeCount);
+  for (let node = 0; node < nodeCount; node += 1) {
+    const from = csr[node];
+    const to = csr[node + 1];
+    let allCrossings = to > from;
+    for (let slot = from; slot < to && allCrossings; slot += 1) {
+      allCrossings =
+        (edgeKindSide[adjacency[slot]] & KIND_MASK) === KIND_CROSSING;
+    }
+    midRoadway[node] = allCrossings ? 1 : 0;
+  }
+  return midRoadway;
 }
 
 export type EdgeKind = "sidewalk" | "crossing" | "link" | "path" | "ferry";
@@ -103,6 +128,9 @@ export interface RoutingGraph extends GraphIdentity {
   edgeKindSide: Uint8Array; // bits 0-2 kind, bits 3-5 side
   edgeSourceId: Uint32Array; // the CSCL physicalid or OSM way id; NO_SOURCE_ID for a crossing, link or ferry
   edgeOrdinal: Uint8Array; // which edge of the several one source segment becomes; both feed `edgeDurableKey`
+  // 1 where every edge on the node is a crossing, i.e. a traffic island: a walker standing there is
+  // mid-roadway, part way through one crossing rather than at the start of another.
+  nodeMidRoadway: Uint8Array;
   maxCover: number; // the greatest per-edge cover in the graph, 0..1; sets the cost clip floor
 
   edgeLandmark: Uint8Array; // 0..254, this edge's landmark-amenity discount attribute; 0 for a ferry
@@ -273,6 +301,13 @@ export function decodeGraph(
     names,
   );
 
+  const nodeMidRoadway = markMidRoadwayNodes(
+    nodeCount,
+    csr,
+    adjacency,
+    edgeKindSide,
+  );
+
   return {
     ...identity,
     nodeCount,
@@ -295,6 +330,7 @@ export function decodeGraph(
     edgeKindSide,
     edgeSourceId,
     edgeOrdinal,
+    nodeMidRoadway,
     maxCover,
     edgeLandmark,
     edgeArt,

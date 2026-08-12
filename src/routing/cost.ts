@@ -21,7 +21,17 @@
 import { edgeKind, type RoutingGraph } from "./graph";
 import { shedShade } from "./sheds";
 
-export const WALK_METERS_PER_SECOND = 1.4;
+// NYC DCP's Pedestrian Level of Service Study (2006) timed 8,978 Lower Manhattan pedestrians at a
+// mean of 1.30 m/s; work trips ran 1.34, over-65s 1.11.
+export const WALK_METERS_PER_SECOND = 1.3;
+
+// What one crossing costs beyond walking its length. The same study's 50 timed walks over 18
+// signalized blocks lost 75-155 s to crosswalks against 1,490-1,850 s of walking — about 3 s a
+// crossing for walkers who cross on whichever leg is green rather than waiting out a full phase, and
+// well under the ~15 s a compliant random arrival would face. Deliberately one number for every
+// crossing: signalized share runs from 88% in midtown to 17% on Staten Island, but the whole term is
+// worth a minute on a half-hour walk, so telling them apart buys less than it costs.
+export const CROSSING_SECONDS = 3;
 
 // Every weight spans [0, 1]. w must stay <= 1 or a discount floor (1 - w*max) can go negative, and a
 // negative edge cost breaks Dijkstra/A*. Defaults sit a little in from the extremes for a mild bias.
@@ -213,13 +223,35 @@ export function minMultiplier(
   );
 }
 
-// The undiscounted travel time of an edge: a ferry's baked crossing-plus-wait seconds, or a walked
-// edge's length over walking speed. This is the ETA unit — the reported trip time sums it.
-export function rawSeconds(graph: RoutingGraph, edge: number): number {
+// The wait this edge owes, charged where a walker steps off the kerb and nowhere else. A divided
+// street is several crossing edges chained through its islands, so `fromNode` — the node the walker
+// enters by — is what separates the start of a crossing from its continuation.
+export function crossingWait(
+  graph: RoutingGraph,
+  edge: number,
+  fromNode: number,
+): number {
+  return edgeKind(graph, edge) === "crossing" &&
+    graph.nodeMidRoadway[fromNode] === 0
+    ? CROSSING_SECONDS
+    : 0;
+}
+
+// The undiscounted travel time of an edge entered at `fromNode`: a ferry's baked crossing-plus-wait
+// seconds, or a walked edge's length over walking speed plus any crossing wait. This is the ETA unit —
+// the reported trip time sums it.
+export function rawSeconds(
+  graph: RoutingGraph,
+  edge: number,
+  fromNode: number,
+): number {
   if (edgeKind(graph, edge) === "ferry") {
     return graph.edgeDurationSeconds[edge];
   } else {
-    return graph.edgeLength[edge] / WALK_METERS_PER_SECOND;
+    return (
+      graph.edgeLength[edge] / WALK_METERS_PER_SECOND +
+      crossingWait(graph, edge, fromNode)
+    );
   }
 }
 

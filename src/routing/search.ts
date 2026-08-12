@@ -7,6 +7,7 @@
 // optimality even though the ferry credit makes the heuristic inconsistent.
 
 import {
+  crossingWait,
   edgeCover,
   edgeMultiplier,
   edgeShed,
@@ -30,6 +31,11 @@ import {
   subEdgePath,
 } from "./graph";
 import { haversineMeters, type Snap } from "./snap";
+
+// The node a step is entered by, which its direction fixes: the crossing wait is charged there.
+function stepFrom(graph: RoutingGraph, step: RouteStep): number {
+  return step.forward ? graph.edgeNodeA[step.edge] : graph.edgeNodeB[step.edge];
+}
 
 export interface RouteStep {
   edge: number;
@@ -294,7 +300,7 @@ function reconstruct(
   for (const step of steps) {
     lengthMeters += step.lengthMeters;
     if (step.kind === "ferry") {
-      const seconds = rawSeconds(graph, step.edge);
+      const seconds = rawSeconds(graph, step.edge, stepFrom(graph, step));
       travelSeconds += seconds;
       elapsedSeconds += seconds;
     } else {
@@ -317,7 +323,9 @@ function reconstruct(
         edgeShed(graph, edge),
       );
       sums.shade += Math.max(0, shadeAttr) * stepMeters;
-      const seconds = stepMeters / WALK_METERS_PER_SECOND;
+      const seconds =
+        stepMeters / WALK_METERS_PER_SECOND +
+        crossingWait(graph, edge, stepFrom(graph, step));
       travelSeconds += seconds;
       elapsedSeconds += seconds;
     }
@@ -467,7 +475,7 @@ export function findRoute(
         distance[node] + effSeconds(graph, edge, weights, elapsed[node]);
       if (relaxed < distance[neighbour]) {
         distance[neighbour] = relaxed;
-        elapsed[neighbour] = elapsed[node] + rawSeconds(graph, edge);
+        elapsed[neighbour] = elapsed[node] + rawSeconds(graph, edge, node);
         parentEdge[neighbour] = edge;
         heap.push(relaxed + heuristicOf(neighbour), neighbour);
       }
@@ -708,7 +716,7 @@ export class RouteSolver {
           }
           this.distance[neighbour] = relaxed;
           this.elapsed[neighbour] =
-            this.elapsed[node] + rawSeconds(graph, edge);
+            this.elapsed[node] + rawSeconds(graph, edge, node);
           this.parentEdge[neighbour] = edge;
           heap.push(relaxed + heuristicOf(neighbour), neighbour);
         }
