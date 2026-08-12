@@ -551,6 +551,9 @@ never expire on their own — including the 243 MiB canopy height raster, which 
 rather than as JSON because the tiler reads it off disk itself. The sources move about once a year, so a re-run wants whatever it
 read last time — not a fresher copy it did not ask for.
 
+`SOCRATA_APP_TOKEN`, when set, buys a request budget of its own. It only matters on a host whose
+address is shared with strangers, so CI has one and a workstation does not need one.
+
 `build-tiles` skips its work entirely if its output is newer than the manifest, the ramp, the
 `.bin` inputs and the script itself.
 

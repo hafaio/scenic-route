@@ -47,7 +47,12 @@ jobs:
       # New sheds are placed against the graph the SITE is serving, not one this checkout could build,
       # so their durable edge keys are the ones the client will resolve. The job fails loudly if the
       # deployed graph is older than this checkout can read — deploy first, then run this.
+      #
+      # A runner shares its egress address with the whole fleet, and the anonymous Socrata pool is
+      # throttled per address. Absent on a fork, which reads unauthenticated instead.
       - run: bun run update-sheds
+        env:
+          SOCRATA_APP_TOKEN: ${{ secrets.SOCRATA_APP_TOKEN }}
 
       # One ordinary commit on `main` a day. Not a size problem: packed git deltas these files to
       # 1.7-22 KB a day depending on the repack window, not the ~1 MB a day the raw size suggests
