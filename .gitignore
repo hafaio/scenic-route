@@ -26,9 +26,10 @@
 /public/dining/
 /public/openstreets/
 /public/landuse/
-# NOT public/sheds/: the shed artifact is rebuilt daily by a job rather than by a deploy, so it is
-# committed — the job reads the last one out of the checkout and the client reads it off `main`
-# through raw.githubusercontent.com. Never LFS-track it (data/README.md).
+# NOT public/sheds/ or public/ferry-schedule/: both are rebuilt daily by a job rather than by a
+# deploy, so they are committed — the job reads the last one out of the checkout and the client reads
+# it off `main` through raw.githubusercontent.com. Never LFS-track either (data/README.md).
+# public/ferries/ above is a different thing entirely: the deploy's own drawn ferry lines.
 
 # raw source reads cached by `bun run build-tree-data`; --refresh to go back to the network
 /.cache/
