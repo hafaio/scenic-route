@@ -34,7 +34,6 @@ export default function CanopyLayer() {
       .filter((city) => city.field.canopy)
       .map((city) => {
         const { south, west, north, east } = city.bounds;
-        const canopy = city.field.canopy;
         return new WorkerTileLayer(
           () => ({
             kind: "canopy",
@@ -51,7 +50,6 @@ export default function CanopyLayer() {
             zIndex: Z_INDEX,
             // a wider ring, so panning after a zoom doesn't immediately re-draw
             keepBuffer: 4,
-            attribution: `<a href="${canopy?.sourceUrl}" target="_blank" rel="noreferrer">${canopy?.attribution}</a>`,
           },
         );
       });
