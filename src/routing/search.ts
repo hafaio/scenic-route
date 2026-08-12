@@ -32,9 +32,31 @@ import {
 } from "./graph";
 import { haversineMeters, type Snap } from "./snap";
 
-// The node a step is entered by, which its direction fixes: the crossing wait is charged there.
-function stepFrom(graph: RoutingGraph, step: RouteStep): number {
+// The node a step is entered by, which its direction fixes: the crossing wait is charged there, and
+// a ferry is boarded there.
+export function stepFrom(graph: RoutingGraph, step: RouteStep): number {
   return step.forward ? graph.edgeNodeA[step.edge] : graph.edgeNodeB[step.edge];
+}
+
+// The raw seconds one route STEP takes, reached `elapsedSeconds` into the trip. Not the same as
+// `rawSeconds`, which prices a whole edge: the first and last steps are partial walks along theirs,
+// so a step is charged its own `lengthMeters`. Everything that runs a clock over the finished route
+// — the ETA summary and the directions — has to use this one, because a ferry's cost is a step
+// function of the clock and two clocks a minute apart can board different boats.
+export function stepSeconds(
+  graph: RoutingGraph,
+  step: RouteStep,
+  elapsedSeconds: number,
+): number {
+  const from = stepFrom(graph, step);
+  if (step.kind === "ferry") {
+    return rawSeconds(graph, step.edge, from, elapsedSeconds);
+  } else {
+    return (
+      step.lengthMeters / WALK_METERS_PER_SECOND +
+      crossingWait(graph, step.edge, from)
+    );
+  }
 }
 
 export interface RouteStep {
@@ -300,7 +322,7 @@ function reconstruct(
   for (const step of steps) {
     lengthMeters += step.lengthMeters;
     if (step.kind === "ferry") {
-      const seconds = rawSeconds(graph, step.edge, stepFrom(graph, step));
+      const seconds = stepSeconds(graph, step, elapsedSeconds);
       travelSeconds += seconds;
       elapsedSeconds += seconds;
     } else {
@@ -323,9 +345,7 @@ function reconstruct(
         edgeShed(graph, edge),
       );
       sums.shade += Math.max(0, shadeAttr) * stepMeters;
-      const seconds =
-        stepMeters / WALK_METERS_PER_SECOND +
-        crossingWait(graph, edge, stepFrom(graph, step));
+      const seconds = stepSeconds(graph, step, elapsedSeconds);
       travelSeconds += seconds;
       elapsedSeconds += seconds;
     }
@@ -472,10 +492,11 @@ export function findRoute(
       }
       const neighbour = otherEnd(graph, edge, node);
       const relaxed =
-        distance[node] + effSeconds(graph, edge, weights, elapsed[node]);
+        distance[node] + effSeconds(graph, edge, weights, elapsed[node], node);
       if (relaxed < distance[neighbour]) {
         distance[neighbour] = relaxed;
-        elapsed[neighbour] = elapsed[node] + rawSeconds(graph, edge, node);
+        elapsed[neighbour] =
+          elapsed[node] + rawSeconds(graph, edge, node, elapsed[node]);
         parentEdge[neighbour] = edge;
         heap.push(relaxed + heuristicOf(neighbour), neighbour);
       }
@@ -709,14 +730,15 @@ export class RouteSolver {
         }
         const relaxed =
           this.distance[node] +
-          effSeconds(graph, edge, this.weights, this.sunElapsed(node));
+          effSeconds(graph, edge, this.weights, this.sunElapsed(node), node);
         if (relaxed < this.distance[neighbour]) {
           if (this.distance[neighbour] === Number.POSITIVE_INFINITY) {
             this.reached.push(neighbour);
           }
           this.distance[neighbour] = relaxed;
           this.elapsed[neighbour] =
-            this.elapsed[node] + rawSeconds(graph, edge, node);
+            this.elapsed[node] +
+            rawSeconds(graph, edge, node, this.sunElapsed(node));
           this.parentEdge[neighbour] = edge;
           heap.push(relaxed + heuristicOf(neighbour), neighbour);
         }

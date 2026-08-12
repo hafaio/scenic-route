@@ -3,6 +3,7 @@
 // over the fetched buffer; the strided edge records are copied once into parallel typed arrays so
 // the search loop touches only flat arrays.
 
+import type { FerryTimetable } from "./ferry-schedule";
 import type { ShadeField } from "./shade";
 import type { ShedField } from "./sheds";
 
@@ -158,8 +159,15 @@ export interface RoutingGraph extends GraphIdentity {
   // scaffolding at all while it is.
   sheds: ShedField | null;
 
+  // The departure date's ferry timetable, filled from the FSCH artifact by computeFerrySchedule: per
+  // ferry edge, the sailings out of each of its two terminals. Null until that resolves and on any day
+  // no record covers, and every ferry then costs the baked `edgeDurationSeconds` below instead.
+  ferries: FerryTimetable | null;
+
   edgeHalfOffsetDm: Uint8Array; // decimetres to a sidewalk; 0 for crossings/links/paths/ferries
-  edgeDurationSeconds: Float32Array; // a ferry edge's crossing-plus-wait seconds; 0 for every other kind
+  // A ferry edge's crossing-plus-average-wait seconds, the whole timetable flattened to one number;
+  // 0 for every other kind. What a ferry costs when `ferries` is null.
+  edgeDurationSeconds: Float32Array;
   ferryEdges: Uint32Array; // ids of the ferry edges, for the A* ferry-credit heuristic
   minFerrySecPerMetre: number; // min over ferry edges of duration/length, Infinity when there are none
   edgeFlags: Uint8Array; // bit0 structure, bit1 steps, bit2 geometry-right (sidewalks), bit3 OSM-sourced
@@ -343,6 +351,7 @@ export function decodeGraph(
     maxDirectCanopy,
     shade: null, // populated lazily once the SHDE artifact loads, keyed on the departure instant
     sheds: null, // populated lazily once the SHED artifact loads, keyed on the picked day
+    ferries: null, // populated lazily once the FSCH artifact loads, keyed on the departure day
     edgeHalfOffsetDm,
     edgeDurationSeconds,
     ferryEdges: Uint32Array.from(ferryEdges),
