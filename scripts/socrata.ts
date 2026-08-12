@@ -1,5 +1,6 @@
 // Shared access to the NYC Open Data (Socrata) endpoints the data pipelines read.
 
+import pRetry from "p-retry";
 import { cached } from "./cache";
 
 export interface Coord {
@@ -17,7 +18,8 @@ export interface Tree extends Coord {
 
 const PAGE_SIZE = 50_000;
 const MAX_ATTEMPTS = 3;
-const RETRY_DELAY_MS = 2_000;
+const RETRY_BASE_MS = 2_000;
+const RETRY_CAP_MS = 30_000;
 const BATCH_KEYS = 200; // keys per `field in (...)`; longer lists start timing out
 const BATCH_WORKERS = 8;
 const BATCH_PROGRESS = 50; // batches between progress lines
@@ -28,25 +30,30 @@ const TREE_COUNT = 898_618; // standing trees at the last refresh; a floor, not 
 const SHORTFALL = 0.05;
 
 async function fetchJson<Row>(url: string): Promise<Row[]> {
-  let lastError: unknown;
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-    try {
-      const response = await fetch(url);
-      if (!response.ok) {
-        throw new Error(`${response.status} ${response.statusText}`);
-      }
-      return (await response.json()) as Row[];
-    } catch (error) {
-      lastError = error;
-      console.error(`  attempt ${attempt}/${MAX_ATTEMPTS} failed: ${error}`);
-      if (attempt < MAX_ATTEMPTS) {
-        await new Promise((resolve) =>
-          setTimeout(resolve, RETRY_DELAY_MS * attempt),
-        );
-      }
-    }
+  try {
+    return await pRetry(
+      async () => {
+        const response = await fetch(url);
+        if (!response.ok) {
+          throw new Error(`${response.status} ${response.statusText}`);
+        }
+        return (await response.json()) as Row[];
+      },
+      {
+        retries: MAX_ATTEMPTS - 1,
+        minTimeout: RETRY_BASE_MS,
+        maxTimeout: RETRY_CAP_MS,
+        randomize: true,
+        onFailedAttempt: ({ error, attemptNumber }) => {
+          console.error(
+            `  attempt ${attemptNumber}/${MAX_ATTEMPTS} failed: ${error}`,
+          );
+        },
+      },
+    );
+  } catch (error) {
+    throw new Error(`failed to fetch ${url}: ${error}`);
   }
-  throw new Error(`failed to fetch ${url}: ${lastError}`);
 }
 
 // Pages in `:id` order, the only ordering Socrata guarantees is stable across the requests
