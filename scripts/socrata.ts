@@ -17,9 +17,12 @@ export interface Tree extends Coord {
 }
 
 const PAGE_SIZE = 50_000;
-const MAX_ATTEMPTS = 3;
+const MAX_ATTEMPTS = 6;
 const RETRY_BASE_MS = 2_000;
 const RETRY_CAP_MS = 30_000;
+// four times the heaviest observed read
+const REQUEST_TIMEOUT_MS = 90_000;
+const APP_TOKEN = process.env.SOCRATA_APP_TOKEN;
 const BATCH_KEYS = 200; // keys per `field in (...)`; longer lists start timing out
 const BATCH_WORKERS = 8;
 const BATCH_PROGRESS = 50; // batches between progress lines
@@ -30,10 +33,15 @@ const TREE_COUNT = 898_618; // standing trees at the last refresh; a floor, not 
 const SHORTFALL = 0.05;
 
 async function fetchJson<Row>(url: string): Promise<Row[]> {
+  const headers: Record<string, string> =
+    APP_TOKEN === undefined ? {} : { "X-App-Token": APP_TOKEN };
   try {
     return await pRetry(
       async () => {
-        const response = await fetch(url);
+        const response = await fetch(url, {
+          headers,
+          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+        });
         if (!response.ok) {
           throw new Error(`${response.status} ${response.statusText}`);
         }
