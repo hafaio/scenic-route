@@ -53,6 +53,7 @@ import {
   type RouteWeights,
 } from "../src/routing/cost";
 import { buildDirections } from "../src/routing/directions";
+import { computeFerrySchedule } from "../src/routing/ferry-schedule";
 import { loadGraph, type RoutingGraph } from "../src/routing/graph";
 import { navProgress } from "../src/routing/nav-progress";
 import { loadPois, type PoiSet, passedPois } from "../src/routing/pois";
@@ -306,6 +307,10 @@ export default function MapApp() {
   );
   const [allowSheds, setAllowSheds] = useState<boolean>(true);
   const shedDayRef = useRef<number>(Number.NaN);
+  // Which (city, clock tick) the graph's ferry timetable was resolved for. The DAY picks the services
+  // that run, but the sailing you catch moves with the clock inside that day, so this rebuilds on
+  // every tick rather than only when the date changes.
+  const ferryContextRef = useRef<string>("");
   // Whether to send the live location to the geocoder so nearby results rank first. On by default;
   // the toolbar menu toggle opts out, and it persists to localStorage below.
   const [shareLocationForSearch, setShareLocationForSearch] =
@@ -384,15 +389,24 @@ export default function MapApp() {
         ? "deferred"
         : "off";
 
-  // While a preference reads the clock, follow it: each tick re-costs the route against the sun's new
-  // position, and a tick that lands on a new day also restands the scaffolding. The store only ticks in
-  // "now" mode or on a scrub, and only with a listener.
+  // While anything the route reads moves with the clock, follow it: each tick re-costs the route
+  // against the sun's new position and against the sailing a ferry terminal is next offering, and a
+  // tick that lands on a new day also restands the scaffolding. The store only ticks in "now" mode or
+  // on a scrub, and only with a listener.
+  //
+  // Ferries are on by default, so this normally subscribes from the outset — which is the point: an
+  // ETA built on "the 6:20 boat" has to stop saying so once 6:20 has gone.
   useEffect(() => {
-    if (shadeWeight === 0 && shelterWeight === 0 && allowSheds) {
+    if (
+      shadeWeight === 0 &&
+      shelterWeight === 0 &&
+      allowSheds &&
+      !allowFerries
+    ) {
       return;
     }
     return subscribeRouteTime(() => setRouteTimeTick((tick) => tick + 1));
-  }, [shadeWeight, shelterWeight, allowSheds]);
+  }, [shadeWeight, shelterWeight, allowSheds, allowFerries]);
 
   useEffect(() => {
     const stored = window.localStorage.getItem(SEARCH_BIAS_KEY);
@@ -714,6 +728,34 @@ export default function MapApp() {
           } else {
             graph.sheds = null;
             shedDayRef.current = Number.NaN;
+          }
+          // The ferry timetable for the departure instant. Only worth fetching while ferries are
+          // allowed; barred, every ferry edge is skipped before its cost is ever asked for. A failed
+          // fetch is not fatal — the graph's baked crossing-plus-average-wait figure is what routing
+          // used before this artifact existed, so it simply falls back to that.
+          if (weights.allowFerries) {
+            const context = `${activeCity().id}:${routeTimeTick}`;
+            if (ferryContextRef.current !== context) {
+              routeCacheRef.current = null;
+              dragSolverRef.current = null;
+              ferryContextRef.current = context;
+              try {
+                await computeFerrySchedule(
+                  graph,
+                  activeCity().id,
+                  getResolvedDate(),
+                );
+              } catch (error) {
+                console.error("ferry timetable unavailable:", error);
+                graph.ferries = null;
+              }
+              if (cancelled) {
+                return;
+              }
+            }
+          } else {
+            graph.ferries = null;
+            ferryContextRef.current = "";
           }
           const pair = snapPair(graph, index, request.start, request.dest);
           if (!pair.ok) {

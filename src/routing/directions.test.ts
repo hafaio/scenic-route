@@ -60,6 +60,17 @@ function makeResult(graph: RoutingGraph, specs: ReadonlyArray<EdgeSpec>) {
   const edgeGeomOffset = new Uint32Array(edgeCount).fill(NO_GEOMETRY);
   const edgeGeomCount = new Uint16Array(edgeCount);
   const edgeDurationSeconds = new Float32Array(edgeCount);
+  // buildRuns runs the ETA clock forward over the steps to pick each ferry's sailing, so the fixture
+  // owes it the fields rawSeconds reads: the kind byte, the length, and the island flags.
+  const edgeLength = new Float32Array(edgeCount);
+  const edgeKindSide = new Uint8Array(edgeCount);
+  const kindByte: Record<EdgeKind, number> = {
+    sidewalk: 0,
+    crossing: 1,
+    link: 2,
+    path: 3,
+    ferry: 4,
+  };
   // The name table and per-edge name id back edgeName(), which the ferry maneuver reads for its
   // route; the ferry endpoint map carries the two terminal names per ferry edge.
   const NAME_NONE = 0xffff;
@@ -83,6 +94,8 @@ function makeResult(graph: RoutingGraph, specs: ReadonlyArray<EdgeSpec>) {
     edgeNodeA[edge] = spec.a;
     edgeNodeB[edge] = spec.b;
     edgeDurationSeconds[edge] = spec.durationSeconds ?? 0;
+    edgeLength[edge] = spec.lengthMeters;
+    edgeKindSide[edge] = kindByte[spec.kind];
     if (spec.name !== null) {
       edgeNameId[edge] = internName(spec.name);
     }
@@ -105,6 +118,9 @@ function makeResult(graph: RoutingGraph, specs: ReadonlyArray<EdgeSpec>) {
     edgeGeomOffset: Uint32Array;
     edgeGeomCount: Uint16Array;
     edgeDurationSeconds: Float32Array;
+    edgeLength: Float32Array;
+    edgeKindSide: Uint8Array;
+    nodeMidRoadway: Uint8Array;
     edgeNameId: Uint16Array;
     names: string[];
     ferryEndpointNames: Map<number, { a: string; b: string }>;
@@ -114,6 +130,12 @@ function makeResult(graph: RoutingGraph, specs: ReadonlyArray<EdgeSpec>) {
   wired.edgeGeomOffset = edgeGeomOffset;
   wired.edgeGeomCount = edgeGeomCount;
   wired.edgeDurationSeconds = edgeDurationSeconds;
+  wired.edgeLength = edgeLength;
+  wired.edgeKindSide = edgeKindSide;
+  // No islands in these fixtures: every crossing starts from pavement.
+  wired.nodeMidRoadway = new Uint8Array(
+    specs.reduce((most, spec) => Math.max(most, spec.a, spec.b), 0) + 1,
+  );
   wired.edgeNameId = edgeNameId;
   wired.names = names;
   wired.ferryEndpointNames = ferryEndpointNames;
