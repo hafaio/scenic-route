@@ -146,7 +146,7 @@ const MAGIC = "GRPH";
 const FORMAT_VERSION = 6;
 const HEADER_BYTES = 64;
 const EDGE_RECORD_BYTES = 34;
-const GRAPH_URL = "routing/nyc.bin"; // relative, so it picks up the deploy basePath
+// relative, so both pick up the deploy basePath
 const VERSION_URL = "routing/version.json"; // written beside the graph by the same `tiler graph` run
 const PATH_CACHE_LIMIT = 512;
 
@@ -380,7 +380,8 @@ export function edgeGeometryRight(graph: RoutingGraph, edge: number): boolean {
   return (graph.edgeFlags[edge] & GEOMETRY_RIGHT_FLAG) !== 0;
 }
 
-let graphPromise: Promise<RoutingGraph> | null = null;
+// Keyed by city: switching city loads a different graph, and coming back must not refetch the first.
+const graphPromises = new Map<string, Promise<RoutingGraph>>();
 
 // How the graph beside it names itself, read out of the deploy's own record rather than recomputed
 // here: FNV-1a over 30 MB of graph is ~0.5 s of blocked main thread on a laptop and several times
@@ -403,23 +404,25 @@ async function fetchGraphIdentity(): Promise<GraphIdentity> {
   }
 }
 
-export function loadGraph(): Promise<RoutingGraph> {
-  if (!graphPromise) {
-    graphPromise = Promise.all([fetch(GRAPH_URL), fetchGraphIdentity()])
-      .then(async ([response, identity]) => {
-        if (!response.ok) {
-          throw new Error(
-            `${GRAPH_URL}: ${response.status} ${response.statusText}`,
-          );
-        }
-        return decodeGraph(await response.arrayBuffer(), identity);
-      })
-      .catch((error: unknown) => {
-        graphPromise = null; // a failed load must not be memoized
-        throw error;
-      });
+export function loadGraph(cityId: string): Promise<RoutingGraph> {
+  const pending = graphPromises.get(cityId);
+  if (pending) {
+    return pending;
   }
-  return graphPromise;
+  const url = `routing/${cityId}.bin`;
+  const request = Promise.all([fetch(url), fetchGraphIdentity()])
+    .then(async ([response, identity]) => {
+      if (!response.ok) {
+        throw new Error(`${url}: ${response.status} ${response.statusText}`);
+      }
+      return decodeGraph(await response.arrayBuffer(), identity);
+    })
+    .catch((error: unknown) => {
+      graphPromises.delete(cityId); // a failed load must not be memoized
+      throw error;
+    });
+  graphPromises.set(cityId, request);
+  return request;
 }
 
 function readVarint(bytes: Uint8Array, cursor: { offset: number }): number {

@@ -11,6 +11,7 @@ import {
 } from "../src/routing/graph";
 import type { RouteResult, RouteStep } from "../src/routing/search";
 import type { Snap } from "../src/routing/snap";
+import { useCity } from "./city-context";
 import { savedIcon, startIcon } from "./map-icons";
 
 interface RouteLayerProps {
@@ -254,6 +255,7 @@ export default function RouteLayer({
   onEndpointDrag,
 }: RouteLayerProps) {
   const map = useMap();
+  const city = useCity();
   const [graph, setGraph] = useState<RoutingGraph | null>(null);
   const gridRef = useRef<RouteGrid | null>(null);
   // The dest object last framed by the camera; a slider recompute keeps its identity, a new
@@ -262,7 +264,7 @@ export default function RouteLayer({
 
   useEffect(() => {
     let live = true;
-    loadGraph().then(
+    loadGraph(city.id).then(
       (loaded) => {
         if (live) {
           setGraph(loaded);
@@ -273,7 +275,7 @@ export default function RouteLayer({
     return () => {
       live = false;
     };
-  }, []);
+  }, [city.id]);
 
   useEffect(() => {
     if (!map.getPane(PANE_NAME)) {

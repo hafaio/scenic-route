@@ -12,7 +12,7 @@ import {
   shedDecks,
   traceDeck,
 } from "../src/tiles/shed-decks";
-import manifest from "../src/tree-cover/manifest.json";
+import { useCity } from "./city-context";
 
 // The "Scaffolding" overlay: every sidewalk shed standing on the map's picked DATE, drawn as the
 // stretch of sidewalk it decks over. The SHED artifact (src/routing/sheds.ts) carries eight and a
@@ -41,8 +41,6 @@ const SHED_ALPHA = 0.75; // the basemap's street still reads through the band
 
 // Zoom 0 is the whole world in 256 px, which a double resolves far past z20.
 const REFERENCE_ZOOM = 0;
-
-const [city] = manifest.cities;
 
 class ShedGrid extends L.GridLayer {
   private decks: ShedDecks | null = null;
@@ -98,6 +96,7 @@ class ShedGrid extends L.GridLayer {
 
 export default function ShedLayer() {
   const map = useMap();
+  const city = useCity();
 
   useEffect(() => {
     // A dedicated pane, so the dark-mode tile-pane invert leaves the orange true.
@@ -136,7 +135,7 @@ export default function ShedLayer() {
       grid.setDecks(shedDecks(graph, history, day));
     };
 
-    Promise.all([loadGraph(), loadSheds()]).then(
+    Promise.all([loadGraph(city.id), loadSheds()]).then(
       ([loaded, sheds]) => {
         if (!cancelled) {
           graph = loaded;
@@ -153,7 +152,7 @@ export default function ShedLayer() {
       unsubscribe();
       grid.remove();
     };
-  }, [map]);
+  }, [map, city]);
 
   return null;
 }

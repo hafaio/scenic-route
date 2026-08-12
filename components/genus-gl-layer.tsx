@@ -9,6 +9,7 @@ import {
   subscribeGenusFilter,
 } from "../src/tree-cover/genus-filter";
 import manifest from "../src/tree-cover/manifest.json";
+import { useCity } from "./city-context";
 import TreeDotsLayer from "./tree-dots-layer";
 
 // The low-zoom genus overlay: a client-shaded dominance texture. The raster half (z9-z14) is a stack
@@ -165,11 +166,11 @@ function maskFromEnabled(enabled: ReadonlySet<number>): number {
   return mask >>> 0;
 }
 
-// The tile bounds: the union of every city that carries a genus layer, so Leaflet never requests a
-// tile outside the baked pyramid (a 404 the decoder would choke on).
-function genusBounds(): L.LatLngBounds | undefined {
+// The active city's bounds, when it carries a genus layer, so Leaflet never requests a tile outside
+// the baked pyramid (a 404 the decoder would choke on).
+function genusBounds(activeId: string): L.LatLngBounds | undefined {
   const boxes = manifest.cities
-    .filter((city) => city.field.genus)
+    .filter((city) => city.id === activeId && city.field.genus)
     .map((city) => city.bounds);
   if (boxes.length === 0) {
     return undefined;
@@ -190,6 +191,7 @@ interface TileEntry {
 
 export default function GenusGlLayer() {
   const map = useMap();
+  const active = useCity();
 
   useEffect(() => {
     if (!map.getPane(PANE_NAME)) {
@@ -360,7 +362,7 @@ export default function GenusGlLayer() {
     const layer = new GlGridCtor({
       pane: PANE_NAME,
       tileSize: TILE_SIZE,
-      bounds: genusBounds(),
+      bounds: genusBounds(active.id),
       minNativeZoom: MIN_NATIVE_ZOOM,
       maxNativeZoom: MAX_NATIVE_ZOOM,
       maxZoom: MAX_NATIVE_ZOOM, // hand off to TreeDotsLayer above
@@ -422,7 +424,7 @@ export default function GenusGlLayer() {
       }
       tiles.clear();
     };
-  }, [map]);
+  }, [map, active.id]);
 
   return <TreeDotsLayer />;
 }

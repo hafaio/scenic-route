@@ -5,6 +5,7 @@ import { useEffect } from "react";
 import { useMap } from "react-leaflet";
 import WorkerTileLayer from "../src/tiles/layer";
 import manifest from "../src/tree-cover/manifest.json";
+import { useCity } from "./city-context";
 
 // A line overlay: the committed highway/rail nuisance lines (magic HWAY) or the ferry route segments
 // (magic FERR), drawn as coloured canvas polylines at every zoom. Like the POI dots they ride in a
@@ -26,27 +27,30 @@ export default function LinesLayer({
   color: string; // CSS stroke colour
 }) {
   const map = useMap();
+  const active = useCity();
 
   useEffect(() => {
     if (!map.getPane(PANE_NAME)) {
       const pane = map.createPane(PANE_NAME);
       pane.style.zIndex = String(PANE_Z_INDEX);
     }
-    const layers = manifest.cities.map((city) => {
-      const { south, west, north, east } = city.bounds;
-      // Relative, so it picks up the basePath the deploy injects.
-      const url = `${dir}/${city.id}.bin`;
-      return new WorkerTileLayer(
-        () => ({ kind: "lines", url, format, color }),
-        {
-          pane: PANE_NAME,
-          bounds: L.latLngBounds([south, west], [north, east]),
-          minZoom: MIN_ZOOM,
-          maxZoom: MAX_ZOOM,
-          keepBuffer: 4,
-        },
-      );
-    });
+    const layers = manifest.cities
+      .filter((entry) => entry.id === active.id)
+      .map((city) => {
+        const { south, west, north, east } = city.bounds;
+        // Relative, so it picks up the basePath the deploy injects.
+        const url = `${dir}/${city.id}.bin`;
+        return new WorkerTileLayer(
+          () => ({ kind: "lines", url, format, color }),
+          {
+            pane: PANE_NAME,
+            bounds: L.latLngBounds([south, west], [north, east]),
+            minZoom: MIN_ZOOM,
+            maxZoom: MAX_ZOOM,
+            keepBuffer: 4,
+          },
+        );
+      });
     for (const layer of layers) {
       layer.addTo(map);
     }
@@ -55,7 +59,7 @@ export default function LinesLayer({
         layer.remove();
       }
     };
-  }, [map, dir, format, color]);
+  }, [map, dir, format, color, active.id]);
 
   return null;
 }

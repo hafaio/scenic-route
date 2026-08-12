@@ -2,9 +2,11 @@
 
 import { useEffect, useRef, useState } from "react";
 import { FiCheck, FiLayers } from "react-icons/fi";
+import type { City } from "../src/cities";
 import { OVERLAYS, type OverlayId } from "../src/overlays/registry";
 
 interface LayersControlProps {
+  city: City;
   active: ReadonlySet<OverlayId>;
   onToggle: (id: OverlayId) => void;
 }
@@ -15,6 +17,7 @@ const ROW_ACTIVE = `${ROW_BASE} text-brand-600 dark:text-brand-400`;
 const ROW_IDLE = `${ROW_BASE} text-slate-700 hover:bg-slate-50 dark:text-slate-200 dark:hover:bg-slate-700/60`;
 
 export default function LayersControl({
+  city,
   active,
   onToggle,
 }: LayersControlProps) {
@@ -45,7 +48,10 @@ export default function LayersControl({
 
   // The button wears the single active layer's own glyph when exactly one is on, so the toolbar hints
   // at what's showing; with none or several on it falls back to the generic layers icon.
-  const activeEntries = OVERLAYS.filter((overlay) => active.has(overlay.id));
+  const offered = OVERLAYS.filter((overlay) =>
+    city.overlays.includes(overlay.id),
+  );
+  const activeEntries = offered.filter((overlay) => active.has(overlay.id));
   const soleEntry = activeEntries.length === 1 ? activeEntries[0] : null;
 
   return (
@@ -74,7 +80,7 @@ export default function LayersControl({
           role="menu"
           className="absolute right-0 mt-2 w-44 origin-top-right overflow-hidden rounded-2xl bg-white/95 py-1 shadow-2xl ring-1 ring-black/5 backdrop-blur-md dark:bg-slate-800/95 dark:ring-white/10"
         >
-          {OVERLAYS.map((overlay) => {
+          {offered.map((overlay) => {
             const on = active.has(overlay.id);
             return (
               <button

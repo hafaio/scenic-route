@@ -3,6 +3,7 @@
 import { useEffect } from "react";
 import { useMap } from "react-leaflet";
 import * as SunCalc from "suncalc";
+import { activeCity } from "../src/cities";
 import {
   getResolvedDate,
   isPickerOpen,
@@ -18,7 +19,7 @@ import WorkerTileLayer, {
 } from "../src/tiles/layer";
 import type { TileCoords } from "../src/tiles/protocol";
 import { shedDecks } from "../src/tiles/shed-decks";
-import manifest from "../src/tree-cover/manifest.json";
+import { useCity } from "./city-context";
 
 // The "Shade" overlay: shadow tiles for the sun's actual position, drawn as a smooth cool wash over all
 // ground. The heavy work — casting ~1M building footprints with a physically-modelled penumbra
@@ -75,10 +76,6 @@ const sun = SunCalc as unknown as {
   ) => { altitude: number; azimuth: number };
 };
 
-const [city] = manifest.cities;
-const CENTRE_LAT = (city.bounds.north + city.bounds.south) / 2;
-const CENTRE_LNG = (city.bounds.east + city.bounds.west) / 2;
-
 // One baked bin: its tile-pyramid index, its (declination, hourAngle) grid cell (what the client
 // selects on), and the sun position (degrees) it stands for.
 interface Bin {
@@ -103,7 +100,11 @@ function loadSchedule(): Promise<Bin[]> {
 
 // The sun's position over the city at the route-time store's resolved instant (now, or a picked time).
 function currentSun(): { elevation: number; azimuth: number } {
-  const position = sun.getPosition(getResolvedDate(), CENTRE_LAT, CENTRE_LNG);
+  const position = sun.getPosition(
+    getResolvedDate(),
+    activeCity().center.lat,
+    activeCity().center.lng,
+  );
   return {
     elevation: position.altitude,
     azimuth: ((position.azimuth % 360) + 360) % 360,
@@ -114,8 +115,12 @@ function currentSun(): { elevation: number; azimuth: number } {
 // prefetch can still order the day's bins around a night-time pick.
 function currentHourAngle(): number {
   const { elevation, azimuth } = currentSun();
-  const declination = declinationOf(elevation, azimuth, CENTRE_LAT);
-  return hourAngleOf(elevation, azimuth, CENTRE_LAT, declination);
+  const declination = declinationOf(
+    elevation,
+    azimuth,
+    activeCity().center.lat,
+  );
+  return hourAngleOf(elevation, azimuth, activeCity().center.lat, declination);
 }
 
 // The bin for a sun position: its season band, then the nearest hour-angle step within that band.
@@ -123,8 +128,17 @@ function currentHourAngle(): number {
 // nearest-centroid flip. Bins outside the sun's band are skipped; the fallback across all bins only
 // bites if a band has no baked bin (it always does while the sun is up).
 function pickBin(bins: Bin[], elevation: number, azimuth: number): Bin | null {
-  const declination = declinationOf(elevation, azimuth, CENTRE_LAT);
-  const hourAngle = hourAngleOf(elevation, azimuth, CENTRE_LAT, declination);
+  const declination = declinationOf(
+    elevation,
+    azimuth,
+    activeCity().center.lat,
+  );
+  const hourAngle = hourAngleOf(
+    elevation,
+    azimuth,
+    activeCity().center.lat,
+    declination,
+  );
   const season = seasonBand(declination);
   let best: Bin | null = null;
   let bestKey = Number.POSITIVE_INFINITY;
@@ -143,6 +157,7 @@ function pickBin(bins: Bin[], elevation: number, azimuth: number): Bin | null {
 
 export default function ShadeLayer() {
   const map = useMap();
+  const city = useCity();
 
   useEffect(() => {
     // A dedicated pane, so the dark-mode tile-pane invert leaves the slate tint true.
@@ -238,9 +253,15 @@ export default function ShadeLayer() {
     const pickedBand = (): number => {
       const noon = getResolvedDate();
       noon.setHours(12, 0, 0, 0);
-      const position = sun.getPosition(noon, CENTRE_LAT, CENTRE_LNG);
+      const position = sun.getPosition(
+        noon,
+        activeCity().center.lat,
+        activeCity().center.lng,
+      );
       const azimuth = ((position.azimuth % 360) + 360) % 360;
-      return seasonBand(declinationOf(position.altitude, azimuth, CENTRE_LAT));
+      return seasonBand(
+        declinationOf(position.altitude, azimuth, activeCity().center.lat),
+      );
     };
 
     // The baked source tiles the view is reading right now, plus — where the tiles are magnified — the
@@ -319,7 +340,7 @@ export default function ShadeLayer() {
         return;
       }
       deckDay = day;
-      Promise.all([loadGraph(), loadSheds()]).then(
+      Promise.all([loadGraph(city.id), loadSheds()]).then(
         ([graph, history]) => {
           if (!cancelled && deckDay === day) {
             sendShedDecks(shedDecks(graph, history, day));
@@ -411,7 +432,7 @@ export default function ShadeLayer() {
         layer.remove();
       }
     };
-  }, [map]);
+  }, [map, city.id]);
 
   return null;
 }

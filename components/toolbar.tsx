@@ -2,15 +2,18 @@
 
 import { useEffect, useRef, useState } from "react";
 import {
+  FiCheck,
   FiCrosshair,
   FiInfo,
   FiLoader,
   FiLogIn,
   FiLogOut,
+  FiMap,
   FiMapPin,
   FiRefreshCw,
   FiUser,
 } from "react-icons/fi";
+import { CITIES, type City } from "../src/cities";
 import type { OverlayId } from "../src/overlays/registry";
 import ClockControl from "./clock-control";
 import LayersControl from "./layers-control";
@@ -22,6 +25,7 @@ import ThemeToggle from "./theme-toggle";
 interface ToolbarProps {
   auth: AuthState;
   pinCount: number;
+  city: City;
   activeOverlays: ReadonlySet<OverlayId>;
   routing: boolean;
   refreshingClaims: boolean;
@@ -37,6 +41,7 @@ interface ToolbarProps {
   logHereHint: string | null; // why the location is unavailable, when it is
   shareLocationForSearch: boolean; // send the live location to the geocoder to rank nearby results
   onToggleSearchBias: () => void;
+  onSelectCity: (city: City) => void;
   composeShareUrl: () => string; // the route plus the current camera and overlays, as a link
 }
 
@@ -55,6 +60,7 @@ function initialFor(email: string | null): string {
 export default function Toolbar({
   auth,
   pinCount,
+  city,
   activeOverlays,
   routing,
   refreshingClaims,
@@ -70,6 +76,7 @@ export default function Toolbar({
   logHereHint,
   shareLocationForSearch,
   onToggleSearchBias,
+  onSelectCity,
   composeShareUrl,
 }: ToolbarProps) {
   const [menuOpen, setMenuOpen] = useState<boolean>(false);
@@ -105,7 +112,11 @@ export default function Toolbar({
   return (
     <div className="absolute top-3 right-3 z-[1000] flex items-center gap-2">
       <RouteToggle active={routing} onToggle={onToggleRouting} />
-      <LayersControl active={activeOverlays} onToggle={onToggleOverlay} />
+      <LayersControl
+        city={city}
+        active={activeOverlays}
+        onToggle={onToggleOverlay}
+      />
       <ClockControl />
       <ShareControl composeUrl={composeShareUrl} />
       <ThemeToggle />
@@ -192,6 +203,34 @@ export default function Toolbar({
                 />
                 Check again
               </button>
+            ) : null}
+            {CITIES.length > 1 ? (
+              <div className={MENU_DIVIDER}>
+                <p className="px-4 pt-3 text-[11px] uppercase tracking-wide text-slate-400 dark:text-slate-500">
+                  City
+                </p>
+                {CITIES.map((entry) => (
+                  <button
+                    key={entry.id}
+                    type="button"
+                    role="menuitemradio"
+                    aria-checked={entry.id === city.id}
+                    onClick={() => {
+                      setMenuOpen(false);
+                      onSelectCity(entry);
+                    }}
+                    className={`justify-between ${MENU_ITEM}`}
+                  >
+                    <span className="flex items-center gap-2">
+                      <FiMap className="shrink-0" />
+                      {entry.name}
+                    </span>
+                    {entry.id === city.id ? (
+                      <FiCheck className="shrink-0 text-brand-600 dark:text-brand-400" />
+                    ) : null}
+                  </button>
+                ))}
+              </div>
             ) : null}
             <button
               type="button"

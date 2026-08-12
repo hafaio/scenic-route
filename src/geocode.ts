@@ -1,3 +1,5 @@
+import { activeCity } from "./cities";
+
 const NOMINATIM_BASE = "https://nominatim.openstreetmap.org";
 const USER_AGENT_NOTE = "scenic-route (https://github.com/hafaio/scenic-route)";
 const MAX_CACHE_ENTRIES = 200;
@@ -6,9 +8,11 @@ const MAX_CACHE_ENTRIES = 200;
 // as-you-type autocomplete (Nominatim's usage policy forbids it and its public server is slow),
 // is CORS-enabled and keyless. Reverse geocoding stays on Nominatim — those are single calls.
 const PHOTON_BASE = "https://photon.komoot.io";
-// Clamps results to the manifest city bounds so a bare street name resolves to the local one.
-const PHOTON_BBOX =
-  "-74.25744633653791,40.49535834077158,-73.6955944236991,40.91699792884648";
+// Clamps results to the active city's bounds so a bare street name resolves to the local one.
+function photonBbox(): string {
+  const { west, south, east, north } = activeCity().bounds;
+  return `${west},${south},${east},${north}`;
+}
 const MAX_SEARCH_RESULTS = 5;
 
 export interface GeocodeResult {
@@ -148,11 +152,13 @@ export async function searchAddress(
   if (!trimmed) {
     return [];
   }
-  // The bias reorders results, so it is part of the cache identity; rounded to ~100 m so GPS jitter
-  // doesn't defeat the cache while the ranking stays representative of the user's neighbourhood.
+  // The bias reorders results and the city bounds them, so both are part of the cache identity; the
+  // bias is rounded to ~100 m so GPS jitter doesn't defeat the cache while the ranking stays
+  // representative of the user's neighbourhood.
+  const scope = activeCity().id;
   const cacheKey = bias
-    ? `${trimmed}@${bias.lat.toFixed(3)},${bias.lng.toFixed(3)}`
-    : trimmed;
+    ? `${scope}|${trimmed}@${bias.lat.toFixed(3)},${bias.lng.toFixed(3)}`
+    : `${scope}|${trimmed}`;
   const cached = searchCache.get(cacheKey);
   if (cached) {
     return cached;
@@ -161,7 +167,7 @@ export async function searchAddress(
   url.searchParams.set("q", trimmed);
   url.searchParams.set("limit", String(MAX_SEARCH_RESULTS));
   url.searchParams.set("lang", "en");
-  url.searchParams.set("bbox", PHOTON_BBOX);
+  url.searchParams.set("bbox", photonBbox());
   if (bias) {
     url.searchParams.set("lat", String(bias.lat));
     url.searchParams.set("lon", String(bias.lng));

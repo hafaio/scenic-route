@@ -18,6 +18,7 @@ import {
   useMap,
   useMapEvents,
 } from "react-leaflet";
+import { CITY_ZOOM, type City } from "../src/cities";
 import { OVERLAYS, type OverlayId } from "../src/overlays/registry";
 import type { Pin, PinDraft } from "../src/pin";
 import type { RouteResult } from "../src/routing/search";
@@ -42,6 +43,7 @@ export interface MapTarget {
 export type PickMode = "off" | "immediate" | "deferred";
 
 interface MapViewProps {
+  city: City; // frames the map when there is no camera to restore
   pins: Pin[];
   draft: PinDraft | null;
   target: MapTarget | null;
@@ -66,9 +68,6 @@ interface MapViewProps {
   onEndpointDrag: (which: "start" | "dest", lat: number, lng: number) => void;
   onPinSelect: (pin: Pin) => void;
 }
-
-const DEFAULT_CENTER: [number, number] = [40.7128, -74.006];
-const DEFAULT_ZOOM = 13;
 
 const draftIcon = L.divIcon({
   className: "",
@@ -462,6 +461,7 @@ function summarizePin(pin: Pin): string {
 }
 
 export default function MapView({
+  city,
   pins,
   draft,
   target,
@@ -542,8 +542,8 @@ export default function MapView({
 
   return (
     <MapContainer
-      center={DEFAULT_CENTER}
-      zoom={DEFAULT_ZOOM}
+      center={[city.center.lat, city.center.lng]}
+      zoom={CITY_ZOOM}
       className={picking ? "h-dvh w-full scenic-picking" : "h-dvh w-full"}
       zoomControl={false}
       bounceAtZoomLimits={false}
