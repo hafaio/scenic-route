@@ -33,6 +33,14 @@ export const WALK_METERS_PER_SECOND = 1.3;
 // worth a minute on a half-hour walk, so telling them apart buys less than it costs.
 export const CROSSING_SECONDS = 3;
 
+// How long a walker will stand on a pier before the ferry stops counting as a way to get anywhere.
+// The timetable always has a next sailing — tomorrow's first boat, if nothing else — so without a
+// bound a route planned at midnight would propose waiting until morning. Past this the edge costs
+// Infinity and the search walks instead; that only ever raises cost, so the heuristic's ferry credit
+// (built at zero wait) stays a lower bound. NYC's overnight service sets the floor: the Staten
+// Island Ferry runs every 30-60 minutes all night.
+export const MAX_FERRY_WAIT_SECONDS = 90 * 60;
+
 // Every weight spans [0, 1]. w must stay <= 1 or a discount floor (1 - w*max) can go negative, and a
 // negative edge cost breaks Dijkstra/A*. Defaults sit a little in from the extremes for a mild bias.
 export const MAX_TREE_WEIGHT = 1;
@@ -237,16 +245,45 @@ export function crossingWait(
     : 0;
 }
 
-// The undiscounted travel time of an edge entered at `fromNode`: a ferry's baked crossing-plus-wait
-// seconds, or a walked edge's length over walking speed plus any crossing wait. This is the ETA unit —
-// the reported trip time sums it.
+// What riding a ferry takes, boarding at `fromNode` after `elapsedSeconds` of walking: the wait for
+// the next sailing out of that terminal plus its crossing. Infinity once the day's last boat has gone,
+// which is what drops the edge out of the search rather than pricing a walk to a dark terminal.
+// Without a timetable loaded it is the graph's baked crossing-plus-average-wait figure, which is
+// direction- and time-independent — the behaviour before FSCH existed.
+export function ferrySeconds(
+  graph: RoutingGraph,
+  edge: number,
+  fromNode: number,
+  elapsedSeconds: number,
+): { wait: number; crossing: number } {
+  if (!graph.ferries?.covers(edge)) {
+    return { wait: 0, crossing: graph.edgeDurationSeconds[edge] };
+  }
+  const sailing = graph.ferries.board(edge, fromNode, elapsedSeconds);
+  if (!sailing || sailing.wait > MAX_FERRY_WAIT_SECONDS) {
+    return { wait: Number.POSITIVE_INFINITY, crossing: 0 };
+  } else {
+    return { wait: sailing.wait, crossing: sailing.crossing };
+  }
+}
+
+// The undiscounted travel time of an edge entered at `fromNode` after `elapsedSeconds` of walking: a
+// ferry's wait-plus-crossing, or a walked edge's length over walking speed plus any crossing wait.
+// This is the ETA unit — the reported trip time sums it.
 export function rawSeconds(
   graph: RoutingGraph,
   edge: number,
   fromNode: number,
+  elapsedSeconds = 0,
 ): number {
   if (edgeKind(graph, edge) === "ferry") {
-    return graph.edgeDurationSeconds[edge];
+    const { wait, crossing } = ferrySeconds(
+      graph,
+      edge,
+      fromNode,
+      elapsedSeconds,
+    );
+    return wait + crossing;
   } else {
     return (
       graph.edgeLength[edge] / WALK_METERS_PER_SECOND +
@@ -264,15 +301,23 @@ export function effSeconds(
   edge: number,
   weights: RouteWeights,
   elapsedSeconds = 0,
+  fromNode = -1,
 ): number {
   if (edgeKind(graph, edge) === "ferry") {
     if (!weights.allowFerries) {
       return Number.POSITIVE_INFINITY;
     } else {
-      return (
-        graph.edgeDurationSeconds[edge] *
-        Math.max(FERRY_FLOOR, 1 - weights.ferry)
+      const { wait, crossing } = ferrySeconds(
+        graph,
+        edge,
+        fromNode,
+        elapsedSeconds,
       );
+      // The ferry weight is a taste for BEING on a boat, so it discounts the crossing and leaves the
+      // wait at full price — otherwise a strong preference would make standing on a pier cheap, and
+      // the router would pick the later sailing. The baked figure has the two fused and is discounted
+      // whole, which is the closest it can come.
+      return wait + crossing * Math.max(FERRY_FLOOR, 1 - weights.ferry);
     }
   } else {
     return (
@@ -296,6 +341,11 @@ export function walkSecondsCoeff(
 // the two largest covers any route using <= 2 ferries (every realistic NYC ferry OD). Subtracting it
 // from the walking heuristic keeps A* admissible without letting a many-ferry fantasy path make the
 // estimate exceed the truth. Zero when ferries are barred or the graph has none.
+//
+// Against a timetable the ferry's cost depends on when the walker reaches the terminal, so the bound
+// has to be its cost at the LUCKIEST arrival: the quickest sailing, boarded with no wait at all.
+// That is looser than the truth — the credit only ever grows, which shrinks the heuristic — so the
+// estimate stays a lower bound and the search stays optimal, at the price of expanding more nodes.
 export function ferryCredit(
   graph: RoutingGraph,
   weights: RouteWeights,
@@ -304,12 +354,16 @@ export function ferryCredit(
     return 0;
   }
   const coeff = walkSecondsCoeff(graph, weights);
+  const discount = Math.max(FERRY_FLOOR, 1 - weights.ferry);
   let bestShortcut = 0;
   let secondShortcut = 0;
   for (const edge of graph.ferryEdges) {
+    const quickest = graph.ferries?.covers(edge)
+      ? graph.ferries.minRideSeconds(edge)
+      : graph.edgeDurationSeconds[edge];
     const shortcut = Math.max(
       0,
-      coeff * graph.edgeLength[edge] - effSeconds(graph, edge, weights),
+      coeff * graph.edgeLength[edge] - quickest * discount,
     );
     if (shortcut > bestShortcut) {
       secondShortcut = bestShortcut;

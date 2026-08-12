@@ -6,7 +6,12 @@
 
 import { edgeName, edgePath, type RoutingGraph, type SideLabel } from "./graph";
 import type { PassedPoi } from "./pois";
-import type { RouteResult, RouteStep } from "./search";
+import {
+  type RouteResult,
+  type RouteStep,
+  stepFrom,
+  stepSeconds,
+} from "./search";
 import { prettifyStreetName } from "./street-names";
 
 export type Turn =
@@ -120,6 +125,10 @@ interface Run {
   durationSeconds: number; // summed ferry crossing seconds; 0 for walking runs
   ferryRoute: string | null; // a ferry run's route display name (its first edge's), else null
   ferryDest: string | null; // a ferry run's destination terminal (its final edge's), else null
+  // A ferry run's boarding time, seconds from midnight of the departure day: the sailing the walker
+  // actually catches, so the maneuver can name it. Null with no timetable loaded, where the graph's
+  // baked figure is an average wait rather than a departure.
+  ferryDeparture: number | null;
   lngs: number[];
   lats: number[];
 }
@@ -131,6 +140,16 @@ function ferryDestName(graph: RoutingGraph, step: RouteStep): string | null {
     return null;
   }
   return step.forward ? ends.b : ends.a;
+}
+
+// A sailing's departure as a 12-hour clock label. Seconds run from midnight of the DEPARTURE day, so
+// a boat after midnight reads past 86400 and wraps back to a small hour here.
+function formatDeparture(seconds: number): string {
+  const minutes = Math.round(seconds / 60) % 1440;
+  const hour = Math.floor(minutes / 60);
+  const period = hour >= 12 ? "PM" : "AM";
+  const display = hour % 12 === 0 ? 12 : hour % 12;
+  return `${display}:${String(minutes % 60).padStart(2, "0")} ${period}`;
 }
 
 // Strip a trailing " Ferry Terminal" or " Ferry" from a terminal name for the maneuver destination:
@@ -171,8 +190,14 @@ function buildRuns(graph: RoutingGraph, steps: RouteStep[]): Run[] {
   const runs: Run[] = [];
   let current: Run | null = null;
   let pendingLinkMeters = 0;
+  // How far into the trip each step is reached, which is what picks a ferry's sailing. It has to be
+  // the SAME clock the ETA summary runs (hence the shared `stepSeconds`), or the two disagree about
+  // which boat is caught and the maneuver names a sailing the reported time never allowed for.
+  let elapsedSeconds = 0;
   for (let index = 0; index < steps.length; index++) {
     const step = steps[index];
+    const reachedAt = elapsedSeconds;
+    elapsedSeconds += stepSeconds(graph, step, reachedAt);
     // A ferry is its own run: flush any open walk run, then start (or extend) a ferry run. Its
     // crossing seconds sum onto the run so the maneuver can report the ride time.
     if (step.kind === "ferry") {
@@ -182,9 +207,25 @@ function buildRuns(graph: RoutingGraph, steps: RouteStep[]): Run[] {
       }
       const last = runs[runs.length - 1];
       const points = stepTravelPoints(graph, step);
-      if (last && last.kind === "ferry") {
+      const sailing =
+        graph.ferries?.board(step.edge, stepFrom(graph, step), reachedAt) ??
+        null;
+      // The ride time the maneuver reports is the crossing alone — the wait before it belongs to the
+      // walk up to the pier, not to the leg — falling back to the baked crossing-plus-average-wait
+      // figure when no timetable is loaded.
+      const rideSeconds =
+        sailing?.crossing ?? graph.edgeDurationSeconds[step.edge];
+      // A ferry line calls at several piers, and each pier-to-pier leg is its own edge — but you
+      // board once, so those legs are one maneuver. Still aboard means the timetable put you on the
+      // same line with nothing to wait for; a wait, or a different line, is a CHANGE OF BOAT and gets
+      // its own maneuver rather than disappearing into the previous one. With no timetable loaded
+      // there is no sailing to compare, and consecutive legs merge as they always did.
+      const stillAboard =
+        last?.kind === "ferry" &&
+        (!sailing || (sailing.route === last.ferryRoute && sailing.wait === 0));
+      if (last && last.kind === "ferry" && stillAboard) {
         last.lengthMeters += step.lengthMeters;
-        last.durationSeconds += graph.edgeDurationSeconds[step.edge];
+        last.durationSeconds += rideSeconds;
         last.stepEnd = index + 1;
         // The run keeps its first edge's route; the destination advances to this edge's terminal.
         last.ferryDest = ferryDestName(graph, step);
@@ -197,9 +238,12 @@ function buildRuns(graph: RoutingGraph, steps: RouteStep[]): Run[] {
           stepStart: index,
           stepEnd: index + 1,
           lengthMeters: step.lengthMeters,
-          durationSeconds: graph.edgeDurationSeconds[step.edge],
-          ferryRoute: edgeName(graph, step.edge),
+          durationSeconds: rideSeconds,
+          // The route the timetable says is sailing beats the edge's own name: a stop pair several
+          // routes serve is one graph edge carrying whichever route the ingest picked as primary.
+          ferryRoute: sailing?.route ?? edgeName(graph, step.edge),
           ferryDest: ferryDestName(graph, step),
+          ferryDeparture: sailing?.departure ?? null,
           lngs: [],
           lats: [],
         };
@@ -234,6 +278,7 @@ function buildRuns(graph: RoutingGraph, steps: RouteStep[]): Run[] {
         durationSeconds: 0,
         ferryRoute: null,
         ferryDest: null,
+        ferryDeparture: null,
         lngs: [],
         lats: [],
       };
@@ -431,9 +476,14 @@ export function buildDirections(
       // crossing time rides in durationSeconds, rendered where a walking maneuver shows its distance.
       let text: string;
       if (run.ferryRoute && dest) {
+        // With a timetable the sailing is named: "Take the 4:40 PM East River ferry to ...".
+        const at =
+          run.ferryDeparture === null
+            ? ""
+            : `${formatDeparture(run.ferryDeparture)} `;
         const lead = /ferry$/i.test(run.ferryRoute)
-          ? `Take the ${run.ferryRoute}`
-          : `Take the ${run.ferryRoute} ferry`;
+          ? `Take the ${at}${run.ferryRoute}`
+          : `Take the ${at}${run.ferryRoute} ferry`;
         text = `${lead} to ${dest}`;
       } else {
         text = "Take the ferry";
