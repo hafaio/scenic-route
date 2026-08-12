@@ -16,7 +16,7 @@ import { COORD_SCALE, writeVarint, zigzag } from "./geometry";
 import { fetchGtfsZip, type GtfsFeed, parseGtfs } from "./gtfs";
 import type { Coord } from "./socrata";
 
-interface FeedSource {
+export interface FeedSource {
   id: string; // namespaces stop ids, so the two feeds' stop ids cannot collide
   name: string;
   zipFile: string; // the frozen raw feed, committed under data/ferries/
@@ -26,7 +26,7 @@ interface FeedSource {
 
 // The two feeds, both verified reachable. SI Ferry is NYC DOT's own download (behind an Akamai
 // edge that needs a browser User-Agent); NYC Ferry is Hornblower's feed served through Connexionz.
-const FEEDS: readonly FeedSource[] = [
+export const FEEDS: readonly FeedSource[] = [
   {
     id: "si",
     name: "Staten Island Ferry",
@@ -54,13 +54,13 @@ const FERRY_SEGMENT_BYTES = 20;
 const NO_GEOMETRY = 0xffffffff; // a segment's geometry offset when it is a straight A→B line
 const WAIT_CAP_SECONDS = 600; // half a headway is charged as wait, but never more than 10 minutes
 const KEY_SEPARATOR = "|"; // joins a stop pair into a segment key; a stop key has no NUL
-const FERRY_ROUTE_TYPE = "4"; // GTFS route_type; the NYC Ferry feed also carries shuttle buses (3)
+export const FERRY_ROUTE_TYPE = "4"; // GTFS route_type; the NYC Ferry feed also carries shuttle buses (3)
 
 // Stops dropped for now: the Rockaway peninsula is not connected to the rest of the routable
 // walking network (its bridges' pedestrian status is unmodeled), so a ferry-only stub there routes
 // nowhere. Revisit once that connection exists — Phase 2's snapping should own this once it can see
 // graph connectivity.
-const EXCLUDED_STOP_NAMES = new Set(["Rockaway"]);
+export const EXCLUDED_STOP_NAMES = new Set(["Rockaway"]);
 
 // One consolidated stop, in geographic coordinates with its GTFS name — deliberately NOT snapped
 // to the routing graph (that is Phase 2). `key` is `${feed}:${stopId}`, unique across both feeds.
@@ -82,7 +82,7 @@ interface Segment {
   routeName: string | null; // the primary route's display name (most trips on this stop pair)
 }
 
-function toSeconds(clock: string): number | null {
+export function toSeconds(clock: string): number | null {
   const match = /^(\d+):(\d{2}):(\d{2})$/.exec(clock.trim());
   if (!match) {
     return null;
