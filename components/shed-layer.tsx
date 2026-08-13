@@ -6,6 +6,8 @@ import { useMap } from "react-leaflet";
 import { getResolvedDate, subscribeRouteTime } from "../src/route-time/store";
 import { loadGraph, type RoutingGraph } from "../src/routing/graph";
 import { loadSheds, type ShedHistory, shedDay } from "../src/routing/sheds";
+import CanvasGrid from "../src/tiles/canvas-grid";
+import { repeatable } from "../src/tiles/repaint";
 import {
   forEachDeckIn,
   type ShedDecks,
@@ -42,7 +44,7 @@ const SHED_ALPHA = 0.75; // the basemap's street still reads through the band
 // Zoom 0 is the whole world in 256 px, which a double resolves far past z20.
 const REFERENCE_ZOOM = 0;
 
-class ShedGrid extends L.GridLayer {
+class ShedGrid extends CanvasGrid {
   private decks: ShedDecks | null = null;
 
   setDecks(decks: ShedDecks): void {
@@ -56,9 +58,14 @@ class ShedGrid extends L.GridLayer {
     tile.width = TILE_SIZE * ratio;
     tile.height = TILE_SIZE * ratio;
     const context = tile.getContext("2d");
-    if (context && this.decks) {
-      context.scale(ratio, ratio);
-      this.draw(context, this.decks, coords);
+    const decks = this.decks;
+    if (context && decks) {
+      this.watch(
+        tile,
+        repeatable(context, ratio, (target) => {
+          this.draw(target, decks, coords);
+        }),
+      );
     }
     return tile;
   }
