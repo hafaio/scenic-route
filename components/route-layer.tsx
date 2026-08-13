@@ -11,6 +11,8 @@ import {
 } from "../src/routing/graph";
 import type { RouteResult, RouteStep } from "../src/routing/search";
 import type { Snap } from "../src/routing/snap";
+import CanvasGrid from "../src/tiles/canvas-grid";
+import { repeatable } from "../src/tiles/repaint";
 import { useCity } from "./city-context";
 import { savedIcon, startIcon } from "./map-icons";
 
@@ -146,7 +148,7 @@ function buildDrawSteps(graph: RoutingGraph, result: RouteResult): DrawStep[] {
   return draw;
 }
 
-class RouteGrid extends L.GridLayer {
+class RouteGrid extends CanvasGrid {
   private drawSteps: DrawStep[] = [];
 
   setDrawSteps(steps: DrawStep[]): void {
@@ -161,8 +163,12 @@ class RouteGrid extends L.GridLayer {
     tile.height = TILE_SIZE * ratio;
     const context = tile.getContext("2d");
     if (context && this.drawSteps.length > 0) {
-      context.scale(ratio, ratio);
-      this.draw(context, coords);
+      this.watch(
+        tile,
+        repeatable(context, ratio, (target) => {
+          this.draw(target, coords);
+        }),
+      );
     }
     return tile;
   }

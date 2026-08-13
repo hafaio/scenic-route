@@ -5,6 +5,7 @@ import { linesRenderer } from "./lines";
 import { poiRenderer } from "./poi";
 import type { DoneMessage, DrawMessage, ToWorker } from "./protocol";
 import type { TileRenderer } from "./renderer";
+import { repaintOnRestore, repeatable } from "./repaint";
 import { shadeRenderer, warm as warmShade } from "./shade";
 import { streetScoreRenderer } from "./street-score";
 import { setShedDecks } from "./sweep";
@@ -28,6 +29,15 @@ const scope = globalThis as unknown as {
 // Tiles whose data is still loading, and of those the ones Leaflet has since dropped.
 const inFlight = new Set<number>();
 const cancelled = new Set<number>();
+// Painted tiles still on the map, by the detach that stops watching them for a lost context. The
+// canvas is the only copy of its pixels and only this side can reach it, so only this side can put
+// them back — see ./repaint.
+const live = new Map<number, () => void>();
+
+function forget(tileKey: number): void {
+  live.get(tileKey)?.();
+  live.delete(tileKey);
+}
 
 async function run<Params, Data>(
   renderer: TileRenderer<Params, Data>,
@@ -40,8 +50,13 @@ async function run<Params, Data>(
   }
   const context = canvas.getContext("2d");
   if (context) {
-    context.scale(ratio, ratio);
-    renderer.draw(context, data, coords, params, ratio);
+    const paint = repeatable(context, ratio, (target) => {
+      renderer.draw(target, data, coords, params, ratio);
+    });
+    // Registered before the first paint, not after: the context can already be lost by the time the
+    // data lands, and then this paint draws nothing and the restore is the one that shows the tile.
+    live.set(tileKey, repaintOnRestore(canvas, paint));
+    paint();
   }
 }
 
@@ -81,6 +96,9 @@ scope.onmessage = ({ data: message }) => {
   } else if (message.type === "shed-decks") {
     setShedDecks(message.decks);
   } else if (message.type === "cancel") {
+    // Also where a painted tile is released: its watcher holds the canvas and the decoded data, and
+    // Leaflet unloads tiles on every pan.
+    forget(message.tileKey);
     if (inFlight.has(message.tileKey)) {
       cancelled.add(message.tileKey);
     }
