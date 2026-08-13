@@ -1,4 +1,5 @@
-// Shared access to the NYC Open Data (Socrata) endpoints the data pipelines read.
+// Shared access to the Socrata endpoints the data pipelines read. Every city publishing on Socrata
+// speaks the same API, so a second city is a second host here rather than a second reader.
 
 import pRetry from "p-retry";
 import { cached } from "./cache";
@@ -31,6 +32,13 @@ const TREE_COUNT = 898_618; // standing trees at the last refresh; a floor, not 
 // The city keeps planting, so only a shortfall this far below the expected count is a page
 // the server quietly cut short rather than a year of removals.
 const SHORTFALL = 0.05;
+
+// The host is part of what was asked for, so it is part of the cache key: two cities can publish
+// the same 4x4 dataset id, and a stale entry serving one city's rows for the other's read would be
+// invisible — the rows parse, the counts look plausible, and nothing downstream knows better.
+function cacheKey(host: string, query: Record<string, string>): string {
+  return JSON.stringify({ host, ...query });
+}
 
 async function fetchJson<Row>(url: string): Promise<Row[]> {
   const headers: Record<string, string> =
@@ -66,17 +74,16 @@ async function fetchJson<Row>(url: string): Promise<Row[]> {
 
 // Pages in `:id` order, the only ordering Socrata guarantees is stable across the requests
 // that make up one paged read.
-export async function fetchDataset<Row>(
+async function fetchDataset<Row>(
+  host: string,
   dataset: string,
   query: Record<string, string>,
   expected: number,
 ): Promise<Row[]> {
-  return await cached(dataset, JSON.stringify(query), async () => {
+  return await cached(dataset, cacheKey(host, query), async () => {
     const rows: Row[] = [];
     for (let offset = 0; ; offset += PAGE_SIZE) {
-      const url = new URL(
-        `https://data.cityofnewyork.us/resource/${dataset}.json`,
-      );
+      const url = new URL(`https://${host}/resource/${dataset}.json`);
       for (const [key, value] of Object.entries(query)) {
         url.searchParams.set(key, value);
       }
@@ -110,7 +117,8 @@ export async function fetchDataset<Row>(
 // Every row whose `field` is one of `keys`, read as `field in (...)` batches run `concurrency` at a
 // time. Each batch is cached on its own, so a re-run costs nothing and a batch the server 500s on
 // costs one batch rather than the whole read.
-export async function fetchKeyed<Row>(
+async function fetchKeyed<Row>(
+  host: string,
   dataset: string,
   select: string,
   field: string,
@@ -132,11 +140,9 @@ export async function fetchKeyed<Row>(
       const batch = batches[index];
       pages[index] = await cached(
         `${dataset}.${field}`,
-        `${select}|${batch.join(",")}`,
+        cacheKey(host, { $select: select, batch: batch.join(",") }),
         async () => {
-          const url = new URL(
-            `https://data.cityofnewyork.us/resource/${dataset}.json`,
-          );
+          const url = new URL(`https://${host}/resource/${dataset}.json`);
           const list = batch.map((key) => `'${key}'`).join(",");
           url.searchParams.set("$select", select);
           url.searchParams.set("$where", `${field} in (${list})`);
@@ -156,6 +162,38 @@ export async function fetchKeyed<Row>(
   );
   return pages.flat();
 }
+
+// One city's Socrata deployment. Reads go through a bound host rather than taking one as an
+// argument, so a source module names its city once and cannot then read the wrong one.
+export interface Socrata {
+  dataset<Row>(
+    dataset: string,
+    query: Record<string, string>,
+    expected: number,
+  ): Promise<Row[]>;
+  keyed<Row>(
+    dataset: string,
+    select: string,
+    field: string,
+    keys: Iterable<string>,
+    concurrency?: number,
+  ): Promise<Row[]>;
+  // Where a human goes to read about a dataset, for the manifest's source links.
+  page(dataset: string): string;
+}
+
+function socrata(host: string): Socrata {
+  return {
+    dataset: (dataset, query, expected) =>
+      fetchDataset(host, dataset, query, expected),
+    keyed: (dataset, select, field, keys, concurrency) =>
+      fetchKeyed(host, dataset, select, field, keys, concurrency),
+    page: (dataset) => `https://${host}/d/${dataset}`,
+  };
+}
+
+export const NYC_OPEN_DATA = socrata("data.cityofnewyork.us");
+export const DATA_SF = socrata("data.sfgov.org");
 
 // Socrata returns points as WKT, e.g. "POINT(-73.8165 40.7162)" (lng first).
 export function parseWktPoint(wkt: string): Coord | null {
@@ -188,7 +226,7 @@ function genusOf(genusspecies: string | undefined): string {
 export async function fetchNycTrees(): Promise<Tree[]> {
   // `*` so a newly-read column (here genusspecies) is free after one refetch: the disk cache
   // keys on the query, so narrowing $select would force a full re-page on every added column.
-  const rows = await fetchDataset<{
+  const rows = await NYC_OPEN_DATA.dataset<{
     geometry?: string;
     dbh?: string;
     genusspecies?: string;

@@ -15,7 +15,7 @@ import { type LandContext, loadLandContext } from "./land";
 import type { SourceFile } from "./manifest";
 import type { Polygon } from "./overpass";
 import type { Coord } from "./socrata";
-import { fetchDataset } from "./socrata";
+import { NYC_OPEN_DATA } from "./socrata";
 
 const DATA_DIR = join(import.meta.dirname, "..", "data");
 const BUILDINGS_DIR = join(DATA_DIR, "buildings");
@@ -82,7 +82,7 @@ export async function ingestBuildings(
   await mkdir(BUILDINGS_DIR, { recursive: true });
 
   // `*` so a newly-read column is free after one refetch (the disk cache keys on the query).
-  const rows = await fetchDataset<BuildingRow>(
+  const rows = await NYC_OPEN_DATA.dataset<BuildingRow>(
     BUILDINGS_DATASET,
     { $select: "*" },
     BUILDINGS_COUNT,

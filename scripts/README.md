@@ -546,8 +546,9 @@ bun run build-tree-data -- --refresh # bypass .cache/, go back to the network
 bun run build-tiles
 ```
 
-Raw source reads are cached in `.cache/` (gitignored), keyed by the request itself, and
-never expire on their own — including the 243 MiB canopy height raster, which is kept as a file
+Raw source reads are cached in `.cache/` (gitignored), keyed by the request itself — **including the
+Socrata host**, since two cities can publish the same 4x4 dataset id and an entry serving one city's
+rows for the other's read would parse and count as if it were right — and never expire on their own — including the 243 MiB canopy height raster, which is kept as a file
 rather than as JSON because the tiler reads it off disk itself. The sources move about once a year, so a re-run wants whatever it
 read last time — not a fresher copy it did not ask for.
 
