@@ -13,7 +13,7 @@
 
 import { union } from "polygon-clipping";
 import { COORD_SCALE } from "./geometry";
-import { fetchKeyed } from "./socrata";
+import { NYC_OPEN_DATA } from "./socrata";
 
 const FOOTPRINT_DATASET = "5zhs-2jue"; // NYC Building Footprints
 const FOOTPRINT_SELECT = "bin,the_geom,base_bbl,mappluto_bbl";
@@ -233,7 +233,12 @@ function toRings(
 async function fetchLotParts(
   bbls: Iterable<string>,
 ): Promise<Map<string, Boundary[]>> {
-  const rows = await fetchKeyed<LotRow>(LOT_DATASET, LOT_SELECT, "bbl", bbls);
+  const rows = await NYC_OPEN_DATA.keyed<LotRow>(
+    LOT_DATASET,
+    LOT_SELECT,
+    "bbl",
+    bbls,
+  );
   const parts = new Map<string, Boundary[]>();
   for (const row of rows) {
     if (row.bbl) {
@@ -278,7 +283,7 @@ export async function fetchShedParcels(
     }
   }
 
-  const footprintRows = await fetchKeyed<FootprintRow>(
+  const footprintRows = await NYC_OPEN_DATA.keyed<FootprintRow>(
     FOOTPRINT_DATASET,
     FOOTPRINT_SELECT,
     "bin",
@@ -313,7 +318,7 @@ export async function fetchShedParcels(
   // fiction: the condo table names the tax lots it physically occupies, and the billing lot takes
   // the union of their geometry.
   const missing = [...wanted].filter((bbl) => !lotParts.has(bbl));
-  const condoRows = await fetchKeyed<CondoRow>(
+  const condoRows = await NYC_OPEN_DATA.keyed<CondoRow>(
     CONDO_DATASET,
     CONDO_SELECT,
     "condo_billing_bbl",

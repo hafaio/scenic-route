@@ -47,7 +47,7 @@ import {
   type Polygon,
 } from "./overpass";
 import { ingestSidewalks } from "./sidewalks";
-import { type Coord, fetchDataset, fetchNycTrees, type Tree } from "./socrata";
+import { type Coord, fetchNycTrees, NYC_OPEN_DATA, type Tree } from "./socrata";
 import { runTiler } from "./tiler";
 
 // The CSCL road-way types that carry pedestrians: street, bridge, tunnel, boardwalk, path,
@@ -427,7 +427,7 @@ async function fetchNycStreets(): Promise<Segment[]> {
   // `*` so a newly-read column is free after one refetch: the disk cache keys on the query, so
   // narrowing $select would force a full re-page whenever a new column is wanted. StreetRow names
   // only the columns toSegments reads.
-  const rows = await fetchDataset<StreetRow>(
+  const rows = await NYC_OPEN_DATA.dataset<StreetRow>(
     "inkn-q76z",
     {
       $select: "*",
@@ -652,9 +652,9 @@ const CITY = {
   id: "nyc",
   name: "New York City",
   attribution: "NYC Parks Forestry (ForMS) via NYC Open Data",
-  sourceUrl: "https://data.cityofnewyork.us/d/hn5i-inap",
+  sourceUrl: NYC_OPEN_DATA.page("hn5i-inap"),
   streetAttribution: "NYC DoITT Street Centerline (CSCL) via NYC Open Data",
-  streetSourceUrl: "https://data.cityofnewyork.us/d/inkn-q76z",
+  streetSourceUrl: NYC_OPEN_DATA.page("inkn-q76z"),
   // The field's ODbL credit: it mixes OSM natural=tree points (which the genus overlay draws) and
   // the OSM path network the canopy field is sampled along. ForMS is credited on the city.
   fieldAttribution: "path & tree data © OpenStreetMap contributors",

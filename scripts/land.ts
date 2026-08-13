@@ -5,7 +5,7 @@ import { boxOf } from "./geometry";
 import { buildLandTest } from "./land-filter";
 import type { Bounds } from "./manifest";
 import type { Polygon } from "./overpass";
-import { type Coord, fetchDataset } from "./socrata";
+import { type Coord, NYC_OPEN_DATA } from "./socrata";
 
 const NYC_BOROUGH_COUNT = 5;
 
@@ -18,7 +18,7 @@ interface BoroughRow {
 export async function fetchNycLand(): Promise<Polygon[]> {
   // `*` so a newly-read column is free after one refetch (the disk cache keys on the query);
   // BoroughRow reads only the_geom.
-  const rows = await fetchDataset<BoroughRow>(
+  const rows = await NYC_OPEN_DATA.dataset<BoroughRow>(
     "gthc-hcne",
     { $select: "*" },
     NYC_BOROUGH_COUNT,
