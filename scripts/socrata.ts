@@ -18,12 +18,17 @@ export interface Tree extends Coord {
 }
 
 const PAGE_SIZE = 50_000;
-const MAX_ATTEMPTS = 6;
+// The ladder has to outlast an outage, not a blip: on 2026-08-12 the building footprints went away
+// for the seven minutes six attempts covered, and the read that failed answered in 0.2 s once it
+// came back. Eight attempts capped at two minutes reach past twenty.
+const MAX_ATTEMPTS = 8;
 const RETRY_BASE_MS = 2_000;
-const RETRY_CAP_MS = 30_000;
+const RETRY_CAP_MS = 120_000;
 // four times the heaviest observed read
 const REQUEST_TIMEOUT_MS = 90_000;
-const APP_TOKEN = process.env.SOCRATA_APP_TOKEN;
+// Empty rather than absent on a fork: an unset secret reaches the step as "", and sending that as a
+// token is worse than sending none.
+const APP_TOKEN = process.env.SOCRATA_APP_TOKEN || undefined;
 const BATCH_KEYS = 200; // keys per `field in (...)`; longer lists start timing out
 const BATCH_WORKERS = 8;
 const BATCH_PROGRESS = 50; // batches between progress lines
