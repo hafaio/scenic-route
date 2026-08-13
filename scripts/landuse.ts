@@ -13,7 +13,7 @@ import { type ClassifiedPoint, encodeClassifiedPoints } from "./geometry";
 import { type LandContext, loadLandContext } from "./land";
 import type { SourceFile } from "./manifest";
 import type { Coord } from "./socrata";
-import { fetchDataset } from "./socrata";
+import { NYC_OPEN_DATA } from "./socrata";
 
 const DATA_DIR = join(import.meta.dirname, "..", "data");
 const LANDUSE_DIR = join(DATA_DIR, "landuse");
@@ -71,7 +71,7 @@ export async function ingestLandUse(
 
   // A narrowed $select: 860k lots carry dozens of columns each, so pulling only the three the
   // overlay reads keeps the paged payload (and the disk cache entry) an order of magnitude smaller.
-  const rows = await fetchDataset<LandUseRow>(
+  const rows = await NYC_OPEN_DATA.dataset<LandUseRow>(
     LANDUSE_DATASET,
     { $select: "landuse, latitude, longitude" },
     LANDUSE_COUNT,

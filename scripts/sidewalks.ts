@@ -15,7 +15,7 @@ import type { LandContext } from "./land";
 import type { SourceFile } from "./manifest";
 import { fetchSidewalks, type SidewalkWay } from "./overpass";
 import { projectX, projectY } from "./planar";
-import { type Coord, fetchDataset } from "./socrata";
+import { type Coord, NYC_OPEN_DATA } from "./socrata";
 
 const DATA_DIR = join(import.meta.dirname, "..", "data");
 const SIDEWALK_DIR = join(DATA_DIR, "sidewalks");
@@ -324,7 +324,7 @@ async function fetchSurveyedSidewalks(): Promise<Grid<Ring>> {
   // The geometry alone, not the `*` the smaller sources ask for: these polygons are ~450 MB of
   // GeoJSON on their own, and the columns beside them (source ids, shape lengths, capture status)
   // are of no use to a point-in-polygon probe.
-  const rows = await fetchDataset<PolygonRow>(
+  const rows = await NYC_OPEN_DATA.dataset<PolygonRow>(
     SIDEWALK_DATASET,
     { $select: "the_geom", $where: `sub_code='${SIDEWALK_SUB_CODE}'` },
     SIDEWALK_POLYGON_COUNT,

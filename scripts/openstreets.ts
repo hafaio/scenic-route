@@ -13,7 +13,7 @@ import { encodePoints, haversineMeters, type NamedPoint } from "./geometry";
 import { type LandContext, loadLandContext } from "./land";
 import type { SourceFile } from "./manifest";
 import type { Coord } from "./socrata";
-import { fetchDataset } from "./socrata";
+import { NYC_OPEN_DATA } from "./socrata";
 
 const DATA_DIR = join(import.meta.dirname, "..", "data");
 const OPEN_STREETS_DIR = join(DATA_DIR, "openstreets");
@@ -109,7 +109,7 @@ export async function ingestOpenStreets(
   await mkdir(OPEN_STREETS_DIR, { recursive: true });
 
   // `*` so a newly-read column is free after one refetch (the disk cache keys on the query).
-  const rows = await fetchDataset<OpenStreetRow>(
+  const rows = await NYC_OPEN_DATA.dataset<OpenStreetRow>(
     OPEN_STREETS_DATASET,
     { $select: "*" },
     OPEN_STREETS_COUNT,
