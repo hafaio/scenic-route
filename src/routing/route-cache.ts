@@ -14,13 +14,15 @@ import { findRoute, type RouteResult } from "./search";
 import type { Snap } from "./snap";
 
 // The numeric weights that a slider can move; the two toggles (ferries, scaffolding) are discrete
-// contexts, not axes.
+// contexts, not axes. Every slider has to be here: `sameWeights` reads this list, so one left out is
+// a slider whose moves the cache cannot see, and it answers them with the previous route.
 const AXES = [
   "tree",
   "ferry",
   "landmark",
   "art",
   "highway",
+  "hill",
   "commercial",
   "shade",
   "shelter",
@@ -43,6 +45,7 @@ function quantizeWeights(weights: RouteWeights): RouteWeights {
     landmark: quantize(weights.landmark),
     art: quantize(weights.art),
     highway: quantize(weights.highway),
+    hill: quantize(weights.hill),
     commercial: quantize(weights.commercial),
     shade: quantize(weights.shade),
     shelter: quantize(weights.shelter),

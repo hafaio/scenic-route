@@ -1,23 +1,23 @@
 "use client";
 
 import L from "leaflet";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { Marker, Polyline, useMap } from "react-leaflet";
-import {
-  edgeKind,
-  loadGraph,
-  type RoutingGraph,
-  subEdgePath,
-} from "../src/routing/graph";
+import { CROSS_CITY_METERS } from "../src/cities";
+import { edgeKind, type RoutingGraph, subEdgePath } from "../src/routing/graph";
 import type { RouteResult, RouteStep } from "../src/routing/search";
 import type { Snap } from "../src/routing/snap";
 import CanvasGrid from "../src/tiles/canvas-grid";
 import { repeatable } from "../src/tiles/repaint";
-import { useCity } from "./city-context";
 import { savedIcon, startIcon } from "./map-icons";
 
 interface RouteLayerProps {
   result: RouteResult | null;
+  // The graph `result` was computed against, handed down rather than fetched here. Both are edge
+  // indices into one city's graph, and a layer that loads its own would draw a San Francisco route
+  // through New York's edges for as long as the two disagreed — which is the whole span of a city
+  // switch, since the result lands before the new fetch does.
+  graph: RoutingGraph | null;
   dest: { lat: number; lng: number } | null; // the tapped/searched destination
   start: { lat: number; lng: number } | null; // the snapped start, for the dot
   dragging: boolean; // an endpoint is being dragged; reframe zooms out only, never in
@@ -252,6 +252,7 @@ function routeBounds(result: RouteResult): L.LatLngBounds {
 
 export default function RouteLayer({
   result,
+  graph,
   dest,
   start,
   dragging,
@@ -261,27 +262,10 @@ export default function RouteLayer({
   onEndpointDrag,
 }: RouteLayerProps) {
   const map = useMap();
-  const city = useCity();
-  const [graph, setGraph] = useState<RoutingGraph | null>(null);
   const gridRef = useRef<RouteGrid | null>(null);
   // The dest object last framed by the camera; a slider recompute keeps its identity, a new
   // destination replaces it, so only the latter re-frames.
   const framedDest = useRef<{ lat: number; lng: number } | null>(preframedDest);
-
-  useEffect(() => {
-    let live = true;
-    loadGraph(city.id).then(
-      (loaded) => {
-        if (live) {
-          setGraph(loaded);
-        }
-      },
-      () => {},
-    );
-    return () => {
-      live = false;
-    };
-  }, [city.id]);
 
   useEffect(() => {
     if (!map.getPane(PANE_NAME)) {
@@ -315,7 +299,12 @@ export default function RouteLayer({
   // view change mid-drag desyncs the pin from the cursor — and just remember the dest so releasing the
   // drag doesn't snap-reframe the settled route.
   useEffect(() => {
-    if (!result || !dest) {
+    if (!dest) {
+      // Cleared, so the next destination reframes even if it lands on the same coordinates.
+      framedDest.current = null;
+      return;
+    }
+    if (!result) {
       return;
     }
     if (dragging) {
@@ -330,7 +319,17 @@ export default function RouteLayer({
       return;
     }
     framedDest.current = dest;
-    map.flyToBounds(routeBounds(result), { padding: [64, 96] });
+    const bounds = routeBounds(result);
+    const padding: [number, number] = [64, 96];
+    // A route in the city on screen is flown to; one a city away is cut to, for the reason
+    // CROSS_CITY_METERS carries — an animated crossing draws this very layer over open water for the
+    // length of it. This is the third camera that can cross a city, after the explicit target and the
+    // follow centring, and it is the one a shared link reaches first.
+    if (map.distance(bounds.getCenter(), map.getCenter()) > CROSS_CITY_METERS) {
+      map.fitBounds(bounds, { padding, animate: false });
+    } else {
+      map.flyToBounds(bounds, { padding });
+    }
     onDisengageFollow();
   }, [result, dest, map, dragging, onDisengageFollow]);
 

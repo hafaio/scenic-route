@@ -32,6 +32,7 @@ use crate::corners::{self, EdgeEnd};
 use crate::direct_canopy;
 use crate::geometry::{METERS_PER_DEGREE_LAT, round_half_up};
 use crate::invariants;
+use crate::relief;
 use crate::scenic;
 use crate::shade;
 use crate::sidewalks::{self, FLAG_NON_VEHICULAR};
@@ -97,11 +98,15 @@ pub const SIDE_SOUTH: u8 = 3;
 const SIDE_WEST: u8 = 4;
 const FLAG_GEOMETRY_RIGHT: u8 = 1 << 2; // this sidewalk lies right of its stored geometry direction
 
-const GRAPH_FORMAT: u16 = 6; // v6 adds the direct-canopy byte and the durable edge key
+const GRAPH_FORMAT: u16 = 8; // v8 spans the relief byte over 35% of grade, not 12%
+// The field the relief is sampled off is built at this zoom's pixel size — about 5 m at San
+// Francisco's latitude. Finer than the block a grade is measured over, coarser than the metre the
+// DEM is published at, and a whole city of it is tens of megabytes rather than gigabytes.
+const RELIEF_FIELD_ZOOM: u32 = 15;
 const GRAPH_HEADER_BYTES: usize = 64;
 // 24 + landmark(24), art(25), highway(26), commercial(27), directCanopy(28), sourceId(29..32),
-// ordinal(33)
-const EDGE_RECORD_BYTES: usize = 34;
+// ordinal(33), relief(34)
+const EDGE_RECORD_BYTES: usize = 35;
 // Record bytes 29-33: the source record an edge was derived from (a CSCL physicalid, or an OSM way
 // id for a conflated path) and the how-many-th edge of that source, on that side, this is. With the
 // side label already in byte 22 the triple (source id, side, ordinal) survives a rebuild, where the
@@ -222,14 +227,26 @@ const MAX_CELL_DEMOTED_SHARE: f64 = 0.30;
 // mouths, 14,961 one-sided keys, 2,877 scored cells and 15,539 links — far enough under to survive a
 // year of OSM edits and orders of magnitude over the nothing a classifier that stopped matching
 // would leave.
-const MIN_ALLEY_KM: f64 = 50.0;
-const MIN_ALLEY_MOUTHS: usize = 600;
-const MIN_ONE_SIDED_KEYS: usize = 2_500;
-const MIN_PAVEMENT_CELLS: usize = 500;
-const MIN_LINK_EDGES: usize = 2_500;
+//
+// They are EMPTINESS tests, not proportionality tests, and the difference only showed up on a second
+// city. Two of them only ever run against a city that classifies alleys at all (`args.alleys`), and
+// that gate is what lets San Francisco through — it has no alleys in New York's sense, so it is
+// never asked. Those two therefore keep New York's own numbers: lowering them as well, which is what
+// I did first, would have let New York's alley classifier rot from 303 km to 3 before anything
+// tripped, in exchange for nothing.
+//
+// The three that every city faces did have to move, because San Francisco has fewer of everything —
+// but only as far as its own measured figures, keeping a gap on both sides that a dead classifier
+// still falls through. Each carries both cities' populations so the next one can see the margin it
+// is being held to.
+const MIN_ALLEY_KM: f64 = 50.0; // nyc 303.1; alley-classifying cities only
+const MIN_ALLEY_MOUTHS: usize = 600; // nyc 3_813; alley-classifying cities only
+const MIN_ONE_SIDED_KEYS: usize = 500; // nyc 14_961, sf 1_127
+const MIN_PAVEMENT_CELLS: usize = 200; // nyc 2_877, sf 484
+const MIN_LINK_EDGES: usize = 2_500; // nyc 15_539, sf 3_320
 // The same emptiness on the existence gate's own denominators: no derived side km makes the drop
 // 0%, and no alley km makes the demoted share whatever the missing-denominator branch says.
-const MIN_DERIVED_SIDEWALK_KM: f64 = 400.0;
+const MIN_DERIVED_SIDEWALK_KM: f64 = 400.0; // nyc 2_342, sf 3_466
 
 pub const STRANDED_FORMAT: u16 = 1;
 pub const STRANDED_HEADER_BYTES: usize = 12;
@@ -248,12 +265,23 @@ pub struct Args {
     pub out: PathBuf,
     // Where the OSM way ids of the paths the island drop stranded are written. `tiler chunks` reads
     // the file back so the overlay stops painting a walk this graph holds no edge for.
-    pub stranded: Option<PathBuf>,
+    /// Where to WRITE this city's dropped ways. `tiler chunks` reads them back by directory,
+    /// under `--stranded-dir`.
+    pub stranded_out: Option<PathBuf>,
     // The optional SHDE bake: building footprints, the shade sun-position params (the same file
     // `tiler shade` reads), and the directory the per-bin shade files are written to. All three or none.
     pub buildings: Option<PathBuf>,
     pub shade_params: Option<PathBuf>,
     pub shade_dir: Option<PathBuf>,
+    /// The city's DEM tiles as a newline-separated list, plus what is needed to read them: the
+    /// projection they are published on, which band carries the ground, and the city's bounds to
+    /// resample over.
+    pub elevation: Option<PathBuf>,
+    pub elevation_projection: Option<crate::heights::Tmerc>,
+    pub elevation_band: usize,
+    pub elevation_bounds: Option<crate::manifest::Bounds>,
+    /// Whether this city's centreline classifies alleys — see the alley bounds in `run`.
+    pub alleys: bool,
     // The measured canopy, read twice over: for the direct-canopy record byte, and — when the shade
     // bake runs — for the crowns that occlude the edges alongside the buildings.
     pub canopy: Option<PathBuf>,
@@ -1673,8 +1701,12 @@ fn write_version(
         "bytes": bytes.len(),
         "generatedUnixSeconds": generated,
     });
+    // Named after the graph rather than sitting beside it under one name: two cities write into one
+    // directory, and a shared file would describe whichever built last. The client gates its shed
+    // artifact on this, and a mismatch blanks the layer rather than misplacing it — so the wrong
+    // city's hash here is a layer that silently disappears.
     fs::write(
-        out.with_file_name("version.json"),
+        out.with_extension("version.json"),
         serde_json::to_vec(&version)?,
     )?;
     Ok(())
@@ -3587,6 +3619,36 @@ pub fn run(args: &Args) -> Fallible<()> {
         })
         .collect();
 
+    // The relief byte (v7): the height climbed and dropped along each edge, sampled off the city's
+    // DEM resampled to a lat/lng field. A city with no elevation source leaves every edge flat.
+    let relief_bytes = match &args.elevation {
+        Some(paths_file) => {
+            let paths: Vec<std::path::PathBuf> = std::fs::read_to_string(paths_file)?
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .map(std::path::PathBuf::from)
+                .collect();
+            let projection = args
+                .elevation_projection
+                .ok_or("--elevation needs a projection for the city's DEM")?;
+            let mut dem = crate::dem::Dem::open(&paths, projection, args.elevation_band)?;
+            let bounds = args
+                .elevation_bounds
+                .ok_or("--elevation needs the city bounds")?;
+            let field = crate::dem::resample(&bounds, RELIEF_FIELD_ZOOM, &mut dem)?;
+            let lengths: Vec<f32> = v2_edges.iter().map(|edge| edge.length).collect();
+            let baked = relief::relief(&edge_polys, &lengths, &field)?;
+            eprintln!(
+                "relief: {} edges measured, mean grade {:.1}%, steepest {:.1}%",
+                baked.measured,
+                100.0 * baked.mean_grade,
+                100.0 * baked.max_grade
+            );
+            baked.bytes
+        }
+        None => vec![0u8; v2_edges.len()],
+    };
+
     // The direct-canopy byte (v6): the fraction of the edge under a crown, integrated along that
     // polyline with no kernel — see direct_canopy.rs for why the cover byte cannot stand in.
     let direct_canopy_bytes = match &args.canopy {
@@ -3702,16 +3764,38 @@ pub fn run(args: &Args) -> Fallible<()> {
     // that are correct (a mapped crossing stub OSM simply drew short, a cul-de-sac wrapping round its
     // own head), so neither has a line worth holding, and the regressions that move them move the
     // bounded numbers above far harder.
+    let total_km: f64 = v2_edges
+        .iter()
+        .map(|edge| f64::from(edge.length))
+        .sum::<f64>()
+        / 1000.0;
     let mut broken: Vec<String> = Vec::new();
+    // The alley bounds assert New York's meaning of an alley — a service way with no pavement, which
+    // the gate demotes to its centreline. A city whose centreline has no such class is not asked:
+    // San Francisco's "alleys" are narrow streets with sidewalks, and 6.6% of their km demote where
+    // New York's 97% do. `args.alleys` is the city's own statement, not a count, so a classifier
+    // that stopped matching still fails the floors below rather than skipping them.
+    if args.alleys {
+        for (population, floor, what) in [
+            (alley_reach.total_km, MIN_ALLEY_KM, "km of alley"),
+            (
+                mouth_walk.mouths as f64,
+                MIN_ALLEY_MOUTHS as f64,
+                "alley mouths",
+            ),
+        ] {
+            if population < floor {
+                broken.push(format!(
+                    "the city has {population:.1} {what}, under the {floor:.0} floor: the bounds \
+                     below are held over that population, so they would pass on it whatever the \
+                     graph looks like"
+                ));
+            }
+        }
+    }
     // The populations first, so a bound that passed because it had nothing to hold says so instead
     // of reading as a clean city.
     for (population, floor, what) in [
-        (alley_reach.total_km, MIN_ALLEY_KM, "km of alley"),
-        (
-            mouth_walk.mouths as f64,
-            MIN_ALLEY_MOUTHS as f64,
-            "alley mouths",
-        ),
         (
             one_sided_ids.len() as f64,
             MIN_ONE_SIDED_KEYS as f64,
@@ -3736,7 +3820,9 @@ pub fn run(args: &Args) -> Fallible<()> {
             ));
         }
     }
-    if alley_reach.off_component_km > MAX_STRANDED_ALLEY_FRACTION * alley_reach.total_km {
+    if args.alleys
+        && alley_reach.off_component_km > MAX_STRANDED_ALLEY_FRACTION * alley_reach.total_km
+    {
         broken.push(format!(
             "{:.1} of {:.1} km of alley hangs off the main walking component, over the {:.0}% \
              ceiling: an alley nothing reaches still routes internally, so a trip that ends on one \
@@ -3746,9 +3832,10 @@ pub fn run(args: &Args) -> Fallible<()> {
             100.0 * MAX_STRANDED_ALLEY_FRACTION
         ));
     }
-    if mouth_walk.median_meters > MAX_ALLEY_MOUTH_MEDIAN_METERS
-        || mouth_walk.p90_meters > MAX_ALLEY_MOUTH_P90_METERS
-        || mouth_walk.stranded > MAX_STRANDED_ALLEY_MOUTHS
+    if args.alleys
+        && (mouth_walk.median_meters > MAX_ALLEY_MOUTH_MEDIAN_METERS
+            || mouth_walk.p90_meters > MAX_ALLEY_MOUTH_P90_METERS
+            || mouth_walk.stranded > MAX_STRANDED_ALLEY_MOUTHS)
     {
         broken.push(format!(
             "an alley mouth walks {:.0} m to mapped pavement at the median and {:.0} m at the 90th \
@@ -3920,6 +4007,9 @@ pub fn run(args: &Args) -> Fallible<()> {
             bytes[record + 26] = highway_bytes[edge_id];
             bytes[record + 27] = commercial_bytes[edge_id];
             bytes[record + 28] = direct_canopy_bytes[edge_id];
+            // The relief byte (v7): how much height this edge climbs and drops, absolute, so it
+            // costs the same in either direction. A ferry crosses water and has none.
+            bytes[record + 34] = relief_bytes[edge_id];
         }
         // The durable key (v6): the source record's id, and the ordinal that — with the side already
         // in byte 22 — picks this edge out within it. A crossing, link or ferry has no source
@@ -3958,7 +4048,7 @@ pub fn run(args: &Args) -> Fallible<()> {
     fs::write(&args.out, &bytes)?;
     let key_hash = key_space_hash(&v2_edges, &edge_ordinals);
     write_version(&args.out, &bytes, edge_count, key_hash)?;
-    if let Some(path) = &args.stranded {
+    if let Some(path) = &args.stranded_out {
         write_stranded(path, &stranded_ways)?;
     }
 
@@ -3993,7 +4083,7 @@ pub fn run(args: &Args) -> Fallible<()> {
     // Both are shares, so each needs its denominator to exist before the share means anything — a
     // gate handed no offsettable street and no alley at all would otherwise report a perfect city.
     if !args.probe {
-        if derived_side_km < MIN_DERIVED_SIDEWALK_KM || alley_km < MIN_ALLEY_KM {
+        if derived_side_km < MIN_DERIVED_SIDEWALK_KM || (args.alleys && alley_km < MIN_ALLEY_KM) {
             return Err(format!(
                 "the gate was handed {derived_side_km:.1} km of derived sidewalk and {alley_km:.1} \
                  km of alley, under the {MIN_DERIVED_SIDEWALK_KM:.0} / {MIN_ALLEY_KM:.0} km \
@@ -4011,7 +4101,7 @@ pub fn run(args: &Args) -> Fallible<()> {
             )
             .into());
         }
-        if demoted_alley_fraction < MIN_DEMOTED_ALLEY_FRACTION {
+        if args.alleys && demoted_alley_fraction < MIN_DEMOTED_ALLEY_FRACTION {
             return Err(format!(
                 "only {:.1}% of alley km demoted to its centreline, under the {:.0}% floor: alleys \
                  have no sidewalks, so a build that keeps them has the gate the wrong way round",
@@ -4022,11 +4112,6 @@ pub fn run(args: &Args) -> Fallible<()> {
         }
     }
 
-    let total_km: f64 = v2_edges
-        .iter()
-        .map(|edge| f64::from(edge.length))
-        .sum::<f64>()
-        / 1000.0;
     let largest_fraction = if node_count > 0 {
         largest_component as f64 / node_count as f64
     } else {

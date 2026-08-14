@@ -15,6 +15,7 @@ const weights = (
   landmark: 0,
   art: 0,
   highway: 0,
+  hill: 0,
   commercial: 0,
   shade: 0,
   shelter: 0,
@@ -128,4 +129,29 @@ test("switching sliders drops the old range and rebrackets the new one", () => {
   // Back to a tree weight already sampled on the dropped tree range — the range is gone, so it runs.
   cache.route(GRAPH, START, DEST, weights(0.6, 0.8, true));
   expect(calls).toBe(4);
+});
+
+// Every slider the UI shows has to appear in the cache's axis list. A weight left out of it reads as
+// no change at all, so the cache answers the move with the previous route and the slider looks
+// inert — which is what the hill weight did when it shipped: quantized, costed, and invisible here.
+test("every weight a slider moves invalidates the cache", () => {
+  const cache = new RouteCache(stubSearch);
+  const base = weights(0.2, 0.1, true);
+  cache.route(GRAPH, START, DEST, base);
+  for (const axis of [
+    "tree",
+    "ferry",
+    "landmark",
+    "art",
+    "highway",
+    "hill",
+    "commercial",
+    "shade",
+    "shelter",
+  ] as const) {
+    calls = 0;
+    cache.route(GRAPH, START, DEST, { ...base, [axis]: 0.7 });
+    expect(`${axis}:${calls}`).toBe(`${axis}:1`);
+    cache.route(GRAPH, START, DEST, base);
+  }
 });

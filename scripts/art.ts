@@ -12,6 +12,7 @@ import { encodePoints, haversineMeters, type NamedPoint } from "./geometry";
 import { type LandContext, loadLandContext } from "./land";
 import type { SourceFile } from "./manifest";
 import { fetchOsmArtwork, type OsmArtwork } from "./overpass";
+import { fetchSfArt } from "./sf";
 import type { Coord } from "./socrata";
 import { NYC_OPEN_DATA } from "./socrata";
 
@@ -62,26 +63,38 @@ function dedupOsm(osm: OsmArtwork[], pdc: NamedPoint[]): NamedPoint[] {
     .map((point) => ({ lat: point.lat, lng: point.lng, name: point.name }));
 }
 
+async function nycArt(land: LandContext): Promise<NamedPoint[]> {
+  // `*` so a newly-read column is free after one refetch (the disk cache keys on the query).
+  const rows = await NYC_OPEN_DATA.dataset<ArtRow>(
+    ART_DATASET,
+    { $select: "*" },
+    ART_COUNT,
+  );
+  return toPoints(rows, land.onLand);
+}
+
+// The city's own inventories, which OSM's murals are then deduped against and added to. OSM is the
+// half that works anywhere; this is the half that does not, so a city states it or states null.
+export type ArtSource = (land: LandContext) => Promise<NamedPoint[]>;
+
+export const NYC_ART: ArtSource = nycArt;
+export const SF_ART: ArtSource = (land) => fetchSfArt(land.onLand);
+
 export async function ingestArt(
   cityId: string,
+  source: ArtSource | null,
   land: LandContext,
 ): Promise<SourceFile> {
   const started = performance.now();
   await mkdir(ART_DIR, { recursive: true });
 
-  // `*` so a newly-read column is free after one refetch (the disk cache keys on the query).
-  const pdcRows = await NYC_OPEN_DATA.dataset<ArtRow>(
-    ART_DATASET,
-    { $select: "*" },
-    ART_COUNT,
-  );
-  const pdc = toPoints(pdcRows, land.onLand);
+  const city = source ? await source(land) : [];
 
   const { south, west, north, east } = land.box;
   const osmRaw = await fetchOsmArtwork(south, west, north, east);
   const osmOnLand = osmRaw.filter(land.onLand);
-  const osm = dedupOsm(osmOnLand, pdc);
-  const points = [...pdc, ...osm];
+  const osm = dedupOsm(osmOnLand, city);
+  const points = [...city, ...osm];
 
   const bytes = encodePoints(ART_MAGIC, ART_FORMAT, points);
   const file = `${cityId}.bin`;
@@ -90,7 +103,7 @@ export async function ingestArt(
   const seconds = ((performance.now() - started) / 1000).toFixed(1);
   const kib = (bytes.length / 1024).toFixed(1);
   console.error(
-    `art: PDC ${pdc.length} on land, OSM ${osmRaw.length} fetched / ${osmOnLand.length} on land / ${osm.length} kept after dedup, ${points.length} total, ${kib} KiB in ${seconds}s`,
+    `art: city inventories ${city.length} on land, OSM ${osmRaw.length} fetched / ${osmOnLand.length} on land / ${osm.length} kept after dedup, ${points.length} total, ${kib} KiB in ${seconds}s`,
   );
   return {
     file,
@@ -102,5 +115,10 @@ export async function ingestArt(
 }
 
 if (import.meta.main) {
-  await ingestArt("nyc", await loadLandContext());
+  const cityId = process.argv[2] ?? "nyc";
+  await ingestArt(
+    cityId,
+    cityId === "sf" ? SF_ART : NYC_ART,
+    await loadLandContext(cityId),
+  );
 }

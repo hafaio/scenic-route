@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import {
   CITIES,
+  citiesInView,
   cityById,
   containsPoint,
   DEFAULT_CITY,
@@ -47,4 +48,23 @@ test("an unknown or absent city id resolves to nothing rather than a default", (
   expect(cityById(DEFAULT_CITY.id)).toBe(DEFAULT_CITY);
   expect(cityById("atlantis")).toBeNull();
   expect(cityById(null)).toBeNull();
+});
+
+// What the camera reads to decide the active city: a view naming exactly one city hands it over, and
+// one naming several or none leaves the city alone.
+test("a view reports every city it overlaps, however little", () => {
+  const { bounds } = DEFAULT_CITY;
+  const clipped = {
+    south: bounds.north - 0.01,
+    north: bounds.north + 5,
+    west: bounds.east - 0.01,
+    east: bounds.east + 5,
+  };
+  expect(citiesInView(clipped)).toEqual([DEFAULT_CITY]);
+
+  const world = { south: -85, north: 85, west: -180, east: 180 };
+  expect(citiesInView(world)).toEqual([...CITIES]);
+
+  const empty = { south: 0, north: 10, west: 0, east: 10 };
+  expect(citiesInView(empty)).toEqual([]);
 });

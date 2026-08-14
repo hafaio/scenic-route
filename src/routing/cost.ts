@@ -56,7 +56,71 @@ export const DEFAULT_LANDMARK_WEIGHT = 0.1;
 export const MAX_ART_WEIGHT = 1;
 export const DEFAULT_ART_WEIGHT = 0.1;
 export const MAX_HIGHWAY_WEIGHT = 1;
+// The one weight whose maximum is not 1, because at 1 the slider ran out of authority before it ran
+// out of hill. Measured across Potrero Hill: at full strength the chosen route still climbed a block
+// at or past 12% grade, and only at 2 did it stop using one at all (relief 614 m -> 431 m for 9%
+// more walking). Past about 5 the routes stop changing much and start going a long way round, so
+// that is where the top of the slider sits.
+//
+// The slider still reads 0-100%: a factor's percentage is taken against its own maximum, so this
+// changes what the far end means and not how it is shown. Admissibility is untouched at any value —
+// hill is a penalty, its minimum factor is 1, and `minMultiplier` never sees it.
+export const MAX_HILL_WEIGHT = 5;
+
+// The grade the relief byte's full range spans. Mirrors REFERENCE_GRADE in crates/tiler/src/relief.rs
+// — the byte carries a fraction, and this is what the fraction is a fraction OF. Change one and the
+// other is wrong, which is why the graph format version moves with it.
+const RELIEF_MAX_GRADE = 0.35;
+
+// The grade the hill slider is calibrated against: at this steepness the penalty is exactly the
+// weight, which is where the Potrero measurements above were taken. Steeper costs more than
+// proportionally and gentler costs less, because the penalty is SQUARED in the grade.
+//
+// That square is the whole point of the shape. A penalty proportional to grade is a penalty
+// proportional to height climbed, so two routes that climb the same hill over the same distance cost
+// the same however the climb is distributed — three flat blocks and one wall priced identically to
+// four gradual ones. Squaring breaks the tie the way a walker would: spread the climb out and it
+// costs less, concentrate it and it costs more.
+const HILL_REFERENCE_GRADE = 0.12;
+
+// The grade of one edge, as a real fraction rather than the byte's own scale.
+export function edgeGrade(graph: RoutingGraph, edge: number): number {
+  return (graph.edgeRelief[edge] / 255) * RELIEF_MAX_GRADE;
+}
+
+// How much of the hill slider's authority an edge draws, 0 at flat and 1 at the reference grade.
+// Clamped only for the summary's sake; the cost below deliberately runs past 1.
+export function hillFractionOf(graph: RoutingGraph, edge: number): number {
+  return Math.min(1, edgeGrade(graph, edge) / HILL_REFERENCE_GRADE);
+}
+
+// Tobler's hiking function, which is where the shape of "steep is slow" comes from: walking speed
+// falls off exponentially in the grade. Written against |grade| because the relief byte is absolute —
+// it does not record which way an edge tips — so a descent is charged the same slowdown as a climb.
+// That is wrong in the mild case (a gentle descent is genuinely a little FASTER than flat) and right
+// in the case that matters (a 30% descent is slow and unpleasant); a signed byte would fix it and is
+// a bake change.
+//
+// Normalized to 1 on the flat, so it scales the measured 1.3 m/s rather than replacing it with
+// Tobler's own 1.4. Never above 1, so walking can only get slower — which is what keeps the A*
+// heuristic's seconds-per-metre bound a bound.
+const TOBLER_FALLOFF = 3.5;
+
+export function gradeSpeedFactor(grade: number): number {
+  return Math.exp(-TOBLER_FALLOFF * Math.abs(grade));
+}
+
+// How fast this edge is actually walked. Every place that turns a length into seconds goes through
+// here, so the ETA and the cost cannot disagree about how long a hill takes.
+export function walkSpeedOn(graph: RoutingGraph, edge: number): number {
+  return WALK_METERS_PER_SECOND * gradeSpeedFactor(edgeGrade(graph, edge));
+}
 export const DEFAULT_HIGHWAY_WEIGHT = 0.5;
+// Hills start at zero, and now mean only what the name says: how much you MIND one, over and above
+// the time it costs. The time is charged whatever the slider reads, because the walking speed itself
+// is grade-adjusted — so a hilly route is reported as the longer walk it is, and the router prefers
+// the flatter one at zero weight without being told to.
+export const DEFAULT_HILL_WEIGHT = 0;
 // A discount for edges fronting a nice commercial block. Modest default, tunable by eye.
 export const MAX_COMMERCIAL_WEIGHT = 1;
 export const DEFAULT_COMMERCIAL_WEIGHT = 0.1;
@@ -88,6 +152,9 @@ export interface RouteWeights {
   landmark: number;
   art: number;
   highway: number;
+  // Penalty for climbing: how much a walker minds a hill. Absolute, so it costs the same up or
+  // down — a route that avoids a hill avoids it in both directions.
+  hill: number;
   commercial: number;
   shade: number; // signed sun/shade preference in [-1, 1]; positive prefers sun, negative shade
   shelter: number; // preference for cover overhead in the rain: decks and canopy
@@ -190,6 +257,11 @@ export function edgeMultiplier(
   const landmark = 1 - weights.landmark * (graph.edgeLandmark[edge] / 255);
   const art = 1 - weights.art * (graph.edgeArt[edge] / 255);
   const highway = 1 + weights.highway * (graph.edgeHighway[edge] / 255);
+  // Squared, so the same climb spread over a longer stretch costs less than the same climb
+  // concentrated into a wall; `HILL_REFERENCE_GRADE` carries the reasoning. Unclamped above the
+  // reference — San Francisco has streets at three times it, and they should cost like it.
+  const gradeShare = edgeGrade(graph, edge) / HILL_REFERENCE_GRADE;
+  const hill = 1 + weights.hill * gradeShare * gradeShare;
   const commercial =
     1 - weights.commercial * (graph.edgeCommercial[edge] / 255);
   // The signed shade attribute for the sun at this point in the walk; 0 when no artifact is loaded or at
@@ -197,7 +269,8 @@ export function edgeMultiplier(
   const shade =
     1 - weights.shade * shadeAttrOf(graph, edge, elapsedSeconds, shaded);
   const shelter = 1 - weights.shelter * shelterAttrOf(graph, edge, shed);
-  const scenic = tree * landmark * art * highway * commercial * shade * shelter;
+  const scenic =
+    tree * landmark * art * highway * hill * commercial * shade * shelter;
   if (weights.allowSheds) {
     return scenic;
   } else {
@@ -286,7 +359,7 @@ export function rawSeconds(
     return wait + crossing;
   } else {
     return (
-      graph.edgeLength[edge] / WALK_METERS_PER_SECOND +
+      graph.edgeLength[edge] / walkSpeedOn(graph, edge) +
       crossingWait(graph, edge, fromNode)
     );
   }
@@ -321,7 +394,7 @@ export function effSeconds(
     }
   } else {
     return (
-      (graph.edgeLength[edge] / WALK_METERS_PER_SECOND) *
+      (graph.edgeLength[edge] / walkSpeedOn(graph, edge)) *
       edgeMultiplier(graph, edge, weights, elapsedSeconds)
     );
   }
@@ -333,6 +406,9 @@ export function walkSecondsCoeff(
   graph: RoutingGraph,
   weights: RouteWeights,
 ): number {
+  // Still the flat speed, deliberately: the grade only ever slows walking down, so dividing by the
+  // fastest speed any edge can be walked at keeps this a LOWER bound on the seconds a metre costs,
+  // which is all the heuristic needs.
   return minMultiplier(graph, weights) / WALK_METERS_PER_SECOND;
 }
 

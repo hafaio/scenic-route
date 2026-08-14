@@ -71,5 +71,6 @@ export async function ingestHighways(
 }
 
 if (import.meta.main) {
-  await ingestHighways("nyc", await loadLandContext());
+  const cityId = process.argv[2] ?? "nyc";
+  await ingestHighways(cityId, await loadLandContext(cityId));
 }

@@ -14,10 +14,11 @@ import { join } from "node:path";
 import { loadGraphBytes } from "../../scripts/build-sheds";
 import { checkSheds } from "../../scripts/check-sheds";
 import { encodeSheds } from "../../scripts/shed-encode";
+import { FORMAT_VERSION as GRAPH_FORMAT_VERSION } from "./graph";
 
 const LAST_DAY = 3136;
 const HEADER_BYTES = 64;
-const EDGE_RECORD_BYTES = 34;
+const EDGE_RECORD_BYTES = 35;
 const NODE_COUNT = 2;
 const KIND_SIDEWALK = 0;
 const SIDE_SHIFT = 3;
@@ -36,7 +37,7 @@ const EDGES: readonly Edge[] = [
   { sourceId: 19, side: 4, ordinal: 0, length: 7.5 },
 ];
 
-// A v6 GRPH file carrying exactly these edges: two nodes, no geometry, no names, no ferries. Enough
+// A v7 GRPH file carrying exactly these edges: two nodes, no geometry, no names, no ferries. Enough
 // for `decodeGraph`, which is all the gate reads.
 function graphBytes(edges: readonly Edge[]): Uint8Array {
   const nodes = HEADER_BYTES + NODE_COUNT * 10;
@@ -46,7 +47,7 @@ function graphBytes(edges: readonly Edge[]): Uint8Array {
   const bytes = new Uint8Array(names + 8);
   const view = new DataView(bytes.buffer);
   bytes.set(new TextEncoder().encode("GRPH"));
-  view.setUint16(4, 6, true);
+  view.setUint16(4, GRAPH_FORMAT_VERSION, true);
   view.setUint32(8, NODE_COUNT, true);
   view.setUint32(12, edges.length, true);
   view.setFloat64(16, -73.98, true);
@@ -81,7 +82,7 @@ async function deploy(
   await Promise.all([
     writeFile(join(dir, "nyc.bin"), graph),
     writeFile(
-      join(dir, "version.json"),
+      join(dir, "nyc.version.json"),
       JSON.stringify({
         graph: "nyc.bin",
         hash: built.hash,
@@ -154,7 +155,7 @@ test("a rebuild that shifted an ordinal fails the deploy", async () => {
 test("a version file that has drifted from the graph fails too", async () => {
   const dir = await deploy(GRAPH, GRAPH);
   await writeFile(
-    join(dir, "version.json"),
+    join(dir, "nyc.version.json"),
     JSON.stringify({
       graph: "nyc.bin",
       hash: loadGraphBytes(GRAPH).hash,

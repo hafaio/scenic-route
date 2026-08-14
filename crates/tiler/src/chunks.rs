@@ -28,10 +28,11 @@ pub struct Args {
     pub manifest: PathBuf,
     pub data: PathBuf,
     pub chunks: PathBuf,
-    pub paths: Option<PathBuf>, // the OSM path network, drawn into the same z12 street chunks
     // The graph's STRD list of the OSM ways its island drop stranded. Absent on the pass that runs
     // before the graph exists, and then every segment's bit is clear.
-    pub stranded: Option<PathBuf>,
+    /// The routing directory holding every city's `<id>.stranded.bin`. A DIRECTORY, where
+    /// `tiler graph`'s `--stranded-out` is the file it writes — hence the two names.
+    pub stranded_dir: Option<PathBuf>,
 }
 
 /// The STRD way ids, sorted as `tiler graph` wrote them, for `contains` by binary search.
@@ -219,22 +220,31 @@ pub fn run(args: &Args) -> Fallible<()> {
     let started = Instant::now();
     let manifest: Manifest = serde_json::from_slice(&fs::read(&args.manifest)?)?;
 
-    // One optional paths file rides along with the single-city manifest. Cities write disjoint
-    // z12 tiles, so the paths land in whichever tiles their bbox touches without contending.
-    let paths = match &args.paths {
-        Some(file) => Some(binfmt::read_paths(file)?),
-        None => None,
-    };
-
-    let stranded = match &args.stranded {
-        Some(file) => read_stranded(file)?,
-        None => Vec::new(),
-    };
-
     let mut chunks = 0;
     let mut chunk_bytes = 0;
     for city in &manifest.cities {
         let streets = binfmt::read_streets(&args.data.join("streets").join(&city.streets.file))?;
+        // Each city's own dropped ways, beside its own graph. The ids are OSM's and so cannot
+        // collide between cities, but one shared file was written twice and only the last survived.
+        let stranded = match &args.stranded_dir {
+            Some(dir) => {
+                let file = dir.join(format!("{}.stranded.bin", city.id));
+                if file.exists() {
+                    read_stranded(&file)?
+                } else {
+                    Vec::new()
+                }
+            }
+            None => Vec::new(),
+        };
+        // Each city's own paths, out of its own manifest entry. One shared `--paths` flag meant only
+        // whichever city the caller picked ever got its OSM ways drawn into its chunks.
+        let paths = match &city.paths {
+            Some(layer) => Some(binfmt::read_paths(
+                &args.data.join("paths").join(&layer.file),
+            )?),
+            None => None,
+        };
         eprintln!(
             "{}: {} segments, {} path segments",
             city.id,

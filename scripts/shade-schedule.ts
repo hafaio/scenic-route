@@ -64,8 +64,16 @@ function positionOf(
 // The bins: for each declination band, the sun position at the band's central declination stepped
 // across the daytime hour angles. The band centre stands for every date in the band (identical
 // shadows), and the hour steps run from just after sunrise to just before sunset.
-export function computeShadeBuckets(): ShadeBucket[] {
-  const [city] = manifest.cities;
+//
+// PER CITY, and not only because the numbers differ. The (season, hourAngle) keys are latitude-free
+// — that is what makes a scrub jitter-free — but the sun position each one resolves to is not, and
+// neither is the sunrise cut that decides which keys exist at all: a city further south has winter
+// bins a northern one does not. So two cities can share neither a bin index nor a pyramid.
+export function computeShadeBuckets(cityId: string): ShadeBucket[] {
+  const city = manifest.cities.find((entry) => entry.id === cityId);
+  if (!city) {
+    throw new Error(`no city ${cityId} in the manifest`);
+  }
   const centreLat = (city.bounds.north + city.bounds.south) / 2;
 
   const buckets: ShadeBucket[] = [];
@@ -79,7 +87,7 @@ export function computeShadeBuckets(): ShadeBucket[] {
     const maxHourAngle =
       Math.abs(cosSunset) >= 1
         ? cosSunset < 0
-          ? 180 // sun never sets at this band (not reached at NYC's latitude)
+          ? 180 // sun never sets at this band (not reached at any city's latitude)
           : 0
         : Math.acos(cosSunset) / DEGREES;
     const steps = Math.floor(maxHourAngle / HOUR_ANGLE_STEP_DEG);

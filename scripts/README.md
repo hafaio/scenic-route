@@ -27,7 +27,7 @@ scripts fetch, encode and orchestrate; they compute nothing about trees.
 
 ```sh
 tiler densities --params <file.json>                          # fills the street & path density blobs, in place
-tiler heights --canopy <file.bin> --chm <file.tif>            # fills the canopy file's crown-height region, in place
+tiler heights --canopy <file.bin> --chm-crs <sf-cs13|utm18n> (--chm <file.tif> | --chm-mosaic <file.txt> --chm-band <n>)   # fills the canopy file's crown-height region, in place
 tiler canopy --manifest … --ramp … --data … --tiles …         # the LiDAR-canopy cover fill pyramid
 tiler genus  --manifest … --palette … --data … --tiles …      # the genus-dot raster pyramid
 tiler shade  --manifest … --data … --tiles … --params …       # the building- and tree-shadow pyramids
@@ -297,6 +297,26 @@ of the cells it caught, in decimetres, in the file's trailing height region. It 
 in place, exactly as `tiler densities` fills the density blobs, and the ingest calls it right after
 writing the canopy file.
 
+San Francisco has no equivalent product, and takes its heights from **band 2 of the same 3DEP
+topographic tiles the terrain overlay is built from** — the surface model less the terrain model,
+which is height above ground. Same command, two differences: the tiles are a *mosaic* of 651
+separate rasters rather than one file, so `--chm-mosaic` takes a list on disk and the tiler lays a
+single virtual grid over their union (they share a projection, 1 m cells, and whole-metre origins,
+all three checked rather than assumed); and the band is not a canopy product at all. It measures
+whatever stood there — the Salesforce Tower reads 324 m in it. What makes it a crown height is the
+masking, and only the masking: the polygons are measured canopy, so a cell is read only where a tree
+was already mapped. **Never sample that band unmasked.** Cells still reading above 65 m, taller than
+any tree in either city, are dropped rather than clamped — a clamp would keep a 200 m tower and call
+it a 65 m tree — so a polygon straying onto a roof falls back to its real crown cells, and one with
+none keeps the 0 that means unknown. Measured: that rejects 0.05% of the city's canopy area, all of
+it downtown and along roof edges, and the run reports the upper tail (p95/p99/max and the share
+above the cut) for exactly this reason.
+
+The two cities' numbers are not comparable as like for like, and the difference is the product, not
+the trees: New York measures 46% of its polygons, median 15.2 m, IQR 8.2 m; San Francisco measures
+75% of them, median 16.6 m, IQR 16.9 m. A crown-core threshold drops low canopy, which lifts the
+floor and tightens the spread; a raw height-above-ground inside a polygon keeps the shrubs.
+
 The CHM is a **thresholded crown-core product, not a canopy surface**: 95% of its cells are nodata
 and its lowest real reading is 2.1 m, because everything shorter (and everything taller than 60 m,
 to keep buildings out) was masked away. So a polygon can be real canopy and still catch no cell —
@@ -313,9 +333,16 @@ count and carries on rather than failing the build.
 
 #### What the heights are for: the tree-shadow pyramid, and routing
 
+**Everything under a bin index is per city.** A bin's key is `(declination band, hour angle)`, which
+is latitude-free — that is what makes a clock scrub jitter-free — but the sun position that key
+resolves to is not, and neither is the sunrise cut deciding which keys exist at all: a city further
+south has winter bins a northern one does not. So `tiler shade` renders one city per invocation
+(`--city`), and the pyramids, `buckets.json` and the `SHDB` directory all carry the city in their
+path. Two cities can share neither a bin index nor a file.
+
 `tiler shade` reads them alongside the building footprints and bakes a **second shadow pyramid**,
-`public/tiles/tree-shade/<bin>/{z}/{x}/{y}.webp`, mirroring the building one
-(`public/tiles/shade/<bin>/{z}/{x}/{y}.webp`) tile for tile: the same bin indices off the same
+`public/tiles/tree-shade/<city>/<bin>/{z}/{x}/{y}.webp`, mirroring the building one
+(`public/tiles/shade/<city>/<bin>/{z}/{x}/{y}.webp`) tile for tile: the same bin indices off the same
 `buckets.json`, the same z9–z15 plan, the same lossless WebP of one flat slate where only alpha
 varies, the same `MAX_SHADE_ALPHA * intensity * fraction` scale and 8-step quantisation, and a tile
 with nothing painted in it is not written at all — the client reads the 404 as transparent.
@@ -541,15 +568,18 @@ it, so it needs a little more opacity to hold its own.
 ## Running it
 
 ```sh
-bun run build-tree-data              # uses .cache/ if warm
+bun run build-tree-data              # every city; uses .cache/ if warm
+bun run build-tree-data sf           # one city
 bun run build-tree-data -- --refresh # bypass .cache/, go back to the network
-bun run build-tiles
+bun run build-buildings sf           # the other ingests take a city the same way
+bun run build-tiles                  # every city's pyramids and graphs
 ```
 
 Raw source reads are cached in `.cache/` (gitignored), keyed by the request itself — **including the
 Socrata host**, since two cities can publish the same 4x4 dataset id and an entry serving one city's
-rows for the other's read would parse and count as if it were right — and never expire on their own — including the 243 MiB canopy height raster, which is kept as a file
-rather than as JSON because the tiler reads it off disk itself. The sources move about once a year, so a re-run wants whatever it
+rows for the other's read would parse and count as if it were right — and never expire on their own — including the rasters, which are kept as files rather than as JSON
+because the tiler reads them off disk itself: New York's 243 MiB canopy height model, and San
+Francisco's 651 3DEP tiles at 1.77 GB. The sources move about once a year, so a re-run wants whatever it
 read last time — not a fresher copy it did not ask for.
 
 `SOCRATA_APP_TOKEN`, when set, buys a request budget of its own. It only matters on a host whose
@@ -1202,7 +1232,28 @@ recovered there — but the staircase is not detail at any zoom the client can a
 bought was a payload and a path-building cost no viewport could ever use. LOD past this is still
 the client's to take.
 
-### `public/routing/{id}.bin` — the routing graph, magic `GRPH` (v6, derived, gitignored)
+### `public/tiles/elevation/<city>/{z}/{x}/{y}.webp` — the terrain overlay (derived, gitignored)
+
+The city's ground, tinted by height and relief-shaded, baked by `tiler elevation` from the DEM
+mosaic. z9-z14; a tile with no ground under it is not written and the client reads the 404 as
+transparent.
+
+The DEM is several hundred one-metre GeoTIFFs on the city's own projected grid — for San Francisco
+the 3DEP campaign `CA_SanFrancisco_1_B23`, 651 five-band float32 COGs (DTM, DSM, canopy height,
+slope, aspect), CC0, enumerated from a STAC collection and cached whole (1.7 GB) but never shipped.
+`crates/tiler/src/dem.rs` reads a set of such tiles as one surface and resamples it into a regular
+longitude/latitude field, which is what the pyramid and the graph's relief bake each read rather than
+the mosaic itself. Within one resample every tile is decoded exactly once — the cells are visited
+grouped by tile, and visiting them in grid order instead re-decodes every tile on every row, which
+measured 37,204 decodes of 651 tiles against 616. A build resamples twice, though, once in
+`tiler elevation` at z14 and once in `tiler graph` at z15: separate processes, and the field is not
+written down between them.
+
+The tint is hypsometric — greens through tans to browns — stretched over the city's own height range
+rather than an absolute scale, because what the layer is for is showing which of *these* streets are
+the hills. The hillshade is lit from the north-west, the direction a printed relief map lights from.
+
+### `public/routing/{id}.bin` — the routing graph, magic `GRPH` (v8, derived, gitignored)
 
 `tiler graph` contracts STRT into the graph the client routes on, then expands it into the edges a
 walker actually uses. When `--paths` is supplied it first **conflates** the OSM pedestrian/park
@@ -1402,7 +1453,7 @@ Header, 64 bytes:
 | offset | type | field |
 | --- | --- | --- |
 | 0 | u8[4] | magic `GRPH` |
-| 4 | u16 | format version = 6 |
+| 4 | u16 | format version = 7 |
 | 6 | u16 | header bytes = 64 |
 | 8 | u32 | node count N |
 | 12 | u32 | edge count E |
@@ -1446,8 +1497,9 @@ can view them as typed arrays without copying):
 | 28 | u8 | direct canopy, 0–254 (the shelter factor's input; 0 for a ferry) |
 | 29 | u32 | **source id**: the CSCL physicalid, or the OSM way id for a conflated path; `0xFFFFFFFF` = no durable identity |
 | 33 | u8 | **ordinal**: how many earlier edges share this edge's (source id, side) pair; 0 where there is no source id |
+| 34 | u8 | **relief**, 0-254: the average grade along this edge — the height it climbs and drops, added up along its polyline without regard to direction, divided by its length — as a fraction of 35%. That span clears the steepest street anyone walks (San Francisco's worst blocks reach about 31.5%), so nothing saturates; v7 spanned only 12%, which made every serious hill identical. Read both as a penalty attribute and as the input to the grade-adjusted walking speed. 0 for a ferry and for a city with no elevation source |
 
-The record is 34 bytes, so the name table that follows it is zero-padded back to the 4-byte
+The record is 35 bytes, so the name table that follows it is zero-padded back to the 4-byte
 boundary every section starts on.
 
 Bytes 29–33 carry the **durable edge key** (v6). Node and edge ids are positional — nodes are
@@ -1535,7 +1587,7 @@ A pure degree-2 cycle is emitted as a self-loop on the one node it retains. GRPH
 distinct from the STRT record flags: a step street is bit1, and bit2 on a **sidewalk** marks the
 geometry-right side (v1's "path-like" bit is gone — the kind field carries that now).
 
-### `public/routing/version.json` — what the deployed graph is (derived, gitignored)
+### `public/routing/<city>.version.json` — what the deployed graph is (derived, gitignored)
 
 Written by the same `tiler graph` invocation, beside the `.bin` it just produced, so a job holding
 nothing but the live site can tell whether the graph it last snapped against is still the one being
@@ -1567,7 +1619,7 @@ order rather than in their hash map's per-process iteration order — the edge s
 the smaller node id, so without it a hundred-odd edge ids shuffled between two runs over the same
 files, and the SHDE rows, which are keyed by edge index, shuffled with them.
 
-### `public/routing/stranded.bin` — the walks the graph dropped, magic `STRD` (v1, derived, gitignored)
+### `public/routing/<city>.stranded.bin` — the walks the graph dropped, magic `STRD` (v1, derived, gitignored)
 
 `tiler graph --stranded` writes the OSM way ids of the paths its **island drop** takes away entirely
 — a way every edge of which sat in a component nothing CSCL anchored, so no route can enter or leave
@@ -1588,7 +1640,7 @@ records, 31.5 km — off this list by cutting the routable line each of them was
 The list says nothing about whether those trails are walkable on the ground — most are. It records
 only that *this* graph cannot route them, which is what the overlay must not contradict.
 
-### `public/routing/shade/` — the per-edge occlusion fractions, magic `SHDB` (v2, derived, gitignored)
+### `public/routing/shade/<city>/` — the per-edge occlusion fractions, magic `SHDB` (v2, derived, gitignored)
 
 The same `tiler graph` invocation, given `--buildings` and `--shade-params` (the sun-position file
 `tiler shade` reads) and `--shade-dir`, bakes for every GRPH edge and every sun-position bin how much
@@ -1712,7 +1764,7 @@ Header, 32 bytes plus each file's own trailing block, both record files:
 | 6 | u16 | header bytes, and so where the records start: 32 plus whatever the block below runs to |
 | 8 | u32 | records in this file |
 | 12 | u32 | spans in this file |
-| 16 | u64 | graph key-space hash — the `keyHash` `routing/version.json` carries |
+| 16 | u64 | graph key-space hash — the `keyHash` `routing/<city>.version.json` carries |
 | 24 | u16 | the day the file's delta chain starts from: its first record's own day |
 | 26 | u8 | flags: bit0 set in `closed.bin` |
 | 27 | u8 | reserved, zero |
@@ -1764,7 +1816,7 @@ key — contributes no coverage, which is the correct answer rather than a silen
 A key survives a rebuild; it does not promise to still name the same edge across one. A conflation
 fix that stopped a second OSM mapping of a street becoming a spur left 2,284 of 302,985 keys naming
 an edge a **median 26 m** from the one they had named. So the header's key-space hash is a **gate**,
-not a note: the client reads its own graph's `keyHash` out of `routing/version.json` — recomputing it
+not a note: the client reads its own graph's `keyHash` out of `routing/<city>.version.json` — recomputing it
 is a 368k-element sort and an FNV over 3 MB, to arrive at a number the deploy already wrote down —
 and an artifact naming any other key space resolves **nothing at all**. The band, the router and the
 shadow caster all resolve through the one call, so they go quiet together: a day of bare pavement is
@@ -2135,5 +2187,29 @@ hard-coded `CITY` constant plus four NYC-specific fetchers. A new city needs:
    server quietly cut short.
 
 The **OSM sources already work anywhere** — Overpass is queried by bounding box, not by
-city. The estimator, the encoders and the tiler are all city-agnostic; only
-the source fetchers, the crown allometry and the `CITY` constant are not.
+city. The estimator, the encoders and the tiler are all city-agnostic; only the source fetchers and
+the crown allometry are not.
+
+San Francisco is the second city, and what it took is in `scripts/sf.ts`. DataSF is a Socrata
+deployment, so the reading is shared and most of the work was a field remap; three things were not,
+and each is the kind of thing a third city should expect to hit:
+
+- **The walkability filter has no counterpart.** CSCL has `rw_type`, one code per kind of way. SF's
+  centreline has `classcode`, which is only a road hierarchy and says nothing about whether a person
+  may walk. The field that does is `layer` — and it names the PAPER layers, streets that exist on
+  the map and not on the ground. `PAPER_WATER` would have put walking edges out in the bay.
+- **The width is published from the other side.** NYC gives a kerb-to-kerb `streetwidth` and the
+  pavement is offset half of it. SF gives the width of the *sidewalk*, so the roadway is recovered
+  as the right-of-way polygon's area over its centreline's length, less two sidewalks — a median of
+  26 ft against New York's 30.
+- **The survey is a table, not polygons.** The existence gate needs an authoritative per-side answer
+  to "is there pavement here", because OSM's silence is ambiguous. NYC probes planimetric polygons;
+  SF publishes a `side` column. So `sidewalks.ts` takes a `Survey` function and each city supplies
+  its own.
+
+And two traps worth stating plainly. The land mask must be the **shoreline-clipped** polygons, not
+the county's legal boundary — San Francisco County reaches 45 km offshore to the Farallon Islands,
+and `boxOf(land)` feeds the manifest bounds, every Overpass query and the whole tile plan. And a
+tree register's coordinates are only as good as its geocoder: 55 SF street trees carry a placeholder
+in the north Pacific, which is why the ingest land-clips the points before taking the city's bounds
+over them.
