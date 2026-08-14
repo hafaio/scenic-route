@@ -66,6 +66,13 @@ export async function ingestLandUse(
   cityId: string,
   land: LandContext,
 ): Promise<SourceFile> {
+  // New York only. The fetch below reads a NYC dataset unconditionally, so another city would clip
+  // New York's rows against its own coastline, drop every one of them, and write a silently empty
+  // artifact that `serveSources` would then publish.
+  if (cityId !== "nyc") {
+    throw new Error(`no land use source for ${cityId}`);
+  }
+
   const started = performance.now();
   await mkdir(LANDUSE_DIR, { recursive: true });
 
@@ -103,5 +110,6 @@ export async function ingestLandUse(
 }
 
 if (import.meta.main) {
-  await ingestLandUse("nyc", await loadLandContext());
+  const cityId = process.argv[2] ?? "nyc";
+  await ingestLandUse(cityId, await loadLandContext(cityId));
 }

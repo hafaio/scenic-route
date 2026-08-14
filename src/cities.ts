@@ -39,12 +39,21 @@ const OVERLAYS_BY_CITY: Record<string, readonly OverlayId[]> = {
     "shade",
     "scaffolding",
   ],
+  // San Francisco has no scaffolding feed to build a shed layer from, and its ferries are behind a
+  // 511.org key this pipeline does not hold. Commercial waits on its own signals being wired up.
+  sf: ["canopy", "genus", "elevation", "landmarks", "art", "highways", "shade"],
 };
 
 const METERS_PER_DEGREE_LAT = 111_320;
 
 // What a city is framed at when the app opens on it with no camera of its own to restore.
 export const CITY_ZOOM = 13;
+
+// Past this the camera cuts rather than flies. Well beyond any pan inside one city — New York's own
+// diagonal is about 50 km — and far below the distance to another city, so the only thing it catches
+// is a move that was never a pan. Everything keyed on the viewport renders against each frame of an
+// animated crossing and reports what it finds over the ocean in between, which is nothing.
+export const CROSS_CITY_METERS = 120_000;
 
 export const CITIES: readonly City[] = manifest.cities.map((city) => ({
   id: city.id,
@@ -93,6 +102,18 @@ export function activeCity(): City {
 
 export function containsPoint(city: City, point: LatLng): boolean {
   return metersFromCity(city, point) === 0;
+}
+
+// The cities any part of which is on screen. Overlap, not containment: a city half off the edge is
+// still one you are looking at.
+export function citiesInView(view: CityBounds): City[] {
+  return CITIES.filter(
+    ({ bounds }) =>
+      bounds.south <= view.north &&
+      bounds.north >= view.south &&
+      bounds.west <= view.east &&
+      bounds.east >= view.west,
+  );
 }
 
 // The city a point belongs to, or the closest one when it is outside every city. Never null: an

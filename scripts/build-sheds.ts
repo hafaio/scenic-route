@@ -68,7 +68,7 @@ const ROUTING_DIR = join(PUBLIC_DIR, "routing");
 // as the client's relative path, and the tile build neither renders nor clears it.
 export const SHED_DIR = join(PUBLIC_DIR, "sheds");
 const GRAPH_PATH = join(ROUTING_DIR, "nyc.bin");
-const VERSION_PATH = join(ROUTING_DIR, "version.json");
+const VERSION_PATH = join(ROUTING_DIR, "nyc.version.json");
 // The DOB publishes one CSV a day and keeps the old ones only as git history, so the whole record of
 // what stood when is the repository rather than any single file.
 const SNAPSHOT_REPO = "https://github.com/NYCDOB/ActiveShedPermits.git";
@@ -124,7 +124,7 @@ async function loadGraph(): Promise<RoutingGraph> {
     const declared = JSON.parse(version) as GraphIdentity;
     if (declared.hash !== graph.hash || declared.keyHash !== graph.keyHash) {
       throw new Error(
-        `${GRAPH_PATH} is ${graph.hash}/${graph.keyHash}, version.json beside it says` +
+        `${GRAPH_PATH} is ${graph.hash}/${graph.keyHash}, its version file says` +
           ` ${declared.hash}/${declared.keyHash}`,
       );
     }

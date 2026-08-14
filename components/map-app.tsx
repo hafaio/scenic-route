@@ -7,6 +7,8 @@ import {
   activeCity,
   CITY_ZOOM,
   type City,
+  type CityBounds,
+  citiesInView,
   cityById,
   containsPoint,
   DEFAULT_CITY,
@@ -42,6 +44,7 @@ import {
   DEFAULT_COMMERCIAL_WEIGHT,
   DEFAULT_FERRY_WEIGHT,
   DEFAULT_HIGHWAY_WEIGHT,
+  DEFAULT_HILL_WEIGHT,
   DEFAULT_LANDMARK_WEIGHT,
   DEFAULT_SHADE_WEIGHT,
   DEFAULT_SHELTER_WEIGHT,
@@ -106,7 +109,11 @@ export type AuthState =
 type RouteState =
   | { kind: "idle" }
   | { kind: "loading" } // graph fetch or search in flight
-  | { kind: "ready"; result: RouteResult }
+  // The graph travels WITH the result. Directions are built by indexing a result's edge numbers into
+  // a graph's arrays, so the two have to be the same city's — and they were separate pieces of state,
+  // written by separate updates, with nothing to say so. Mid-switch that indexed one city's route
+  // into another city's edges. Carrying it here makes the mismatch unrepresentable.
+  | { kind: "ready"; result: RouteResult; graph: RoutingGraph }
   | { kind: "error"; message: string };
 
 const TREE_WEIGHT_KEY = "scenic-route:tree-weight";
@@ -118,11 +125,13 @@ const SHED_ALLOW_KEY = "scenic-route:allow-sheds";
 const LANDMARK_WEIGHT_KEY = "scenic-route:landmark-weight";
 const ART_WEIGHT_KEY = "scenic-route:art-weight";
 const HIGHWAY_WEIGHT_KEY = "scenic-route:highway-weight";
+const HILL_WEIGHT_KEY = "scenic-route:hill-weight";
 const COMMERCIAL_WEIGHT_KEY = "scenic-route:commercial-weight";
 const OVERLAY_KEY = "scenic-route:overlay";
-const CITY_KEY = "scenic-route:city";
 const SEARCH_BIAS_KEY = "scenic-route:search-bias"; // "false" opts out of biasing search to the user
 const RESNAP_METERS = 25; // a followed location must drift this far before the route recomputes
+// Street level, where the first fix frames you. Matches what the map's own follow camera zooms to.
+const LOCATED_ZOOM = 16;
 // How close to the route a POI must be to count as passed.
 const LANDMARK_PASS_METERS = 40;
 const ART_PASS_METERS = 40;
@@ -167,6 +176,7 @@ function storedWeights(): RouteWeights {
     landmark: read(LANDMARK_WEIGHT_KEY, DEFAULT_LANDMARK_WEIGHT, 0, 1),
     art: read(ART_WEIGHT_KEY, DEFAULT_ART_WEIGHT, 0, 1),
     highway: read(HIGHWAY_WEIGHT_KEY, DEFAULT_HIGHWAY_WEIGHT, 0, 1),
+    hill: read(HILL_WEIGHT_KEY, DEFAULT_HILL_WEIGHT, 0, 1),
     commercial: read(COMMERCIAL_WEIGHT_KEY, DEFAULT_COMMERCIAL_WEIGHT, 0, 1),
     shade: read(
       SHADE_WEIGHT_KEY,
@@ -190,10 +200,6 @@ function storedWeights(): RouteWeights {
 function storedOverlays(): string[] | null {
   const stored = window.localStorage.getItem(OVERLAY_KEY);
   return stored === null ? null : stored.split(",");
-}
-
-function storedCity(): string | null {
-  return window.localStorage.getItem(CITY_KEY);
 }
 
 function metersBetween(
@@ -290,6 +296,7 @@ export default function MapApp() {
   const [highwayWeight, setHighwayWeight] = useState<number>(
     DEFAULT_HIGHWAY_WEIGHT,
   );
+  const [hillWeight, setHillWeight] = useState<number>(DEFAULT_HILL_WEIGHT);
   const [commercialWeight, setCommercialWeight] = useState<number>(
     DEFAULT_COMMERCIAL_WEIGHT,
   );
@@ -298,7 +305,7 @@ export default function MapApp() {
   // position; `shadeContextRef` records which tick the route cache was built against.
   const [shadeWeight, setShadeWeight] = useState<number>(DEFAULT_SHADE_WEIGHT);
   const [routeTimeTick, setRouteTimeTick] = useState<number>(0);
-  const shadeContextRef = useRef<number>(-1);
+  const shadeContextRef = useRef<string>("");
   // Rain shelter (decks plus canopy) and the scaffolding gate. Both read the same per-edge shed
   // coverage, which only changes with the picked DAY — `shedDayRef` records the day the graph's field
   // was built for, so a clock tick re-aims its sun rather than rebuilding it.
@@ -306,7 +313,7 @@ export default function MapApp() {
     DEFAULT_SHELTER_WEIGHT,
   );
   const [allowSheds, setAllowSheds] = useState<boolean>(true);
-  const shedDayRef = useRef<number>(Number.NaN);
+  const shedDayRef = useRef<string>("");
   // Which (city, clock tick) the graph's ferry timetable was resolved for. The DAY picks the services
   // that run, but the sailing you catch moves with the clock inside that day, so this rebuilds on
   // every tick rather than only when the date changes.
@@ -365,8 +372,16 @@ export default function MapApp() {
   // The nonce the route effect last acted on, so a recompute can tell a drop (nonce bumped, lands
   // silently) from a fresh target (a new destination or start, which flashes the loading spinner).
   const lastAppliedNonceRef = useRef<number>(0);
-  // The URL hash at load has been applied, so the live hash writer may start.
+  // The URL hash at load has been applied, so the live hash writer may start. Mirrored into a ref for
+  // the camera callback, which is held by a long-lived map listener and must keep its identity.
   const [hashApplied, setHashApplied] = useState<boolean>(false);
+  const hashAppliedRef = useRef<boolean>(false);
+  // Whether the link itself named a city. A stored city does not count: it is where the visitor was
+  // last time, and their live position is the better answer to "which city am I in".
+  const linkedCityRef = useRef<boolean>(false);
+  // The city the endpoints on screen were picked in, so a switch can tell a route it has outlived
+  // from one that arrived with the city. Null while there are no endpoints.
+  const endpointCityRef = useRef<string | null>(null);
   // Whether the first location fix has been tested against the covered cities; only that one decides.
   const coverageChecked = useRef<boolean>(false);
   // A shared link's camera, applied once by the map, and the destination it was framed around; null
@@ -474,9 +489,14 @@ export default function MapApp() {
         const lng = position.coords.longitude;
         setUserLocation({ lat, lng });
         setLocationError(null);
-        // Following a visitor who is outside every city centres the map on ground the app has no data
-        // for — a blank basemap that reads as a broken page. Take them to the nearest city instead and
-        // say so. Only the first fix decides this, so a later pan is theirs to keep.
+        // The first fix is what opens the app on the city you are standing in. Nothing else can do
+        // it: the URL named no city, the stored one is only where you were last time, and the camera
+        // cannot pick a city it was never pointed at. A visitor outside every city gets the nearest
+        // one and a banner saying so, since centring on ground the app has no data for is a blank
+        // basemap that reads as a broken page.
+        //
+        // Only the FIRST fix decides, and only when the link named no city of its own — a link that
+        // names one is a request to look there, which the visitor's own position does not override.
         if (!coverageChecked.current) {
           coverageChecked.current = true;
           const nearest = nearestCity({ lat, lng });
@@ -484,9 +504,17 @@ export default function MapApp() {
             setFollowing(false);
             setCity(nearest);
             setTarget({ ...nearest.center, zoom: CITY_ZOOM });
-            setBanner(
-              `Scenic Route doesn't cover your area yet — showing ${nearest.name}.`,
-            );
+          } else if (!linkedCityRef.current) {
+            // The camera moves with the city, not after it: the map is still framed wherever it
+            // opened, and the camera reports what it can see, so leaving it there let it report the
+            // old city back and undo this the moment it settled.
+            //
+            // This target and the link's own initial camera can never both be set — a link with a
+            // camera has a city, and a city here means `linkedCityRef` and no adoption. Keep it that
+            // way: were both live in one commit, which of them framed the map would come down to
+            // which component React happened to run first.
+            setCity(nearest);
+            setTarget({ lat, lng, zoom: LOCATED_ZOOM });
           }
         }
       },
@@ -500,9 +528,63 @@ export default function MapApp() {
     return () => navigator.geolocation.clearWatch(watchId);
   }, []);
 
+  // The live fix, but only while the active city could do anything with it. Routing stays within one
+  // city, so a fix outside the one on screen is not a start, is not somewhere to centre, and is not a
+  // "My location" the panel can offer. Everything that reads the fix as an input to this city reads
+  // this instead, so the panel, the camera and the search cannot disagree about whether it counts.
+  const routableLocation =
+    userLocation && containsPoint(city, userLocation) ? userLocation : null;
+
+  // A visitor in New York opening San Francisco would otherwise have the first fix drag the camera
+  // back across the country — and since the camera is what picks the city, that drag flipped the city
+  // out from under the link, mid-route. Derived rather than an effect that clears `following`, because
+  // the map's own follow effect runs on the same render as the fix that triggers it and would have
+  // started the flight before any effect of this component could fire.
+  const followLive =
+    following && (userLocation === null || routableLocation !== null);
+
+  // A route belongs to the city it was found in, so leaving that city ends it: its endpoints are
+  // points the new city's graph cannot reach, and keeping them only turns the panel into an error
+  // about a destination nobody is still asking for. The panel stays open, asking for a new one.
+  //
+  // Stated once here rather than called from each of the four places that change city, because those
+  // callers cannot tell a switch apart from the city simply arriving: the link's own city lands in
+  // the same commit as the endpoints it carried, and a camera that reports twice inside one tick
+  // reports a stale city first. As a rule about what may coexist, both are answered by construction —
+  // the endpoints record which city they were picked in, and only a change away from THAT clears
+  // them. Ordered before the search effect so it never runs a pass on endpoints from another city.
+  useEffect(() => {
+    if (!dest && !manualStart) {
+      endpointCityRef.current = null;
+      return;
+    }
+    if (endpointCityRef.current === null) {
+      endpointCityRef.current = city.id;
+    } else if (endpointCityRef.current !== city.id) {
+      endpointCityRef.current = null;
+      setDest(null);
+      setManualStart(null);
+      setPickTarget(null);
+      setRouteState({ kind: "idle" });
+      routedForRef.current = null;
+      routeCacheRef.current = null;
+      dragSolverRef.current = null;
+    }
+  }, [city, dest, manualStart]);
+
+  // The toggle reads and writes the derived state, so pressing it always does what the button says.
+  // Engaging it from a city you are not in means "take me to me", which moves the active city with
+  // the camera rather than lighting a control that centres nothing.
   const handleToggleFollow = useCallback(() => {
-    setFollowing((on) => !on);
-  }, []);
+    if (followLive) {
+      setFollowing(false);
+    } else {
+      setFollowing(true);
+      if (userLocation && !routableLocation) {
+        setCity(nearestCity(userLocation));
+      }
+    }
+  }, [followLive, userLocation, routableLocation]);
 
   // Picking a city frames it and stops following, since the visitor has just said they want to look
   // somewhere other than where they are.
@@ -543,14 +625,6 @@ export default function MapApp() {
   // cannot leave it wrong.
   setActiveCity(city);
 
-  // Written only once the hash has been read, so the default city cannot overwrite a stored pick
-  // during the load that is about to restore it.
-  useEffect(() => {
-    if (hashApplied) {
-      window.localStorage.setItem(CITY_KEY, city.id);
-    }
-  }, [city, hashApplied]);
-
   // Switching city swaps the whole layer set, so anything the new city does not offer goes off rather
   // than staying lit with no data behind it, and the landmark and art points are dropped so the new
   // city's are fetched instead of the old city's names surviving the move.
@@ -562,6 +636,10 @@ export default function MapApp() {
       return kept.size === current.size ? current : kept;
     });
     setPoiSets(null);
+    // The graph says which controls this city can answer, so holding the old one leaves sliders lit
+    // for data the new city does not have — the hill slider stayed enabled in New York after San
+    // Francisco. Null is the honest answer until this city's own graph lands.
+    setRoutingGraph(null);
   }, [city]);
 
   // stable identity for a long-lived map listener; functional updater keeps disengage idempotent
@@ -582,26 +660,60 @@ export default function MapApp() {
           ? previous
           : { lat: manualStart.lat, lng: manualStart.lng },
       );
-    } else if (!userLocation) {
+    } else if (!routableLocation) {
+      // A live fix outside the active city is not a start: adopting it guarantees the search fails on
+      // a point it was never going to reach. Dropping it leaves the panel asking for a start, which is
+      // the honest state.
       startBasisRef.current = null;
       setResolvedStart(null);
     } else {
       const basis = startBasisRef.current;
-      if (!basis || metersBetween(basis, userLocation) > RESNAP_METERS) {
+      if (!basis || metersBetween(basis, routableLocation) > RESNAP_METERS) {
         startBasisRef.current = {
-          lat: userLocation.lat,
-          lng: userLocation.lng,
+          lat: routableLocation.lat,
+          lng: routableLocation.lng,
         };
-        setResolvedStart({ lat: userLocation.lat, lng: userLocation.lng });
+        setResolvedStart({
+          lat: routableLocation.lat,
+          lng: routableLocation.lng,
+        });
       }
     }
-  }, [manualStart, userLocation]);
+  }, [manualStart, routableLocation]);
 
   useEffect(() => {
     hasReadyRouteRef.current = routeState.kind === "ready";
     lastTravelSecondsRef.current =
       routeState.kind === "ready" ? routeState.result.travelSeconds : null;
   }, [routeState]);
+
+  // The city a route belongs to. Captured as a value and threaded through the whole search rather
+  // than read from the `activeCity()` global at each step, because that global moves under the
+  // search: a first location fix or a camera settle can reselect the city while a graph fetch is in
+  // flight, and the effect would then load one city's graph and report the result against another's
+  // name and bounds. With a visitor located in New York opening directions in San Francisco, that
+  // race left the route computed and never drawn. It is a dependency of the search for the same
+  // reason — changing city has to recompute the route, not silently repoint the labels.
+  const routeCity = city;
+
+  // Which controls this city can actually answer, read off its own loaded graph rather than
+  // authored per city — the graph is the thing the sliders cost against, so it is the only source
+  // that cannot drift from them. Everything reads false until the graph lands, which is the honest
+  // answer while nothing is known; the panel is not routing yet either.
+  //
+  // The scaffolding gate is the exception: sheds are fetched separately from the graph, so it asks
+  // the city's overlay list, where a city with no shed feed omits the layer.
+  const capabilities = useMemo(
+    () => ({
+      relief: (routingGraph?.maxRelief ?? 0) > 0,
+      ferries: (routingGraph?.ferryEdges.length ?? 0) > 0,
+      commercial: (routingGraph?.maxCommercial ?? 0) > 0,
+      landmarks: (routingGraph?.maxLandmark ?? 0) > 0,
+      art: (routingGraph?.maxArt ?? 0) > 0,
+      sheds: city.overlays.includes("scaffolding"),
+    }),
+    [routingGraph, city],
+  );
 
   // The cost context every search runs against, and what the URL and the share link carry.
   const weights: RouteWeights = useMemo(
@@ -611,6 +723,7 @@ export default function MapApp() {
       landmark: landmarkWeight,
       art: artWeight,
       highway: highwayWeight,
+      hill: hillWeight,
       commercial: commercialWeight,
       shade: shadeWeight,
       shelter: shelterWeight,
@@ -623,6 +736,7 @@ export default function MapApp() {
       landmarkWeight,
       artWeight,
       highwayWeight,
+      hillWeight,
       commercialWeight,
       shadeWeight,
       shelterWeight,
@@ -662,12 +776,17 @@ export default function MapApp() {
       if (isNewTarget && !draggingRef.current && !isDropRefresh) {
         setRouteState({ kind: "loading" });
       }
-      loadRouting(activeCity().id).then(
+      loadRouting(routeCity.id).then(
         async ({ graph, index }) => {
           if (cancelled) {
             return;
           }
-          setRoutingGraph((current) => current ?? graph);
+          // Replaced whenever the identity changes, not kept forever once set. `loadRouting` hands
+          // back one stable graph PER CITY, so `current ?? graph` held New York's for the whole
+          // session: switching to San Francisco left the hill slider greyed out (this graph is what
+          // says which layers a city has) and built San Francisco's turn-by-turn directions against
+          // New York's edges. The identity check keeps the re-render, which is what `??` was for.
+          setRoutingGraph((current) => (current === graph ? current : graph));
           routedForRef.current = request;
           // Keep the shade routing context current. loadRouting hands back one stable graph, so the
           // per-edge attrs are recomputed only when the sun position (a clock tick) moves — a start/dest
@@ -676,12 +795,16 @@ export default function MapApp() {
           // not fatal: routing drops the sun/shade bias for this time rather than failing. When shade is
           // off, clear the field and the context so it costs nothing.
           if (weights.shade !== 0) {
-            if (shadeContextRef.current !== routeTimeTick) {
+            // Keyed by city as well as by tick: the field is built onto ONE city's graph, so a
+            // switch with the clock stopped left the guard saying "already built" about the other
+            // city's graph and the new one's shade silently dead. Same reason the ferry context is.
+            const context = `${routeCity.id}:${routeTimeTick}`;
+            if (shadeContextRef.current !== context) {
               routeCacheRef.current = null;
               dragSolverRef.current = null;
-              shadeContextRef.current = routeTimeTick;
+              shadeContextRef.current = context;
               try {
-                await computeEdgeShade(graph, getResolvedDate());
+                await computeEdgeShade(graph, getResolvedDate(), routeCity);
               } catch (error) {
                 // A missing or malformed SHDE artifact is not fatal — routing just drops the sun/shade
                 // bias for this time. Surface it so a stale local bake (the usual cause) is visible in
@@ -695,7 +818,7 @@ export default function MapApp() {
             }
           } else {
             graph.shade = null;
-            shadeContextRef.current = -1;
+            shadeContextRef.current = "";
           }
           // The standing sheds, whose set moves only with the picked DAY. They feed the shade composite
           // as well as the shelter factor and the scaffolding gate, so the field is kept current while any of
@@ -707,10 +830,11 @@ export default function MapApp() {
             !weights.allowSheds
           ) {
             const day = shedDay(getResolvedDate());
-            if (shedDayRef.current !== day) {
+            const context = `${routeCity.id}:${day}`;
+            if (shedDayRef.current !== context) {
               routeCacheRef.current = null;
               dragSolverRef.current = null;
-              shedDayRef.current = day;
+              shedDayRef.current = context;
               try {
                 await computeEdgeSheds(graph, getResolvedDate());
               } catch (error) {
@@ -727,14 +851,15 @@ export default function MapApp() {
             }
           } else {
             graph.sheds = null;
-            shedDayRef.current = Number.NaN;
+            shedDayRef.current = "";
           }
           // The ferry timetable for the departure instant. Only worth fetching while ferries are
-          // allowed; barred, every ferry edge is skipped before its cost is ever asked for. A failed
+          // allowed and this city has any to sail; barred, every ferry edge is skipped before its cost
+          // is ever asked for, and a city with no ferry edges has no timetable to fetch. A failed
           // fetch is not fatal — the graph's baked crossing-plus-average-wait figure is what routing
           // used before this artifact existed, so it simply falls back to that.
-          if (weights.allowFerries) {
-            const context = `${activeCity().id}:${routeTimeTick}`;
+          if (weights.allowFerries && graph.ferryEdges.length > 0) {
+            const context = `${routeCity.id}:${routeTimeTick}`;
             if (ferryContextRef.current !== context) {
               routeCacheRef.current = null;
               dragSolverRef.current = null;
@@ -742,7 +867,7 @@ export default function MapApp() {
               try {
                 await computeFerrySchedule(
                   graph,
-                  activeCity().id,
+                  routeCity.id,
                   getResolvedDate(),
                 );
               } catch (error) {
@@ -767,7 +892,7 @@ export default function MapApp() {
                   : null;
             setRouteState({
               kind: "error",
-              message: messageFor(pair.reason, activeCity(), offending),
+              message: messageFor(pair.reason, routeCity, offending),
             });
           } else if (draggingRef.current) {
             // Mid-drag: reuse a per-gesture solver rooted at the held endpoint for an approximate
@@ -790,11 +915,11 @@ export default function MapApp() {
             const result =
               which === "start" && solved ? reverseResult(solved) : solved;
             if (result) {
-              setRouteState({ kind: "ready", result });
+              setRouteState({ kind: "ready", result, graph });
             } else {
               setRouteState({
                 kind: "error",
-                message: messageFor("disconnected", activeCity(), null),
+                message: messageFor("disconnected", routeCity, null),
               });
             }
           } else {
@@ -810,11 +935,11 @@ export default function MapApp() {
             // loading state. A drop resets the cache first, so its exact route reads as changed anyway.
             if (changed || !hasReadyRouteRef.current) {
               if (result) {
-                setRouteState({ kind: "ready", result });
+                setRouteState({ kind: "ready", result, graph });
               } else {
                 setRouteState({
                   kind: "error",
-                  message: messageFor("disconnected", activeCity(), null),
+                  message: messageFor("disconnected", routeCity, null),
                 });
               }
             }
@@ -834,7 +959,14 @@ export default function MapApp() {
       cancelled = true;
       cancelAnimationFrame(frame);
     };
-  }, [resolvedStart, dest, weights, routeTimeTick, routeRefreshNonce]);
+  }, [
+    resolvedStart,
+    dest,
+    weights,
+    routeTimeTick,
+    routeRefreshNonce,
+    routeCity,
+  ]);
 
   // A new destination collapses any open maneuver list; keyed on the coordinates so a reverse-geocode
   // label patch (same point, new object identity) doesn't snap it shut.
@@ -851,22 +983,23 @@ export default function MapApp() {
     setPanelMinimized((on) => !on);
   }, []);
 
+  // Reads the current value rather than toggling inside an updater: an updater must be pure, and
+  // both branches here are side effects. React invokes updaters twice in development to find exactly
+  // this, and the next effect added inside one would not be as forgiving as these are.
   const handleToggleRouting = useCallback(() => {
-    setRoutingOpen((open) => {
-      if (open) {
-        // closing clears everything but keeps the slider value
-        setDest(null);
-        setManualStart(null);
-        setPickTarget(null);
-        setRouteState({ kind: "idle" });
-        routedForRef.current = null;
-      } else {
-        // warm the graph so the first route lands without a fetch stall
-        void loadRouting(activeCity().id);
-      }
-      return !open;
-    });
-  }, []);
+    if (routingOpen) {
+      // closing clears everything but keeps the slider value
+      setDest(null);
+      setManualStart(null);
+      setPickTarget(null);
+      setRouteState({ kind: "idle" });
+      routedForRef.current = null;
+    } else {
+      // warm the graph so the first route lands without a fetch stall
+      void loadRouting(city.id);
+    }
+    setRoutingOpen(!routingOpen);
+  }, [routingOpen, city.id]);
 
   const handleTreeWeight = useCallback((weight: number) => {
     setTreeWeight(weight);
@@ -891,6 +1024,11 @@ export default function MapApp() {
   const handleArtWeight = useCallback((weight: number) => {
     setArtWeight(weight);
     window.localStorage.setItem(ART_WEIGHT_KEY, String(weight));
+  }, []);
+
+  const handleHillWeight = useCallback((weight: number) => {
+    setHillWeight(weight);
+    window.localStorage.setItem(HILL_WEIGHT_KEY, String(weight));
   }, []);
 
   const handleHighwayWeight = useCallback((weight: number) => {
@@ -1005,12 +1143,16 @@ export default function MapApp() {
   // shared link as nothing at all, leaving whoever opened it routing from THEIR position. So the live
   // position is promoted to a real point, reverse-geocoded like any picked one. Clearing the start
   // afterwards re-pins it to wherever you are then.
+  //
+  // Only a fix this city can route from is promoted, for the reason the start resolver gives: pinning
+  // one from another city turns a link someone opened into an immediate routing error against a start
+  // they never chose.
   useEffect(() => {
-    if (!dest || manualStart || !userLocation) {
+    if (!dest || manualStart || !routableLocation) {
       return;
     }
-    applyPick("start", userLocation.lat, userLocation.lng);
-  }, [dest, manualStart, userLocation, applyPick]);
+    applyPick("start", routableLocation.lat, routableLocation.lng);
+  }, [dest, manualStart, routableLocation, applyPick]);
 
   // Each frame of an endpoint drag: move that end's coordinate so the route recomputes live, keeping
   // the prior label (a reverse geocode would spam the network) until the drag settles.
@@ -1068,6 +1210,7 @@ export default function MapApp() {
     setLandmarkWeight(route.weights.landmark);
     setArtWeight(route.weights.art);
     setHighwayWeight(route.weights.highway);
+    setHillWeight(route.weights.hill);
     setCommercialWeight(route.weights.commercial);
     setShadeWeight(route.weights.shade);
     setShelterWeight(route.weights.shelter);
@@ -1085,10 +1228,21 @@ export default function MapApp() {
     if (route.dest) {
       applyPick("dest", route.dest.lat, route.dest.lng);
       setRoutingOpen(true);
+      // A link that names a route is a request to look at that route, so the first location fix does
+      // not get to centre the map on the visitor instead — even when they are in the same city as it.
+      setFollowing(false);
       void loadRouting(activeCity().id); // warm the graph, as opening the panel by hand does
     }
     const view = decodeView(params);
-    const linked = cityById(view.city) ?? cityById(storedCity());
+    // Three sources, in this order and no other: the link, then where you are, then the default. The
+    // last city you looked at is deliberately NOT one of them — it was remembered in localStorage and
+    // beat the live fix, so a visitor in San Francisco who had once opened New York kept being shown
+    // New York. Nobody asked to be taken back to where they were last time.
+    // A destination names a city as surely as the city key does: it is a point in exactly one of
+    // them, and it is what the visitor opened the link to see.
+    const linked =
+      cityById(view.city) ?? (route.dest ? nearestCity(route.dest) : null);
+    linkedCityRef.current = linked !== null;
     if (linked) {
       setCity(linked);
     }
@@ -1107,17 +1261,38 @@ export default function MapApp() {
       // correcting afterwards would just switch straight back.
       setInitialCamera({ center: linked.center, zoom: CITY_ZOOM });
     }
+    hashAppliedRef.current = true;
     setHashApplied(true);
   }, [applyPick]);
 
-  const handleCamera = useCallback((camera: Camera) => {
+  const handleCamera = useCallback((camera: Camera, view: CityBounds) => {
     cameraRef.current = camera;
-    // Settled moves only, and setState bails when the id is unchanged, so this costs one lookup per
-    // gesture rather than one per frame.
-    setCity((current) => {
-      const nearest = nearestCity(camera.center);
-      return nearest.id === current.id ? current : nearest;
-    });
+    // Where the map is decides which city is active — but not yet. The first report comes from the
+    // container's default centre, which is the default city rather than anything anyone chose, and it
+    // lands before the hash effect has read the link. Answering it would set the city from the default
+    // and leave the link to correct it afterwards, which is the race this ordering removes.
+    if (!hashAppliedRef.current) {
+      return;
+    }
+    // Settled moves only, and this bails when the id is unchanged, so it costs one lookup per gesture
+    // rather than one per frame. Read against the active city rather than through a functional update
+    // because leaving a city has to clear its route too, which a state updater may not do.
+    //
+    // One city on screen and no other is the whole test. Where the centre happens to sit does not
+    // enter into it: a view wide enough to hold two cities is not a view that has chosen between
+    // them, however the centre falls, and switching there would throw away the route of whichever
+    // one you actually had. So a city takes over only once it is alone in frame — which for
+    // neighbours like Oakland and San Francisco means zooming in far enough to leave the other
+    // behind, and that is the same gesture as saying which one you mean.
+    // Proposed through the updater rather than compared against the city read from the last
+    // render. A settled camera fires several times inside one tick — a synchronous setView reports
+    // synchronously — so a comparison outside the updater reads a value the previous report has
+    // already queued a change to, and the stale one wins. The updater always sees the latest.
+    const inView = citiesInView(view);
+    if (inView.length === 1) {
+      const [next] = inView;
+      setCity((current) => (next.id === current.id ? current : next));
+    }
   }, []);
 
   // The link the share button copies: the route the hash already carries, plus the camera and overlay
@@ -1301,12 +1476,14 @@ export default function MapApp() {
   }, [routingOpen, poiSets, city.id]);
 
   const routeResult = routeState.kind === "ready" ? routeState.result : null;
+  // The graph the result was actually computed against, not whichever one state last landed on.
+  const resultGraph = routeState.kind === "ready" ? routeState.graph : null;
   const directions = useMemo(() => {
-    if (!routingGraph || !routeResult) {
+    if (!resultGraph || !routeResult) {
       return null;
     }
     const passed = poiSets
-      ? passedPois(routingGraph, routeResult, [
+      ? passedPois(resultGraph, routeResult, [
           {
             kind: "landmark",
             set: poiSets.landmarks,
@@ -1315,11 +1492,11 @@ export default function MapApp() {
           { kind: "art", set: poiSets.art, thresholdMeters: ART_PASS_METERS },
         ])
       : [];
-    return buildDirections(routingGraph, routeResult, {
+    return buildDirections(resultGraph, routeResult, {
       collapseLinearCrossings: true,
       passed,
     });
-  }, [routingGraph, routeResult, poiSets]);
+  }, [resultGraph, routeResult, poiSets]);
   // Live progress along the ready route from the current fix; null when off-route or unlocated, which
   // makes the panel fall back to the route summary. Recomputes as watchPosition updates userLocation.
   const progress = useMemo(
@@ -1340,8 +1517,8 @@ export default function MapApp() {
       ? routeResult.start.point
       : manualStart
         ? { lat: manualStart.lat, lng: manualStart.lng }
-        : routingOpen && userLocation
-          ? { lat: userLocation.lat, lng: userLocation.lng }
+        : routingOpen && routableLocation
+          ? { lat: routableLocation.lat, lng: routableLocation.lng }
           : null;
   // The destination marker appears the moment a destination exists; the line follows live once both
   // endpoints resolve and the search lands.
@@ -1356,9 +1533,10 @@ export default function MapApp() {
           draft={draft}
           target={target}
           userLocation={userLocation}
-          following={following}
+          following={followLive}
           activeOverlays={activeOverlays}
           routeResult={routeResult}
+          routeGraph={resultGraph}
           routeDest={routeDest}
           routeStart={routeStart}
           pickMode={pickMode}
@@ -1400,7 +1578,7 @@ export default function MapApp() {
           weights={weights}
           enabled={hashApplied}
         />
-        <FollowToggle active={following} onToggle={handleToggleFollow} />
+        <FollowToggle active={followLive} onToggle={handleToggleFollow} />
         {/* the active overlays' floating keys (genus only today); bottom-left keeps them clear of the
           toolbar, follow toggle, attribution, and the centered route panel */}
         <div className="pointer-events-none absolute bottom-3 left-3 z-[1000] max-w-[70vw]">
@@ -1431,15 +1609,15 @@ export default function MapApp() {
             startLabel={
               manualStart
                 ? manualStart.label
-                : userLocation
+                : routableLocation
                   ? "My location"
                   : null
             }
             destLabel={dest?.label ?? null}
             startSet={manualStart !== null}
             destSet={dest !== null}
-            needsStart={(manualStart ?? userLocation) === null}
-            hasLiveLocation={userLocation !== null}
+            needsStart={(manualStart ?? routableLocation) === null}
+            hasLiveLocation={routableLocation !== null}
             searchBias={searchBias}
             pickTarget={effectivePickTarget}
             status={routeState.kind}
@@ -1461,6 +1639,8 @@ export default function MapApp() {
             landmarkWeight={landmarkWeight}
             artWeight={artWeight}
             highwayWeight={highwayWeight}
+            hillWeight={hillWeight}
+            capabilities={capabilities}
             commercialWeight={commercialWeight}
             shadeWeight={shadeWeight}
             shelterWeight={shelterWeight}
@@ -1475,6 +1655,7 @@ export default function MapApp() {
             onLandmarkWeight={handleLandmarkWeight}
             onArtWeight={handleArtWeight}
             onHighwayWeight={handleHighwayWeight}
+            onHillWeight={handleHillWeight}
             onCommercialWeight={handleCommercialWeight}
             onShadeWeight={handleShadeWeight}
             onShelterWeight={handleShelterWeight}

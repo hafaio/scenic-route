@@ -18,9 +18,15 @@ import {
   useMap,
   useMapEvents,
 } from "react-leaflet";
-import { CITY_ZOOM, type City } from "../src/cities";
+import {
+  CITY_ZOOM,
+  type City,
+  type CityBounds,
+  CROSS_CITY_METERS,
+} from "../src/cities";
 import { OVERLAYS, type OverlayId } from "../src/overlays/registry";
 import type { Pin, PinDraft } from "../src/pin";
+import type { RoutingGraph } from "../src/routing/graph";
 import type { RouteResult } from "../src/routing/search";
 import installTilePrune from "../src/tiles/prune";
 import type { Camera } from "../src/url-state";
@@ -51,13 +57,16 @@ interface MapViewProps {
   following: boolean;
   activeOverlays: ReadonlySet<OverlayId>;
   routeResult: RouteResult | null;
+  routeGraph: RoutingGraph | null; // the graph routeResult's edge indices point into
   routeDest: { lat: number; lng: number } | null;
   routeStart: { lat: number; lng: number } | null;
   pickMode: PickMode;
   dragging: boolean; // an endpoint marker is being dragged; the route reframe goes zoom-out-only
   initialCamera: Camera | null; // a shared link's camera, applied once; null leaves the map alone
   preframedDest: { lat: number; lng: number } | null; // a dest whose framing the link already chose
-  onCamera: (camera: Camera) => void;
+  // The settled camera, plus what it can see: the visible bounds pick the active city when only one
+  // city is on screen, which the centre alone cannot tell.
+  onCamera: (camera: Camera, view: CityBounds) => void;
   onMapPick: (lat: number, lng: number) => void;
   onDisengageFollow: () => void;
   onEndpointDragMove: (
@@ -348,7 +357,7 @@ function CameraWatcher({
   onCamera,
 }: {
   initial: Camera | null;
-  onCamera: (camera: Camera) => void;
+  onCamera: (camera: Camera, view: CityBounds) => void;
 }) {
   const map = useMap();
   const appliedRef = useRef<boolean>(false);
@@ -356,7 +365,16 @@ function CameraWatcher({
   useEffect(() => {
     const report = () => {
       const { lat, lng } = map.getCenter();
-      onCamera({ center: { lat, lng }, zoom: map.getZoom() });
+      const view = map.getBounds();
+      onCamera(
+        { center: { lat, lng }, zoom: map.getZoom() },
+        {
+          south: view.getSouth(),
+          west: view.getWest(),
+          north: view.getNorth(),
+          east: view.getEast(),
+        },
+      );
     };
     if (initial && !appliedRef.current) {
       appliedRef.current = true;
@@ -404,9 +422,16 @@ function MapController({
       return;
     }
     lastTargetKey.current = key;
-    map.flyTo([target.lat, target.lng], target.zoom ?? map.getZoom(), {
-      duration: 0.8,
-    });
+    const zoom = target.zoom ?? map.getZoom();
+    // A short hop is animated, a cross-city one is cut; CROSS_CITY_METERS carries why.
+    if (
+      map.distance([target.lat, target.lng], map.getCenter()) >
+      CROSS_CITY_METERS
+    ) {
+      map.setView([target.lat, target.lng], zoom, { animate: false });
+    } else {
+      map.flyTo([target.lat, target.lng], zoom, { duration: 0.8 });
+    }
   }, [target, map]);
 
   // follow camera: recenter on the user while engaged
@@ -417,13 +442,25 @@ function MapController({
       return;
     }
     const { lat, lng } = userLocation;
+    const crossCity =
+      map.distance([lat, lng], map.getCenter()) > CROSS_CITY_METERS;
     if (!hasZoomedRef.current) {
-      // first fix: zoom in to street level
+      // first fix: zoom in to street level, cutting rather than flying when the map opened on a
+      // different city than the one you turn out to be in — CROSS_CITY_METERS carries why.
       hasZoomedRef.current = true;
-      map.flyTo([lat, lng], 16, { duration: 0.8 });
+      if (crossCity) {
+        map.setView([lat, lng], 16, { animate: false });
+      } else {
+        map.flyTo([lat, lng], 16, { duration: 0.8 });
+      }
     } else if (justEngaged) {
-      // re-engaged: snap back at the current zoom
-      map.flyTo([lat, lng], map.getZoom(), { duration: 0.8 });
+      // re-engaged: snap back at the current zoom, cutting if that means crossing to another city —
+      // reachable by panning to the other city and then tapping follow.
+      if (crossCity) {
+        map.setView([lat, lng], map.getZoom(), { animate: false });
+      } else {
+        map.flyTo([lat, lng], map.getZoom(), { duration: 0.8 });
+      }
     } else {
       // steady state: pan to the user, keeping their zoom
       map.setView([lat, lng], map.getZoom(), { animate: true });
@@ -469,6 +506,7 @@ export default function MapView({
   following,
   activeOverlays,
   routeResult,
+  routeGraph,
   routeDest,
   routeStart,
   pickMode,
@@ -573,6 +611,7 @@ export default function MapView({
       />
       <RouteLayer
         result={routeResult}
+        graph={routeGraph}
         dest={routeDest}
         start={routeStart}
         dragging={dragging}

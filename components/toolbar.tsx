@@ -2,7 +2,6 @@
 
 import { useEffect, useRef, useState } from "react";
 import {
-  FiCheck,
   FiCrosshair,
   FiInfo,
   FiLoader,
@@ -15,6 +14,7 @@ import {
 } from "react-icons/fi";
 import { CITIES, type City } from "../src/cities";
 import type { OverlayId } from "../src/overlays/registry";
+import CityDialog from "./city-dialog";
 import ClockControl from "./clock-control";
 import LayersControl from "./layers-control";
 import type { AuthState } from "./map-app";
@@ -80,6 +80,7 @@ export default function Toolbar({
   composeShareUrl,
 }: ToolbarProps) {
   const [menuOpen, setMenuOpen] = useState<boolean>(false);
+  const [cityDialogOpen, setCityDialogOpen] = useState<boolean>(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -111,6 +112,13 @@ export default function Toolbar({
 
   return (
     <div className="absolute top-3 right-3 z-[1000] flex items-center gap-2">
+      {cityDialogOpen ? (
+        <CityDialog
+          city={city}
+          onSelect={onSelectCity}
+          onClose={() => setCityDialogOpen(false)}
+        />
+      ) : null}
       <RouteToggle active={routing} onToggle={onToggleRouting} />
       <LayersControl
         city={city}
@@ -204,33 +212,27 @@ export default function Toolbar({
                 Check again
               </button>
             ) : null}
+            {/* One row that opens the picker, rather than one row per city: the menu holds the
+                app's own actions, and a list that grows with every city added would crowd them
+                out and eventually scroll. */}
             {CITIES.length > 1 ? (
-              <div className={MENU_DIVIDER}>
-                <p className="px-4 pt-3 text-[11px] uppercase tracking-wide text-slate-400 dark:text-slate-500">
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  setMenuOpen(false);
+                  setCityDialogOpen(true);
+                }}
+                className={`justify-between ${MENU_ITEM} ${MENU_DIVIDER}`}
+              >
+                <span className="flex min-w-0 items-center gap-2">
+                  <FiMap className="shrink-0" />
                   City
-                </p>
-                {CITIES.map((entry) => (
-                  <button
-                    key={entry.id}
-                    type="button"
-                    role="menuitemradio"
-                    aria-checked={entry.id === city.id}
-                    onClick={() => {
-                      setMenuOpen(false);
-                      onSelectCity(entry);
-                    }}
-                    className={`justify-between ${MENU_ITEM}`}
-                  >
-                    <span className="flex items-center gap-2">
-                      <FiMap className="shrink-0" />
-                      {entry.name}
-                    </span>
-                    {entry.id === city.id ? (
-                      <FiCheck className="shrink-0 text-brand-600 dark:text-brand-400" />
-                    ) : null}
-                  </button>
-                ))}
-              </div>
+                </span>
+                <span className="ml-auto truncate text-xs font-normal text-slate-400 dark:text-slate-500">
+                  {city.name}
+                </span>
+              </button>
             ) : null}
             <button
               type="button"

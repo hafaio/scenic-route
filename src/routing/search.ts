@@ -13,11 +13,12 @@ import {
   edgeShed,
   effSeconds,
   ferryCredit,
+  hillFractionOf,
   type RouteWeights,
   rawSeconds,
   shadeAttrOf,
-  WALK_METERS_PER_SECOND,
   walkSecondsCoeff,
+  walkSpeedOn,
 } from "./cost";
 import {
   type EdgeKind,
@@ -53,7 +54,7 @@ export function stepSeconds(
     return rawSeconds(graph, step.edge, from, elapsedSeconds);
   } else {
     return (
-      step.lengthMeters / WALK_METERS_PER_SECOND +
+      step.lengthMeters / walkSpeedOn(graph, step.edge) +
       crossingWait(graph, step.edge, from)
     );
   }
@@ -80,6 +81,7 @@ export interface RouteFactors {
   landmark: number;
   art: number;
   highway: number;
+  hill: number;
   commercial: number;
 }
 
@@ -317,6 +319,7 @@ function reconstruct(
     landmark: 0,
     art: 0,
     highway: 0,
+    hill: 0,
     commercial: 0,
   };
   for (const step of steps) {
@@ -332,6 +335,7 @@ function reconstruct(
       sums.landmark += (graph.edgeLandmark[edge] / 255) * stepMeters;
       sums.art += (graph.edgeArt[edge] / 255) * stepMeters;
       sums.highway += (graph.edgeHighway[edge] / 255) * stepMeters;
+      sums.hill += hillFractionOf(graph, edge) * stepMeters;
       sums.commercial += (graph.edgeCommercial[edge] / 255) * stepMeters;
       // Sun exposure only: the positive (sunlit) part of the signed shade attribute at this point in the
       // walk, with a deck composited in whether or not scaffolding is barred, which is what the cost
@@ -368,6 +372,7 @@ function reconstruct(
       landmark: mean(sums.landmark),
       art: mean(sums.art),
       highway: mean(sums.highway),
+      hill: mean(sums.hill),
       commercial: mean(sums.commercial),
     },
     start,
@@ -413,7 +418,7 @@ export function findRoute(
   const startA = graph.edgeNodeA[start.edge];
   const startB = graph.edgeNodeB[start.edge];
   const startPerMeter =
-    edgeMultiplier(graph, start.edge, weights) / WALK_METERS_PER_SECOND;
+    edgeMultiplier(graph, start.edge, weights) / walkSpeedOn(graph, start.edge);
   const startLength = graph.edgeLength[start.edge];
 
   const destA = graph.edgeNodeA[dest.edge];
@@ -423,7 +428,7 @@ export function findRoute(
   // the elapsed raw seconds of the endpoint the route reaches it through.
   const destPerMeterAt = (node: number): number =>
     edgeMultiplier(graph, dest.edge, weights, elapsed[node]) /
-    WALK_METERS_PER_SECOND;
+    walkSpeedOn(graph, dest.edge);
 
   let bestTotal = Number.POSITIVE_INFINITY;
   let bestDestNode = -1; // the edge endpoint the winning route reaches the dest edge through
@@ -450,8 +455,9 @@ export function findRoute(
   distance[startA] = start.metersFromA * startPerMeter;
   distance[startB] = (startLength - start.metersFromA) * startPerMeter;
   // Seed the elapsed clock with the raw time to walk each half of the start edge to its node.
-  elapsed[startA] = start.metersFromA / WALK_METERS_PER_SECOND;
-  elapsed[startB] = (startLength - start.metersFromA) / WALK_METERS_PER_SECOND;
+  const startSpeed = walkSpeedOn(graph, start.edge);
+  elapsed[startA] = start.metersFromA / startSpeed;
+  elapsed[startB] = (startLength - start.metersFromA) / startSpeed;
   heap.push(distance[startA] + heuristicOf(startA), startA);
   heap.push(distance[startB] + heuristicOf(startB), startB);
 
@@ -578,7 +584,7 @@ export class RouteSolver {
         source.edge,
         weights,
         Math.max(0, sunAnchorSeconds),
-      ) / WALK_METERS_PER_SECOND;
+      ) / walkSpeedOn(graph, source.edge);
     this.sourceLength = graph.edgeLength[source.edge];
 
     this.distance[this.sourceA] = source.metersFromA * this.sourcePerMeter;
@@ -586,9 +592,10 @@ export class RouteSolver {
       (this.sourceLength - source.metersFromA) * this.sourcePerMeter;
     // The elapsed clock is anchored at the source, so it is stable across dest drags — every reused
     // node's raw time from the source is the same no matter where the moving endpoint goes.
-    this.elapsed[this.sourceA] = source.metersFromA / WALK_METERS_PER_SECOND;
+    const sourceSpeed = walkSpeedOn(graph, source.edge);
+    this.elapsed[this.sourceA] = source.metersFromA / sourceSpeed;
     this.elapsed[this.sourceB] =
-      (this.sourceLength - source.metersFromA) / WALK_METERS_PER_SECOND;
+      (this.sourceLength - source.metersFromA) / sourceSpeed;
     this.reached.push(this.sourceA, this.sourceB);
   }
 
@@ -609,7 +616,7 @@ export class RouteSolver {
     // forward wall-clock time.
     const destPerMeterAt = (node: number): number =>
       edgeMultiplier(graph, dest.edge, this.weights, this.sunElapsed(node)) /
-      WALK_METERS_PER_SECOND;
+      walkSpeedOn(graph, dest.edge);
 
     let bestTotal = Number.POSITIVE_INFINITY;
     let bestDestNode = -1;
