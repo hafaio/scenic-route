@@ -119,6 +119,7 @@ function makeResult(graph: RoutingGraph, specs: ReadonlyArray<EdgeSpec>) {
     edgeGeomCount: Uint16Array;
     edgeDurationSeconds: Float32Array;
     edgeLength: Float32Array;
+    edgeRelief: Uint8Array;
     edgeKindSide: Uint8Array;
     nodeMidRoadway: Uint8Array;
     edgeNameId: Uint16Array;
@@ -131,6 +132,7 @@ function makeResult(graph: RoutingGraph, specs: ReadonlyArray<EdgeSpec>) {
   wired.edgeGeomCount = edgeGeomCount;
   wired.edgeDurationSeconds = edgeDurationSeconds;
   wired.edgeLength = edgeLength;
+  wired.edgeRelief = new Uint8Array(edgeCount); // flat: these fixtures are about maneuvers, not grades
   wired.edgeKindSide = edgeKindSide;
   // No islands in these fixtures: every crossing starts from pavement.
   wired.nodeMidRoadway = new Uint8Array(

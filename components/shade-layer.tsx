@@ -60,9 +60,14 @@ const MAX_NATIVE_ZOOM = 14;
 // over four times the ground per level, which no amount of clock scrubbing pays back.
 const VECTOR_ZOOM = MAX_NATIVE_ZOOM + 1;
 
-const SCHEDULE_URL = "tiles/shade/buckets.json";
-const TILE_URL = "tiles/shade/{bin}/{z}/{x}/{y}.webp";
-const TREE_TILE_URL = "tiles/tree-shade/{bin}/{z}/{x}/{y}.webp";
+// Per city: a bin index is only a sun position alongside the latitude it was synthesised at, so two
+// cities share neither the schedule nor the pyramid (scripts/shade-schedule.ts).
+const scheduleUrl = (cityId: string): string =>
+  `tiles/shade/${cityId}/buckets.json`;
+const tileUrl = (cityId: string): string =>
+  `tiles/shade/${cityId}/{bin}/{z}/{x}/{y}.webp`;
+const treeTileUrl = (cityId: string): string =>
+  `tiles/tree-shade/${cityId}/{bin}/{z}/{x}/{y}.webp`;
 const TILE_SIZE = 256;
 const FADE_MS = 300;
 const HORIZON_DEG = 0.5; // at or below this the sun is down and there is no shade to show
@@ -86,16 +91,19 @@ interface Bin {
   azimuth: number;
 }
 
-// One shared fetch of the bin schedule, so every ShadeLayer mount reuses it.
-let schedule: Promise<Bin[]> | null = null;
+// One shared fetch of each city's bin schedule, so every ShadeLayer mount reuses it.
+const schedules = new Map<string, Promise<Bin[]>>();
 
-function loadSchedule(): Promise<Bin[]> {
-  if (!schedule) {
-    schedule = fetch(SCHEDULE_URL)
-      .then((response) => (response.ok ? response.json() : []))
-      .catch(() => []);
+function loadSchedule(cityId: string): Promise<Bin[]> {
+  const cached = schedules.get(cityId);
+  if (cached) {
+    return cached;
   }
-  return schedule;
+  const promise: Promise<Bin[]> = fetch(scheduleUrl(cityId))
+    .then((response) => (response.ok ? response.json() : []))
+    .catch(() => []);
+  schedules.set(cityId, promise);
+  return promise;
 }
 
 // The sun's position over the city at the route-time store's resolved instant (now, or a picked time).
@@ -193,8 +201,13 @@ export default function ShadeLayer() {
       const layer = new WorkerTileLayer(
         () => ({
           kind: "shade",
-          url: TILE_URL,
-          treeUrl: TREE_TILE_URL,
+          // The city this effect was built for, not whichever one is active when Leaflet next asks
+          // for a tile. This factory is called synchronously on every tile request for as long as
+          // the layer is attached, and a switch flips the global during the parent's render —
+          // before this effect's cleanup detaches the layer. In that window a tile request would
+          // fetch the new city's file for a layer whose bin index belongs to the old one.
+          url: tileUrl(city.id),
+          treeUrl: treeTileUrl(city.id),
           bin: index,
           maxNativeZoom: MAX_NATIVE_ZOOM,
           tau: canopyTau(getResolvedDate()),
@@ -320,8 +333,8 @@ export default function ShadeLayer() {
           );
         prefetchShadeTiles({
           type: "shade-prefetch",
-          url: TILE_URL,
-          treeUrl: TREE_TILE_URL,
+          url: tileUrl(city.id),
+          treeUrl: treeTileUrl(city.id),
           bins: ordered.map(({ index }) => index),
           coords: viewSources(),
         });
@@ -409,7 +422,7 @@ export default function ShadeLayer() {
       }
     };
 
-    loadSchedule().then((loaded) => {
+    loadSchedule(city.id).then((loaded) => {
       if (!cancelled) {
         bins = loaded;
         apply();

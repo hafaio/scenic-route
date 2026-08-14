@@ -15,7 +15,9 @@ import type { LandContext } from "./land";
 import type { SourceFile } from "./manifest";
 import { fetchSidewalks, type SidewalkWay } from "./overpass";
 import { projectX, projectY } from "./planar";
-import { type Coord, NYC_OPEN_DATA } from "./socrata";
+import { SIDEWALK_WIDTH_COUNT, SIDEWALK_WIDTH_DATASET } from "./sf";
+import { type Coord, DATA_SF, NYC_OPEN_DATA } from "./socrata";
+import { toInt } from "./streets";
 
 const DATA_DIR = join(import.meta.dirname, "..", "data");
 const SIDEWALK_DIR = join(DATA_DIR, "sidewalks");
@@ -90,6 +92,8 @@ const WIDTH_BASED_TYPES = [1, 3, 4, 10]; // street, bridge, tunnel, alley
 // The parts of a STRT segment the per-side bits are computed from. `flags` is stamped in place,
 // the way buildNameTable stamps a record's name id.
 export interface SidedSegment {
+  // The city's own id for the row, which a survey published as a table is joined on.
+  physicalId: number;
   roadType: number;
   streetWidth: number;
   flags: number;
@@ -320,6 +324,83 @@ interface Ring {
   coords: Float64Array;
 }
 
+// San Francisco's survey: the 2014 Sidewalk Widths study, which records per centreline segment
+// which SIDES carry a sidewalk — "Both", "None", or a compass side. That is the same statement the
+// polygon probe works to reach, published directly, so it is read rather than probed.
+//
+// A compass side has to be resolved against the segment's own direction, because left and right are
+// the digitisation's: left faces 90 degrees counter-clockwise of travel. A segment with no row is
+// left unsurveyed rather than assumed bare — 94% of segments carry one, and the existence gate still
+// has OSM's mapping to fall back on for the rest.
+async function sfSurvey(): Promise<Survey> {
+  const rows = await DATA_SF.dataset<{ cnn?: string; side?: string }>(
+    SIDEWALK_WIDTH_DATASET,
+    { $select: "cnn,side" },
+    SIDEWALK_WIDTH_COUNT,
+  );
+  // Keyed through the same normalisation the segment's own id went through (`toInt` of the raw
+  // column), so the two sides of the join cannot drift. Keyed on the raw string, a leading zero or a
+  // ".0" suffix would miss for EVERY segment and the survey would report no pavement anywhere, with
+  // nothing to say it had.
+  const sides = new Map<string, string>();
+  for (const row of rows) {
+    if (row.cnn && row.side) {
+      sides.set(String(toInt(row.cnn)), row.side.trim().toUpperCase());
+    }
+  }
+  return (segment) => {
+    const side = sides.get(String(segment.physicalId));
+    if (side === undefined || side === "NONE") {
+      return { left: false, right: false };
+    }
+    if (side === "BOTH") {
+      return { left: true, right: true };
+    }
+    // The bearing of the whole segment, end to end, is enough: a city block does not turn far
+    // enough for its two ends to disagree about which way is north.
+    const first = segment.points[0];
+    const last = segment.points[segment.points.length - 1];
+    const bearing = Math.atan2(
+      (last.lng - first.lng) * Math.cos(((first.lat + last.lat) / 2) * DEGREES),
+      last.lat - first.lat,
+    );
+    // Left faces a quarter turn counter-clockwise of travel, right a quarter turn clockwise.
+    const facing = (turn: number): number =>
+      ((bearing + turn) / DEGREES + 360) % 360;
+    const wanted = COMPASS[side];
+    if (wanted === undefined) {
+      return { left: false, right: false };
+    }
+    const away = (from: number): number => {
+      const gap = Math.abs(((from - wanted + 540) % 360) - 180);
+      return gap;
+    };
+    return {
+      left: away(facing(-Math.PI / 2)) < away(facing(Math.PI / 2)),
+      right: away(facing(Math.PI / 2)) <= away(facing(-Math.PI / 2)),
+    };
+  };
+}
+
+const DEGREES = Math.PI / 180;
+const COMPASS: Record<string, number> = {
+  // One row spells south "STH". Reading it as "both sides" would have claimed pavement the survey
+  // never recorded, on the strength of a typo.
+  STH: 180,
+  N: 0,
+  NE: 45,
+  E: 90,
+  SE: 135,
+  S: 180,
+  SW: 225,
+  W: 270,
+  NW: 315,
+};
+
+export const NYC_SURVEY: () => Promise<Survey> = async () =>
+  polygonSurvey(await fetchSurveyedSidewalks());
+export const SF_SURVEY: () => Promise<Survey> = sfSurvey;
+
 async function fetchSurveyedSidewalks(): Promise<Grid<Ring>> {
   // The geometry alone, not the `*` the smaller sources ask for: these polygons are ~450 MB of
   // GeoJSON on their own, and the columns beside them (source ids, shape lengths, capture status)
@@ -396,14 +477,22 @@ function onSurveyedSidewalk(survey: Grid<Ring>, x: number, y: number): boolean {
   }
 }
 
+// What a city's own survey says a street has pavement on, per side, in the segment's own left/right
+// terms. New York answers it by probing planimetric polygons; San Francisco publishes the answer as
+// a column. Both are the authoritative half of the existence gate — OSM's silence is ambiguous
+// between a mapping gap and genuinely bare kerb, and a survey's is not.
+export type Survey = (segment: SidedSegment) => {
+  left: boolean;
+  right: boolean;
+};
+
 // The four bits of one street, from the two sources. A side counts as mapped when the corridor
-// matcher finds an OSM sidewalk at half its samples, and as surveyed when the planimetric probe
-// hits at half its stations — the same "most of the block, not one lucky point" rule for both, so
-// a corner or a driveway cannot decide a whole segment.
+// matcher finds an OSM sidewalk at half its samples, and as surveyed when the city's survey says so
+// — for a probe, at half its stations, the same "most of the block, not one lucky point" rule.
 function sidesOf(
   segment: SidedSegment,
   pieces: Grid<Piece>,
-  survey: Grid<Ring>,
+  survey: Survey,
 ): number {
   const halfOffset = halfOffsetMeters(segment);
   let osmLeft = 0;
@@ -414,40 +503,49 @@ function sidesOf(
     osmLeft += left ? 1 : 0;
     osmRight += right ? 1 : 0;
   }
-  let surveyedLeft = 0;
-  let surveyedRight = 0;
-  const probes = stations(segment.points, STATION_METERS);
-  const fanMeters =
-    segment.streetWidth === 0 ? ASSUMED_WIDTH_FAN_METERS : PROBE_FAN_METERS;
-  for (const { x, y, alongX, alongY } of probes) {
-    for (const side of [1, -1]) {
-      const hit = fanMeters.some((fan) => {
-        const offset = side * (halfOffset + fan);
-        return onSurveyedSidewalk(
-          survey,
-          x - alongY * offset,
-          y + alongX * offset,
-        );
-      });
-      if (side === 1) {
-        surveyedLeft += hit ? 1 : 0;
-      } else {
-        surveyedRight += hit ? 1 : 0;
-      }
-    }
-  }
+  const surveyed = survey(segment);
   const covered = (hits: number, total: number, fraction: number): boolean =>
     total > 0 && hits / total >= fraction;
   return (
     (covered(osmLeft, samples.length, MATCH_FRACTION) ? FLAG_OSM_LEFT : 0) |
     (covered(osmRight, samples.length, MATCH_FRACTION) ? FLAG_OSM_RIGHT : 0) |
-    (covered(surveyedLeft, probes.length, SURVEYED_FRACTION)
-      ? FLAG_SURVEYED_LEFT
-      : 0) |
-    (covered(surveyedRight, probes.length, SURVEYED_FRACTION)
-      ? FLAG_SURVEYED_RIGHT
-      : 0)
+    (surveyed.left ? FLAG_SURVEYED_LEFT : 0) |
+    (surveyed.right ? FLAG_SURVEYED_RIGHT : 0)
   );
+}
+
+// New York's survey: the planimetric ROW-sidewalk polygons, probed every STATION_METERS along the
+// street and fanned across the pavement's own width, and counted as present when half the stations
+// land inside one.
+function polygonSurvey(rings: Grid<Ring>): Survey {
+  return (segment) => {
+    const halfOffset = halfOffsetMeters(segment);
+    const probes = stations(segment.points, STATION_METERS);
+    const fanMeters =
+      segment.streetWidth === 0 ? ASSUMED_WIDTH_FAN_METERS : PROBE_FAN_METERS;
+    let left = 0;
+    let right = 0;
+    for (const { x, y, alongX, alongY } of probes) {
+      for (const side of [1, -1]) {
+        const hit = fanMeters.some((fan) => {
+          const offset = side * (halfOffset + fan);
+          return onSurveyedSidewalk(
+            rings,
+            x - alongY * offset,
+            y + alongX * offset,
+          );
+        });
+        if (side === 1) {
+          left += hit ? 1 : 0;
+        } else {
+          right += hit ? 1 : 0;
+        }
+      }
+    }
+    const covered = (hits: number): boolean =>
+      probes.length > 0 && hits / probes.length >= SURVEYED_FRACTION;
+    return { left: covered(left), right: covered(right) };
+  };
 }
 
 const KIND_OF = {
@@ -535,6 +633,7 @@ export async function ingestSidewalks(
   cityId: string,
   streets: SidedSegment[],
   land: LandContext,
+  buildSurvey: () => Promise<Survey>,
 ): Promise<SourceFile> {
   const started = performance.now();
   await mkdir(SIDEWALK_DIR, { recursive: true });
@@ -555,7 +654,7 @@ export async function ingestSidewalks(
   );
 
   const pieces = indexPieces(segments);
-  const survey = await fetchSurveyedSidewalks();
+  const survey = await buildSurvey();
 
   let offsettedKm = 0;
   let osmBothKm = 0;

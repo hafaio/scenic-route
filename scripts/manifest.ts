@@ -44,15 +44,19 @@ export interface SourceFile {
   sha256: string;
 }
 
-// How a tree's trunk diameter becomes the crown disc the model shades the ground with. A
-// published relation, recorded so the model is legible from the manifest alone.
-export interface CrownAllometry {
-  source: string;
-  form: string;
-  a: number;
-  b: number;
-  logBiasCorrection: number;
-}
+// How a tree's trunk diameter becomes the crown disc the model shades the ground with. A published
+// relation, recorded so the model is legible from the manifest alone — including WHICH relation,
+// since the equation form differs between climate regions and not only its coefficients.
+// scripts/allometry.ts is the type this mirrors and the place the curves are chosen.
+export type CrownAllometry =
+  | {
+      source: string;
+      form: "loglog";
+      a: number;
+      b: number;
+      logBiasCorrection: number;
+    }
+  | { source: string; form: "quad"; a: number; b: number; c: number };
 
 // data/canopy/<id>.bin: NYC's 2017 LiDAR tree-canopy polygons, magic `CNPY`, the shared polygon
 // byte layout (a header, then per-polygon varint-delta rings) plus a trailing crown height in
@@ -71,8 +75,10 @@ export interface CanopyLayer {
   updated: string;
   attribution: string; // NYC OTI / NYC Parks (2017 LiDAR)
   sourceUrl: string;
-  heightAttribution: string; // the separate LiDAR height model the crown heights are sampled from
-  heightSourceUrl: string;
+  // The separate height model the crown heights are sampled from. Absent for a city with none —
+  // then every polygon's height is the 0 that reads as unknown and no tree shade is baked.
+  heightAttribution?: string;
+  heightSourceUrl?: string;
 }
 
 // The genus legend the genus overlay reads: the 11 most abundant genera by tree count, in id
@@ -123,6 +129,10 @@ export interface StreetLayer {
   sha256: string;
   densifyMeters: number; // longest gap between two sampled vertices
   sidewalkInsetMeters: number; // curb to the centre of the sidewalk, either side
+  // Whether this city's centreline distinguishes a service way with no pavement — New York's CSCL
+  // does and San Francisco's does not, its "alleys" being narrow streets with sidewalks. The graph's
+  // alley invariants are held over that population, so a city without one is not asked about it.
+  alleys: boolean;
   density: Distribution; // the normalized tight field, over both sidewalks of every vertex
   updated: string;
   attribution: string;
@@ -192,7 +202,67 @@ export async function readManifest(): Promise<Manifest> {
   }
 }
 
+// The zoom the street and caster chunks are cut on. Those pyramids are keyed by x/y alone, with no
+// city in the path, which works only because two cities never share a tile.
+const CHUNK_ZOOM = 12;
+
+// Whether two cities can reach the same chunk. Cities share the street, caster and commercial
+// pyramids — they are keyed by x/y with no city segment — and the whole arrangement rests on their
+// bounds not overlapping at the chunk grid. That is stated in a comment in `tiler chunks` and
+// checked nowhere, so the day someone adds a city that adjoins another (Oakland beside San
+// Francisco, Jersey City inside New York's box) the two would interleave in one file with no error
+// at all. Cheaper to assert here, where the bounds are written, than to debug there.
+function chunkRange(bounds: Bounds): {
+  minX: number;
+  maxX: number;
+  minY: number;
+  maxY: number;
+} {
+  const scale = 2 ** CHUNK_ZOOM;
+  const x = (lng: number): number => Math.floor(((lng + 180) / 360) * scale);
+  const y = (lat: number): number => {
+    const radians = (lat * Math.PI) / 180;
+    const merc =
+      (1 - Math.log(Math.tan(radians) + 1 / Math.cos(radians)) / Math.PI) / 2;
+    return Math.floor(merc * scale);
+  };
+  return {
+    minX: x(bounds.west),
+    maxX: x(bounds.east),
+    minY: y(bounds.north),
+    maxY: y(bounds.south),
+  };
+}
+
+export function overlappingCities(
+  cities: CityEntry[],
+): [string, string] | null {
+  for (let first = 0; first < cities.length; first++) {
+    for (let second = first + 1; second < cities.length; second++) {
+      const one = chunkRange(cities[first].bounds);
+      const other = chunkRange(cities[second].bounds);
+      if (
+        one.minX <= other.maxX &&
+        other.minX <= one.maxX &&
+        one.minY <= other.maxY &&
+        other.minY <= one.maxY
+      ) {
+        return [cities[first].id, cities[second].id];
+      }
+    }
+  }
+  return null;
+}
+
 export async function writeManifest(manifest: Manifest): Promise<void> {
+  const overlap = overlappingCities(manifest.cities);
+  if (overlap) {
+    throw new Error(
+      `${overlap[0]} and ${overlap[1]} share a z${CHUNK_ZOOM} chunk: the street, caster and ` +
+        "commercial pyramids are keyed by x/y with no city in the path, so their segments would " +
+        "interleave in one file. Give those pyramids a city segment before adding this city.",
+    );
+  }
   const versioned: Manifest = { ...manifest, version: MANIFEST_VERSION };
   await writeFile(MANIFEST_PATH, `${JSON.stringify(versioned, null, 2)}\n`);
 }

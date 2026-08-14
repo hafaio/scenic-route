@@ -113,6 +113,8 @@ function buildGraph(nodes: NodeSpec[], edges: EdgeSpec[]): RoutingGraph {
     maxArt: 0,
     maxCommercial: 0,
     edgeDirectCanopy: new Uint8Array(edgeCount),
+    edgeRelief: new Uint8Array(edgeCount),
+    maxRelief: 0,
     maxDirectCanopy: 0,
     shade: null,
     sheds: null,

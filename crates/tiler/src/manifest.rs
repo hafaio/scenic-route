@@ -52,6 +52,13 @@ pub struct City {
     pub bounds: Bounds,
     pub field: FieldLayer,
     pub streets: StreetLayer,
+    /// The OSM pedestrian network, absent for a city whose ingest found none.
+    pub paths: Option<PathLayer>,
+}
+
+#[derive(Deserialize)]
+pub struct PathLayer {
+    pub file: String,
 }
 
 #[derive(Deserialize)]

@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { encodePoints, type NamedPoint } from "./geometry";
 import { type LandContext, loadLandContext } from "./land";
 import type { SourceFile } from "./manifest";
+import { fetchSfLandmarks } from "./sf";
 import type { Coord } from "./socrata";
 import { NYC_OPEN_DATA } from "./socrata";
 
@@ -46,19 +47,33 @@ function toPoints(
   return points;
 }
 
-export async function ingestLandmarks(
-  cityId: string,
-  land: LandContext,
-): Promise<SourceFile> {
-  const started = performance.now();
-  await mkdir(LANDMARK_DIR, { recursive: true });
+async function nycLandmarks(land: LandContext): Promise<NamedPoint[]> {
   // `*` so a newly-read column is free after one refetch (the disk cache keys on the query).
   const rows = await NYC_OPEN_DATA.dataset<LandmarkRow>(
     LANDMARK_DATASET,
     { $select: "*" },
     LANDMARK_COUNT,
   );
-  const points = toPoints(rows, land.onLand);
+  return toPoints(rows, land.onLand);
+}
+
+// The city's own register of designated sites. A city with none passes null and simply has no
+// landmark discount, which is a decision its descriptor states rather than one this module infers
+// from a missing map entry.
+export type LandmarkSource = (land: LandContext) => Promise<NamedPoint[]>;
+
+export const NYC_LANDMARKS: LandmarkSource = nycLandmarks;
+export const SF_LANDMARKS: LandmarkSource = (land) =>
+  fetchSfLandmarks(land.onLand);
+
+export async function ingestLandmarks(
+  cityId: string,
+  source: LandmarkSource | null,
+  land: LandContext,
+): Promise<SourceFile> {
+  const started = performance.now();
+  await mkdir(LANDMARK_DIR, { recursive: true });
+  const points = source ? await source(land) : [];
   const bytes = encodePoints(LANDMARK_MAGIC, LANDMARK_FORMAT, points);
   const file = `${cityId}.bin`;
   await writeFile(join(LANDMARK_DIR, file), bytes);
@@ -66,7 +81,7 @@ export async function ingestLandmarks(
   const seconds = ((performance.now() - started) / 1000).toFixed(1);
   const kib = (bytes.length / 1024).toFixed(1);
   console.error(
-    `landmarks: ${rows.length} sites, ${points.length} on land, ${kib} KiB in ${seconds}s`,
+    `landmarks: ${points.length} on land, ${kib} KiB in ${seconds}s`,
   );
   return {
     file,
@@ -78,5 +93,10 @@ export async function ingestLandmarks(
 }
 
 if (import.meta.main) {
-  await ingestLandmarks("nyc", await loadLandContext());
+  const cityId = process.argv[2] ?? "nyc";
+  await ingestLandmarks(
+    cityId,
+    cityId === "sf" ? SF_LANDMARKS : NYC_LANDMARKS,
+    await loadLandContext(cityId),
+  );
 }

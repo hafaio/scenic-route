@@ -98,7 +98,7 @@ const SIDE_LABELS: readonly SideLabel[] = [
   "west",
 ];
 
-// The two figures routing/version.json names a graph by, both FNV-1a 64 in hex.
+// The two figures routing/<city>.version.json names a graph by, both FNV-1a 64 in hex.
 export interface GraphIdentity {
   // What this graph IS: the hash of the GRPH file's own bytes. It changes on any rebuild at all,
   // including one that only moved an f32 length, so nothing an artifact is gated on rides on it.
@@ -145,6 +145,14 @@ export interface RoutingGraph extends GraphIdentity {
   // The share of the edge that lies DIRECTLY under a crown, unblurred — what edgeCover, the smoothed
   // field the overlay is coloured from, cannot answer.
   edgeDirectCanopy: Uint8Array; // 0..254; 0 for a ferry
+  // 0..254: the average grade along this edge — the height it climbs and drops over its length,
+  // absolute, so it reads the same in either direction — as a fraction of 35%. That span clears the
+  // steepest street anyone walks, so nothing saturates. 0 for a ferry and for a city with no DEM.
+  edgeRelief: Uint8Array;
+  // The largest relief attribute present. NOT a heuristic bound — hill is a penalty, whose
+  // minimum factor is 1, so it never loosens the A* lower bound. This is read to tell a city with no
+  // elevation source (every edge 0) from one that has it, which is what greys the slider out.
+  maxRelief: number;
   maxDirectCanopy: number; // the greatest per-edge direct canopy, 0..1; that factor's clip-floor input
 
   // The route-time signed shade field, filled from the SHDE artifact by computeEdgeShade: the per-edge
@@ -179,11 +187,14 @@ export interface RoutingGraph extends GraphIdentity {
 }
 
 const MAGIC = "GRPH";
-const FORMAT_VERSION = 6;
+// Exported so a fixture cannot drift from it: a test writing its own header must write this one.
+export const FORMAT_VERSION = 8;
 const HEADER_BYTES = 64;
-const EDGE_RECORD_BYTES = 34;
+const EDGE_RECORD_BYTES = 35;
 // relative, so both pick up the deploy basePath
-const VERSION_URL = "routing/version.json"; // written beside the graph by the same `tiler graph` run
+// Written by the same `tiler graph` run as the graph, and named after it: one directory holds
+// every city's, so a shared name would describe whichever built last.
+const versionUrl = (cityId: string): string => `routing/${cityId}.version.json`;
 const PATH_CACHE_LIMIT = 512;
 
 function fourByteAlign(offset: number): number {
@@ -248,12 +259,14 @@ export function decodeGraph(
   const edgeDirectCanopy = new Uint8Array(edgeCount);
   const edgeSourceId = new Uint32Array(edgeCount);
   const edgeOrdinal = new Uint8Array(edgeCount);
+  const edgeRelief = new Uint8Array(edgeCount);
   const ferryEdges: number[] = [];
   let maxCoverByte = 0;
   let maxLandmarkByte = 0;
   let maxArtByte = 0;
   let maxCommercialByte = 0;
   let maxDirectCanopyByte = 0;
+  let maxReliefByte = 0;
   let minFerrySecPerMetre = Number.POSITIVE_INFINITY;
   for (let edge = 0; edge < edgeCount; edge++) {
     const record = offset + edge * EDGE_RECORD_BYTES;
@@ -290,11 +303,14 @@ export function decodeGraph(
     edgeDirectCanopy[edge] = bytes[record + 28];
     edgeSourceId[edge] = view.getUint32(record + 29, true);
     edgeOrdinal[edge] = bytes[record + 33];
+    edgeRelief[edge] = bytes[record + 34];
+    maxReliefByte = Math.max(maxReliefByte, edgeRelief[edge]);
     maxLandmarkByte = Math.max(maxLandmarkByte, edgeLandmark[edge]);
     maxArtByte = Math.max(maxArtByte, edgeArt[edge]);
     maxCommercialByte = Math.max(maxCommercialByte, edgeCommercial[edge]);
     maxDirectCanopyByte = Math.max(maxDirectCanopyByte, edgeDirectCanopy[edge]);
   }
+  const maxRelief = maxReliefByte / 255;
   const maxCover = maxCoverByte / 255;
   const maxLandmark = maxLandmarkByte / 255;
   const maxArt = maxArtByte / 255;
@@ -349,6 +365,8 @@ export function decodeGraph(
     maxCommercial,
     edgeDirectCanopy,
     maxDirectCanopy,
+    edgeRelief,
+    maxRelief,
     shade: null, // populated lazily once the SHDE artifact loads, keyed on the departure instant
     sheds: null, // populated lazily once the SHED artifact loads, keyed on the picked day
     ferries: null, // populated lazily once the FSCH artifact loads, keyed on the departure day
@@ -435,16 +453,17 @@ const graphPromises = new Map<string, Promise<RoutingGraph>>();
 // unreadable version file leaves both unknown, which no artifact then matches — the graph itself
 // still loads, so only what is placed against it goes quiet. A version file from before `keyHash`
 // existed is the same case.
-async function fetchGraphIdentity(): Promise<GraphIdentity> {
+async function fetchGraphIdentity(cityId: string): Promise<GraphIdentity> {
+  const url = versionUrl(cityId);
   try {
-    const response = await fetch(VERSION_URL);
+    const response = await fetch(url);
     if (!response.ok) {
       throw new Error(`${response.status} ${response.statusText}`);
     }
     const version = (await response.json()) as Partial<GraphIdentity>;
     return { hash: version.hash ?? "", keyHash: version.keyHash ?? "" };
   } catch (error: unknown) {
-    console.error(`${VERSION_URL} is unreadable:`, error);
+    console.error(`${url} is unreadable:`, error);
     return { hash: "", keyHash: "" };
   }
 }
@@ -455,7 +474,7 @@ export function loadGraph(cityId: string): Promise<RoutingGraph> {
     return pending;
   }
   const url = `routing/${cityId}.bin`;
-  const request = Promise.all([fetch(url), fetchGraphIdentity()])
+  const request = Promise.all([fetch(url), fetchGraphIdentity(cityId)])
     .then(async ([response, identity]) => {
       if (!response.ok) {
         throw new Error(`${url}: ${response.status} ${response.statusText}`);

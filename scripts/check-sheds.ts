@@ -17,7 +17,7 @@
 // same check with the deploy's own defaults.
 
 import { readFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import type { GraphIdentity } from "../src/routing/graph";
 import { loadGraphBytes } from "./build-sheds";
 import { decodeShedArtifact, shedGraphMismatch } from "./shed-encode";
@@ -42,14 +42,14 @@ export async function checkSheds(
   // The client gates on what `version.json` states, not on anything it recomputes, so a version file
   // that has drifted from the bytes beside it blanks the map exactly as a stale artifact would.
   const version = await readFile(
-    join(dirname(graphPath), "version.json"),
+    graphPath.replace(/\.bin$/, ".version.json"),
     "utf-8",
   ).catch(() => null);
   if (version !== null) {
     const declared = JSON.parse(version) as Partial<GraphIdentity>;
     if (declared.hash !== hash || declared.keyHash !== keyHash) {
       throw new Error(
-        `${graphPath} is ${hash}/${keyHash} and version.json beside it says` +
+        `${graphPath} is ${hash}/${keyHash} and its version file says` +
           ` ${declared.hash}/${declared.keyHash}: the deploy would serve a graph it names wrongly,` +
           " and every shed would resolve to nothing",
       );

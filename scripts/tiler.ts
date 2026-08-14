@@ -3,7 +3,8 @@
 // fetch, encode and orchestrate; they call it for everything numeric.
 
 import { spawnSync } from "node:child_process";
-import { readdir } from "node:fs/promises";
+import { readdir, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const ROOT = join(import.meta.dirname, "..");
@@ -64,4 +65,15 @@ export async function tilerSources(): Promise<string[]> {
     join(CRATE, "Cargo.toml"),
     ...sources,
   ];
+}
+
+// A mosaic's tiles, handed over as a file. Several hundred paths is more than a command line should
+// carry, so every flag that takes one of these — `--dem`, `--chm-mosaic` — takes a list instead.
+export async function writeList(
+  name: string,
+  paths: string[],
+): Promise<string> {
+  const path = join(tmpdir(), `scenic-${name}.txt`);
+  await writeFile(path, `${paths.join("\n")}\n`);
+  return path;
 }

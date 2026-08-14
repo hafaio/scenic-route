@@ -19,6 +19,7 @@ const weights = (ferry: number): RouteWeights => ({
   landmark: 0,
   art: 0,
   highway: 0,
+  hill: 0,
   commercial: 0,
   shade: 0,
   shelter: 0,

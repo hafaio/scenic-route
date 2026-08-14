@@ -24,6 +24,7 @@ const noScenic = (over: Partial<RouteWeights> = {}): RouteWeights => ({
   landmark: 0,
   art: 0,
   highway: 0,
+  hill: 0,
   commercial: 0,
   shade: 0,
   shelter: 0,
@@ -138,6 +139,8 @@ function buildGraph(nodes: NodeSpec[], edges: EdgeSpec[]): RoutingGraph {
     edgeLandmark,
     edgeArt,
     edgeHighway,
+    edgeRelief: new Uint8Array(edgeCount),
+    maxRelief: 0,
     edgeCommercial,
     maxLandmark: maxLandmark / 255,
     maxArt: maxArt / 255,
@@ -313,6 +316,7 @@ test("edgeMultiplier is the product of the three discounts and the highway penal
     landmark: 0.5,
     art: 0.3,
     highway: 0.7,
+    hill: 0,
   });
   const edge = 1; // the upper 0->1 edge, which carries all four attributes
   const expected =
