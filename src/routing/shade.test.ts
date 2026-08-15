@@ -90,10 +90,11 @@ const originalFetch = globalThis.fetch;
 beforeAll(() => {
   globalThis.fetch = ((input: RequestInfo | URL): Promise<Response> => {
     const url = String(input);
-    if (url === "routing/shade/bins.json") {
+    // The city segment is what keeps two latitudes' bins apart; the default city is nyc.
+    if (url === "routing/shade/nyc/bins.json") {
       return Promise.resolve(new Response(JSON.stringify(binsJson)));
     }
-    const match = url.match(/routing\/shade\/(\d+)\.bin$/);
+    const match = url.match(/routing\/shade\/nyc\/(\d+)\.bin$/);
     if (match) {
       const index = Number(match[1]);
       return Promise.resolve(new Response(binFiles[index]));

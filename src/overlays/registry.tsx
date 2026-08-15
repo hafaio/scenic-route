@@ -7,10 +7,12 @@ import {
   MdConstruction,
   MdDirectionsCar,
   MdPalette,
+  MdTerrain,
   MdStorefront,
   MdWbShade,
 } from "react-icons/md";
 import { PiBoatFill, PiTreeFill, PiTreeStructureFill } from "react-icons/pi";
+import ElevationLegend from "../../components/elevation-legend";
 import TreeLegend from "../../components/tree-legend";
 
 // The Leaflet layer components touch `window` at import, so they load only in the browser —
@@ -41,6 +43,10 @@ const LinesLayer = dynamic(() => import("../../components/lines-layer"), {
 const ShedLayer = dynamic(() => import("../../components/shed-layer"), {
   ssr: false,
 });
+const ElevationLayer = dynamic(
+  () => import("../../components/elevation-layer"),
+  { ssr: false },
+);
 
 export type OverlayId =
   | "canopy"
@@ -51,7 +57,8 @@ export type OverlayId =
   | "highways"
   | "commercial"
   | "shade"
-  | "scaffolding";
+  | "scaffolding"
+  | "elevation";
 
 export interface OverlayDef {
   id: OverlayId;
@@ -103,6 +110,13 @@ export const OVERLAYS: readonly OverlayDef[] = [
     label: "Shade",
     icon: <MdWbShade className="h-4 w-4 text-slate-500" aria-hidden="true" />,
     render: () => <ShadeLayer />,
+  },
+  {
+    id: "elevation",
+    label: "Elevation",
+    icon: <MdTerrain className="h-4 w-4 text-amber-700" aria-hidden="true" />,
+    render: () => <ElevationLayer />,
+    legend: <ElevationLegend />,
   },
   {
     id: "scaffolding",

@@ -14,6 +14,7 @@ import { encodeBuildings, type HeightedBuilding } from "./geometry";
 import { type LandContext, loadLandContext } from "./land";
 import type { SourceFile } from "./manifest";
 import type { Polygon } from "./overpass";
+import { fetchSfBuildings } from "./sf";
 import type { Coord } from "./socrata";
 import { NYC_OPEN_DATA } from "./socrata";
 
@@ -74,20 +75,33 @@ function toBuildings(
   return buildings;
 }
 
-export async function ingestBuildings(
-  cityId: string,
-  land: LandContext,
-): Promise<SourceFile> {
-  const started = performance.now();
-  await mkdir(BUILDINGS_DIR, { recursive: true });
-
+async function nycBuildings(land: LandContext): Promise<HeightedBuilding[]> {
   // `*` so a newly-read column is free after one refetch (the disk cache keys on the query).
   const rows = await NYC_OPEN_DATA.dataset<BuildingRow>(
     BUILDINGS_DATASET,
     { $select: "*" },
     BUILDINGS_COUNT,
   );
-  const buildings = toBuildings(rows, land.onLand);
+  return toBuildings(rows, land.onLand);
+}
+
+// New York joins its footprints to a separate height table; San Francisco's carry a LiDAR-measured
+// height on the row itself. A city that passes null casts no building shade AT ALL — which is a loud
+// thing to choose and was a silent thing to forget, back when this looked the city up in a map.
+export type BuildingSource = (land: LandContext) => Promise<HeightedBuilding[]>;
+
+export const NYC_BUILDINGS: BuildingSource = nycBuildings;
+export const SF_BUILDINGS: BuildingSource = (land) =>
+  fetchSfBuildings(land.onLand);
+
+export async function ingestBuildings(
+  cityId: string,
+  source: BuildingSource | null,
+  land: LandContext,
+): Promise<SourceFile> {
+  const started = performance.now();
+  await mkdir(BUILDINGS_DIR, { recursive: true });
+  const buildings = source ? await source(land) : [];
 
   const bytes = encodeBuildings(BUILDINGS_FORMAT, buildings);
   const file = `${cityId}.bin`;
@@ -96,7 +110,7 @@ export async function ingestBuildings(
   const seconds = ((performance.now() - started) / 1000).toFixed(1);
   const mib = (bytes.length / (1024 * 1024)).toFixed(1);
   console.error(
-    `buildings: ${rows.length} fetched / ${buildings.length} polygons on land, ${mib} MiB in ${seconds}s`,
+    `buildings: ${buildings.length} polygons on land, ${mib} MiB in ${seconds}s`,
   );
   return {
     file,
@@ -108,5 +122,10 @@ export async function ingestBuildings(
 }
 
 if (import.meta.main) {
-  await ingestBuildings("nyc", await loadLandContext());
+  const cityId = process.argv[2] ?? "nyc";
+  await ingestBuildings(
+    cityId,
+    cityId === "sf" ? SF_BUILDINGS : NYC_BUILDINGS,
+    await loadLandContext(cityId),
+  );
 }

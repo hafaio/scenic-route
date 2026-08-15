@@ -33,7 +33,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: bun install --frozen-lockfile
       - run: bun lint
-      - run: bun test src
+      # scripts too: the build-time invariants live there, and a city that breaks one should
+      # fail here rather than halfway through an ingest.
+      - run: bun test src scripts
       # The committed shed artifact records what the durable key space of its graph was built from,
       # and this compares that against the same in this checkout — so a change that lands without a
       # `bun run build-sheds` fails here rather than one deploy later. It reads data/** only as the

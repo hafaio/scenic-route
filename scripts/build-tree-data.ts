@@ -7,10 +7,22 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ingestArt } from "./art";
+import {
+  type CrownAllometry,
+  crownDiameterMeters,
+  NOCALC_LONDON_PLANE,
+  NOEAST_LONDON_PLANE,
+} from "./allometry";
+import { type ArtSource, ingestArt, NYC_ART, SF_ART } from "./art";
+import { type BuildingSource, NYC_BUILDINGS, SF_BUILDINGS } from "./buildings";
 import { fetchCanopyPolygons } from "./canopy";
 import { CHM_ATTRIBUTION, CHM_SOURCE_URL, fetchChmRaster } from "./chm";
-import { ingestFerries } from "./ferries";
+import {
+  type ElevationRaster,
+  SF_CANOPY_BAND,
+  SF_ELEVATION,
+} from "./elevation";
+import { type FerrySource, ingestFerries } from "./ferries";
 import {
   boxOf,
   buildNameTable,
@@ -25,7 +37,12 @@ import {
 import { ingestHighways } from "./highways";
 import { fetchNycLand, type LandContext } from "./land";
 import { buildLandTest } from "./land-filter";
-import { ingestLandmarks } from "./landmarks";
+import {
+  ingestLandmarks,
+  type LandmarkSource,
+  NYC_LANDMARKS,
+  SF_LANDMARKS,
+} from "./landmarks";
 import {
   type Bounds,
   type CanopyLayer,
@@ -46,33 +63,36 @@ import {
   type PathWay,
   type Polygon,
 } from "./overpass";
-import { ingestSidewalks } from "./sidewalks";
-import { type Coord, fetchNycTrees, NYC_OPEN_DATA, type Tree } from "./socrata";
-import { runTiler } from "./tiler";
-
-// The CSCL road-way types that carry pedestrians: street, bridge, tunnel, boardwalk, path,
-// step street, alley. Bridges (3) and tunnels (4) are walkable only when not vehicular-only
-// (nonped != 'V'); the $where excludes those. Highways, ramps, driveways and ferry routes are
-// never walkable.
-type RoadType = 1 | 3 | 4 | 5 | 6 | 7 | 10;
-
-// STRT record byte 23, bits 0-2. A router reads these; the overlay ignores them. Bits 3-6 are the
-// per-side sidewalk bits, stamped in place by ingestSidewalks — scripts/sidewalks.ts owns them.
-const FLAG_VEHICULAR_ONLY = 1 << 0; // nonped === "V" — drawn, never routed
-const FLAG_NON_VEHICULAR = 1 << 1; // trafdir === "NV" — a dedicated ped/bike deck, offset 0
-const FLAG_STRUCTURE = 1 << 2; // rw_type 3 or 4 — a bridge or tunnel deck
-
-interface Segment {
-  physicalId: number;
-  roadType: RoadType;
-  streetWidth: number; // feet, 0 unknown
-  postedSpeed: number; // mph, 0 unknown
-  flags: number; // FLAG_* bits, from the row's nonped/trafdir/rw_type
-  name: string; // the trimmed stname_label, "" when the row carries none
-  nameId: number; // index into the name table, UNNAMED_ID when the row carries no label
-  points: Coord[]; // densified, so the field is sampled at least every DENSIFY_METERS
-  lengthMeters: number;
-}
+import {
+  fetchSfCanopyPolygons,
+  fetchSfLand,
+  fetchSfStreets,
+  fetchSfTrees,
+  SF_CANOPY_ATTRIBUTION,
+} from "./sf";
+import {
+  ingestSidewalks,
+  NYC_SURVEY,
+  SF_SURVEY,
+  type Survey,
+} from "./sidewalks";
+import {
+  type Coord,
+  DATA_SF,
+  fetchNycTrees,
+  NYC_OPEN_DATA,
+  type Tree,
+} from "./socrata";
+import {
+  FLAG_NON_VEHICULAR,
+  FLAG_STRUCTURE,
+  FLAG_VEHICULAR_ONLY,
+  ROAD_TYPES,
+  type RoadType,
+  type Segment,
+  toInt,
+} from "./streets";
+import { runTiler, writeList } from "./tiler";
 
 // One OSM pedestrian/park way, land-clipped and densified, ready to encode as a PATH record. The
 // name is uppercased once here so the client's prettifier renders "BOW BRIDGE" as "Bow Bridge".
@@ -136,14 +156,21 @@ const CANOPY_FORMAT = 2; // the measured 2017 LiDAR canopy under magic CNPY; v2 
 
 const TOP_GENUS_COUNT = 11; // the genera given their own id 0..10; the rest share id 11 ("Other")
 const OTHER_GENUS_ID = TOP_GENUS_COUNT; // 11: tail genera, unknown genus, and every OSM tree
-// The legend's common names for the expected top-11 genera; a selected genus not here falls back
-// to its own name, so a shift in the ranks stays legible rather than blank.
+// The legend's common names, covering both cities' top genera; one not here falls back to its own
+// name, so a shift in the ranks stays legible rather than blank. That fallback is meant to fire on
+// the odd genus, not on most of a legend — with New York's list alone, eight of San Francisco's
+// eleven read in Latin, and a default firing that often reads as a defect rather than a graceful
+// degradation.
+//
+// San Francisco's names are its own register's, not mine: `qspecies` is "Lophostemon confertus ::
+// Brisbane Box", so each genus takes the common name of its most planted species.
 const GENUS_COMMON_NAMES: Record<string, string> = {
+  // New York's ranks
   Quercus: "Oak",
   Acer: "Maple",
   Platanus: "London planetree",
   Gleditsia: "Honeylocust",
-  Pyrus: "Callery pear",
+  Pyrus: "Pear",
   Tilia: "Linden",
   Prunus: "Cherry",
   Zelkova: "Zelkova",
@@ -151,6 +178,19 @@ const GENUS_COMMON_NAMES: Record<string, string> = {
   Ginkgo: "Ginkgo",
   Ulmus: "Elm",
   Styphnolobium: "Pagoda tree",
+  // San Francisco's
+  Lophostemon: "Brisbane box",
+  Ficus: "Fig",
+  Pittosporum: "Victorian box",
+  Tristaniopsis: "Swamp myrtle",
+  Magnolia: "Magnolia",
+  Metrosideros: "New Zealand Christmas tree",
+  Arbutus: "Strawberry tree",
+  Acacia: "Acacia",
+  Olea: "Olive",
+  Maytenus: "Mayten",
+  Corymbia: "Flowering gum",
+  Eucalyptus: "Eucalyptus",
 };
 // The isotropic blur the canopy field is rendered and reported through: closed woods stay dark,
 // lawns stay blank, and a park edge feathers over ~2σ ≈ 30 m. The land cover distribution reads
@@ -163,25 +203,11 @@ const TIGHT_SIGMA_ALONG_METERS = 15;
 const TIGHT_SIGMA_ACROSS_METERS = 4;
 const SIDEWALK_INSET_METERS = 2; // curb to the centre of the sidewalk
 
-// The crown each tree shades the ground with, from its trunk diameter. Published relation, not
-// invented: McPherson, van Doorn & Peper 2016, "Urban Tree Database and Allometric Equations"
-// (USDA Forest Service GTR-PSW-253, archive RDS-2016-0005). The "NoEast" reference city is
-// Queens, so this is literally NYC street-tree data; the London planetree log-log curve (the
-// city's most abundant street species, R^2 0.94) stands in for every species, since ForMS
-// carries no species here. crownDiameter[m] = exp(a + b*ln(ln(dbh_cm + 1)) + correction).
-const CROWN_ALLOMETRY = {
-  source:
-    "McPherson, van Doorn & Peper 2016 (USDA GTR-PSW-253), NoEast London planetree",
-  form: "crownDiameterMeters = exp(a + b*ln(ln(dbhInches*2.54 + 1)) + logBiasCorrection)",
-  a: -0.752,
-  b: 2.414,
-  logBiasCorrection: 0.00988,
-} as const;
-const CM_PER_INCH = 2.54;
-// max(dbh) is 2427 in, nonsense; a 60 in trunk is already a very large street tree, so anything
-// past it is clamped there. dbh = 0 (missing) is given the median rather than a zero crown.
+// max(dbh) is 2427 in in New York and 9999 in San Francisco, both nonsense; a 60 in trunk is
+// already a very large street tree, so anything past it is clamped there. That clamp also keeps the
+// quadratic allometries on the arm they were fitted on — past their turning point they fall away.
+// dbh = 0 (missing) is given the city's own median rather than a zero crown.
 const MAX_DBH_INCHES = 60;
-const MEDIAN_DBH_INCHES = 9; // the ForMS median over standing trees, imputed for missing dbh
 
 // An OSM natural=tree point this close to a ForMS trunk is the same tree; ForMS wins the duplicate
 // because it carries a dbh the crown is sized from, where OSM usually carries none.
@@ -213,27 +239,18 @@ const PERCENTILES: readonly Percentile[] = [
   "p99",
 ];
 
-const ROAD_TYPES: readonly RoadType[] = [1, 3, 4, 5, 6, 7, 10];
 // The walkable-row total the paged fetch is checked against — a floor, so it sits a little below
 // the current Socrata count (111,675 rows for the $where below: 99,361 street + 2,205 bridge +
 // 7 tunnel + 101 boardwalk + 5,918 path + 248 step + 3,835 alley) rather than tracking it exactly.
 const NYC_SEGMENT_COUNT = 111_000;
 
-function toInt(value: string | undefined): number {
-  const parsed = Number.parseInt(value ?? "", 10);
-  return Number.isFinite(parsed) ? parsed : 0;
-}
-
 // The crown radius the allometry predicts for one trunk, in metres. dbh is capped and a missing
 // dbh imputed *before* this, so the log-log curve is only ever asked about a plausible trunk.
-function crownRadiusMeters(dbhInches: number): number {
-  const dbhCm = dbhInches * CM_PER_INCH;
-  const diameter = Math.exp(
-    CROWN_ALLOMETRY.a +
-      CROWN_ALLOMETRY.b * Math.log(Math.log(dbhCm + 1)) +
-      CROWN_ALLOMETRY.logBiasCorrection,
-  );
-  return diameter / 2;
+function crownRadiusMeters(
+  allometry: CrownAllometry,
+  dbhInches: number,
+): number {
+  return crownDiameterMeters(allometry, dbhInches) / 2;
 }
 
 // Sizes every tree's crown from its dbh, clamping the nonsense outliers and imputing the median
@@ -242,6 +259,8 @@ function crownRadiusMeters(dbhInches: number): number {
 function crownTrees(
   trees: readonly Tree[],
   genusId: ReadonlyMap<string, number>,
+  allometry: CrownAllometry,
+  medianDbhInches: number,
 ): {
   crowned: CrownedTree[];
   clamped: number;
@@ -252,7 +271,7 @@ function crownTrees(
   const crowned = trees.map(({ lat, lng, dbhInches, genus }) => {
     let dbh = dbhInches;
     if (dbh <= 0) {
-      dbh = MEDIAN_DBH_INCHES;
+      dbh = medianDbhInches;
       imputed += 1;
     } else if (dbh > MAX_DBH_INCHES) {
       dbh = MAX_DBH_INCHES;
@@ -261,7 +280,7 @@ function crownTrees(
     return {
       lat,
       lng,
-      crownRadiusM: crownRadiusMeters(dbh),
+      crownRadiusM: crownRadiusMeters(allometry, dbh),
       genusId: genusId.get(genus) ?? OTHER_GENUS_ID,
     };
   });
@@ -299,6 +318,8 @@ function crownOsmTrees(
   forms: readonly Coord[],
   onLand: (coord: Coord) => boolean,
   centerLat: number,
+  allometry: CrownAllometry,
+  medianDbhInches: number,
 ): OsmCrowns {
   const cellLat = OSM_TREE_DEDUP_METERS / METERS_PER_DEGREE_LAT;
   const cellLng =
@@ -320,7 +341,7 @@ function crownOsmTrees(
     }
   }
 
-  const imputedCrownRadiusM = crownRadiusMeters(MEDIAN_DBH_INCHES);
+  const imputedCrownRadiusM = crownRadiusMeters(allometry, medianDbhInches);
   const crowned: CrownedTree[] = [];
   let onLandCount = 0;
   let deduped = 0;
@@ -648,7 +669,70 @@ async function writeSource(
   };
 }
 
-const CITY = {
+// One city's sources, so the ingest below reads a city rather than being one. Everything that
+// differs between two cities is either a fetcher here or a credit line; the estimator, the
+// encoders, the crowning and the tiler are all city-agnostic already.
+interface CitySources {
+  id: string;
+  name: string;
+  attribution: string;
+  sourceUrl: string;
+  streetAttribution: string;
+  streetSourceUrl: string;
+  fieldAttribution: string;
+  fieldSourceUrl: string;
+  pathAttribution: string;
+  pathSourceUrl: string;
+  canopyAttribution: string;
+  canopySourceUrl: string;
+  // The polygons the whole ingest is clipped to, and whose box every Overpass query is cut from.
+  land: () => Promise<Polygon[]>;
+  streets: () => Promise<Segment[]>;
+  trees: () => Promise<Tree[]>;
+  canopy: () => Promise<{
+    polygons: Polygon[];
+    fetched: number;
+    dropped: number;
+  }>;
+  // Where crown heights are measured, or null for a city with none — then every polygon keeps the 0
+  // that reads as an unknown height, and the tree-shade pyramid is simply not produced. A city
+  // states either one raster or a mosaic of them with the band that carries height above ground;
+  // that band measures buildings too, which is safe only because the polygons it is read through
+  // are measured canopy.
+  chm: () => Promise<{
+    paths: string[];
+    band: number | null;
+    crs: "utm18n" | "sf-cs13";
+    attribution: string;
+    sourceUrl: string;
+  } | null>;
+  // The city's ferry network, consolidated from its GTFS feeds, or null where it has none — a
+  // fetcher rather than a flag, because a third city's feeds are its own and a boolean can only ever
+  // mean "the ones scripts/ferries.ts already hardcodes".
+  ferries: (() => Promise<FerrySource>) | null;
+  // Whether its centreline classifies a service way with no pavement. New York's does; San
+  // Francisco's "alleys" are narrow streets with sidewalks, which is a different thing.
+  alleys: boolean;
+  // The city's own registers, or null where it has none. Null is a decision the descriptor states,
+  // where a missing entry in a per-module lookup was a decision nobody made: a city absent from
+  // buildings' map got no footprints, so no building shade at all, and the build said nothing.
+  landmarks: LandmarkSource | null;
+  art: ArtSource | null;
+  buildings: BuildingSource | null;
+  // Which side of a street the city's own survey says carries pavement. Not optional: the existence
+  // gate needs an authoritative answer, because OSM's silence is ambiguous between a mapping gap and
+  // genuinely bare kerb.
+  survey: () => Promise<Survey>;
+  // The DEM the terrain overlay and the relief byte are read off, or null for a flat model.
+  elevation: (() => Promise<ElevationRaster>) | null;
+  // The crown curve fitted nearest this city, and the trunk to stand in for a row that carries none.
+  // Both are per city because both are measured FROM a city: the curve from its climate region's
+  // reference town, the median from its own register.
+  crownAllometry: CrownAllometry;
+  medianDbhInches: number;
+}
+
+const NYC: CitySources = {
   id: "nyc",
   name: "New York City",
   attribution: "NYC Parks Forestry (ForMS) via NYC Open Data",
@@ -665,22 +749,89 @@ const CITY = {
   canopyAttribution: "Tree canopy © NYC OTI / NYC Parks (2017 LiDAR)",
   canopySourceUrl:
     "https://services3.arcgis.com/xJHn8F2NTtwCMFtX/arcgis/rest/services/TreeCanopy2017_Simplified_1ft/FeatureServer/0",
-} as const;
+  land: fetchNycLand,
+  streets: fetchNycStreets,
+  trees: fetchNycTrees,
+  canopy: fetchCanopyPolygons,
+  chm: async () => ({
+    paths: [await fetchChmRaster()],
+    band: null,
+    crs: "utm18n",
+    attribution: CHM_ATTRIBUTION,
+    sourceUrl: CHM_SOURCE_URL,
+  }),
+  ferries: () => ingestFerries("nyc"),
+  alleys: true,
+  landmarks: NYC_LANDMARKS,
+  art: NYC_ART,
+  buildings: NYC_BUILDINGS,
+  survey: NYC_SURVEY,
+  elevation: null,
+  crownAllometry: NOEAST_LONDON_PLANE,
+  medianDbhInches: 9, // the ForMS median over standing trees
+};
 
-async function ingest(): Promise<void> {
+const SF: CitySources = {
+  id: "sf",
+  name: "San Francisco",
+  attribution: "SF Public Works street trees via DataSF",
+  sourceUrl: DATA_SF.page("tkzw-k3nq"),
+  streetAttribution: "SF basemap street centrelines via DataSF",
+  streetSourceUrl: DATA_SF.page("3psu-pn9h"),
+  fieldAttribution: "path & tree data © OpenStreetMap contributors",
+  fieldSourceUrl: "https://www.openstreetmap.org/copyright",
+  pathAttribution: "OpenStreetMap contributors",
+  pathSourceUrl: "https://www.openstreetmap.org/copyright",
+  canopyAttribution: SF_CANOPY_ATTRIBUTION,
+  canopySourceUrl: DATA_SF.page("ni2e-vpbg"),
+  land: fetchSfLand,
+  streets: fetchSfStreets,
+  trees: fetchSfTrees,
+  canopy: fetchSfCanopyPolygons,
+  // The same 3DEP tiles the terrain overlay is built from, read at the band that differences the
+  // surface model against the ground. That band is height above ground for everything standing, not
+  // canopy — downtown reads 200 m of tower — so it is only ever sampled through the measured-canopy
+  // polygons, which is what `tiler heights` does and the only thing that makes it a crown height.
+  chm: async () => {
+    const raster = await SF_ELEVATION();
+    return {
+      paths: raster.paths,
+      band: SF_CANOPY_BAND,
+      crs: "sf-cs13",
+      attribution: raster.attribution,
+      sourceUrl: raster.sourceUrl,
+    };
+  },
+  // The Bay Area feed is behind a 511.org key, which nothing in this pipeline holds yet.
+  ferries: null,
+  alleys: false,
+  landmarks: SF_LANDMARKS,
+  art: SF_ART,
+  buildings: SF_BUILDINGS,
+  survey: SF_SURVEY,
+  elevation: SF_ELEVATION,
+  crownAllometry: NOCALC_LONDON_PLANE,
+  medianDbhInches: 7, // the DPW register's median over its 151,806 rows that carry one
+};
+
+const CITIES: Record<string, CitySources> = { nyc: NYC, sf: SF };
+
+async function ingest(CITY: CitySources): Promise<void> {
   const started = performance.now();
 
   // The ferry network is OSM- and canopy-independent: it is consolidated from the two NYC ferry
   // GTFS feeds into data/ferries/<id>.bin (magic FERR), a committed build input a later phase reads
   // into the routing graph. It does not enter the tree-cover manifest, so it is produced up front,
   // apart from the cover pipeline below.
-  const ferries = await ingestFerries(CITY.id);
-  console.error(
-    `${CITY.id}: ferries ${ferries.stops} stops, ${ferries.segments} segments (${ferries.bytes} bytes)`,
-  );
+  if (CITY.ferries) {
+    const ferries = await CITY.ferries();
+    console.error(
+      `${CITY.id}: ferries ${ferries.stops} stops, ${ferries.segments} segments (${ferries.bytes} bytes)`,
+    );
+  }
 
-  console.error(`${CITY.id}: fetching borough boundaries`);
-  const land = await fetchNycLand();
+  console.error(`${CITY.id}: fetching the land polygons`);
+  const land = await CITY.land();
   const landBox = boxOf(land);
 
   // The land test is built once from the borough polygons and reused: the paths ask it up to
@@ -692,8 +843,8 @@ async function ingest(): Promise<void> {
   // into the routing graph — none enters the tree-cover manifest, so they are produced here, apart
   // from the cover pipeline, exactly as the ferries are.
   const landContext: LandContext = { onLand, box: landBox };
-  const landmarks = await ingestLandmarks(CITY.id, landContext);
-  const art = await ingestArt(CITY.id, landContext);
+  const landmarks = await ingestLandmarks(CITY.id, CITY.landmarks, landContext);
+  const art = await ingestArt(CITY.id, CITY.art, landContext);
   const highways = await ingestHighways(CITY.id, landContext);
   console.error(
     `${CITY.id}: landmarks ${landmarks.count}, art ${art.count}, highways ${highways.count} lines`,
@@ -702,8 +853,8 @@ async function ingest(): Promise<void> {
   // The measured 2017 LiDAR canopy: NYC Parks' polygon feature service, ~1M polygons paged and
   // disk-cached, then land-clipped. It is the cover source — `tiler canopy` rasterizes it for the
   // fill pyramid and `tiler densities` samples it at every sidewalk for the routing density.
-  console.error(`${CITY.id}: fetching 2017 LiDAR tree canopy polygons`);
-  const canopy = await fetchCanopyPolygons();
+  console.error(`${CITY.id}: fetching tree canopy polygons`);
+  const canopy = await CITY.canopy();
   const canopyOnLand = clipCanopyToLand(canopy.polygons, onLand);
   const canopyReferenceLat = (landBox.south + landBox.north) / 2;
   const canopySquareKilometers = canopySquareKm(
@@ -722,8 +873,8 @@ async function ingest(): Promise<void> {
 
   // The LiDAR canopy height model each polygon's crown height is measured from: a 243 MiB raster,
   // downloaded once into .cache/ and read off disk by `tiler heights` below.
-  console.error(`${CITY.id}: fetching the LiDAR canopy height model`);
-  const chmPath = await fetchChmRaster();
+  console.error(`${CITY.id}: fetching the canopy height model`);
+  const chm = await CITY.chm();
 
   // Paths are the other Overpass query, so they are fetched next while a mirror is warm — and
   // land-clipped here, against the borough polygons, to drop the New Jersey and Westchester
@@ -763,7 +914,7 @@ async function ingest(): Promise<void> {
   );
 
   console.error(`${CITY.id}: fetching street segments`);
-  const segments = await fetchNycStreets();
+  const segments = await CITY.streets();
   const names = buildNameTable(segments);
   const unnamed = segments.filter(
     (segment) => segment.nameId === UNNAMED_ID,
@@ -772,7 +923,18 @@ async function ingest(): Promise<void> {
     `${CITY.id}: ${names.length} distinct street names, ${unnamed} unnamed segments`,
   );
   console.error(`${CITY.id}: fetching trees`);
-  const trees = await fetchNycTrees();
+  const allTrees = await CITY.trees();
+  // Land-clipped, because a register's coordinates are only as good as its geocoder: 55 of San
+  // Francisco's street trees carry a placeholder at 47.27 N, 138.28 W — a real tree on Octavia
+  // Street, filed in the north Pacific. Nothing downstream would notice a tree in the wrong place,
+  // but the city's BOUNDS are taken over these points, and they set the Overpass boxes and the whole
+  // tile plan. So the check belongs here, where the land test already is.
+  const trees = allTrees.filter((tree) => onLand(tree));
+  if (trees.length !== allTrees.length) {
+    console.error(
+      `${CITY.id}: dropped ${allTrees.length - trees.length} trees off the city's land`,
+    );
+  }
 
   // The genus legend: tally the ForMS genera, take the 11 most abundant, and give each an id 0..10
   // in descending-count order. Everything else — tail genera, unknown genus, and every OSM tree —
@@ -794,9 +956,14 @@ async function ingest(): Promise<void> {
   }));
   const topGenusTotal = topGenera.reduce((sum, [, count]) => sum + count, 0);
 
-  const { crowned, clamped, imputed } = crownTrees(trees, genusId);
+  const { crowned, clamped, imputed } = crownTrees(
+    trees,
+    genusId,
+    CITY.crownAllometry,
+    CITY.medianDbhInches,
+  );
   console.error(
-    `${CITY.id}: sized ${crowned.length} crowns (clamped ${clamped} trunks past ${MAX_DBH_INCHES} in, imputed ${imputed} missing dbh at ${MEDIAN_DBH_INCHES} in)`,
+    `${CITY.id}: sized ${crowned.length} crowns (clamped ${clamped} trunks past ${MAX_DBH_INCHES} in, imputed ${imputed} missing dbh at ${CITY.medianDbhInches} in)`,
   );
   console.error(
     `${CITY.id}: top ${genusTable.length} genera ${genusTable.map((entry) => `${entry.genus}:${entry.count}`).join(", ")}`,
@@ -810,6 +977,8 @@ async function ingest(): Promise<void> {
     trees,
     onLand,
     (landBox.south + landBox.north) / 2,
+    CITY.crownAllometry,
+    CITY.medianDbhInches,
   );
   console.error(
     `${CITY.id}: OSM trees ${osmTreesRaw.length} fetched, ${osm.onLandCount} on land, ${osm.deduped} deduped against ForMS, ${osm.crowned.length} kept (${osm.imputedCrowns} imputed crown)`,
@@ -843,19 +1012,49 @@ async function ingest(): Promise<void> {
     canopyOnLand.length,
     encodeCanopy(CANOPY_FORMAT, canopyOnLand),
   );
-  const heights: Heights = JSON.parse(
-    runTiler(["heights", "--canopy", canopyPath, "--chm", chmPath], true),
-  );
+  // A city with no height model leaves every polygon's height at the 0 that reads as unknown, so
+  // `tiler heights` simply does not run and no tree-shade pyramid is baked for it.
+  const heights: Heights | null = chm
+    ? JSON.parse(
+        runTiler(
+          [
+            "heights",
+            "--canopy",
+            canopyPath,
+            "--chm-crs",
+            chm.crs,
+            // Several hundred rasters are more than a command line carries, so a mosaic arrives as
+            // a list on disk, exactly as the terrain overlay's tiles do.
+            ...(chm.band === null
+              ? ["--chm", chm.paths[0]]
+              : [
+                  "--chm-mosaic",
+                  await writeList(`${CITY.id}-canopy-mosaic`, chm.paths),
+                  "--chm-band",
+                  String(chm.band),
+                ]),
+          ],
+          true,
+        ),
+      )
+    : null;
   const canopyBytes = new Uint8Array(await readFile(canopyPath));
   console.error(
-    `${CITY.id}: canopy heights measured for ${heights.measured} of ${heights.polygons} polygons (${heights.skippedTiles} CHM tiles skipped)`,
+    heights
+      ? `${CITY.id}: canopy heights measured for ${heights.measured} of ${heights.polygons} polygons (${heights.skippedTiles} CHM tiles skipped)`
+      : `${CITY.id}: no canopy height model; every polygon keeps an unknown height`,
   );
   // OSM's own sidewalk/crossing/island ways, written as their own committed source, and the
   // planimetric ROW-sidewalk polygons, which are only probed. Between them they settle the four
   // per-side bits of every offsetted STRT record's flags byte, so this runs before the streets are
   // encoded.
   console.error(`${CITY.id}: fetching sidewalks`);
-  const sidewalks = await ingestSidewalks(CITY.id, segments, landContext);
+  const sidewalks = await ingestSidewalks(
+    CITY.id,
+    segments,
+    landContext,
+    CITY.survey,
+  );
 
   const streetPath = join(DATA_DIR, "streets", file);
   await mkdir(join(DATA_DIR, "streets"), { recursive: true });
@@ -912,12 +1111,13 @@ async function ingest(): Promise<void> {
     bytes: canopyBytes.length,
     sha256: createHash("sha256").update(canopyBytes).digest("hex"),
     squareKm: Math.round(canopySquareKilometers * 10) / 10,
-    measuredHeights: heights.measured,
+    measuredHeights: heights?.measured ?? 0,
     updated,
     attribution: CITY.canopyAttribution,
     sourceUrl: CITY.canopySourceUrl,
-    heightAttribution: CHM_ATTRIBUTION,
-    heightSourceUrl: CHM_SOURCE_URL,
+    ...(chm
+      ? { heightAttribution: chm.attribution, heightSourceUrl: chm.sourceUrl }
+      : {}),
   };
   const field: FieldLayer = {
     trees: treeFile,
@@ -926,9 +1126,9 @@ async function ingest(): Promise<void> {
     fillSigmaMeters: FILL_SIGMA_METERS,
     tightSigmaAlongMeters: TIGHT_SIGMA_ALONG_METERS,
     tightSigmaAcrossMeters: TIGHT_SIGMA_ACROSS_METERS,
-    crownAllometry: CROWN_ALLOMETRY,
+    crownAllometry: CITY.crownAllometry,
     maxDbhInches: MAX_DBH_INCHES,
-    imputedDbhInches: MEDIAN_DBH_INCHES,
+    imputedDbhInches: CITY.medianDbhInches,
     clampedTrees: clamped,
     imputedTrees: imputed,
     osmTrees: osm.crowned.length,
@@ -956,6 +1156,7 @@ async function ingest(): Promise<void> {
     sha256: createHash("sha256").update(streetBytes).digest("hex"),
     densifyMeters: DENSIFY_METERS,
     sidewalkInsetMeters: SIDEWALK_INSET_METERS,
+    alleys: CITY.alleys,
     density: distributionOf(estimate.streetDensity),
     updated,
     attribution: CITY.streetAttribution,
@@ -1004,4 +1205,13 @@ async function ingest(): Promise<void> {
   );
 }
 
-await ingest();
+// `bun run build-tree-data [city ...]`; with none, every city the pipeline knows.
+const requested = process.argv.slice(2).filter((arg) => !arg.startsWith("--"));
+const selected = requested.length > 0 ? requested : Object.keys(CITIES);
+for (const id of selected) {
+  const city = CITIES[id];
+  if (!city) {
+    throw new Error(`no city ${id}; known: ${Object.keys(CITIES).join(", ")}`);
+  }
+  await ingest(city);
+}
