@@ -29,7 +29,9 @@ const REQUEST_TIMEOUT_MS = 90_000;
 // Empty rather than absent on a fork: an unset secret reaches the step as "", and sending that as a
 // token is worse than sending none.
 const APP_TOKEN = process.env.SOCRATA_APP_TOKEN || undefined;
-const BATCH_KEYS = 200; // keys per `field in (...)`; longer lists start timing out
+// Keys per `field in (...)` for a light row; a call site whose rows are heavy passes its own. The
+// ceiling is the URL rather than the query: past ~1,100 keys the request comes back 414.
+const BATCH_KEYS = 200;
 const BATCH_WORKERS = 8;
 const BATCH_PROGRESS = 50; // batches between progress lines
 const TREE_DATASET = "hn5i-inap"; // ForMS "Forestry Tree Points"
@@ -119,6 +121,13 @@ async function fetchDataset<Row>(
   });
 }
 
+// How a keyed read is cut up. Named rather than positional because both are counts, and a call site
+// that swapped them would still typecheck.
+export interface Batching {
+  batchKeys?: number;
+  concurrency?: number;
+}
+
 // Every row whose `field` is one of `keys`, read as `field in (...)` batches run `concurrency` at a
 // time. Each batch is cached on its own, so a re-run costs nothing and a batch the server 500s on
 // costs one batch rather than the whole read.
@@ -128,12 +137,12 @@ async function fetchKeyed<Row>(
   select: string,
   field: string,
   keys: Iterable<string>,
-  concurrency: number = BATCH_WORKERS,
+  { batchKeys = BATCH_KEYS, concurrency = BATCH_WORKERS }: Batching = {},
 ): Promise<Row[]> {
   const sorted = [...new Set(keys)].sort();
   const batches: string[][] = [];
-  for (let start = 0; start < sorted.length; start += BATCH_KEYS) {
-    batches.push(sorted.slice(start, start + BATCH_KEYS));
+  for (let start = 0; start < sorted.length; start += batchKeys) {
+    batches.push(sorted.slice(start, start + batchKeys));
   }
 
   const pages: Row[][] = new Array(batches.length);
@@ -181,7 +190,7 @@ export interface Socrata {
     select: string,
     field: string,
     keys: Iterable<string>,
-    concurrency?: number,
+    batching?: Batching,
   ): Promise<Row[]>;
   // Where a human goes to read about a dataset, for the manifest's source links.
   page(dataset: string): string;
@@ -191,8 +200,8 @@ function socrata(host: string): Socrata {
   return {
     dataset: (dataset, query, expected) =>
       fetchDataset(host, dataset, query, expected),
-    keyed: (dataset, select, field, keys, concurrency) =>
-      fetchKeyed(host, dataset, select, field, keys, concurrency),
+    keyed: (dataset, select, field, keys, batching) =>
+      fetchKeyed(host, dataset, select, field, keys, batching),
     page: (dataset) => `https://${host}/d/${dataset}`,
   };
 }
