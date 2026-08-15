@@ -21,6 +21,14 @@ const LOT_DATASET = "i38t-6if2"; // DOF digital tax map
 const LOT_SELECT = "bbl,the_geom";
 const CONDO_DATASET = "p8u6-a6it"; // condominium billing lot -> the base lot it occupies
 const CONDO_SELECT = "condo_billing_bbl,condo_base_bbl";
+// Keys per request for the two reads that carry `the_geom`, against the 200 a row without geometry
+// is read at. Not a latency fix: a healthy server answers 200 BINs in 0.2 s and 200 lots in 0.3 s,
+// nowhere near the 90 s timeout. It is what a bad window costs — batches are cached one at a time,
+// so an endpoint that refuses to answer for a few minutes loses 50 keys rather than every key the
+// day brought, and the re-run resumes on the ones it never got. Fifty and not fewer because below
+// about that the response is all fixed overhead (0.1 s at both 25 and 50 keys), so a smaller batch
+// buys nothing and only multiplies the requests a full-history rebuild makes.
+const GEOMETRY_BATCH_KEYS = 50;
 const BLOCK_DIGITS = 5;
 const LOT_DIGITS = 4;
 
@@ -238,6 +246,7 @@ async function fetchLotParts(
     LOT_SELECT,
     "bbl",
     bbls,
+    { batchKeys: GEOMETRY_BATCH_KEYS },
   );
   const parts = new Map<string, Boundary[]>();
   for (const row of rows) {
@@ -288,6 +297,7 @@ export async function fetchShedParcels(
     FOOTPRINT_SELECT,
     "bin",
     bins,
+    { batchKeys: GEOMETRY_BATCH_KEYS },
   );
   const footprintParts = new Map<string, Boundary[]>();
   const lotOfBin = new Map<string, string>();
