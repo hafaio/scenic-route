@@ -19,12 +19,13 @@ import { join, relative } from "node:path";
 import manifest from "../src/tree-cover/manifest.json";
 import { rampAlpha, rampColor } from "../src/tree-cover/ramp";
 import { buildCommercial, commercialLinesPath } from "./build-commercial";
+import { fetchElevationRaster } from "./elevation";
 import {
   computeShadeBuckets,
   SHADE_MAX_SHADOW_METERS,
   SHADE_MAX_ZOOM,
 } from "./shade-schedule";
-import { runTiler, tilerSources } from "./tiler";
+import { runTiler, tilerSources, writeList } from "./tiler";
 
 type City = (typeof manifest.cities)[number];
 
@@ -55,7 +56,10 @@ const CASTER_DIR = join(PUBLIC_DIR, "casters");
 const COMMERCIAL_DIR = join(PUBLIC_DIR, "commercial");
 const ROUTING_DIR = join(PUBLIC_DIR, "routing");
 // The graph's list of the OSM paths its island drop stranded, which the second chunk pass reads back.
-const STRANDED_PATH = join(ROUTING_DIR, "stranded.bin");
+// Per city, beside its graph: the ids are OSM's and cannot collide, but one file would be
+// written by each city's graph pass and only the last would survive.
+const strandedPath = (cityId: string): string =>
+  join(ROUTING_DIR, `${cityId}.stranded.bin`);
 const STAMP_PATH = join(CANOPY_TILE_DIR, ".stamp");
 // Committed point/line sources served to the client verbatim for the map overlays (dots and lines).
 // Not rendered by the tiler, so they are copied straight across whenever their file is present.
@@ -262,12 +266,8 @@ async function build(): Promise<void> {
     "--chunks",
     CHUNK_DIR,
   ];
-  // The OSM paths are drawn into the same z12 street chunks; the single-city manifest carries one
-  // paths layer, so it rides along here as it does for the graph.
-  const withPaths = cities.find((city) => city.paths);
-  if (withPaths?.paths) {
-    chunksArgs.push("--paths", sourcePath("paths", withPaths.paths.file));
-  }
+  // The OSM paths are drawn into the same z12 street chunks. `tiler chunks` reads each city's own
+  // paths layer out of the manifest, so there is nothing to pass here.
   runTiler(chunksArgs, false);
 
   // The commercial overlay's per-segment signals: snapped from the committed sources onto the STCK
@@ -280,19 +280,28 @@ async function build(): Promise<void> {
   // stale tiles are cleared first so a shrunk schedule leaves nothing behind.
   // The sun-position params drive both the shade tile pyramid and the per-edge SHDE routing bake, so
   // they are written once here and shared; null when the year yields no above-horizon bin.
-  const shadeBuckets = computeShadeBuckets();
-  let shadeParamsPath: string | null = null;
-  if (shadeBuckets.length > 0) {
-    shadeParamsPath = join(tmpdir(), "scenic-shade-params.json");
+  // One set of params per city: a bin's sun position is synthesised at the city's own latitude, so
+  // the grids differ in what each index means and in how many indices there are at all.
+  const shadeParams = new Map<string, string>();
+  for (const city of cities) {
+    const buckets = computeShadeBuckets(city.id);
+    if (buckets.length === 0) {
+      continue;
+    }
+    const path = join(tmpdir(), `scenic-shade-params.${city.id}.json`);
     await writeFile(
-      shadeParamsPath,
+      path,
       JSON.stringify({
         maxZoom: SHADE_MAX_ZOOM,
         maxShadowMeters: SHADE_MAX_SHADOW_METERS,
-        buckets: shadeBuckets,
+        buckets,
       }),
     );
+    shadeParams.set(city.id, path);
   }
+  // The caster chunks are geometry on a shared x/y grid and carry no sun position, so they are cut
+  // once over every city; any city's params carry the halo they are gathered over.
+  const anyShadeParams = shadeParams.values().next().value ?? null;
   const anyBuildings = (
     await Promise.all(
       cities.map((city) =>
@@ -304,7 +313,7 @@ async function build(): Promise<void> {
   // past the pyramid's deepest baked level. Either source alone is worth chunking, and the halo the
   // client gathers them over comes from the shared params' maxShadowMeters.
   if (
-    shadeParamsPath &&
+    anyShadeParams &&
     (anyBuildings || cities.some((city) => city.field.canopy))
   ) {
     runTiler(
@@ -317,29 +326,84 @@ async function build(): Promise<void> {
         "--chunks",
         CASTER_DIR,
         "--params",
-        shadeParamsPath,
+        anyShadeParams,
       ],
       false,
     );
   }
-  if (anyBuildings && shadeParamsPath) {
+  if (anyBuildings) {
     for (const pyramid of ["shade", "tree-shade"]) {
       await rm(join(PUBLIC_DIR, "tiles", pyramid), {
         recursive: true,
         force: true,
       });
     }
+    for (const city of cities) {
+      const params = shadeParams.get(city.id);
+      if (
+        params &&
+        (await fileExists(sourcePath("buildings", `${city.id}.bin`)))
+      ) {
+        runTiler(
+          [
+            "shade",
+            "--manifest",
+            MANIFEST_PATH,
+            "--data",
+            DATA_DIR,
+            "--tiles",
+            join(PUBLIC_DIR, "tiles"),
+            "--params",
+            params,
+            "--city",
+            city.id,
+          ],
+          false,
+        );
+      }
+    }
+  }
+
+  // The terrain overlay, one city at a time because the DEM tiles are per city and on the city's own
+  // projected grid. A city with no elevation source is skipped rather than rendered empty. The tile
+  // list is kept for the graph's relief bake below, which reads the same mosaic.
+  const elevationByCity = new Map<
+    string,
+    { listPath: string; crs: string; band: number }
+  >();
+  await rm(join(PUBLIC_DIR, "tiles", "elevation"), {
+    recursive: true,
+    force: true,
+  });
+  for (const city of cities) {
+    const raster = await fetchElevationRaster(city.id);
+    if (!raster) {
+      continue;
+    }
+    const listPath = await writeList(`dem-${city.id}`, raster.paths);
+    elevationByCity.set(city.id, {
+      listPath,
+      crs: raster.crs,
+      band: raster.band,
+    });
     runTiler(
       [
-        "shade",
+        "elevation",
         "--manifest",
         MANIFEST_PATH,
-        "--data",
-        DATA_DIR,
         "--tiles",
         join(PUBLIC_DIR, "tiles"),
-        "--params",
-        shadeParamsPath,
+        "--city",
+        city.id,
+        "--dem",
+        listPath,
+        "--band",
+        String(raster.band),
+        "--elevation-crs",
+        raster.crs,
+        // The DEM answers over water too, so the overlay is clipped to the city's own land.
+        "--land",
+        join(DATA_DIR, "land", `${city.id}.bin`),
       ],
       false,
     );
@@ -426,17 +490,36 @@ async function build(): Promise<void> {
     // footprints and the shared sun-position params, and writes one file per sun-position bin into
     // public/routing/shade (cleared by the ROUTING_DIR rm above) plus a bins.json manifest.
     const buildingsFile = sourcePath("buildings", `${city.id}.bin`);
-    if (shadeParamsPath && (await fileExists(buildingsFile))) {
+    const cityShadeParams = shadeParams.get(city.id);
+    if (cityShadeParams && (await fileExists(buildingsFile))) {
       graphArgs.push(
         "--buildings",
         buildingsFile,
         "--shade-params",
-        shadeParamsPath,
+        cityShadeParams,
         "--shade-dir",
-        join(ROUTING_DIR, "shade"),
+        join(ROUTING_DIR, "shade", city.id),
       );
     }
-    graphArgs.push("--stranded", STRANDED_PATH);
+    // The relief byte: how much height each edge climbs and drops, off the same DEM the terrain
+    // overlay is drawn from. A city with no elevation source leaves every edge flat.
+    const elevation = elevationByCity.get(city.id);
+    if (elevation) {
+      graphArgs.push(
+        "--elevation",
+        elevation.listPath,
+        "--elevation-crs",
+        elevation.crs,
+        "--elevation-band",
+        String(elevation.band),
+        "--elevation-bounds",
+        JSON.stringify(city.bounds),
+      );
+    }
+    // The alley invariants assert New York's meaning of an alley; a city whose centreline has no
+    // such class says so rather than being asked about it.
+    graphArgs.push("--alleys", String(city.streets.alleys ?? true));
+    graphArgs.push("--stranded-out", strandedPath(city.id));
     runTiler(graphArgs, false);
   }
 
@@ -444,10 +527,9 @@ async function build(): Promise<void> {
   // source network carries — including the ones the island drop took away, which the overlay would
   // draw as a tree-lined walk no route can follow. Re-run over the same inputs with the graph's
   // answer: only the trailing stranded bitmap changes, so the commercial signals keyed on the
-  // segment index stay aligned and need no rebuild. One paths layer means one stranded list, as the
-  // chunk pass itself assumes.
-  if (withPaths?.paths) {
-    runTiler([...chunksArgs, "--stranded", STRANDED_PATH], false);
+  // segment index stay aligned and need no rebuild.
+  if (cities.some((city) => city.paths)) {
+    runTiler([...chunksArgs, "--stranded-dir", ROUTING_DIR], false);
   }
   await writeFile(STAMP_PATH, hash);
 }

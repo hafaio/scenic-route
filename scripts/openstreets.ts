@@ -105,6 +105,13 @@ export async function ingestOpenStreets(
   cityId: string,
   land: LandContext,
 ): Promise<SourceFile> {
+  // New York only. The fetch below reads a NYC dataset unconditionally, so another city would clip
+  // New York's rows against its own coastline, drop every one of them, and write a silently empty
+  // artifact that `serveSources` would then publish.
+  if (cityId !== "nyc") {
+    throw new Error(`no open streets source for ${cityId}`);
+  }
+
   const started = performance.now();
   await mkdir(OPEN_STREETS_DIR, { recursive: true });
 
@@ -135,5 +142,6 @@ export async function ingestOpenStreets(
 }
 
 if (import.meta.main) {
-  await ingestOpenStreets("nyc", await loadLandContext());
+  const cityId = process.argv[2] ?? "nyc";
+  await ingestOpenStreets(cityId, await loadLandContext(cityId));
 }

@@ -27,6 +27,7 @@ import {
   MdPalette,
   MdStorefront,
   MdSwapHoriz,
+  MdTerrain,
   MdTurnLeft,
   MdTurnRight,
   MdTurnSlightLeft,
@@ -42,6 +43,7 @@ import {
   MAX_COMMERCIAL_WEIGHT,
   MAX_FERRY_WEIGHT,
   MAX_HIGHWAY_WEIGHT,
+  MAX_HILL_WEIGHT,
   MAX_LANDMARK_WEIGHT,
   MAX_SHADE_WEIGHT,
   MAX_SHELTER_WEIGHT,
@@ -62,7 +64,10 @@ interface RoutePanelProps {
   startSet: boolean; // a manual start is set (so it can be reset)
   destSet: boolean;
   needsStart: boolean; // no location and no manual start yet
-  hasLiveLocation: boolean; // a live fix exists, so the "My location" row can be offered
+  // A live fix this city could route from, so the "My location" row can be offered. A fix in
+  // another city is not one: routing stays within one city, so the placeholder would name a start
+  // that cannot be used.
+  hasLiveLocation: boolean;
   searchBias: SearchBias | null; // ranks search results near the user, or null when not shared
   pickTarget: "start" | "dest" | null;
   status: "idle" | "loading" | "ready" | "error";
@@ -78,6 +83,24 @@ interface RoutePanelProps {
   landmarkWeight: number;
   artWeight: number;
   highwayWeight: number;
+  hillWeight: number;
+  // What the active city's own graph actually carries. Read off the artifact rather than authored
+  // per city, so a layer that is missing shows as missing instead of as a control that moves
+  // nothing: every one of these was a live slider in San Francisco costing an attribute that is 0
+  // on all 102,659 of its edges.
+  //
+  // A slider whose data is absent greys out rather than disappearing, which is what the hill slider
+  // already did — "not here" reads as a fact about the city, where a control that vanishes reads as
+  // a bug. The two gates are hidden instead: a toggle is a claim that both of its states are
+  // reachable, and in a city with no ferries at all it has nothing to say.
+  capabilities: {
+    relief: boolean; // an elevation source, so "avoid hills" can move something
+    ferries: boolean; // ferry edges in the graph, so the slider and its gate mean something
+    commercial: boolean;
+    landmarks: boolean;
+    art: boolean;
+    sheds: boolean; // a sidewalk-shed feed, so the scaffolding gate means something
+  };
   commercialWeight: number;
   shadeWeight: number; // signed: −1 = prefer shade, +1 = prefer sun, 0 = off
   shelterWeight: number;
@@ -92,6 +115,7 @@ interface RoutePanelProps {
   onLandmarkWeight: (weight: number) => void;
   onArtWeight: (weight: number) => void;
   onHighwayWeight: (weight: number) => void;
+  onHillWeight: (weight: number) => void;
   onCommercialWeight: (weight: number) => void;
   onShadeWeight: (weight: number) => void;
   onShelterWeight: (weight: number) => void;
@@ -118,6 +142,9 @@ interface Factor {
   onChange: (weight: number) => void;
   tint: string; // text colour for the icon and chip
   color: string; // the slider's fill/thumb colour (a CSS hex; matches the map overlay)
+  // Whether the active city has the data at all: false drops the factor from the panel entirely.
+  // Distinct from `disabled`, which is a live control the reader has switched off.
+  available?: boolean;
   disabled?: boolean;
   signed?: boolean; // a bipolar −max..max slider (sun ↔ shade) rather than one-sided 0..max
 }
@@ -209,6 +236,8 @@ export default function RoutePanel({
   landmarkWeight,
   artWeight,
   highwayWeight,
+  hillWeight,
+  capabilities,
   commercialWeight,
   shadeWeight,
   shelterWeight,
@@ -223,6 +252,7 @@ export default function RoutePanel({
   onLandmarkWeight,
   onArtWeight,
   onHighwayWeight,
+  onHillWeight,
   onCommercialWeight,
   onShadeWeight,
   onShelterWeight,
@@ -264,7 +294,7 @@ export default function RoutePanel({
       onToggleDirections();
     }
   };
-  const factors: Factor[] = [
+  const allFactors: Factor[] = [
     {
       key: "tree",
       label: "Prefer tree cover",
@@ -305,6 +335,7 @@ export default function RoutePanel({
       onChange: onLandmarkWeight,
       tint: "text-amber-600 dark:text-amber-400",
       color: "#f59e0b",
+      available: capabilities.landmarks,
     },
     {
       key: "art",
@@ -315,6 +346,7 @@ export default function RoutePanel({
       onChange: onArtWeight,
       tint: "text-fuchsia-600 dark:text-fuchsia-400",
       color: "#d946ef",
+      available: capabilities.art,
     },
     {
       key: "highway",
@@ -327,6 +359,17 @@ export default function RoutePanel({
       color: "#ef4444",
     },
     {
+      key: "hill",
+      label: "Avoid hills",
+      Icon: MdTerrain,
+      weight: hillWeight,
+      max: MAX_HILL_WEIGHT,
+      onChange: onHillWeight,
+      tint: "text-amber-700 dark:text-amber-500",
+      color: "#b45309",
+      available: capabilities.relief,
+    },
+    {
       key: "commercial",
       label: "Prefer commercial streets",
       Icon: MdStorefront,
@@ -335,6 +378,7 @@ export default function RoutePanel({
       onChange: onCommercialWeight,
       tint: "text-violet-600 dark:text-violet-400",
       color: "#6d28d9",
+      available: capabilities.commercial,
     },
     {
       key: "ferry",
@@ -345,7 +389,9 @@ export default function RoutePanel({
       onChange: onFerryWeight,
       tint: "text-blue-600 dark:text-blue-400",
       color: "#2563eb",
-      // The ferry slider only matters when the gate is on, so it greys out and stops responding.
+      available: capabilities.ferries,
+      // Present but inert while the gate is off — unlike absence, that is a state the reader chose
+      // and can undo, so the control stays visible to say so.
       disabled: !allowFerries,
     },
   ];
@@ -354,6 +400,12 @@ export default function RoutePanel({
   // suffix), so it stays out of the chip row. Shelter stays out too, and deliberately: a percentage
   // beside a raindrop reads as a forecast of how dry you will stay, and the tree half of that number
   // is extrapolated from about four studied trees. It is a preference, not a prediction.
+  // A factor the city has no data for is dropped outright rather than greyed. It would cost nothing
+  // and mean nothing here, and a disabled control still claims the city has the thing. Filtered once,
+  // at the source, so the sliders, the collapsed peek row and the summary chips cannot disagree
+  // about which factors this city has.
+  const factors = allFactors.filter((factor) => factor.available !== false);
+
   const factorChips = factors.filter(
     (factor) => factor.key !== "ferry" && factor.key !== "shelter",
   );
@@ -427,42 +479,46 @@ export default function RoutePanel({
             Walking directions
           </p>
           <div className="flex items-center gap-1">
-            <button
-              type="button"
-              onClick={() => onAllowFerries(!allowFerries)}
-              aria-label="Allow ferries"
-              aria-pressed={allowFerries}
-              title={
-                allowFerries
-                  ? "Ferries allowed — click to route without them"
-                  : "Ferries barred — click to allow ferry crossings"
-              }
-              className={`-m-1 grid h-8 w-8 place-items-center rounded-full hover:bg-slate-100 dark:hover:bg-slate-700 ${
-                allowFerries
-                  ? "text-blue-600 dark:text-blue-400"
-                  : "text-slate-400"
-              }`}
-            >
-              <MdDirectionsBoat />
-            </button>
-            <button
-              type="button"
-              onClick={() => onAllowSheds(!allowSheds)}
-              aria-label="Allow scaffolding"
-              aria-pressed={allowSheds}
-              title={
-                allowSheds
-                  ? "Scaffolding allowed — click to route around sidewalk sheds"
-                  : "Scaffolding avoided — click to walk under sidewalk sheds again"
-              }
-              className={`-m-1 grid h-8 w-8 place-items-center rounded-full hover:bg-slate-100 dark:hover:bg-slate-700 ${
-                allowSheds
-                  ? "text-orange-600 dark:text-orange-400"
-                  : "text-slate-400"
-              }`}
-            >
-              <MdConstruction />
-            </button>
+            {capabilities.ferries && (
+              <button
+                type="button"
+                onClick={() => onAllowFerries(!allowFerries)}
+                aria-label="Allow ferries"
+                aria-pressed={allowFerries}
+                title={
+                  allowFerries
+                    ? "Ferries allowed — click to route without them"
+                    : "Ferries barred — click to allow ferry crossings"
+                }
+                className={`-m-1 grid h-8 w-8 place-items-center rounded-full hover:bg-slate-100 dark:hover:bg-slate-700 ${
+                  allowFerries
+                    ? "text-blue-600 dark:text-blue-400"
+                    : "text-slate-400"
+                }`}
+              >
+                <MdDirectionsBoat />
+              </button>
+            )}
+            {capabilities.sheds && (
+              <button
+                type="button"
+                onClick={() => onAllowSheds(!allowSheds)}
+                aria-label="Allow scaffolding"
+                aria-pressed={allowSheds}
+                title={
+                  allowSheds
+                    ? "Scaffolding allowed — click to route around sidewalk sheds"
+                    : "Scaffolding avoided — click to walk under sidewalk sheds again"
+                }
+                className={`-m-1 grid h-8 w-8 place-items-center rounded-full hover:bg-slate-100 dark:hover:bg-slate-700 ${
+                  allowSheds
+                    ? "text-orange-600 dark:text-orange-400"
+                    : "text-slate-400"
+                }`}
+              >
+                <MdConstruction />
+              </button>
+            )}
             <button
               type="button"
               onClick={onToggleMinimize}
@@ -485,7 +541,9 @@ export default function RoutePanel({
         <div className="mt-3 space-y-2">
           <LocationField
             label={startLabel}
-            placeholder="My location"
+            placeholder={
+              hasLiveLocation ? "My location" : "Pick a starting point"
+            }
             leadingIcon={
               <FiNavigation className="h-4 w-4" aria-hidden="true" />
             }

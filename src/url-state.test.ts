@@ -26,6 +26,7 @@ test("every route field survives a round trip", () => {
     ferry: 0.9,
     landmark: 0.75,
     art: 0.3,
+    hill: 0.4,
     highway: 0.05,
     commercial: 0.6,
     shade: -0.85,

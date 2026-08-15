@@ -18,7 +18,7 @@
 // src/shade/sun.ts), so the router agrees with the shade overlay at the departure instant.
 
 import * as SunCalc from "suncalc";
-import { activeCity } from "../cities";
+import { activeCity, type City } from "../cities";
 import { canopyTau } from "../shade/phenology";
 import { declinationOf, hourAngleOf, seasonBand } from "../shade/sun";
 import type { RoutingGraph } from "./graph";
@@ -26,7 +26,9 @@ import type { RoutingGraph } from "./graph";
 const MAGIC = "SHDB";
 const FORMAT_VERSION = 2;
 const HEADER_BYTES = 12; // magic(4) + u16 version + u16 pad + u32 edgeCount
-const BINS_URL = "routing/shade/bins.json"; // relative, so it picks up the deploy basePath
+// Relative, so they pick up the deploy basePath. Per city because a bin index only means a sun
+// position alongside the latitude it was synthesised at (scripts/shade-schedule.ts).
+const binsUrl = (cityId: string): string => `routing/shade/${cityId}/bins.json`;
 const HORIZON_DEG = 0.5; // at or below this the sun is down and there is no shade to bias
 
 // The elapsed-time schedule: sun positions are sampled every SCHEDULE_STEP_SECONDS (the sun moves
@@ -46,7 +48,8 @@ export function scheduleBucket(elapsedSeconds: number): number {
   return bucket < SCHEDULE_BUCKETS ? bucket : SCHEDULE_BUCKETS - 1;
 }
 
-const binUrl = (index: number): string => `routing/shade/${index}.bin`;
+const binUrl = (cityId: string, index: number): string =>
+  `routing/shade/${cityId}/${index}.bin`;
 
 // suncalc@2.0.1, as the shade overlay consumes it: altitude/azimuth as the layer's currentSun reads
 // them, azimuth a compass bearing normalised to [0, 360).
@@ -194,25 +197,29 @@ export function constantShadeField(attrs: Float32Array): ShadeField {
   return new ConstantShadeField(attrs, maxAbs);
 }
 
-let binsPromise: Promise<ShadeBins> | null = null;
+const binsPromises = new Map<string, Promise<ShadeBins>>();
 
-export function loadShadeBins(): Promise<ShadeBins> {
-  if (!binsPromise) {
-    binsPromise = fetch(BINS_URL)
-      .then(async (response) => {
-        if (!response.ok) {
-          throw new Error(
-            `${BINS_URL}: ${response.status} ${response.statusText}`,
-          );
-        }
-        return (await response.json()) as ShadeBins;
-      })
-      .catch((error: unknown) => {
-        binsPromise = null; // a failed load must not be memoized
-        throw error;
-      });
+export function loadShadeBins(
+  cityId: string = activeCity().id,
+): Promise<ShadeBins> {
+  const cached = binsPromises.get(cityId);
+  if (cached) {
+    return cached;
   }
-  return binsPromise;
+  const url = binsUrl(cityId);
+  const promise = fetch(url)
+    .then(async (response) => {
+      if (!response.ok) {
+        throw new Error(`${url}: ${response.status} ${response.statusText}`);
+      }
+      return (await response.json()) as ShadeBins;
+    })
+    .catch((error: unknown) => {
+      binsPromises.delete(cityId); // a failed load must not be memoized
+      throw error;
+    });
+  binsPromises.set(cityId, promise);
+  return promise;
 }
 
 // Decode one bin file to its two per-edge fraction rows, buildings then trees, viewed in place after
@@ -238,34 +245,41 @@ export function decodeShadeBin(buffer: ArrayBuffer): BinFractions {
   };
 }
 
-const binCache = new Map<number, Promise<BinFractions>>();
+// Keyed by city as well as index: the same index is a different sun position in another city.
+const binCache = new Map<string, Promise<BinFractions>>();
 
-export function loadShadeBin(index: number): Promise<BinFractions> {
-  const cached = binCache.get(index);
+export function loadShadeBin(
+  index: number,
+  cityId: string = activeCity().id,
+): Promise<BinFractions> {
+  const key = `${cityId}:${index}`;
+  const cached = binCache.get(key);
   if (cached) {
     return cached;
   }
-  const promise = fetch(binUrl(index))
+  const url = binUrl(cityId, index);
+  const promise = fetch(url)
     .then(async (response) => {
       if (!response.ok) {
-        throw new Error(
-          `${binUrl(index)}: ${response.status} ${response.statusText}`,
-        );
+        throw new Error(`${url}: ${response.status} ${response.statusText}`);
       }
       return decodeShadeBin(await response.arrayBuffer());
     })
     .catch((error: unknown) => {
-      binCache.delete(index); // a failed load must not be memoized
+      binCache.delete(key); // a failed load must not be memoized
       throw error;
     });
-  binCache.set(index, promise);
+  binCache.set(key, promise);
   return promise;
 }
 
 // The sun over the city centroid at a given instant, in the same convention shade-layer's currentSun
 // uses so both agree on which bin a time maps to. Degrees; azimuth a compass bearing in [0, 360).
-export function sunAt(date: Date): { elevation: number; azimuth: number } {
-  const { lat, lng } = activeCity().center;
+export function sunAt(
+  date: Date,
+  centre: { lat: number; lng: number } = activeCity().center,
+): { elevation: number; azimuth: number } {
+  const { lat, lng } = centre;
   const position = sun.getPosition(date, lat, lng);
   return {
     elevation: position.altitude,
@@ -289,11 +303,11 @@ function selectBlend(
   bins: ShadeBin[],
   elevation: number,
   azimuth: number,
+  centreLat: number,
 ): ShadeBlend | null {
   if (elevation <= HORIZON_DEG) {
     return null;
   }
-  const centreLat = activeCity().center.lat;
   const declination = declinationOf(elevation, azimuth, centreLat);
   const hourAngle = hourAngleOf(elevation, azimuth, centreLat, declination);
   const season = seasonBand(declination);
@@ -353,8 +367,13 @@ function intern(
 export async function computeEdgeShade(
   graph: RoutingGraph,
   date: Date,
+  forCity: City = activeCity(),
 ): Promise<void> {
-  const { edgeCount, bins } = await loadShadeBins();
+  // The city is read ONCE, here, and threaded through every step below. Read per step it would be
+  // read after an await: switching city mid-fetch then pulls the new city's bins and blends them into
+  // the graph this call was handed, and `loadRouting` memoizes that graph for the session, so nothing
+  // ever rebuilds it. The same reasoning the route search states for `routeCity`.
+  const { edgeCount, bins } = await loadShadeBins(forCity.id);
   if (edgeCount !== graph.edgeCount) {
     throw new Error(
       `shade edge count ${edgeCount} != graph ${graph.edgeCount}`,
@@ -388,8 +407,8 @@ export async function computeEdgeShade(
     const when = new Date(
       date.getTime() + bucket * SCHEDULE_STEP_SECONDS * 1000,
     );
-    const { elevation, azimuth } = sunAt(when);
-    const blend = selectBlend(bins, elevation, azimuth);
+    const { elevation, azimuth } = sunAt(when, forCity.center);
+    const blend = selectBlend(bins, elevation, azimuth, forCity.center.lat);
     if (!blend) {
       continue; // night bucket: binA stays -1, attrAt returns 0
     }
@@ -411,7 +430,7 @@ export async function computeEdgeShade(
   }
 
   const fractions = await Promise.all(
-    order.map((bin) => loadShadeBin(bin.index)),
+    order.map((bin) => loadShadeBin(bin.index, forCity.id)),
   );
   const intensities = Float64Array.from(order, intensityOf);
   // |1 - 2*shaded| <= 1, so a bin's attributes cannot exceed its intensity in magnitude, and the

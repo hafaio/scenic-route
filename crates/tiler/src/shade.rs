@@ -47,6 +47,9 @@ pub struct Args {
     pub data: PathBuf,
     pub tiles: PathBuf,
     pub params: PathBuf,
+    /// Which city to render. One invocation is one city because a bin's sun position depends on the
+    /// latitude it was synthesised at, so two cities cannot share a bin index or a pyramid.
+    pub city: String,
 }
 
 /// One sun-disk sample of the area light: a ground unit vector pointing down the shadow (anti-sun)
@@ -695,6 +698,54 @@ fn resolve(plane: &mut [f32], samples: f32, base: &[f32]) -> bool {
     painted
 }
 
+/// Softens a plane by one pixel, separably, with a 1-2-1 tent.
+///
+/// Only the crowns need it, and they need it because they cast from a single sun sample: their
+/// coverage is 1 or 0 with nothing between, so every crown shadow ends on a whole-pixel boundary and
+/// the pyramid's edges read as a staircase — plainly so at the deepest baked level, which at z14 is
+/// about 9.5 m of ground per pixel. The building plane already comes out fractional, averaged over
+/// the sun disk's samples, and blurring it would smear a penumbra that was computed rather than
+/// invented.
+///
+/// This does not pretend to be a penumbra. It is antialiasing: the interior of any shadow wider than
+/// a pixel keeps its full value, and only the boundary ramps. A shadow one pixel wide does lose
+/// weight, which is the honest cost — at 9.5 m per pixel, a shadow that thin was never resolved.
+fn soften(plane: &mut [f32]) {
+    let mut pass = vec![0.0f32; plane.len()];
+    for row in 0..TILE_SIZE {
+        for column in 0..TILE_SIZE {
+            let index = row * TILE_SIZE + column;
+            let left = if column == 0 {
+                plane[index]
+            } else {
+                plane[index - 1]
+            };
+            let right = if column + 1 == TILE_SIZE {
+                plane[index]
+            } else {
+                plane[index + 1]
+            };
+            pass[index] = 0.25 * left + 0.5 * plane[index] + 0.25 * right;
+        }
+    }
+    for row in 0..TILE_SIZE {
+        for column in 0..TILE_SIZE {
+            let index = row * TILE_SIZE + column;
+            let up = if row == 0 {
+                pass[index]
+            } else {
+                pass[index - TILE_SIZE]
+            };
+            let down = if row + 1 == TILE_SIZE {
+                pass[index]
+            } else {
+                pass[index + TILE_SIZE]
+            };
+            plane[index] = 0.25 * up + 0.5 * pass[index] + 0.25 * down;
+        }
+    }
+}
+
 /// The per-pixel building and tree shadow fractions over one tile. Each sun-disk sample's candidate
 /// hulls are accumulated and the sum divided by the sample count, so a pixel every sample covers reads
 /// 1 (umbra) and one only some reach reads partial (penumbra); the crowns cast from one sample, so
@@ -726,7 +777,10 @@ fn coverage(
     Coverage {
         buildings: (any_buildings && resolve(&mut buildings, samples.len() as f32, &base))
             .then_some(buildings),
-        trees: (any_trees && resolve(&mut trees, 1.0, &base)).then_some(trees),
+        trees: (any_trees && resolve(&mut trees, 1.0, &base)).then_some({
+            soften(&mut trees);
+            trees
+        }),
     }
 }
 
@@ -820,8 +874,12 @@ impl BucketRender<'_> {
 
 pub fn run(args: &Args) -> Fallible<()> {
     let started = Instant::now();
-    let manifest: Manifest = serde_json::from_slice(&fs::read(&args.manifest)?)?;
+    let mut manifest: Manifest = serde_json::from_slice(&fs::read(&args.manifest)?)?;
     let params: Params = serde_json::from_slice(&fs::read(&args.params)?)?;
+    manifest.cities.retain(|city| city.id == args.city);
+    if manifest.cities.is_empty() {
+        return Err(format!("no city {} in the manifest", args.city).into());
+    }
 
     let cities: Vec<Option<CityShade>> = manifest
         .cities
@@ -844,7 +902,7 @@ pub fn run(args: &Args) -> Fallible<()> {
     }
 
     let plan = plan_tiles(&manifest.cities, params.max_zoom);
-    let shade_dir = args.tiles.join("shade");
+    let shade_dir = args.tiles.join("shade").join(&args.city);
     fs::create_dir_all(&shade_dir)?;
     // No canopy or no measured heights anywhere: the tree pyramid is simply not produced, and the
     // client's composite falls back to the building tiles alone.
@@ -852,7 +910,7 @@ pub fn run(args: &Args) -> Fallible<()> {
         .iter()
         .flatten()
         .any(|shade| !shade.casters.crowns.is_empty())
-        .then(|| args.tiles.join("tree-shade"));
+        .then(|| args.tiles.join("tree-shade").join(&args.city));
     if let Some(root) = &tree_root {
         fs::create_dir_all(root)?;
     }
