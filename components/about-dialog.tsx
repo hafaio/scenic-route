@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect } from "react";
-import { FiMapPin, FiX } from "react-icons/fi";
+import { FiExternalLink, FiMapPin, FiX } from "react-icons/fi";
+import { SiGithub } from "react-icons/si";
 
 interface AboutDialogProps {
   onClose: () => void;
@@ -18,6 +19,8 @@ function Source({ label, detail }: { label: string; detail: string }) {
     </li>
   );
 }
+
+const REPO_URL = "https://github.com/hafaio/scenic-route";
 
 export default function AboutDialog({ onClose }: AboutDialogProps) {
   useEffect(() => {
@@ -59,6 +62,16 @@ export default function AboutDialog({ onClose }: AboutDialogProps) {
             <p className="text-xs text-slate-500 dark:text-slate-400">
               Nicer ways to walk the city
             </p>
+            <a
+              href={REPO_URL}
+              target="_blank"
+              rel="noreferrer"
+              className="mt-1 inline-flex items-center gap-1.5 text-xs font-medium text-brand-600 hover:underline dark:text-brand-400"
+            >
+              <SiGithub className="h-3.5 w-3.5" aria-hidden="true" />
+              Source on GitHub
+              <FiExternalLink className="h-3 w-3" aria-hidden="true" />
+            </a>
           </div>
           <button
             type="button"
