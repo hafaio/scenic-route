@@ -6,7 +6,7 @@
 //! standing for the band of heights over which the crown is at least that wide, so a caster can sweep
 //! ring `j` between where that band's two ends land and union the lot.
 //!
-//! `tiler shade` bakes that union into the raster pyramid and `tiler caster-chunks` ships the same
+//! The shade pass bakes that union into the raster pyramid and the caster-chunks pass ships the same
 //! rings for the client to sweep itself; both call `slice_crowns`, so the two halves cannot disagree
 //! about the geometry at the zoom where they hand over.
 

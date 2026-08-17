@@ -11,12 +11,15 @@
 // re-derived, and a record is placed from the reading the feed carried on the day its own interval
 // ended, never from the one it carries now.
 //
+// The snapshots arrive on stdin: package.json clones the DOB repo, resolves every commit's snapshot
+// blob into .build/shed-index.txt and pipes the blobs themselves through `git cat-file --batch`, so
+// the whole git side of the walk is one visible chain of commands rather than a spawn in here.
+//
 // It reads public/routing/nyc.bin, so it runs AFTER `bun run build-tiles` — which bakes that graph
 // and clears public/routing on its way. What it writes sits outside that directory and is committed,
 // so no ordering against the tile build can take it back out again.
 
-import { spawnSync } from "node:child_process";
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   decodeGraph,
@@ -60,6 +63,7 @@ import {
   type ShedAttributes,
   type ShedInterval,
   type ShedPermit,
+  shedSnapshots,
 } from "./shed-permits";
 
 const PUBLIC_DIR = join(import.meta.dirname, "..", "public");
@@ -69,34 +73,9 @@ const ROUTING_DIR = join(PUBLIC_DIR, "routing");
 export const SHED_DIR = join(PUBLIC_DIR, "sheds");
 const GRAPH_PATH = join(ROUTING_DIR, "nyc.bin");
 const VERSION_PATH = join(ROUTING_DIR, "nyc.version.json");
-// The DOB publishes one CSV a day and keeps the old ones only as git history, so the whole record of
-// what stood when is the repository rather than any single file.
-const SNAPSHOT_REPO = "https://github.com/NYCDOB/ActiveShedPermits.git";
-export const SNAPSHOT_DIR =
-  process.env.SHED_SNAPSHOTS ??
-  join(import.meta.dirname, "..", ".cache", "ActiveShedPermits");
 const SIDE_MASK = 0x7; // the graph's kind-and-side byte, bits 3-5
 const METERS_PER_MILE = 1609.344;
 const PROGRESS_EVERY = 5_000;
-
-export async function cloneSnapshots(): Promise<string> {
-  if ((await stat(SNAPSHOT_DIR).catch(() => null)) !== null) {
-    return SNAPSHOT_DIR;
-  }
-  await mkdir(join(SNAPSHOT_DIR, ".."), { recursive: true });
-  console.error(`  cloning ${SNAPSHOT_REPO} (~370 MB, once)`);
-  const clone = spawnSync(
-    "git",
-    ["clone", "--bare", SNAPSHOT_REPO, SNAPSHOT_DIR],
-    {
-      stdio: "inherit",
-    },
-  );
-  if (clone.status !== 0) {
-    throw new Error(`could not clone ${SNAPSHOT_REPO}`);
-  }
-  return SNAPSHOT_DIR;
-}
 
 // The graph the placement snaps against, carrying both figures it names itself by. They are
 // recomputed from the bytes rather than taken on trust from version.json beside them, because the
@@ -429,9 +408,8 @@ export function summarize(
 }
 
 export async function buildSheds(): Promise<void> {
-  const { permits, lastDay, counts } = await readShedPermits(
-    await cloneSnapshots(),
-  );
+  const { sources, blobs } = await shedSnapshots("build-sheds");
+  const { permits, lastDay, counts } = await readShedPermits(sources, blobs);
   permits.sort(byJobNumber);
   const attributes = placementAttributes(permits);
   const parcels = await fetchShedParcels(parcelRequestsOf(attributes));

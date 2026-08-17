@@ -1,5 +1,5 @@
 //! The corner fan at one graph node: given the street- and path-ends leaving it, where the corner
-//! nodes sit and which corner each departing end binds to. `tiler graph` turns every street into a
+//! nodes sit and which corner each departing end binds to. The graph pass turns every street into a
 //! sidewalk on each side, the two sides meet at these corners, a crossing links the two corners
 //! flanking a street, and a path links to the corner whose angular gap it departs into. The caller
 //! passes the street-ends already in counter-clockwise order (street-ends first, then path-ends),

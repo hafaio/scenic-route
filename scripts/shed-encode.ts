@@ -67,7 +67,7 @@ export interface ShedArtifact {
   index: Uint8Array;
 }
 
-// FNV-1a 64 over the GRPH file's own bytes, the same figure `tiler graph` writes into
+// FNV-1a 64 over the GRPH file's own bytes, the same figure the graph pass writes into
 // routing/version.json as `hash` (crates/tiler/src/graph.rs). Run on 16-bit limbs: the 64-bit
 // multiply has to be exact well past 2^53, and a BigInt one over 37 MB of graph costs minutes where
 // this costs under a second.
@@ -94,7 +94,7 @@ export function graphHashOf(bytes: Uint8Array): string {
     .join("");
 }
 
-// What the header's graph field carries, and what `tiler graph` writes into routing/version.json as
+// What the header's graph field carries, and what the graph pass writes into routing/version.json as
 // `keyHash`: FNV-1a 64 over the count of durable edges and then every durable key ascending, eight
 // little-endian bytes each. `key_space_hash` in crates/tiler/src/graph.rs is the other half of this,
 // and `bun run check-sheds` compares the two on every deploy.

@@ -1,4 +1,4 @@
-//! `tiler chunks`: renders data/{streets,paths}/<id>.bin into the vector chunks the client draws
+//! The chunks pass: renders data/{streets,paths}/<id>.bin into the vector chunks the client draws
 //! over the basemap — one z12 tile at public/streets/{x}/{y}.bin, carrying every street and path
 //! that touches it with the per-sidewalk cover bytes densities baked in. See scripts/README.md.
 
@@ -10,7 +10,6 @@ use std::time::Instant;
 use crate::Fallible;
 use crate::binfmt::{self, CHUNK_FORMAT, SIDES, Streets, write_varint, zigzag};
 use crate::geometry::round_half_up;
-use crate::graph::{STRANDED_FORMAT, STRANDED_HEADER_BYTES};
 use crate::manifest::Manifest;
 use crate::raster::{
     TILE_SIZE, lat_to_pixel_y, lng_to_pixel_x, pixel_x_to_lng, pixel_y_to_lat, tile_index,
@@ -27,38 +26,32 @@ pub struct Args {
     pub manifest: PathBuf,
     pub data: PathBuf,
     pub chunks: PathBuf,
-    // The graph's STRD list of the OSM ways its island drop stranded. Absent on the pass that runs
-    // before the graph exists, and then every segment's bit is clear.
-    /// The routing directory holding every city's `<id>.stranded.bin`. A DIRECTORY, where
-    /// `tiler graph`'s `--stranded-out` is the file it writes — hence the two names.
-    pub stranded_dir: Option<PathBuf>,
 }
 
-/// The STRD way ids, sorted as `tiler graph` wrote them, for `contains` by binary search.
-fn read_stranded(file: &Path) -> Fallible<Vec<u32>> {
-    let bytes = fs::read(file)?;
-    if bytes.len() < STRANDED_HEADER_BYTES || &bytes[0..4] != b"STRD" {
-        return Err(format!("{}: not an STRD file", file.display()).into());
+/// The written chunk directory. The commercial pass keys its signals on the segment order INSIDE
+/// these files, so it takes one of these rather than a path: a directory can be named before the
+/// pass that fills it, and this cannot.
+pub struct Chunks {
+    pub dir: PathBuf,
+}
+
+/// The OSM ways each city's graph stranded when it dropped its islands, sorted as the graph pass
+/// produced them so `contains` is a binary search. Empty on the pass that runs before any graph
+/// exists, and then every segment's bit is clear.
+#[derive(Default)]
+pub struct Stranded {
+    by_city: HashMap<String, Vec<u32>>,
+}
+
+impl Stranded {
+    /// One city's ways, straight from the graph pass that computed them.
+    pub fn insert(&mut self, city: &str, ways: Vec<u32>) {
+        self.by_city.insert(city.to_owned(), ways);
     }
-    let format = u16::from_le_bytes([bytes[4], bytes[5]]);
-    if format != STRANDED_FORMAT {
-        return Err(format!(
-            "{}: STRD v{format}, expected v{STRANDED_FORMAT}",
-            file.display()
-        )
-        .into());
+
+    fn ways(&self, city: &str) -> &[u32] {
+        self.by_city.get(city).map_or(&[], Vec::as_slice)
     }
-    let header = u16::from_le_bytes([bytes[6], bytes[7]]) as usize;
-    let count = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]) as usize;
-    if bytes.len() < header + 4 * count {
-        return Err(format!("{}: STRD truncated", file.display()).into());
-    }
-    Ok((0..count)
-        .map(|index| {
-            let at = header + 4 * index;
-            u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
-        })
-        .collect())
 }
 
 /// A chunk member: which network it came from and its segment index there. Streets and paths
@@ -215,7 +208,7 @@ fn write_chunks(
     Ok((buckets.len(), bytes))
 }
 
-pub fn run(args: &Args) -> Fallible<()> {
+pub fn run(args: &Args, stranded: &Stranded) -> Fallible<Chunks> {
     let started = Instant::now();
     let manifest: Manifest = serde_json::from_slice(&fs::read(&args.manifest)?)?;
 
@@ -223,21 +216,8 @@ pub fn run(args: &Args) -> Fallible<()> {
     let mut chunk_bytes = 0;
     for city in &manifest.cities {
         let streets = binfmt::read_streets(&args.data.join("streets").join(&city.streets.file))?;
-        // Each city's own dropped ways, beside its own graph. The ids are OSM's and so cannot
-        // collide between cities, but one shared file was written twice and only the last survived.
-        let stranded = match &args.stranded_dir {
-            Some(dir) => {
-                let file = dir.join(format!("{}.stranded.bin", city.id));
-                if file.exists() {
-                    read_stranded(&file)?
-                } else {
-                    Vec::new()
-                }
-            }
-            None => Vec::new(),
-        };
-        // Each city's own paths, out of its own manifest entry. One shared `--paths` flag meant only
-        // whichever city the caller picked ever got its OSM ways drawn into its chunks.
+        // Each city's own paths, out of its own manifest entry. One paths file for the whole run
+        // meant only whichever city it named ever got its OSM ways drawn into its chunks.
         let paths = match &city.paths {
             Some(layer) => Some(binfmt::read_paths(
                 &args.data.join("paths").join(&layer.file),
@@ -253,7 +233,7 @@ pub fn run(args: &Args) -> Fallible<()> {
         let (city_chunks, city_bytes) = write_chunks(
             &streets,
             paths.as_ref(),
-            &stranded,
+            stranded.ways(&city.id),
             city.streets.sidewalk_inset_meters,
             &args.chunks,
         )?;
@@ -266,5 +246,7 @@ pub fn run(args: &Args) -> Fallible<()> {
         chunk_bytes as f64 / 1024.0 / 1024.0,
         started.elapsed().as_secs_f64()
     );
-    Ok(())
+    Ok(Chunks {
+        dir: args.chunks.clone(),
+    })
 }

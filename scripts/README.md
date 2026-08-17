@@ -8,17 +8,25 @@ Two scripts, run in order:
 ```sh
 bun run build-tree-data   # sources -> data/**/*.bin + src/tree-cover/manifest.json
 bun run build-tiles       # those -> public/tiles/ + public/streets/
+bun run build-tiles:half  # the same, on half the cores
 ```
 
 `build-tree-data` is the slow one (a few minutes of paging, mostly network) and only
 needs re-running when the sources are refreshed; its binaries are committed. `build-tiles`
 is the expensive one in CPU, its output is gitignored, and `bun dev` / `bun export` run it
-automatically whenever an input is newer than the last run.
+automatically — it does nothing when no input's bytes have moved since the last run.
+
+It renders on every core it can find, which leaves the machine it is running on unusable for
+the twenty minutes that takes. `build-tiles:half` passes `--jobs half` to size rayon's pool at
+half the cores instead; `--jobs <n>` takes a count, and the tiler reports which it settled on
+before the first stage. Nothing about the output moves with the thread count.
 
 ## Who does what: TypeScript fetches, Rust computes
 
-**All of the model math lives in `crates/tiler`**, a Rust binary with eleven subcommands. The
-scripts fetch, encode and orchestrate; they compute nothing about trees.
+**All of the model math lives in `crates/tiler`**, a Rust binary with four subcommands. The
+scripts fetch and encode; they compute nothing about trees, and they orchestrate nothing — **no
+TypeScript spawns cargo**, anywhere. package.json sequences every cargo run there is, and the
+scripts either side of one hand their work over as files.
 
 | | |
 | --- | --- |
@@ -26,22 +34,27 @@ scripts fetch, encode and orchestrate; they compute nothing about trees.
 | `crates/tiler` | the canopy convolution and the cover it yields, the sidewalk offsets and their cover, the Monte-Carlo cover distribution, the per-polygon canopy heights, the genus-dot overlay, the tile pyramids, the WebPs, the street and caster chunks, and the routing graph |
 
 ```sh
-tiler densities --params <file.json>                          # fills the street & path density blobs, in place
-tiler heights --canopy <file.bin> --chm-crs <sf-cs13|utm18n> (--chm <file.tif> | --chm-mosaic <file.txt> --chm-band <n>)   # fills the canopy file's crown-height region, in place
-tiler canopy --manifest … --ramp … --data … --tiles …         # the LiDAR-canopy cover fill pyramid
-tiler genus  --manifest … --palette … --data … --tiles …      # the genus-dot raster pyramid
-tiler shade  --manifest … --data … --tiles … --params …       # the building- and tree-shadow pyramids
-tiler elevation --manifest … --tiles … --city … --dem … --elevation-crs … --land …   # the terrain-relief pyramid
-tiler chunks --manifest … --data … --chunks … [--paths …]     # slices STRT (+PATH) into the client's street chunks
-tiler caster-chunks --manifest … --data … --chunks … --params …  # slices BLDG+CNPY+TREE into the client's shadow-caster chunks
-tiler commercial --manifest … --data … --chunks … --signals … --lines …   # snaps the commercial signals onto those chunks, and the qualifying blocks' lines
-tiler graph  --streets <in.bin> --out <out.bin> [--paths …] [--sidewalks …] [--ferries …] [--canopy …]  # contracts STRT (+PATH, +SWLK, +FERR) into the GRPH routing graph
-tiler key-probe --streets … [--paths …] [--sidewalks …] --out …  # the same pipeline over a fixture, for the durable key hash the shed gate stamps
+tiler build --plan <file.json> [--jobs <count|half>]          # the nine passes that make a tile build, in one process
+tiler ingest --params <file.json> --report <file.json>        # fills the canopy crown heights and the street & path density blobs, in place
+tiler key-probe --report <file.json>                          # the graph pipeline over a fixture, for the durable key hash the shed gate stamps
+tiler graph-inputs --plan <file.json> --report <file.json>    # the other half of that gate: the plan's sources decision, and the bytes it names
 ```
 
-Both scripts shell out with `cargo run --release`, which no-ops once the binary is built, so
-`bun dev` and `bun export` need no extra step (`key-probe` alone uses the debug profile — see the
-shed gate below). `bun lint` and `bun fmt` cover the crate too.
+There were ten. Seven of them were argv wrappers over the module function `tiler build` already
+calls directly, so they are gone: what this document calls the chunks, caster-chunks, shade,
+elevation, canopy, genus-field and graph **passes** are those functions, called in order inside
+`build`, and nothing runs one on its own. The commercial pass is not among them — it was a script
+run by hand, which no build invoked, and it became a pass rather than losing a subcommand. `heights` and `densities` merged into `ingest`,
+which is the order they always ran in over one city. `key-probe`'s fixture paths and its throwaway
+`--out` default, so the package.json line carries only where to leave the report.
+
+`cargo run --release` no-ops once the binary is built, so `bun dev` and `bun export` need no extra
+step. **The shed gate's two commands alone run on the debug profile**: `key-probe` and
+`graph-inputs` run on every push and pull request rather than on a deploy, the release profile is
+lto + one codegen unit and takes minutes to link, and between them they read a 268 KB fixture and
+sha256 six files, so the optimizer buys them nothing. Both profiles give that fixture the same key hash — nothing on the key path is float-derived
+in a way rustc is free to reassociate — and the recorded stamp and the checked one are computed the
+same way regardless. `bun lint` and `bun fmt` cover the crate too.
 
 The split is not only for speed. The Gaussian kernel, its 3σ truncation and the
 renormalization constant are the *model*; if the tiler were ported and the ingest were not,
@@ -50,9 +63,9 @@ they would live in two languages and have to be kept in step. One home.
 Two things cross the boundary in the other direction, and both are deliberate:
 
 - **The manifest carries the per-city structure the tiler reads with serde** — each city's
-  bounds and which layer files and overlays it has, which `tiler canopy`, `tiler genus` and
-  `tiler chunks` read. The numeric model constants (σ_fill, σ_tight, the sidewalk inset, the
-  cover sample count and seed) ride to `tiler densities` in its params JSON instead: densities
+  bounds and which layer files and overlays it has, which the canopy, genus-field and
+  chunks passes read. The numeric model constants (σ_fill, σ_tight, the sidewalk inset, the
+  cover sample count and seed) ride to `tiler ingest` in its params JSON instead: the ingest
   runs *before* the manifest is finished — it is what *reports* the cover distribution that goes
   into it — so it cannot read them back from it. The crown allometry stays in the ingest, baked
   into each tree's crown byte, and the canopy's seasonal opacity stays in the client
@@ -153,9 +166,9 @@ zooms in. It is never baked into the data.
 
 ### The allometry: trunk to crown
 
-The cover field is measured, not inferred from the tree points — but the points are still drawn,
-as the **genus overlay** (`tiler genus`, `components/tree-dots-layer.tsx`): each tree a disc
-coloured by its genus and *sized by its crown*. That crown radius comes from a **published**
+The cover field is measured, not inferred from the tree points — but the points are still drawn, as
+the **genus overlay** (`components/genus-gl-layer.tsx`, `components/tree-dots-layer.tsx`): each tree
+a disc coloured by its genus and *sized by its crown*. That crown radius comes from a **published**
 relation, not an invented one: **McPherson, van Doorn & Peper 2016, *Urban Tree Database and
 Allometric Equations*, USDA Forest Service GTR-PSW-253** (data archive RDS-2016-0005). Its "NoEast"
 reference city is Queens, so this is literally NYC street-tree data; the **London planetree**
@@ -169,7 +182,7 @@ At the NYC median dbh (~10 in) this is an ~8.4 m crown; at the mean (~11.7 in) ~
 is **not** fitted to any target — it only sets how big a tree's dot draws, so a mature London
 plane reads as a broad disc and a sapling as a speck.
 
-Two inputs are cleaned before the curve sees them, in `scripts/build-tree-data.ts`:
+Two inputs are cleaned before the curve sees them, in `scripts/tree-data-fetch.ts`:
 
 - **Outliers.** `max(dbh)` is 2427 in, nonsense. Trunks past **60 in** (already a very large
   street tree) are clamped there; ~200 rows are affected. The ingest logs the count.
@@ -177,13 +190,13 @@ Two inputs are cleaned before the curve sees them, in `scripts/build-tree-data.t
   a zero crown. The ingest logs that count too, and the manifest records both.
 
 The allometry lives only in the ingest: it writes a **crown-radius byte per tree** (decimetres,
-0–25.5 m) into the `TREE` file, and `tiler genus` reads it back as the radius to draw each dot at
-— clamped to [1.5, 16] px so a distant crown still shows and a lone giant does not swell into a
+0–25.5 m) into the `TREE` file, and the genus overlay reads it back as the radius to draw each dot
+at — clamped to [1.5, 16] px so a distant crown still shows and a lone giant does not swell into a
 blob. So the model constant sits in one place, and the renderer does geometry, not botany.
 
 ### Anti-aliasing the fill
 
-A canopy polygon has a hard edge — 1 under it, 0 outside — and the fill pyramid (`tiler canopy`)
+A canopy polygon has a hard edge — 1 under it, 0 outside — and the fill pyramid (the canopy pass)
 turns those polygons into a smooth green in two steps. First the polygon fill is **supersampled
 4×**: each pixel is rasterized as a 4 × 4 block of sub-pixels and averaged back down, so a pixel
 half under canopy reads 0.5 rather than a jagged 0/1 boundary. Then the fraction is **convolved
@@ -228,7 +241,7 @@ in its own band.
 | streets | NYC CSCL street centerline, Socrata `inkn-q76z` | `rw_type` in 1, 5, 6, 7, 10 = street, boardwalk, path/trail, step street, alley, plus pedestrian bridges/tunnels (3, 4) where `nonped != 'V'` |
 | land | NYC borough boundaries (water areas excluded), Socrata `gthc-hcne` | the population the cover distribution is taken over, and the clip that drops New Jersey |
 | canopy | NYC's 2017 LiDAR tree canopy, ArcGIS `TreeCanopy2017_Simplified_1ft` | the *measured* canopy footprint the cover field is blurred from, a committed source, magic `CNPY` — feeds the density blobs and, through them, routing; see below |
-| canopy heights | the 1 m LiDAR canopy height model of Ma et al. 2023, figshare doi `10.6084/m9.figshare.20522895` (`NY_CHM_10Int260m.tif`, CC BY 4.0) | a 243 MiB uint16 GeoTIFF of decimetres over UTM 18N, cached but never committed; `tiler heights` samples it per canopy polygon and writes the result *into* the `CNPY` file — see below |
+| canopy heights | the 1 m LiDAR canopy height model of Ma et al. 2023, figshare doi `10.6084/m9.figshare.20522895` (`NY_CHM_10Int260m.tif`, CC BY 4.0) | a 243 MiB uint16 GeoTIFF of decimetres over UTM 18N, cached but never committed; `tiler ingest` samples it per canopy polygon and writes the result *into* the `CNPY` file — see below |
 | paths | OSM pedestrian/park ways (footway/path/pedestrian/steps/cycleway/bridleway/track) plus park drives (roads closed to through motor traffic), via Overpass | the park, greenway and car-free-drive network CSCL lacks; a separate committed source, magic `PATH` — see below and "Binary layouts" |
 | sidewalks | OSM `footway=sidewalk`/`crossing`/`traffic_island` ways via Overpass, plus the NYC planimetric SIDEWALK polygons, Socrata `52n9-sdep` (`sub_code` 380000 = street right-of-way) | the ways are a committed source, magic `SWLK`; both together settle the four per-side sidewalk bits of every offsetted `STRT` record, and the ways themselves are the walking network wherever they exist — see below and "Binary layouts" |
 | ferries | the two NYC ferry GTFS feeds — Staten Island Ferry (NYC DOT) and NYC Ferry (Hornblower, via Connexionz) | consolidated to a time-independent ferry graph, a committed source, magic `FERR` — OSM- and canopy-independent, read by a later phase's routing graph, not the cover pipeline; see below and "Binary layouts" |
@@ -240,7 +253,7 @@ in its own band.
 | dining | NYC Dining Out `fpeh-f7ci` + OSM `outdoor_seating` via Overpass | outdoor-dining points; a committed source, magic `DINE` — a "cute" signal for the commercial overlay |
 | openstreets | NYC DOT Open Streets `uiay-nctu` (non-school), sampled every ~10 m | Open Streets corridor points; a committed source, magic `OSTR` — a "cute" signal for the commercial overlay |
 
-The commercial overlay's per-segment signals are then precomputed at **build time** by `tiler commercial` (run after `tiler chunks`): it snaps `landuse`/`buildings`/`dining`/`openstreets` onto each street segment by *frontage* (perpendicular, projection in-span) and writes `public/commercial/{x}/{y}.bin` (magic `CMRC`, 3 bytes/segment: commercial fraction, median roof height, flags for open-street/seating), one file per `STCK` chunk, gitignored. The overlay reads those and applies the gate (>50% commercial AND low-rise AND (open-street OR seating)) client-side, so its thresholds stay tunable without a rebuild. The **same gate** also runs at build time to emit the qualifying blocks' centrelines as `public/commercial-lines/<id>.bin` (magic `CMLN`, the `HWAY` single-ring-polygon layout, gitignored), which `tiler graph --commercial` proximity-bakes into the per-edge commercial routing discount (GRPH byte 27).
+The commercial overlay's per-segment signals are then precomputed at **build time** by the commercial pass (run after the chunks pass): it snaps `landuse`/`buildings`/`dining`/`openstreets` onto each street segment by *frontage* (perpendicular, projection in-span) and writes `public/commercial/{x}/{y}.bin` (magic `CMRC`, 3 bytes/segment: commercial fraction, median roof height, flags for open-street/seating), one file per `STCK` chunk, gitignored. The overlay reads those and applies the gate (>50% commercial AND low-rise AND (open-street OR seating)) client-side, so its thresholds stay tunable without a rebuild. The **same gate** also runs at build time to emit the qualifying blocks' centrelines as `public/commercial-lines/<id>.bin` (magic `CMLN`, the `HWAY` single-ring-polygon layout, gitignored), which the graph pass proximity-bakes into the per-edge commercial routing discount (GRPH byte 27).
 
 Only walkable road types are kept. Highways, ramps, driveways, ferry routes, u-turns and
 non-physical segments are not part of the network a person walks. Bridges and tunnels come in
@@ -262,14 +275,14 @@ essentially nothing), and encoded to `data/canopy/<id>.bin` in the **shared poly
 than masquerading as another polygon source. `binfmt.rs::read_polygons` is already generic over the
 magic, so nothing in the tiler changes to read it.
 
-This is the **cover source itself**: `tiler densities` convolves the canopy indicator with a
-Gaussian and samples it at each sidewalk offset, so the byte in every street and path density blob
-— and, through them, `tiler graph` and the routing cost — is the blurred measured canopy. There is
-no separate point-KDE lifting park interiors; the ForMS points now drive only the genus overlay
-(see `crates/tiler/src/genus.rs`), not the cover field. Its area on land is ~a fifth of the city (the
-published all-canopy figure is ~22%), recorded in the manifest as `field.canopy.squareKm`.
+This is the **cover source itself**: `tiler ingest` convolves the canopy indicator with a Gaussian
+and samples it at each sidewalk offset, so the byte in every street and path density blob — and,
+through them, the graph pass and the routing cost — is the blurred measured canopy. There is no
+separate point-KDE lifting park interiors; the ForMS points now drive only the genus overlay (see
+`crates/tiler/src/genus_field.rs`), not the cover field. Its area on land is ~a fifth of the city
+(the published all-canopy figure is ~22%), recorded in the manifest as `field.canopy.squareKm`.
 
-`tiler canopy` renders it into the cover **fill pyramid**, `public/tiles/canopy/{z}/{x}/{y}.webp`,
+The canopy pass renders it into the cover **fill pyramid**, `public/tiles/canopy/{z}/{x}/{y}.webp`,
 over the z9–z15 plan and coloured by the **same ramp LUT** — canopy is a covered fraction in
 [0, 1), the very quantity the ramp is defined over. A coarse grid over the ~1.08 M polygons
 (CSR-style, like the tree index) hands each tile only the polygons it touches; each pixel's canopy
@@ -277,7 +290,7 @@ fraction is a 4× supersampled even-odd polygon fill averaged back down (so mult
 punch through and edges antialias), clipped to the land mask so nothing bleeds over water. A tile
 with no canopy is the shared blank WebP. The client draws it with `components/canopy-layer.tsx`, a
 bare `TileLayer` with no street-line companion — canopy is areal, not per-street.
-`build-street-tiles.ts` runs it after the `chunks` pass; the pyramid is gitignored build output
+`tiler build` runs it after the `chunks` pass; the pyramid is gitignored build output
 like the rest of `public/tiles/`, rebuilt by `bun dev`/`bun export`.
 
 **License:** NYC-public (NYC OTI / NYC Parks, 2017 LiDAR) — no ODbL entanglement, unlike the OSM
@@ -292,27 +305,27 @@ The polygons are a footprint — flat. Their **crown height** comes from a secon
 product: the 1 m canopy height model of Ma et al. 2023 (figshare doi `10.6084/m9.figshare.20522895`,
 CC BY 4.0), a 47008 × 47697 uint16 GeoTIFF of **decimetres** over NAD83(2011) UTM 18N.
 `scripts/chm.ts` downloads it once into `.cache/` (243 MiB, checksum-verified, never committed) and
-`tiler heights` reads it off disk: it projects every polygon vertex into the raster's UTM grid with
+`tiler ingest` reads it off disk: it projects every polygon vertex into the raster's UTM grid with
 Snyder's transverse Mercator series (a round trip measures 0.06 mm, and a ±4 m registration sweep
 peaks at no offset), fills each polygon even-odd at cell centres, and stores the **75th percentile**
 of the cells it caught, in decimetres, in the file's trailing height region. It rewrites the `.bin`
-in place, exactly as `tiler densities` fills the density blobs, and the ingest calls it right after
-writing the canopy file.
+in place, exactly as the density pass that follows it fills the density blobs — one `tiler ingest`
+run does both, over the files scripts/tree-data-fetch.ts has just written.
 
 San Francisco has no equivalent product, and takes its heights from **band 2 of the same 3DEP
 topographic tiles the terrain overlay is built from** — the surface model less the terrain model,
-which is height above ground. Same command, two differences: the tiles are a *mosaic* of 651
-separate rasters rather than one file, so `--chm-mosaic` takes a list on disk and the tiler lays a
-single virtual grid over their union (they share a projection, 1 m cells, and whole-metre origins,
-all three checked rather than assumed); and the band is not a canopy product at all. It measures
-whatever stood there — the Salesforce Tower reads 324 m in it. What makes it a crown height is the
-masking, and only the masking: the polygons are measured canopy, so a cell is read only where a tree
-was already mapped. **Never sample that band unmasked.** Cells still reading above 65 m, taller than
-any tree in either city, are dropped rather than clamped — a clamp would keep a 200 m tower and call
-it a 65 m tree — so a polygon straying onto a roof falls back to its real crown cells, and one with
-none keeps the 0 that means unknown. Measured: that rejects 0.05% of the city's canopy area, all of
-it downtown and along roof edges, and the run reports the upper tail (p95/p99/max and the share
-above the cut) for exactly this reason.
+which is height above ground. Same pass, two differences: the tiles are a *mosaic* of 651 separate
+rasters rather than one file, so `ingest.json`'s `chm` names the list and its band and the tiler
+lays a single virtual grid over their union (they share a projection, 1 m cells, and whole-metre
+origins, all three checked rather than assumed); and the band is not a canopy product at all. It
+measures whatever stood there — the Salesforce Tower reads 324 m in it. What makes it a crown height
+is the masking, and only the masking: the polygons are measured canopy, so a cell is read only where
+a tree was already mapped. **Never sample that band unmasked.** Cells still reading above 65 m,
+taller than any tree in either city, are dropped rather than clamped — a clamp would keep a 200 m
+tower and call it a 65 m tree — so a polygon straying onto a roof falls back to its real crown
+cells, and one with none keeps the 0 that means unknown. Measured: that rejects 0.05% of the city's
+canopy area, all of it downtown and along roof edges, and the run reports the upper tail
+(p95/p99/max and the share above the cut) for exactly this reason.
 
 The two cities' numbers are not comparable as like for like, and the difference is the product, not
 the trees: New York measures 46% of its polygons, median 15.2 m, IQR 8.2 m; San Francisco measures
@@ -338,11 +351,11 @@ count and carries on rather than failing the build.
 **Everything under a bin index is per city.** A bin's key is `(declination band, hour angle)`, which
 is latitude-free — that is what makes a clock scrub jitter-free — but the sun position that key
 resolves to is not, and neither is the sunrise cut deciding which keys exist at all: a city further
-south has winter bins a northern one does not. So `tiler shade` renders one city per invocation
-(`--city`), and the pyramids, `buckets.json` and the `SHDB` directory all carry the city in their
-path. Two cities can share neither a bin index nor a file.
+south has winter bins a northern one does not. So the shade pass renders one city at a time, and the
+pyramids, `buckets.json` and the `SHDB` directory all carry the city in their path. Two cities can
+share neither a bin index nor a file.
 
-`tiler shade` reads them alongside the building footprints and bakes a **second shadow pyramid**,
+The shade pass reads them alongside the building footprints and bakes a **second shadow pyramid**,
 `public/tiles/tree-shade/<city>/<bin>/{z}/{x}/{y}.webp`, mirroring the building one
 (`public/tiles/shade/<city>/<bin>/{z}/{x}/{y}.webp`) tile for tile: the same bin indices off the same
 `buckets.json`, the same z9–z15 plan, the same lossless WebP of one flat slate where only alpha
@@ -391,7 +404,7 @@ CSCL is a *street* centerline: it carries almost none of the interior of a park.
 21 km of CSCL path against 89 km in OSM; Prospect Park is 1.3 km against 51 km — the router
 cannot enter their interiors at all. So OSM's pedestrian and park ways are ingested as a second
 committed network, `data/paths/nyc.bin`, magic `PATH`. Its byte layout is **STRT's exactly**,
-so `binfmt.rs` reads it with the same code (`read_paths`) and `tiler densities` samples it with
+so `binfmt.rs` reads it with the same code (`read_paths`) and `tiler ingest` samples it with
 the same loop; only a few record fields are reinterpreted (see "Binary layouts").
 
 The Overpass filter is a union of two kinds of clause: the walking net, and park drives.
@@ -426,14 +439,13 @@ The ways are land-clipped against the borough polygons — a
 way is kept if its midpoint or either endpoint is on land, which drops the New Jersey and
 Westchester spill the bounding box reaches — densified to 25 m, degenerate ways under a metre
 dropped, and their names **uppercased** so the client's prettifier renders "BOW BRIDGE" as "Bow
-Bridge". `tiler densities` fills their density blob from the same canopy field the streets use: a
+Bridge". `tiler ingest` fills their density blob from the same canopy field the streets use: a
 path is its own walking surface, so it is sampled once on its line and that one value stands for
 both sides.
 
-The paths carry honest cover and are conflated into the network: `tiler graph --paths` reads them
-into the GRPH routing graph and `tiler chunks --paths` appends their segments to the street chunks
-the client draws, so a route can follow a greenway or step street rather than only the CSCL
-centerlines.
+The paths carry honest cover and are conflated into the network: the graph pass reads them into the
+GRPH routing graph and the chunks pass appends their segments to the street chunks the client draws,
+so a route can follow a greenway or step street rather than only the CSCL centerlines.
 
 Overpass — which fetches both the paths and the OSM trees — is the flakiest thing in the pipeline:
 the query rotates over three mirrors, backs off in minutes rather than seconds, and must send a
@@ -461,7 +473,7 @@ right-of-way), probed at the derived sidewalk position to say whether the city's
 sidewalk there. The sibling *"Sidewalk Centerline"* layer (`a9xv-vek9`) is **not** that source and is
 not read: its capture rules take interior-campus walkways and explicitly exclude right-of-way
 sidewalks, so it cannot answer the sidedness question at all. And it is the geometry itself:
-`tiler graph --sidewalks` makes these ways the walking network wherever they exist ("the sidewalk
+the graph pass makes these ways the walking network wherever they exist ("the sidewalk
 network", below), which is why the extract is committed and frozen rather than four bits derived
 from it.
 
@@ -570,12 +582,17 @@ it, so it needs a little more opacity to hold its own.
 ## Running it
 
 ```sh
-bun run build-tree-data              # every city; uses .cache/ if warm
-bun run build-tree-data sf           # one city
-bun run build-tree-data -- --refresh # bypass .cache/, go back to the network
-bun run build-buildings sf           # the other ingests take a city the same way
-bun run build-tiles                  # every city's pyramids and graphs
+bun run build-tree-data                  # every city; uses .cache/ if warm
+bun run build-tree-data:sf               # one city
+REFRESH=1 bun run build-tree-data:sf     # bypass .cache/, go back to the network
+bun run build-buildings sf               # the other ingests take a city the same way
+bun run build-tiles                      # every city's pyramids and graphs
 ```
+
+The city is a script entry rather than an argument, and the refresh an environment variable rather
+than a flag, for the same reason: the ingest is a three-command chain — fetch, `tiler ingest`,
+manifest — and `bun run x -- args` appends to the LAST command in a chain, where both have to reach
+the first. `bun run scripts/tree-data-fetch.ts --city sf --refresh` takes the flag directly.
 
 Raw source reads are cached in `.cache/` (gitignored), keyed by the request itself — **including the
 Socrata host**, since two cities can publish the same 4x4 dataset id and an entry serving one city's
@@ -587,8 +604,134 @@ read last time — not a fresher copy it did not ask for.
 `SOCRATA_APP_TOKEN`, when set, buys a request budget of its own. It only matters on a host whose
 address is shared with strangers, so CI has one and a workstation does not need one.
 
-`build-tiles` skips its work entirely if its output is newer than the manifest, the ramp, the
-`.bin` inputs and the script itself.
+### The ingest chain: `tiler ingest --params <file.json>`
+
+`build-tree-data:<city>` is three commands sequenced by package.json, exactly as the tile build is:
+
+```sh
+bun run scripts/tree-data-fetch.ts --city nyc   # sources -> data/**/<id>.bin, + .build/{ingest,tree-data}.json
+cargo run --release --bin tiler -- ingest --params .build/ingest.json --report .build/ingest-report.json
+bun run scripts/tree-data-manifest.ts           # -> src/tree-cover/manifest.json
+```
+
+The fetch half pages the sources, encodes every `.bin` and writes two JSON files: `ingest.json`, the
+model constants and file paths the tiler needs, and `tree-data.json`, the sidecar carrying what the
+manifest half needs from the fetch half — the genus table, the credits and the counts. The blobs
+themselves need no sidecar: the tiler fills a region of each committed file **in place**, so the
+canopy's crown heights and the street and path density blobs travel by disk, and the manifest half
+reads the finished bytes back for their sizes and hashes.
+
+Which is why the two passes are one command. They ran back to back over one city and neither
+returned anything the other needed; the ingest was spawning cargo only to read a number off its
+stdout mid-pipeline. Now the numbers land in `ingest-report.json`, which is what a later link in a
+package.json chain can read. The height pass is conditional on the city naming a canopy height model
+(`ingest.json`'s `chm`, null for a city with none) rather than on TypeScript deciding whether to run
+a command.
+
+### The build plan: `tiler build --plan <file.json>`
+
+`build-tiles` is three commands sequenced by package.json, and **no TypeScript spawns cargo**:
+
+```sh
+bun run scripts/serve-sources.ts   # data/<kind>/<id>.bin -> public/<kind>/<id>.bin, verbatim
+bun run scripts/write-plan.ts      # -> .build/plan.json, and nothing else
+cargo run --release --bin tiler -- build --plan .build/plan.json
+```
+
+`serve-sources.ts` copies the point/line overlays and the TREE blob the genus dots are drawn from;
+it is independent of the render, so it runs every time and empties each directory it serves first.
+`write-plan.ts` is a pure emitter. Everything after that — whether to render at all, the output
+directories, the nine passes — is the tiler's, so the decision to do nothing is made in the same
+place as the work. `.build/` is gitignored build glue: a package.json script can name no temporary
+directory of the machine's, so the handoff lands at the repo root. `write-plan.ts --key-space` emits
+the same plan without the elevation block, to `.build/key-space-plan.json`, which is what the shed
+gate stamps its inputs off — see *What the stamp covers*.
+
+**The freshness check** is `plan.stamp` against `public/tiles/canopy/.stamp`. The stamp is the
+content hash — not the mtime — of every input a pass reads: the manifest, the ramp, the sun grid,
+the whole of `scripts/*.ts`, the tiler's own sources and `Cargo.lock`, and every `.bin` under
+`data/`. Content, because a fresh checkout or a `touch` rewrites mtimes without moving a byte, which
+would force a needless twenty-minute render and leave CI's cache of the derived tiles useless across
+runs. Hashing all of `scripts/` is over-inclusive (an unrelated ingest forces a rebuild) but never
+false-fresh: the ingests share helpers whose output the tiles depend on. A match plus the output
+directories still being there skips the build in milliseconds; the stamp is written **last**, only
+after all nine passes succeed, so a run killed halfway through leaves no claim to be current.
+
+A tile build is nine passes — chunks, commercial, caster-chunks, shade, elevation, canopy,
+genus-field, graph, and the chunks again — and three of the orderings between them are
+load-bearing: the commercial signals are keyed on the segment order *inside* the chunks, the
+graph's commercial discount is baked from the lines that pass writes, and the chunks have to be cut
+a second time once the graph has said which walks its island drop stranded. `tiler build` runs all
+nine in **one process**, where each pass is a function over values, so the stranded set cannot
+reach the chunk pass before the graph that computes it has run. It also opens each city's DEM
+**once** and hands it to both readers — the terrain overlay and the graph's relief byte resample
+different grids over different bounds, but San Francisco's 1.77 GB of tiles are then indexed once.
+
+The plan file carries what the nine argv lists carried, including the two things that have to come
+from TypeScript because the client imports the very same modules: the colour ramp
+(`src/tree-cover/ramp.ts`) and the per-city sun-position grid (`scripts/shade-schedule.ts`).
+**Unknown keys are rejected** — a misspelled directory would otherwise write a pyramid nothing
+serves and report success.
+
+```jsonc
+{
+  "stamp": "9f2c…",                           // the content hash of every input; see the freshness check below
+  "manifest": "src/tree-cover/manifest.json", // every pass reads the city list from here
+  "data": "data",                             // the committed sources; each pass resolves its own files under it
+  "chunks": "public/streets",                 // STCK street chunks
+  "casters": "public/casters",                // CSTR shadow-caster chunks
+  "commercialSignals": "public/commercial",   // CMRC per-chunk signals (the pass clears this itself)
+  "commercialLines": "public/commercial-lines", // CMLN qualifying-block lines, one per city
+  "tiles": "public/tiles",                    // the shade, tree-shade and elevation pyramids write <name>/<city> under it
+  "canopyTiles": "public/tiles/canopy",
+  "genusFieldTiles": "public/tiles/genus-field",
+  "routing": "public/routing",                // <id>.bin, <id>.stranded.bin, and the per-edge bake under shade/<id>
+  "ramp": [0, 0, 0, 0, "…"],                  // exactly 1024 bytes: RGBA for each of 256 density steps
+  "cities": [
+    {
+      "id": "sf",             // must name a manifest city; every manifest city needs an entry
+      "alleys": false,        // does the centreline classify alleys? (default true — New York's meaning)
+      "sources": ["sidewalks", "ferries", "landmarks", "art", "highways", "buildings"],
+      "shade": {              // omit for a city whose year yields no above-horizon bin
+        "maxZoom": 14,
+        "maxShadowMeters": 500,
+        "buckets": [
+          {
+            "season": 0, "hourAngle": -30, "elevation": 20, "azimuth": 120, "intensity": 0.34,
+            "samples": [{ "east": 0.5, "north": 0.5, "shadowPerHeight": 2.7 }]
+          }
+        ]
+      },
+      "elevation": {          // omit for a city with no elevation product: flat edges, no terrain overlay
+        "crs": "sf-cs13",     // "sf-cs13" or "utm18n" — a GeoTIFF names an EPSG code, not the parameters
+        "band": 0,            // which band carries the ground (default 0)
+        "tiles": ["/…/x30y415.tif", "…"] // the mosaic, listed rather than pathed through a temp file
+      }
+    }
+  ]
+}
+```
+
+`sources` names the **by-convention** files, each read as `<data>/<kind>/<id>.bin`: they sit
+outside the manifest because its versioned city schema would throw for existing cities if bumped,
+so the driver states which of them it actually has on disk. Everything else per city — the streets,
+paths, land and canopy files, the bounds, whether a genus layer exists — is read from the manifest.
+A kind no pass reads is rejected.
+
+The plan carries the directory lifecycle too, because everything after the inputs are on disk is
+`tiler build`'s: `public/{tiles/canopy,tiles/genus-field,streets,casters,routing}` are emptied and
+recreated before the first pass, so a layer that stops rendering leaves nothing of its last build
+behind to be served, and `public/tiles/{shade,tree-shade,elevation}` are cleared wholesale, since
+each is written one `<name>/<city>` at a time and no pass ever sees enough of one to clear it — a
+shrunk sun schedule or a dropped city would otherwise keep serving its old bins. `public/commercial`
+and `public/commercial-lines` are missing from both lists because that pass clears its own, and
+`public/trees` because `serve-sources.ts` owns it. The
+gates are the same as they were under the nine subcommands, and follow from the plan: caster chunks
+are cut once over every city (any
+city's `shade` carries the halo) when something can cast a shadow at all; a city gets a shade
+pyramid and a per-edge shade bake only with both `shade` and a `buildings` source; the canopy and
+genus-field pyramids run when any manifest city carries that layer; and the second chunk pass runs
+only when some city has paths.
 
 ### Where the tile build spends its time
 
@@ -597,24 +740,24 @@ at a time. Two rasterizers dominate, and both lean on a spatial index so a tile 
 sources that can reach it, and both send a tile with nothing in it straight to the one shared
 blank webp:
 
-- **The canopy fill (`tiler canopy`).** The ~1.08 M LiDAR polygons are far too many to test per
+- **The canopy fill (the canopy pass).** The ~1.08 M LiDAR polygons are far too many to test per
   tile, so a uniform grid over their bounding boxes (CSR-style) hands each tile only the few
   hundred whose box overlaps its haloed extent. Those are rasterized even-odd at **4× supersample**
   and averaged back down for edge anti-aliasing, then an **isotropic Gaussian** (σ_fill in pixel
   space, skipped below half a pixel, haloed by 3σ so tiles do not seam) grades the shade out past
   a crown before the land clip and the ramp.
-- **The genus dots (`tiler genus`).** A uniform **60 m index over the trees**, flat arrays,
+- **The genus dots (the genus-field pass).** A uniform **60 m index over the trees**, flat arrays,
   CSR-style: a tile scans only the buckets a dot can reach, and a tile with no tree whose disc
   spills into it goes straight to the blank webp. Each tree is a single anti-aliased disc, so this
   pass is cheap next to the polygon fill.
-- **The shadows (`tiler shade`).** By far the longest pass, because it runs the whole plan once per
+- **The shadows (the shade pass).** By far the longest pass, because it runs the whole plan once per
   sun-position bin (58 of them): the buildings' six sun-disk samples measure 17.5 s a bin over a
   3616-tile plan, and the crowns' single sample adds 6.2 s and ~0.5 GB of peak memory on top. The
   tree pyramid comes out at ~88% of the building pyramid's bytes and paints about the
   same fraction of the plan (43.7% against 42.5%), so it roughly doubles what the shade tiles cost
   the deploy.
 
-`tiler densities` is the third heavy pass: it convolves the same canopy indicator at both
+`tiler ingest` is the third heavy pass: it convolves the same canopy indicator at both
 sidewalks of every street and path vertex, and draws a seeded million-point land sample for the
 reported distribution (below). Each pass prints its own tile, painted-tile and byte counts as it
 finishes.
@@ -674,15 +817,16 @@ point *i*:
 
 v1 was points only; v2 added the crown byte; v3 appends the genus byte.
 
-The genus overlay renders this file two ways: `tiler genus` bakes raster pyramids of
-genus-coloured dots (`public/tiles/genus`, z9–14, the zoomed-out view), and the blob itself is
-served at `public/trees/<id>.bin` so the client (`components/tree-dots-layer.tsx`) draws the dots
-live as crisp canvas discs from z15 up, where an upscaled raster tile would blur.
+The genus overlay renders this file two ways: the genus-field pass bakes each tree's disc into
+lossless DATA tiles of per-genus crown density (`public/tiles/genus-field`, z9–14, the zoomed-out
+view, shaded client-side by `components/genus-gl-layer.tsx`), and the blob itself is served at
+`public/trees/<id>.bin` so the client (`components/tree-dots-layer.tsx`) draws the dots live as
+crisp canvas discs from z15 up, where an upscaled raster tile would blur.
 
-So the legend can toggle one genus at a time, the pyramid is split by genus: `public/tiles/genus/<id>`
-(id 0–11) holds only that genus's trees on a transparent tile. The client stacks one layer per
-enabled genus, so the standard all-genera view is all twelve stacked and toggling a genus adds or
-removes a single layer; the live dots (`components/tree-dots-layer.tsx`) filter by the same selection.
+So the legend can toggle one genus at a time, the density is kept per genus rather than pre-coloured:
+three genera ride in one tile's R/G/B, four tiles cover all twelve, and the shader reads only the
+enabled channels. Toggling a genus is a uniform write, so a region hands off to its runner-up instead
+of going blank; the live dots (`components/tree-dots-layer.tsx`) filter by the same selection.
 
 ### `data/land/<id>.bin` — the land mask, magic `LAND`
 
@@ -705,30 +849,31 @@ varint-delta rings — under its own magic so it self-identifies, followed by **
 of a `u16` little-endian per polygon in the same polygon order: the **crown height in decimetres**,
 as `BLDG` carries its roof heights. It is NYC's 2017 LiDAR tree-canopy footprint (~1.08 M polygons,
 land-clipped), the *measured* field the cover is blurred from. `encodeCanopy` writes the region
-zeroed and `tiler heights` fills it in place from the separate canopy height model (above); **0
+zeroed and `tiler ingest` fills it in place from the separate canopy height model (above); **0
 means unknown**, not flat. Read the geometry alone with the generic `read_polygons(path, "CNPY", 2)`
-— which is what `tiler densities` (convolving and sampling it into the streets/paths density blobs),
-`tiler canopy` (rasterizing it into the fill pyramid) and `tiler graph` (integrating it *unblurred*
+— which is what `tiler ingest` (convolving and sampling it into the streets/paths density blobs),
+the canopy pass (rasterizing it into the fill pyramid) and the graph pass (integrating it *unblurred*
 along each sidewalk into the direct-canopy edge byte) do — or with the heights through `read_canopy`.
 
 ### `data/landmarks/<id>.bin` and `data/art/<id>.bin` — the scenic POIs, magic `LMRK` / `ARTW` (v1)
 
 The **point layout**: the 40-byte header, then `count` (longitude, latitude) varint-delta pairs,
-sorted by quantized (latitude, longitude) so a delta steps along a row, then a **trailing name blob**
-— per point, in that same sorted order, a `u16` UTF-8 byte length and its bytes (empty when the source
-named none). Written by the shared `encodePoints` encoder. Two sources share it under their own magic:
-`LMRK` (LPC landmarks, named by `lpc_name`) and `ARTW` (public art, named by the PDC `title` or the OSM
-`name`). `tiler graph` snaps each point to the nearest walking node, fans a bounded shortest-path tree
-out from it, and deposits a network-distance-decaying discount on the edges it reaches — so the router
-mildly prefers routes that pass near them; it reads only `count` points from the header and **ignores
-the name blob**, which is client-only (the map overlay draws the names as labels). The blobs are served
-verbatim to `public/{landmarks,art}/<id>.bin` for the overlay.
+sorted by quantized (latitude, longitude) so a delta steps along a row, then a **trailing name
+blob** — per point, in that same sorted order, a `u16` UTF-8 byte length and its bytes (empty when
+the source named none). Written by the shared `encodePoints` encoder. Two sources share it under
+their own magic: `LMRK` (LPC landmarks, named by `lpc_name`) and `ARTW` (public art, named by the
+PDC `title` or the OSM `name`). The graph pass snaps each point to the nearest walking node, fans a
+bounded shortest-path tree out from it, and deposits a network-distance-decaying discount on the
+edges it reaches — so the router mildly prefers routes that pass near them; it reads only `count`
+points from the header and **ignores the name blob**, which is client-only (the map overlay draws
+the names as labels). The blobs are served verbatim to `public/{landmarks,art}/<id>.bin` for the
+overlay.
 
 **`data/dining/<id>.bin` (`DINE`)** and **`data/openstreets/<id>.bin` (`OSTR`)** use the same point
 layout (name blob empty), for the commercial overlay's "cute" signals. **`data/landuse/<id>.bin`
 (`PLUT`)** is the point layout with a **trailing class byte per point** (the land-use digit 1..5) in
 place of the name blob, via `encodeClassifiedPoints` — mirroring how `TREE` appends parallel per-point
-bytes. All three are consumed only at build time by `tiler commercial` (see "The sources").
+bytes. All three are consumed only at build time by the commercial pass (see "The sources").
 
 ### `data/highways/<id>.bin` — the nuisance lines, magic `HWAY` (v1)
 
@@ -748,8 +893,8 @@ the **roof height** in **decimetres**; then the **base (ground) elevation** in d
 biased by `+ELEVATION_BIAS_METERS` (100 m) so the shoreline's slightly-negative bases stay in the
 unsigned range — recover it as `decimetres / 10 − 100`. A building whose footprint is a multi-part
 MultiPolygon expands to several polygon records, each repeating that building's height and base, so both
-regions stay parallel to the polygons. Written by `encodeBuildings`. `tiler shade` reads the heights
-for the shadow pyramid and `tiler graph` for the per-edge shade bake (the `SHDB` artifact, not the
+regions stay parallel to the polygons. Written by `encodeBuildings`. The shade pass reads the heights
+for the shadow pyramid and the graph pass for the per-edge shade bake (the `SHDB` artifact, not the
 GRPH edge record); the base elevations are still unread — folding them in would make the casters
 terrain-aware, and bare-earth self-shadowing (hills/parks with no buildings) would need the separate
 1-ft LiDAR DEM.
@@ -822,7 +967,7 @@ says the city's aerial survey drew a sidewalk there, and says nothing about its 
 bits are **zero unless the segment is offsetted** (not `nonped='V'`, and a non-zero half-offset),
 since a street with no derived sidewalks has no sides to ask about.
 
-`tiler graph` reads them as the **existence gate**: a side has pavement at all if OSM maps a sidewalk
+The graph pass reads them as the **existence gate**: a side has pavement at all if OSM maps a sidewalk
 there **or** the survey draws one, and a street both of whose sides come back silent is **demoted to
 its centreline** as a path edge. Existing is not the same as being *derived* — where OSM maps the
 pavement, OSM's own way is the sidewalk edge, and the per-stretch exclusivity under
@@ -848,7 +993,7 @@ pairs, the first from the origin.
 Then the **density blob**: the canopy cover at each vertex, a covered fraction of 0..1 quantized
 to 0..255 — **two bytes per vertex**, the left sidewalk then the right, in the vertex order of the
 coordinate blob. It is a fixed-size trailing region, and the ingest is the only writer that
-leaves it empty: `build-tree-data` writes the file with the blob zeroed, then `tiler densities`
+leaves it empty: scripts/tree-data-fetch.ts writes the file with the blob zeroed, then `tiler ingest`
 offsets the sidewalks from the coordinates it just read back and fills the blob in place.
 
 Finally the **name blob**: a `u32` count of distinct names, then each name as a `u16` byte length
@@ -860,7 +1005,7 @@ graph, not shipped to the client, so an offsets table would be ceremony.
 ### `data/paths/<id>.bin` — the OSM pedestrian/park network, magic `PATH` (v1)
 
 **Byte-for-byte the STRT layout above** — the same 64-byte header, 24-byte records, coordinate
-blob, zeroed density blob (filled in place by `tiler densities`) and trailing name blob — so one
+blob, zeroed density blob (filled in place by `tiler ingest`) and trailing name blob — so one
 reader and one sampler serve both files. Only the magic (`PATH`), the format version (1) and the
 meaning of a few record fields differ. Per 24-byte record:
 
@@ -879,7 +1024,7 @@ meaning of a few record fields differ. Per 24-byte record:
 
 Kind 6/7 both drive `half_offset_meters` to 0, so — exactly like a boardwalk or a CSCL path — the
 one sample taken on the centerline fills both density bytes of the vertex. The name blob holds the
-ways' **uppercased** `name` tags, deduped and sorted, in PATH's own index space; `tiler graph`
+ways' **uppercased** `name` tags, deduped and sorted, in PATH's own index space; the graph pass
 concatenates them after the street names and offsets the path name-ids by the street name count.
 This is a committed **ODbL** source: it is an extract of OSM geometry, so its share-alike terms
 follow it (see `data/README.md`).
@@ -904,7 +1049,7 @@ cut every median crossing in two). Per 24-byte record, where it differs from STR
 The kinds sit outside CSCL's `rw_type` range (1..10) and PATH's 6/7 on purpose: a reader pointed at
 the wrong file gets a kind it cannot mistake for a road type. Geometry is land-clipped and
 densified at 25 m exactly as PATH's is, but the density blob stays zeroed and **no pass fills it**:
-`tiler densities` never samples this file. A sidewalk edge takes the cover byte of the street side
+`tiler ingest` never samples this file. A sidewalk edge takes the cover byte of the street side
 the association matched it to instead, and one with no street beside it carries 0. This is a
 committed **ODbL** source, like PATH (see `data/README.md`).
 
@@ -969,11 +1114,12 @@ and a segment's routeNameId both index it.
 ### `public/ferry-schedule/` — the ferry timetable, magic `FSCH` (v1, derived, **committed**)
 
 FERR above flattens the whole timetable into one crossing-plus-average-wait figure per stop pair,
-because a time-independent cost has nowhere to put anything else, and `tiler graph` bakes that figure
-into the routing graph. This is the timetable itself, kept out of the graph so it can be refreshed
-without one: a deploy rebuilds `public/routing/<id>.bin` in ~20 minutes and pushes it through LFS,
-which no daily job can do. `scripts/ferry-schedule.ts` writes it, `src/routing/ferry-schedule.ts`
-reads it, and the router falls back to the baked figure whenever it is missing.
+because a time-independent cost has nowhere to put anything else, and the graph pass bakes that
+figure into the routing graph. This is the timetable itself, kept out of the graph so it can be
+refreshed without one: a deploy rebuilds `public/routing/<id>.bin` in ~20 minutes and pushes it
+through LFS, which no daily job can do. `scripts/ferry-schedule.ts` writes it,
+`src/routing/ferry-schedule.ts` reads it, and the router falls back to the baked figure whenever it
+is missing.
 
 Two files per city, both **committed and never LFS-tracked** (raw.githubusercontent serves an LFS
 file's pointer text, which would break the client fetch — the same rule as `public/sheds/`):
@@ -1041,7 +1187,7 @@ touches; segments are short, so the few tiles it lands in beyond the ones it tru
 cost nothing and cannot leave a gap at a seam. Each chunk's origin is its own tile's
 north-west corner, which keeps the first delta of every segment small.
 
-When a city carries a PATH layer, `tiler chunks --paths …` appends the OSM path segments to the
+When a city carries a PATH layer, the chunks pass appends the OSM path segments to the
 same chunks, back to back with the streets. A path is a single centreline, so it lands with
 **half-offset 0** and its own sampled cover — the client draws an offset-0 segment as the one
 line it is, so no client change is needed and park paths appear as cover-coloured lines.
@@ -1070,10 +1216,10 @@ Then `segment count` segments, back to back, each:
   gradient rather than one flat colour
 
 Then `ceil(segment count / 8)` bitmap bytes, one bit per segment in the same order, LSB first: set
-when the segment is an OSM path whose whole component `tiler graph` dropped as an unanchored island.
+when the segment is an OSM path whose whole component the graph pass dropped as an unanchored island.
 The overlay skips those, since a green line is an offer to walk somewhere the router can in fact
 take you. The bits live in their own trailing region rather than in each segment's header so that
-the two passes over a chunk — `tiler chunks` before the graph, and `tiler chunks --stranded` after
+the two passes over a chunk — the chunks pass before the graph, and the second one after
 it — differ only there, leaving `public/commercial/{x}/{y}.bin` keyed on the segment index aligned.
 
 Decoded by `components/street-score-layer.tsx`, which applies the offset in *pixels*.
@@ -1082,13 +1228,13 @@ Decoded by `components/street-score-layer.tsx`, which applies the offset in *pix
 
 The footprints, crowns and trunks that touch one **z15** tile, so the client can generate their
 shadows itself past where the baked pyramid stops — the pyramid's z15 level alone is two thirds of
-its bytes, and geometry the client sweeps costs a fraction of that. `tiler caster-chunks` writes them
-from the same `data/buildings/<id>.bin` and `data/canopy/<id>.bin` that `tiler shade` rasterizes,
-dropping exactly what that drops: a footprint with no roof height, and a crown carrying the canopy
-file's **0 unknown-height sentinel** (496,604 of 1,076,146 crowns survive), plus the census trunks of
-`data/trees/<id>.bin`. A city with only some of the three sources chunks the ones it has.
-`src/tiles/casters.ts` decodes and caches them and `src/tiles/sweep.ts` sweeps them; the shade layer
-reads the pyramid below z15 and the sweep at and above it.
+its bytes, and geometry the client sweeps costs a fraction of that. The caster-chunks pass writes
+them from the same `data/buildings/<id>.bin` and `data/canopy/<id>.bin` that the shade pass
+rasterizes, dropping exactly what that drops: a footprint with no roof height, and a crown carrying
+the canopy file's **0 unknown-height sentinel** (496,604 of 1,076,146 crowns survive), plus the
+census trunks of `data/trees/<id>.bin`. A city with only some of the three sources chunks the ones
+it has. `src/tiles/casters.ts` decodes and caches them and `src/tiles/sweep.ts` sweeps them; the
+shade layer reads the pyramid below z15 and the sweep at and above it.
 
 A caster goes into every z15 tile it reaches, so it lands where it **stands**, not where its shadow
 falls. A shadow reaches up to `maxShadowMeters` (500 m, ~0.54 of a 927 m chunk) into a view from
@@ -1162,7 +1308,7 @@ rings, since nothing in the format says which piece a hole belongs to; it ships 
 chunk, as everything did before, which is still exact because the pieces it duplicates are subsets
 of it. That happens 37 times in the city.
 
-Which section a record came from is what it casts by, exactly as in `tiler shade`: a footprint is
+Which section a record came from is what it casts by, exactly as in the shade pass: a footprint is
 **swept** (its ring together with its translate, since a wall joins the roof to the ground) and a
 crown is swept **slice by slice**, each between two airborne cross-sections of itself — there is still
 no wall under it, but a crown spans `0.4h..h` and its shadow is the union over that range, which at a
@@ -1175,7 +1321,7 @@ floored at one device pixel of width, since a sliver thinner than the sample gri
 of the rasterizer instead of reading as the faint line it is.
 
 A trunk's **diameter** is the dbh its crown was grown from, recovered by inverting the
-`CROWN_ALLOMETRY` of `scripts/build-tree-data.ts` (`dbh_cm = exp(exp((ln(2r) + 0.742) / 2.414)) - 1`,
+`CROWN_ALLOMETRY` of `scripts/tree-data-fetch.ts` (`dbh_cm = exp(exp((ln(2r) + 0.742) / 2.414)) - 1`,
 exact, since the crown byte is a monotone function of dbh alone) and clamped to the same 1..60 inch
 range the forward pass clamps to — which is also what stops an OSM tree, whose crown byte came from a
 *recorded* crown diameter and never from a dbh, from inverting into a metre-thick trunk. A tree whose
@@ -1192,7 +1338,7 @@ at a median 0.17 m of radius and 4.8 m of height.
 
 A footprint also ships its **inner rings**, because the display path punches a building's base back
 out of the shade and without them a courtyard would punch as though it were roof; they cost 21k
-vertices across the city. A crown ships its outer ring alone — it is never punched, `tiler shade`
+vertices across the city. A crown ships its outer ring alone — it is never punched, the shade pass
 translates its outer ring alone, and the canopy's inner rings are a staircase of LiDAR gaps that
 would be a quarter of everything here. Trunks exist only where the **census** does, and the baked
 pyramid below z15 has none at all, so they appear at the z15 handoff — where a trunk is a tenth of a
@@ -1236,7 +1382,7 @@ the client's to take.
 
 ### `public/tiles/elevation/<city>/{z}/{x}/{y}.webp` — the terrain overlay (derived, gitignored)
 
-The city's ground, tinted by height and relief-shaded, baked by `tiler elevation` from the DEM
+The city's ground, tinted by height and relief-shaded, baked by the elevation pass from the DEM
 mosaic. z9-z16; a tile with no ground under it is not written and the client reads the 404 as
 transparent.
 
@@ -1247,9 +1393,10 @@ slope, aspect), CC0, enumerated from a STAC collection and cached whole (1.7 GB)
 longitude/latitude field, which is what the pyramid and the graph's relief bake each read rather than
 the mosaic itself. Within one resample every tile is decoded exactly once — the cells are visited
 grouped by tile, and visiting them in grid order instead re-decodes every tile on every row, which
-measured 37,204 decodes of 651 tiles against 616. A build resamples twice, though, once in
-`tiler elevation` at z14 and once in `tiler graph` at z15: separate processes, and the field is not
-written down between them.
+measured 37,204 decodes of 651 tiles against 616. A build resamples twice, though, once in the
+elevation pass at z14 and once in the graph pass at z15: the two want different grids over different
+bounds and neither field is written down. What the one process buys is the open — `build` indexes
+the 1.77 GB of tiles once and hands the same `Dem` to both passes.
 
 The tint is hypsometric — greens through tans to browns — stretched over the city's own height range
 rather than an absolute scale, because what the layer is for is showing which of *these* streets are
@@ -1257,8 +1404,8 @@ the hills. The hillshade is lit from the north-west, the direction a printed rel
 
 ### `public/routing/{id}.bin` — the routing graph, magic `GRPH` (v8, derived, gitignored)
 
-`tiler graph` contracts STRT into the graph the client routes on, then expands it into the edges a
-walker actually uses. When `--paths` is supplied it first **conflates** the OSM pedestrian/park
+The graph pass contracts STRT into the graph the client routes on, then expands it into the edges a
+walker actually uses. For a city carrying a PATH layer it first **conflates** the OSM pedestrian/park
 network (`PATH`) into the CSCL edges (`conflate.rs`). Step 0 nodes **CSCL against itself**: the
 contraction below nodes segments by their endpoints alone, which is all it takes wherever the city
 splits both lines at their junction — and is not how the city draws an alley. An alley's mouth is a
@@ -1289,14 +1436,14 @@ whole-block detour. Conflated edges carry the OSM flag (byte-23 bit3), and the p
 `streetlessSidewalkKm`, `seamCorners`, `seamLinks`, `kerbCuts`, `suppressedCrossings` and the
 repair's `seamRepairLinks`/`seamRepairMeters`/`seamRepairLongest`/`seamGaps`.
 
-**The sidewalk network (`--sidewalks`) goes through the same conflation but skips three of its
-steps.** OSM's `footway=sidewalk`/`crossing`/`traffic_island` ways are noded among themselves and
-against the paths — which is what makes a park entrance meet the pavement at the node OSM already
-shares between them, rather than being re-invented — but they are exempt from the 6 m dedup band, the
-orphan band and the weld. The dedup band was tuned to shed on-street bike lanes and a narrow street's
-sidewalk sits at ~5.7 m, inside it; and welding a crossing onto the centreline it crosses would
-shatter that street and hang the walk off a node in the roadbed, which is the defect the whole swap
-exists to remove.
+**The sidewalk network (a city's `sidewalks` source) goes through the same conflation but skips
+three of its steps.** OSM's `footway=sidewalk`/`crossing`/`traffic_island` ways are noded among
+themselves and against the paths — which is what makes a park entrance meet the pavement at the node
+OSM already shares between them, rather than being re-invented — but they are exempt from the 6 m
+dedup band, the orphan band and the weld. The dedup band was tuned to shed on-street bike lanes and
+a narrow street's sidewalk sits at ~5.7 m, inside it; and welding a crossing onto the centreline it
+crosses would shatter that street and hang the walk off a node in the roadbed, which is the defect
+the whole swap exists to remove.
 
 **The entrance snap targets pavement, never a centreline with sidewalks beside it.** Its candidates
 are a street's sidewalk line on each side the gate found **pavement** on — the existence mask, not
@@ -1437,18 +1584,19 @@ drew short), and the degree-2 derived-to-mapped hand-offs that turn past a right
 (`seamHairpins`, 113 — about half of them cul-de-sacs wrapping round their own head). The whole pass
 costs ~200 ms of a ~10 s graph build.
 
-When `--ferries` is supplied (`data/ferries/<id>.bin`, magic `FERR`, referenced by convention — not
-the manifest), a final stage adds the ferry network **after** that walking assertion and renumber,
-so neither is disturbed. Each FERR terminal snaps to the nearest walking node within 250 m (a linear
-scan; a stop with none in range drops its segments, `ferryStopsUnsnapped`); a segment whose two stops
-snap to one node is dropped, and segments snapping to the same unordered node pair are deduped to the
-smaller raw time. Each survivor becomes a **ferry edge** (`ferryEdges`) whose geometry, when the FERR
-leg carries a shape, runs node-a → the shape's interior vertices → node-b (a straight leg carries no
-geometry). The edge's name is its FERR primary-route name, and its two terminal stop names are
-recorded in the byte-60 endpoint side table (below). Connectivity is then recomputed over **walking ∪ ferry** edges and the component labels
+When the city hands over its ferries (`data/ferries/<id>.bin`, magic `FERR`, referenced by
+convention — not the manifest), a final stage adds the ferry network **after** that walking
+assertion and renumber, so neither is disturbed. Each FERR terminal snaps to the nearest walking
+node within 250 m (a linear scan; a stop with none in range drops its segments,
+`ferryStopsUnsnapped`); a segment whose two stops snap to one node is dropped, and segments snapping
+to the same unordered node pair are deduped to the smaller raw time. Each survivor becomes a **ferry
+edge** (`ferryEdges`) whose geometry, when the FERR leg carries a shape, runs node-a → the shape's
+interior vertices → node-b (a straight leg carries no geometry). The edge's name is its FERR
+primary-route name, and its two terminal stop names are recorded in the byte-60 endpoint side table
+(below). Connectivity is then recomputed over **walking ∪ ferry** edges and the component labels
 (and count) overwritten with that merge, so Staten Island and Governors Island join the main
-component. Components are labelled by size descending (0 = largest). Every edge length is at least its
-straight-line node distance (clamped up if not; `lengthClamped`). Everything little-endian.
+component. Components are labelled by size descending (0 = largest). Every edge length is at least
+its straight-line node distance (clamped up if not; `lengthClamped`). Everything little-endian.
 
 Header, 64 bytes:
 
@@ -1524,7 +1672,7 @@ corner, and a ferry leg comes from `FERR`, which carries no CSCL id at all. Over
 531,520 edges (56.4%) carry a durable id — every sidewalk and every path edge. 79.6% of those are
 ordinal 0, 9.7% ordinal 1, 4.1% ordinal 2 and 6.5% higher; the maximum is **102**, an OSM greenway
 welded to every street it crosses (the busiest sidewalk key reaches only 25, since only a street's
-two sides share a source id). The ordinal therefore needs a whole byte, and `tiler graph` fails
+two sides share a source id). The ordinal therefore needs a whole byte, and the graph pass fails
 rather than truncating if one ever passes 255.
 
 Bytes 24–27 are the **scenic-factor attributes** baked by `scenic.rs` (v5). The landmark and art
@@ -1534,24 +1682,24 @@ across POIs and saturated `1 − e^{−k·field}` (so a dense cluster stops stac
 per-mood (landmarks wide, art tight). The highway byte is an areal **penalty**: a Gaussian of the
 edge's metre distance to the nearest highway or above-ground-rail line (`HWAY`). The commercial byte
 is the same proximity Gaussian over the qualifying commercial-block lines (`CMLN`, derived by
-`tiler commercial`), read instead as a **discount** with a tight σ so the reward lands on the
+the commercial pass), read instead as a **discount** with a tight σ so the reward lands on the
 block's own street and sidewalks. All four quantize to a 0–254 ceiling so the client's
 `maxLandmark`/`maxArt`/`maxCommercial` stay `< 1` (the cost model's admissibility invariant, as
 `maxCover` already relies on); a later phase reads the discounts as `1 − w·attr` and the penalty as
 `1 + w·attr`. A ferry carries none.
 
-Byte 28 is the **direct canopy** (v6, `direct_canopy.rs`, baked when `--canopy` is given): the
-fraction of the edge's own baked polyline that lies **directly under a `CNPY` polygon**, on the same
-0–254 ceiling and read the same `1 − w·attr` way — the canopy half of the shelter factor. It is
-*not* a second cover byte. Cover (byte 20) is the deliberately **smoothed** field the overlay is
-coloured from — the oriented anisotropic Gaussian, σ 15 m along the road and 4 m across, reaching
-±37.5 m — which answers "is this a leafy stretch"; a walker under the rain is asking "is there
-anything over my head *here*", and a kernel reaching most of the block cannot say. So this is the raw
-0/1 canopy indicator integrated along the edge by arc length with **no kernel and no blur**: a sample
-every metre, midpoints of equal sub-lengths, each tested even-odd against the polygons the existing
-canopy grid index hands the edge. It samples the **sidewalk** geometry, not the centreline, so the
-two sides of a one-sided street differ: Central Park West reads 203 on its park side against 53 on
-its building side, where the blurred cover only manages 138 against 97.
+Byte 28 is the **direct canopy** (v6, `direct_canopy.rs`, baked when the city carries a canopy
+layer): the fraction of the edge's own baked polyline that lies **directly under a `CNPY` polygon**,
+on the same 0–254 ceiling and read the same `1 − w·attr` way — the canopy half of the shelter
+factor. It is *not* a second cover byte. Cover (byte 20) is the deliberately **smoothed** field the
+overlay is coloured from — the oriented anisotropic Gaussian, σ 15 m along the road and 4 m across,
+reaching ±37.5 m — which answers "is this a leafy stretch"; a walker under the rain is asking "is
+there anything over my head *here*", and a kernel reaching most of the block cannot say. So this is
+the raw 0/1 canopy indicator integrated along the edge by arc length with **no kernel and no blur**:
+a sample every metre, midpoints of equal sub-lengths, each tested even-odd against the polygons the
+existing canopy grid index hands the edge. It samples the **sidewalk** geometry, not the centreline,
+so the two sides of a one-sided street differ: Central Park West reads 203 on its park side against
+53 on its building side, where the blurred cover only manages 138 against 97.
 
 The two bytes come out related but far apart — over NYC they correlate **0.71**. The direct byte
 averages 0.222 over the edges against cover's 0.257 (0.291 against 0.262 weighted by edge length),
@@ -1573,7 +1721,7 @@ route cross it.
    blob): `u32 count`, then per ferry edge a (`u32 edge id`, `u16 a-stop name id`, `u16 b-stop name
    id`) triple, both ids into the name table (7). The two ids are the terminal names at the edge's
    node-a and node-b ends, aligned to its `node a`/`node b`. These ids are **not** edge name_ids, so
-   `tiler graph` adds them to the kept-name set and remaps them alongside the edge names. A later
+   the graph pass adds them to the kept-name set and remaps them alongside the edge names. A later
    phase reads the destination terminal from here (`node b` when the ferry is ridden a → b).
 
 7. **Name table**: `u32 count`, then (count+1) × u32 byte offsets into the following UTF-8 blob,
@@ -1591,7 +1739,7 @@ geometry-right side (v1's "path-like" bit is gone — the kind field carries tha
 
 ### `public/routing/<city>.version.json` — what the deployed graph is (derived, gitignored)
 
-Written by the same `tiler graph` invocation, beside the `.bin` it just produced, so a job holding
+Written by the graph pass, beside the `.bin` it just produced, so a job holding
 nothing but the live site can tell whether the graph it last snapped against is still the one being
 served — and so the client, which fetches it with the graph, can tell whether an artifact placed
 against a graph is the one it is holding:
@@ -1623,17 +1771,19 @@ files, and the SHDE rows, which are keyed by edge index, shuffled with them.
 
 ### `public/routing/<city>.stranded.bin` — the walks the graph dropped, magic `STRD` (v1, derived, gitignored)
 
-`tiler graph --stranded` writes the OSM way ids of the paths its **island drop** takes away entirely
+The graph pass writes the OSM way ids of the paths its **island drop** takes away entirely
 — a way every edge of which sat in a component nothing CSCL anchored, so no route can enter or leave
 it. 4,036 ways, of which 3,979 are `PATH` records covering 204.5 km. The header is the magic, a
 `u16` format, a `u16` header size (12) and a `u32` count, then that many `u32` way ids, ascending.
 
-It exists because the overlay and the router are built from different sets. `tiler chunks` draws
+It exists because the overlay and the router are built from different sets. The chunks pass draws
 straight from `data/paths/<id>.bin`, which never sees the drop, so without the list the tree-cover
 overlay paints a green, tree-lined walk over trail networks the router has no edge for — every one of
 those records has no graph geometry anywhere along it (Floyd Bennett Field's North Forty, the Staten
-Island Greenbelt, Ferry Point Park, Alley Pond). The second `tiler chunks` pass reads the list back
-and sets each drawn segment's stranded bit; `src/tiles/street-score.ts` skips them.
+Island Greenbelt, Ferry Point Park, Alley Pond). The second chunks pass sets each drawn segment's
+stranded bit from the same ids — taken straight from the graph pass that computed them, not read
+back off this file — and `src/tiles/street-score.ts` skips them. The file is the record of what was
+dropped, for anyone asking outside a build.
 
 Conflation's step 7 (DESIGN.md, "The order conflation runs in") is what keeps the list to the
 components that are genuinely out of reach rather than merely unnoded: it took 668 ways — 656
@@ -1644,13 +1794,14 @@ only that *this* graph cannot route them, which is what the overlay must not con
 
 ### `public/routing/shade/<city>/` — the per-edge occlusion fractions, magic `SHDB` (v2, derived, gitignored)
 
-The same `tiler graph` invocation, given `--buildings` and `--shade-params` (the sun-position file
-`tiler shade` reads) and `--shade-dir`, bakes for every GRPH edge and every sun-position bin how much
+The graph pass itself, for a city with both a `buildings` source and a sun-position grid (the same
+one the shade pass bakes from), bakes for every GRPH edge and every sun-position bin how much
 of that edge's polyline a **building** shadow covers and how much a **crown** shadow covers — the
 same shadow geometry the two tile pyramids cast, from the bin's centre sun-disk sample alone (so an
 edge is cleanly in or out), probed every 5 m along the edge against a 5 m rasterized coverage grid of
-the bin's ~867k hulls. `--canopy` supplies the crowns; without it, or where a crown carries the 0
-unknown-height sentinel, the tree fractions are simply 0 and the router costs buildings alone.
+the bin's ~867k hulls. The city's `CNPY` layer supplies the crowns; without one, or where a crown
+carries the 0 unknown-height sentinel, the tree fractions are simply 0 and the router costs buildings
+alone.
 
 The bins run in parallel, one grid alive per thread. NYC's 58 bins over 531,520 edges take ~48 s from
 the buildings alone and ~105 s with the crowns as well, and the artifact is 59 MB either way — twice
@@ -1710,7 +1861,16 @@ some unrelated permit happened to name the same BBL. Each placement carries a co
 of six ways it can be wrong; `scripts/shed-streets.ts` is the DOB-to-CSCL street-name comparison the
 first of those factors reads.
 
-**`bun run scripts/shed-drill.ts` is that claim measured**, because nothing else can see it: it builds
+**The git half of that walk is package.json's, not TypeScript's.** `bun run build-sheds` clones the
+DOB repo if `.cache/ActiveShedPermits` is not there, has `git log` name each commit's two candidate
+snapshot paths, resolves them all in one `git cat-file --batch-check` into `.build/shed-index.txt`,
+and pipes the distinct blobs — 2,614 of them behind 3,623 snapshot-carrying commits — through
+`git cat-file --batch` into the walk's stdin. `bun run update-sheds` is the same chain with a
+`--shallow-since` clone and a fetch in front of it, bounded by the day `scripts/shed-window.ts` reads
+off the artifact. Nothing spawns git; a script at the end of one of those pipes checks the sha on
+every record it is handed, because a shell pipeline reports only its last command's failure.
+
+**`bun run shed-drill` is that claim measured**, because nothing else can see it: it builds
 the record set from every permit, builds it again with one permit dropped, and compares every
 surviving record's `(first, close, confidence, spans)`, which is the whole of what the artifact
 stores. Only the dropped permit's own records may differ — one that moved because an unrelated permit
@@ -2049,7 +2209,7 @@ source swapping ordinals. That is what step 3 below is unconditional for: a refr
 whole history whether or not the gate would have fired, and the gate is the backstop for the refresh
 someone forgot, not a licence to skip one.
 
-1. Re-fetch and commit the sources — `bun run build-tree-data -- --refresh`, plus whichever of
+1. Re-fetch and commit the sources — `REFRESH=1 bun run build-tree-data:<city>`, plus whichever of
    `build-buildings`, `build-dining`, `build-landuse`, `build-openstreets` the refresh covers. These
    are LFS blobs: commit them with **git**, not `sl`, and push the objects (above).
 2. `bun run build-tiles` — the graph, its `version.json` hashes, the SHDB bake and every pyramid.
@@ -2077,9 +2237,10 @@ pairing, not the feed.
 can only run inside a deploy — by which time the artifact has been on `main`, and in front of the
 client, for however long it took someone to dispatch one. So `bun run check-shed-inputs`
 (`scripts/check-shed-inputs.ts`) runs on every push and pull request instead, over what the graph is
-built *from* rather than the graph itself: `scripts/graph-inputs.ts` stamps that, `build-sheds`
-records the stamp in `public/sheds/inputs.json` beside the artifact it places, and the two are
-compared. A change without a re-place fails the run and says which half moved.
+built *from* rather than the graph itself: the tiler stamps that in two halves,
+`scripts/graph-inputs.ts` reads the two reports, `build-sheds` records them in
+`public/sheds/inputs.json` beside the artifact it places, and the two are compared. A change without
+a re-place fails the run and says which half moved.
 
 ### What the stamp covers, and why it is so small
 
@@ -2092,7 +2253,7 @@ whole tiler crate and `Cargo.lock` — and that cost a full re-place for an edit
 that provoked the narrowing touched `graph.rs`, went stale, and re-placed to a **byte-identical**
 artifact.
 
-**The data half** is three committed files, hashed as bytes:
+**The data half** is three committed files per city — six today — hashed as bytes:
 
 | in | why |
 | --- | --- |
@@ -2100,28 +2261,51 @@ artifact.
 | `data/paths/<city>.bin` | the same, for OSM way ids |
 | `data/sidewalks/<city>.bin` | a mapped sidewalk matched to a street is keyed by that street, and `trim_derived` cuts the derived pavement out wherever one exists — so it decides which keys exist and how many edges a source is split across |
 
-and everything else `tiler graph` reads is out, each for a reason that has to be refuted before it
+and everything else the graph pass reads is out, each for a reason that has to be refuted before it
 goes back in:
 
 | out | what it feeds | why it cannot move a key |
 | --- | --- | --- |
 | `data/ferries` | the KIND_FERRY edges | they carry `NO_SOURCE_ID`, and are appended after the walking sort and the node renumber onto nodes that already exist — `assign_ordinals` skips them and an append moves no earlier edge |
 | `data/landmarks`, `data/art`, `data/highways` | one scenic attribute byte each | read at `graph.rs:3501-3535`, after the last `v2_edges.push`, over a `scenic::Network` built from the finished edges |
-| `data/landuse`, `data/buildings`, `data/openstreets`, `data/dining` → `public/commercial-lines` | the commercial attribute byte | one more such byte, read at `graph.rs:3542`. `tiler chunks` and `tiler commercial` are on this branch and nowhere else |
+| `data/landuse`, `data/buildings`, `data/openstreets`, `data/dining` → `public/commercial-lines` | the commercial attribute byte | one more such byte, read at `graph.rs:3542`. the chunks and commercial passes are on this branch and nowhere else |
 | `data/canopy` | the direct-canopy byte, and the crowns of the SHDE bake | integrated along edge polylines that are already final |
 | `data/buildings` + the shade params (`shade-schedule.ts`, `src/shade/sun.ts`) | the per-edge SHDE bake | it runs *after* `fs::write(&args.out)`; it cannot move a key in the file it is written beside |
+| the DEM mosaic (`elevation.tiles`) | the per-edge relief byte | sampled at `graph.rs:3628`, over those same finished edges |
 | `data/land`, `data/trees` | the canopy and genus pyramids | nothing on the graph's chain reads either |
 
-The TypeScript half is the import closure of `scripts/build-street-tiles.ts` — which decides *which*
-sources are handed over and under which flags, and a source withheld puts no key in the space — minus
-the three imports above, and whatever is reachable only through them. The closure is walked rather
-than listed so that a **new** import is in the set until someone argues it out; the exclusions are
-named as leaves in `ATTRIBUTE_ONLY_IMPORTS`.
+**Which of those three a city actually gets is in the stamp as well**, because a source withheld puts
+no key in the space. That decision was TypeScript's for a while — the import closure of
+`scripts/write-plan.ts` minus a list of leaves argued out — because it lived in code with no artifact
+to point at. It has one now: the plan carries each city's resolved `sources` list, and
+`tiler graph-inputs` digests that decision together with the oid of every file it names
+(`key_space_stamp`, `crates/tiler/src/build.rs`). The three paths it hashes are built by the same
+expressions the build hands to `graph::run` a few lines above, so a source that stops being handed
+over cannot go unnoticed — and an edit to the script that reaches the same decision costs no
+re-place, which the closure charged for. The per-city `alleys` flag rides along: it only gates the
+whole-city invariants, so it steers no edge, but it is the plan's statement about what the network
+*is* and a city flips it about once ever.
+
+**What is deliberately not in it is the plan verbatim.** The data root, the manifest's own path and
+the DEM's `.cache` tiles are all where a checkout happens to keep things, and a stamp that moved with
+them could never be compared against one another machine recorded; each file enters as its path
+*relative to the data root* instead. Nor are the manifest's bytes: all it contributes to the key
+space is which streets and paths file each city names, and that is in the stamp — the graph's
+sidewalk inset is a constant in `graph.rs`, not the manifest's `sidewalkInsetMeters`, which only
+the chunks pass and `tiler ingest` read.
+
+The guard needs a plan and cannot afford the one a build writes, so `bun run graph-inputs` runs
+`write-plan.ts --key-space`: the same plan, to `.build/key-space-plan.json`, with the elevation block
+left out. Resolving San Francisco's mosaic is a 1.77 GB download, and it describes a block the table
+above rules out of the key space. It gets its own path so a plan with no DEM can never be mistaken
+for one a build should render from.
 
 **The code half is not the crate's source text.** `crates/tiler/**` and `Cargo.lock` are out of the
 set entirely; in their place `tiler key-probe` runs the graph pipeline over
 `crates/tiler/fixtures/key-probe/` — nine 0.01° slices of the real city, 268 KB of plain committed
-bytes, 4,226 durable keys, 0.09 s — and the stamp records the `keyHash` it lands on. That is a stamp
+bytes, 4,226 durable keys, 0.09 s — and the stamp records the `keyHash` it lands on. package.json
+runs the probe (`bun run key-probe`) ahead of every script that needs it and it leaves its report at
+`.build/key-probe.json`; `scripts/graph-inputs.ts` reads that file, and spawns nothing. That is a stamp
 of what the key assignment **does**, which is the only thing that separates a change to `graph.rs`
 that moves keys from a comment in the same file that cannot. The probe skips the whole-city bounds
 (alley reach, pavement cells, the existence gate's two shares); every one of them is held over a
@@ -2150,9 +2334,9 @@ warning; `check-sheds` is the guarantee. Widening the fixture narrows the hole; 
 back to the crate's source text closes it only by charging a re-place for every comment.
 
 It costs nothing on the fast path. Every blob under `data/` is LFS-tracked, and what the repository
-holds is a pointer whose oid *is* the sha256 of the object — so hashing the pointer and hashing the
-object give the same stamp, and the push/PR job keeps `lfs: false` and downloads not one byte to
-check this. The fixture is under `crates/`, which no `.gitattributes` rule reaches, so it arrives as
+holds is a pointer whose oid *is* the sha256 of the object — so `input_oid` hashes the pointer when it
+finds one and the bytes when it does not, both kinds of checkout land on the same stamp, and the
+push/PR job keeps `lfs: false` and downloads not one byte to check this. The fixture is under `crates/`, which no `.gitattributes` rule reaches, so it arrives as
 bytes; the probe builds the tiler in the **debug** profile, since the release profile is lto with one
 codegen unit and the optimizer buys a 0.09 s run nothing. Both profiles give the fixture the same
 key hash.
@@ -2170,12 +2354,12 @@ another entry in the manifest is another `TileLayer` and another `GridLayer`, an
 of two cities that share a low-zoom tile are painted into the same buffer rather than
 overwriting each other.
 
-What has to change is the ingest in `scripts/build-tree-data.ts`, which is currently one
+What has to change is the ingest in `scripts/tree-data-fetch.ts`, which is currently one
 hard-coded `CITY` constant plus four NYC-specific fetchers. A new city needs:
 
 1. **A measured tree-canopy source** — polygons of the canopy footprint (NYC uses its 2017 LiDAR
-   canopy). This *is* the cover field: without it `tiler densities` has nothing to convolve and the
-   map has no cover at all. A canopy height model to run `tiler heights` against is optional: with
+   canopy). This *is* the cover field: without it `tiler ingest` has nothing to convolve and the
+   map has no cover at all. A canopy height model to run `tiler ingest` against is optional: with
    none, every polygon keeps the 0 that reads as an unknown height.
 2. **A tree inventory** — points, ideally with a standing/removed flag and a trunk diameter to
    size the crowns (without one, a city would need its own way to a crown radius). This feeds the

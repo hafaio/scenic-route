@@ -6,7 +6,7 @@ import { compositeAlpha } from "./shade";
 
 const MAX_SHADE_ALPHA = 190;
 
-// The alphas as `tiler shade` bakes them: MAX_SHADE_ALPHA * intensity * fraction.
+// The alphas as the shade pass bakes them: MAX_SHADE_ALPHA * intensity * fraction.
 function baked(fraction: number, intensity: number): number {
   return Math.round(MAX_SHADE_ALPHA * intensity * fraction);
 }

@@ -34,6 +34,10 @@
 # raw source reads cached by `bun run build-tree-data`; --refresh to go back to the network
 /.cache/
 
+# build glue handed between the steps of `bun run build-tiles`, which package.json sequences and so
+# can name no temporary directory of the machine's
+/.build/
+
 # rust build output; crates/tiler is compiled by `bun run build-tiles`
 /target
 

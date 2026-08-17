@@ -1,6 +1,6 @@
 # The committed sources
 
-Build *inputs*, not build output: `scripts/build-tree-data.ts` writes them from the upstream
+Build *inputs*, not build output: `scripts/tree-data-fetch.ts` writes them from the upstream
 sources, and `scripts/build-tiles` renders them into the tiles and chunks the client actually
 fetches. None of these files is ever served to a browser. Layouts are documented in
 `scripts/README.md`.

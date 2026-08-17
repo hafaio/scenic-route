@@ -1,7 +1,7 @@
-//! `tiler densities`: the covered fraction at both sidewalks of every street vertex, and the
-//! cover distribution the manifest records. Run by scripts/build-tree-data.ts once the source
-//! `.bin`s are written — the street file arrives with a zeroed density blob and leaves with it
-//! filled, in place.
+//! The covered fraction at both sidewalks of every street vertex, and the cover distribution the
+//! manifest records. The second half of `tiler ingest`, run once scripts/tree-data-fetch.ts has
+//! written the source `.bin`s — the street file arrives with a zeroed density blob and leaves with
+//! it filled, in place.
 //!
 //! Cover is the measured 2017 LiDAR canopy, lightly blurred: a Gaussian convolution of the
 //! canopy indicator, sampled at each sidewalk offset. The street kernel is oriented — broad
@@ -50,9 +50,17 @@ pub struct Params {
     percentiles: Vec<u32>, // the labels the reported distributions are cut at
 }
 
+impl Params {
+    /// The canopy blob, which `tiler ingest` also hands to the height pass that fills its crown
+    /// heights before this one convolves its polygons.
+    pub fn canopy(&self) -> &Path {
+        &self.canopy
+    }
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct Report {
+pub struct Report {
     bounds: Bounds,
     draws: usize,
     land_density: Distribution,
@@ -217,8 +225,7 @@ fn fill_densities(network: &mut binfmt::Streets, densities: &[f64]) {
     }
 }
 
-pub fn run(params: &Path) -> Fallible<()> {
-    let params: Params = serde_json::from_slice(&fs::read(params)?)?;
+pub fn run(params: &Params) -> Fallible<Report> {
     let canopy_polygons = binfmt::read_polygons(&params.canopy, "CNPY", binfmt::CANOPY_FORMAT)?;
     let land_polygons = binfmt::read_polygons(&params.land, "LAND", LAND_FORMAT)?;
     let mut streets = binfmt::read_streets(&params.streets)?;
@@ -268,7 +275,7 @@ pub fn run(params: &Path) -> Fallible<()> {
         "sampling the blurred canopy at both sidewalks of {} street vertices",
         streets.vertices()
     );
-    let street_densities = cover_at_vertices(&streets, &projection, &canopy, &grid, &params);
+    let street_densities = cover_at_vertices(&streets, &projection, &canopy, &grid, params);
     fill_densities(&mut streets, &street_densities);
     fs::write(&params.streets, &streets.bytes)?;
 
@@ -282,7 +289,7 @@ pub fn run(params: &Path) -> Fallible<()> {
                 "sampling the blurred canopy on {} path vertices",
                 paths.vertices()
             );
-            let path_densities = cover_at_vertices(&paths, &projection, &canopy, &grid, &params);
+            let path_densities = cover_at_vertices(&paths, &projection, &canopy, &grid, params);
             fill_densities(&mut paths, &path_densities);
             fs::write(path, &paths.bytes)?;
             Some(distribution_of(&path_densities, &params.percentiles))
@@ -290,13 +297,11 @@ pub fn run(params: &Path) -> Fallible<()> {
         None => None,
     };
 
-    let report = Report {
+    Ok(Report {
         bounds,
         draws: points.draws,
         land_density: distribution_of(&land_densities, &params.percentiles),
         street_density: distribution_of(&street_densities, &params.percentiles),
         path_density,
-    };
-    println!("{}", serde_json::to_string(&report)?);
-    Ok(())
+    })
 }

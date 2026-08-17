@@ -1,5 +1,5 @@
 // The shape of src/tree-cover/manifest.json, the committed index that
-// scripts/build-tree-data.ts writes and the tile builder and client read.
+// scripts/tree-data-manifest.ts writes and the tile builder and client read.
 
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -61,7 +61,7 @@ export type CrownAllometry =
 // data/canopy/<id>.bin: NYC's 2017 LiDAR tree-canopy polygons, magic `CNPY`, the shared polygon
 // byte layout (a header, then per-polygon varint-delta rings) plus a trailing crown height in
 // decimetres per polygon. This is the *measured* canopy footprint — the cover field itself:
-// `tiler canopy` rasterizes it for the fill pyramid and `tiler densities` samples it at each
+// the canopy pass rasterizes it for the fill pyramid and the density pass samples it at each
 // sidewalk to fill the routing density blobs. layout: scripts/README.md
 export interface CanopyLayer {
   file: string;
@@ -141,7 +141,7 @@ export interface StreetLayer {
 
 // data/paths/<id>.bin: the OSM pedestrian/park network, magic `PATH`. STRT's byte layout,
 // reinterpreted per record (offset 0 = OSM way id, 20 = kind 6 path / 7 steps); it carries the
-// same canopy cover at every vertex, filled by `tiler densities`. layout: scripts/README.md
+// same canopy cover at every vertex, filled by the density pass. layout: scripts/README.md
 export interface PathLayer {
   file: string;
   format: number;
@@ -208,10 +208,11 @@ const CHUNK_ZOOM = 12;
 
 // Whether two cities can reach the same chunk. Cities share the street, caster and commercial
 // pyramids — they are keyed by x/y with no city segment — and the whole arrangement rests on their
-// bounds not overlapping at the chunk grid. That is stated in a comment in `tiler chunks` and
-// checked nowhere, so the day someone adds a city that adjoins another (Oakland beside San
-// Francisco, Jersey City inside New York's box) the two would interleave in one file with no error
-// at all. Cheaper to assert here, where the bounds are written, than to debug there.
+// bounds not overlapping at the chunk grid. That is stated in a comment in
+// crates/tiler/src/chunks.rs and checked nowhere, so the day someone adds a city that adjoins
+// another (Oakland beside San Francisco, Jersey City inside New York's box) the two would
+// interleave in one file with no error at all. Cheaper to assert here, where the bounds are
+// written, than to debug there.
 function chunkRange(bounds: Bounds): {
   minX: number;
   maxX: number;

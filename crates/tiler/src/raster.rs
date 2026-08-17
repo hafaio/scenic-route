@@ -1,6 +1,6 @@
 //! The raster machinery the canopy pyramid and the street chunks both stand on: the web-mercator
-//! pixel projection, the tile plan, the shoreline land mask, and the PNG encoder. `tiler canopy`
-//! renders the cover pyramid over this; `tiler chunks` uses the same projection to bucket streets
+//! pixel projection, the tile plan, the shoreline land mask, and the PNG encoder. The canopy pass
+//! renders the cover pyramid over this; the chunks pass uses the same projection to bucket streets
 //! into z12 tiles. See scripts/README.md.
 
 use std::collections::HashMap;

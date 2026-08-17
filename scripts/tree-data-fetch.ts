@@ -1,12 +1,15 @@
-// `bun run build-tree-data`: writes data/{trees,land,canopy,streets,paths}/<id>.bin and
-// src/tree-cover/manifest.json. Fetching, encoding and the manifest are here; the estimator that
-// fills the streets file's density blob and reports the cover distribution is crates/tiler. The
-// model, the sources and the binary layouts are all documented in scripts/README.md.
+// `bun run scripts/tree-data-fetch.ts --city <id>`: the fetching and encoding half of the tree-data
+// ingest. It writes data/{ferries,landmarks,art,highways,trees,land,canopy,sidewalks,streets,
+// paths}/<id>.bin, then .build/ingest.json (what `tiler ingest` is pointed at) and
+// .build/tree-data.json (what the manifest half needs from here), and exits. It spawns nothing:
+// package.json sequences this, `cargo run --release --bin tiler -- ingest` and
+// scripts/tree-data-manifest.ts. The model, the sources and the binary layouts are all documented
+// in scripts/README.md.
 
 import { createHash } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { mkdir, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { parseArgs } from "node:util";
 import {
   type CrownAllometry,
   crownDiameterMeters,
@@ -43,19 +46,7 @@ import {
   NYC_LANDMARKS,
   SF_LANDMARKS,
 } from "./landmarks";
-import {
-  type Bounds,
-  type CanopyLayer,
-  type CityEntry,
-  type Distribution,
-  type FieldLayer,
-  type PathLayer,
-  type Percentile,
-  readManifest,
-  type SourceFile,
-  type StreetLayer,
-  writeManifest,
-} from "./manifest";
+import type { Bounds, SourceFile } from "./manifest";
 import {
   fetchOsmTrees,
   fetchPaths,
@@ -92,7 +83,12 @@ import {
   type Segment,
   toInt,
 } from "./streets";
-import { runTiler, writeList } from "./tiler";
+import {
+  INGEST_PARAMS_PATH,
+  PERCENTILES,
+  SIDECAR_PATH,
+  type TreeDataSidecar,
+} from "./tree-data";
 
 // One OSM pedestrian/park way, land-clipped and densified, ready to encode as a PATH record. The
 // name is uppercased once here so the client's prettifier renders "BOW BRIDGE" as "Bow Bridge".
@@ -117,34 +113,34 @@ interface StreetRow {
   stname_label?: string; // CSCL's normalized street name, e.g. "W 60 ST"
 }
 
-// What `tiler densities` reports back, once it has filled the streets file's density blob. The
-// cuts come back as a map, because the labels they are reported at are passed to it.
-interface RawDistribution {
-  min: number;
-  max: number;
-  mean: number;
-  median: number;
-  percentiles: Record<string, number>;
+// .build/ingest.json: everything `tiler ingest` is pointed at, all paths absolute.
+interface IngestParams {
+  canopy: string;
+  land: string;
+  streets: string;
+  paths: string;
+  // null for a city with no canopy height model; then no heights pass runs and every polygon keeps
+  // the 0 that reads as unknown. `band` is null for a single raster and the band index that carries
+  // height above ground for a mosaic — several hundred paths ride in this file rather than on a
+  // command line, which is why the mosaic needs no list on disk.
+  chm: {
+    paths: string[];
+    band: number | null;
+    crs: "utm18n" | "sf-cs13";
+  } | null;
+  sourceBox: Bounds;
+  landBox: Bounds;
+  fillSigmaMeters: number;
+  tightSigmaAlongMeters: number;
+  tightSigmaAcrossMeters: number;
+  sidewalkInsetMeters: number;
+  coverSamples: number;
+  coverSeed: number;
+  percentiles: number[];
 }
 
-interface Estimate {
-  bounds: Bounds; // the sources, grown by the kernel's reach: what the pyramid covers
-  draws: number;
-  landDensity: RawDistribution; // the cover over land: its mean is the sanity-check figure
-  streetDensity: RawDistribution;
-  pathDensity?: RawDistribution; // present only when a paths file was passed
-}
-
-// What `tiler heights` reports back, once it has filled the canopy file's height region from the
-// LiDAR height model.
-interface Heights {
-  polygons: number;
-  measured: number; // polygons the model had a cell for; the rest keep the 0 "unknown" height
-  skippedTiles: number; // CHM tiles whose LZW stream would not decode, all east of the city
-}
-
-const DATA_DIR = join(import.meta.dirname, "..", "data");
-const PARAMS_PATH = join(tmpdir(), "scenic-route-densities.json");
+const ROOT = join(import.meta.dirname, "..");
+const DATA_DIR = join(ROOT, "data");
 
 const STREET_FORMAT = 6; // v6 adds the per-side sidewalk bits (flags bits 3-6) scripts/sidewalks.ts writes
 const PATH_FORMAT = 1; // OSM pedestrian/park ways, STRT's byte layout with the PATH reinterpretations
@@ -223,22 +219,6 @@ const COVER_SEED = 42; // fixed, so the reported mean cover does not churn betwe
 const DENSIFY_METERS = 25; // road sampling step, below the tight sigma so the colour varies
 const DROP_LENGTH_METERS = 1; // shorter than this the geometry is degenerate
 const EARTH_RADIUS_METERS = 6_371_008.8;
-const PERCENTILES: readonly Percentile[] = [
-  "p1",
-  "p5",
-  "p10",
-  "p20",
-  "p30",
-  "p40",
-  "p50",
-  "p60",
-  "p70",
-  "p80",
-  "p90",
-  "p95",
-  "p97",
-  "p99",
-];
 
 // The walkable-row total the paged fetch is checked against — a floor, so it sits a little below
 // the current Socrata count (111,675 rows for the $where below: 99,361 street + 2,205 bridge +
@@ -595,21 +575,6 @@ function sourceBoxOf(segments: Segment[], trees: Coord[]): Bounds {
   return { south, west, north, east };
 }
 
-// The manifest's key order is the ingest's, not whatever a map iterated in.
-function distributionOf(raw: RawDistribution): Distribution {
-  const percentiles = {} as Record<Percentile, number>;
-  for (const percentile of PERCENTILES) {
-    percentiles[percentile] = raw.percentiles[percentile];
-  }
-  return {
-    min: raw.min,
-    max: raw.max,
-    mean: raw.mean,
-    median: raw.median,
-    percentiles,
-  };
-}
-
 // STRT v6: the CSCL street network. The record id is the physicalid; kind is rw_type; the
 // width/speed/flags bytes are all populated, the flags' per-side sidewalk bits by ingestSidewalks.
 function encodeStreets(segments: Segment[], names: string[]): Uint8Array {
@@ -670,7 +635,7 @@ async function writeSource(
   };
 }
 
-// One city's sources, so the ingest below reads a city rather than being one. Everything that
+// One city's sources, so the fetch below reads a city rather than being one. Everything that
 // differs between two cities is either a fetcher here or a credit line; the estimator, the
 // encoders, the crowning and the tiler are all city-agnostic already.
 interface CitySources {
@@ -792,7 +757,8 @@ const SF: CitySources = {
   // The same 3DEP tiles the terrain overlay is built from, read at the band that differences the
   // surface model against the ground. That band is height above ground for everything standing, not
   // canopy — downtown reads 200 m of tower — so it is only ever sampled through the measured-canopy
-  // polygons, which is what `tiler heights` does and the only thing that makes it a crown height.
+  // polygons, which is what the ingest's heights pass does and the only thing that makes it a crown
+  // height.
   chm: async () => {
     const raster = await SF_ELEVATION();
     return {
@@ -817,7 +783,7 @@ const SF: CitySources = {
 
 const CITIES: Record<string, CitySources> = { nyc: NYC, sf: SF };
 
-async function ingest(CITY: CitySources): Promise<void> {
+async function fetchCity(CITY: CitySources): Promise<void> {
   const started = performance.now();
 
   // The ferry network is OSM- and canopy-independent: it is consolidated from the two NYC ferry
@@ -852,8 +818,8 @@ async function ingest(CITY: CitySources): Promise<void> {
   );
 
   // The measured 2017 LiDAR canopy: NYC Parks' polygon feature service, ~1M polygons paged and
-  // disk-cached, then land-clipped. It is the cover source — `tiler canopy` rasterizes it for the
-  // fill pyramid and `tiler densities` samples it at every sidewalk for the routing density.
+  // disk-cached, then land-clipped. It is the cover source — `tiler build` rasterizes it for the
+  // fill pyramid and `tiler ingest` samples it at every sidewalk for the routing density.
   console.error(`${CITY.id}: fetching tree canopy polygons`);
   const canopy = await CITY.canopy();
   const canopyOnLand = clipCanopyToLand(canopy.polygons, onLand);
@@ -873,7 +839,7 @@ async function ingest(CITY: CitySources): Promise<void> {
   );
 
   // The LiDAR canopy height model each polygon's crown height is measured from: a 243 MiB raster,
-  // downloaded once into .cache/ and read off disk by `tiler heights` below.
+  // downloaded once into .cache/ and read off disk by the ingest's heights pass.
   console.error(`${CITY.id}: fetching the canopy height model`);
   const chm = await CITY.chm();
 
@@ -1003,8 +969,8 @@ async function ingest(CITY: CitySources): Promise<void> {
   );
   // The canopy is a polygon blob under its own magic (CNPY) so it self-identifies rather than
   // masquerading as another polygon source; the tiler reads it with the same generic decoder. Its
-  // height region is written zeroed for `tiler heights` to fill in place, so the file on disk is
-  // no longer the one encoded and its bytes are read back for the manifest.
+  // height region is written zeroed for `tiler ingest` to fill in place, so the file on disk will no
+  // longer be the one encoded here — the manifest half reads its bytes back off disk.
   const canopyPath = join(DATA_DIR, "canopy", file);
   const canopyFile = await writeSource(
     "canopy",
@@ -1013,38 +979,7 @@ async function ingest(CITY: CitySources): Promise<void> {
     canopyOnLand.length,
     encodeCanopy(CANOPY_FORMAT, canopyOnLand),
   );
-  // A city with no height model leaves every polygon's height at the 0 that reads as unknown, so
-  // `tiler heights` simply does not run and no tree-shade pyramid is baked for it.
-  const heights: Heights | null = chm
-    ? JSON.parse(
-        runTiler(
-          [
-            "heights",
-            "--canopy",
-            canopyPath,
-            "--chm-crs",
-            chm.crs,
-            // Several hundred rasters are more than a command line carries, so a mosaic arrives as
-            // a list on disk, exactly as the terrain overlay's tiles do.
-            ...(chm.band === null
-              ? ["--chm", chm.paths[0]]
-              : [
-                  "--chm-mosaic",
-                  await writeList(`${CITY.id}-canopy-mosaic`, chm.paths),
-                  "--chm-band",
-                  String(chm.band),
-                ]),
-          ],
-          true,
-        ),
-      )
-    : null;
-  const canopyBytes = new Uint8Array(await readFile(canopyPath));
-  console.error(
-    heights
-      ? `${CITY.id}: canopy heights measured for ${heights.measured} of ${heights.polygons} polygons (${heights.skippedTiles} CHM tiles skipped)`
-      : `${CITY.id}: no canopy height model; every polygon keeps an unknown height`,
-  );
+
   // OSM's own sidewalk/crossing/island ways, written as their own committed source, and the
   // planimetric ROW-sidewalk polygons, which are only probed. Between them they settle the four
   // per-side bits of every offsetted STRT record's flags byte, so this runs before the streets are
@@ -1069,150 +1004,118 @@ async function ingest(CITY: CitySources): Promise<void> {
   for (const segment of segments) {
     vertices += segment.points.length;
   }
-  // The density estimator now reads the measured canopy, blurred: the isotropic fill kernel for
-  // the reported land distribution, the oriented along/across kernel at each sidewalk offset. The
-  // trees are still fetched and encoded above (the genus overlay draws them), but the street/path
-  // density blobs no longer consume them.
-  await writeFile(
-    PARAMS_PATH,
-    JSON.stringify({
-      canopy: join(DATA_DIR, "canopy", file),
-      land: join(DATA_DIR, "land", file),
-      streets: streetPath,
-      paths: pathPath,
-      sourceBox: sourceBoxOf(segments, trees),
-      landBox,
+
+  // The density estimator reads the measured canopy, blurred: the isotropic fill kernel for the
+  // reported land distribution, the oriented along/across kernel at each sidewalk offset. The trees
+  // are still fetched and encoded above (the genus overlay draws them), but the street/path density
+  // blobs no longer consume them.
+  const params: IngestParams = {
+    canopy: canopyPath,
+    land: join(DATA_DIR, "land", file),
+    streets: streetPath,
+    paths: pathPath,
+    chm: chm ? { paths: chm.paths, band: chm.band, crs: chm.crs } : null,
+    sourceBox: sourceBoxOf(segments, trees),
+    landBox,
+    fillSigmaMeters: FILL_SIGMA_METERS,
+    tightSigmaAlongMeters: TIGHT_SIGMA_ALONG_METERS,
+    tightSigmaAcrossMeters: TIGHT_SIGMA_ACROSS_METERS,
+    sidewalkInsetMeters: SIDEWALK_INSET_METERS,
+    coverSamples: COVER_SAMPLES,
+    coverSeed: COVER_SEED,
+    percentiles: PERCENTILES.map((percentile) => Number(percentile.slice(1))),
+  };
+  const sidecar: TreeDataSidecar = {
+    city: {
+      id: CITY.id,
+      name: CITY.name,
+      attribution: CITY.attribution,
+      sourceUrl: CITY.sourceUrl,
+      streetAttribution: CITY.streetAttribution,
+      streetSourceUrl: CITY.streetSourceUrl,
+      fieldAttribution: CITY.fieldAttribution,
+      fieldSourceUrl: CITY.fieldSourceUrl,
+      pathAttribution: CITY.pathAttribution,
+      pathSourceUrl: CITY.pathSourceUrl,
+      canopyAttribution: CITY.canopyAttribution,
+      canopySourceUrl: CITY.canopySourceUrl,
+      alleys: CITY.alleys,
+    },
+    heightSource: chm
+      ? { attribution: chm.attribution, sourceUrl: chm.sourceUrl }
+      : null,
+    trees: treeFile,
+    land: landFile,
+    canopy: {
+      file: canopyFile.file,
+      format: canopyFile.format,
+      polygons: canopyFile.count,
+      vertices: canopyVertices,
+      squareKm: Math.round(canopySquareKilometers * 10) / 10,
+    },
+    streets: {
+      file,
+      format: STREET_FORMAT,
+      segments: segments.length,
+      vertices,
+      densifyMeters: DENSIFY_METERS,
+    },
+    paths: {
+      file,
+      format: PATH_FORMAT,
+      ways: pathSegments.length,
+      vertices: pathVertices,
+      km: Math.round(pathKm * 10) / 10,
+    },
+    field: {
       fillSigmaMeters: FILL_SIGMA_METERS,
       tightSigmaAlongMeters: TIGHT_SIGMA_ALONG_METERS,
       tightSigmaAcrossMeters: TIGHT_SIGMA_ACROSS_METERS,
       sidewalkInsetMeters: SIDEWALK_INSET_METERS,
+      crownAllometry: CITY.crownAllometry,
+      maxDbhInches: MAX_DBH_INCHES,
+      imputedDbhInches: CITY.medianDbhInches,
+      clampedTrees: clamped,
+      imputedTrees: imputed,
+      osmTrees: osm.crowned.length,
+      osmTreeDedup: osm.deduped,
+      osmImputedCrowns: osm.imputedCrowns,
       coverSamples: COVER_SAMPLES,
       coverSeed: COVER_SEED,
-      percentiles: PERCENTILES.map((percentile) => Number(percentile.slice(1))),
-    }),
-  );
-  const estimate: Estimate = JSON.parse(
-    runTiler(["densities", "--params", PARAMS_PATH], true),
-  );
-  // Rust filled the density blob in place, so the files on disk are no longer the ones encoded.
-  const streetBytes = new Uint8Array(await readFile(streetPath));
-  const pathBytes = new Uint8Array(await readFile(pathPath));
-  if (!estimate.pathDensity) {
-    throw new Error(
-      "tiler densities was passed paths but reported no pathDensity",
-    );
-  }
-
-  const updated = new Date().toISOString().slice(0, 10);
-  const canopyLayer: CanopyLayer = {
-    file: canopyFile.file,
-    format: canopyFile.format,
-    polygons: canopyFile.count,
-    vertices: canopyVertices,
-    bytes: canopyBytes.length,
-    sha256: createHash("sha256").update(canopyBytes).digest("hex"),
-    squareKm: Math.round(canopySquareKilometers * 10) / 10,
-    measuredHeights: heights?.measured ?? 0,
-    updated,
-    attribution: CITY.canopyAttribution,
-    sourceUrl: CITY.canopySourceUrl,
-    ...(chm
-      ? { heightAttribution: chm.attribution, heightSourceUrl: chm.sourceUrl }
-      : {}),
-  };
-  const field: FieldLayer = {
-    trees: treeFile,
-    land: landFile,
-    canopy: canopyLayer,
-    fillSigmaMeters: FILL_SIGMA_METERS,
-    tightSigmaAlongMeters: TIGHT_SIGMA_ALONG_METERS,
-    tightSigmaAcrossMeters: TIGHT_SIGMA_ACROSS_METERS,
-    crownAllometry: CITY.crownAllometry,
-    maxDbhInches: MAX_DBH_INCHES,
-    imputedDbhInches: CITY.medianDbhInches,
-    clampedTrees: clamped,
-    imputedTrees: imputed,
-    osmTrees: osm.crowned.length,
-    osmTreeDedup: osm.deduped,
-    osmImputedCrowns: osm.imputedCrowns,
-    meanCoverOverLand: estimate.landDensity.mean,
-    coverSamples: COVER_SAMPLES,
-    coverSeed: COVER_SEED,
-    genus: {
-      table: genusTable,
-      // The ForMS tail and unknowns, plus every OSM tree — all the "Other" (id 11) points.
-      otherCount: trees.length - topGenusTotal + osm.crowned.length,
+      genus: {
+        table: genusTable,
+        // The ForMS tail and unknowns, plus every OSM tree — all the "Other" (id 11) points.
+        otherCount: trees.length - topGenusTotal + osm.crowned.length,
+      },
     },
-    density: distributionOf(estimate.landDensity),
-    updated,
-    attribution: CITY.fieldAttribution,
-    sourceUrl: CITY.fieldSourceUrl,
-  };
-  const streets: StreetLayer = {
-    file,
-    format: STREET_FORMAT,
-    segments: segments.length,
-    vertices,
-    bytes: streetBytes.length,
-    sha256: createHash("sha256").update(streetBytes).digest("hex"),
-    densifyMeters: DENSIFY_METERS,
-    sidewalkInsetMeters: SIDEWALK_INSET_METERS,
-    alleys: CITY.alleys,
-    density: distributionOf(estimate.streetDensity),
-    updated,
-    attribution: CITY.streetAttribution,
-    sourceUrl: CITY.streetSourceUrl,
-  };
-  const paths: PathLayer = {
-    file,
-    format: PATH_FORMAT,
-    ways: pathSegments.length,
-    segments: pathSegments.length,
-    vertices: pathVertices,
-    bytes: pathBytes.length,
-    sha256: createHash("sha256").update(pathBytes).digest("hex"),
-    km: Math.round(pathKm * 10) / 10,
-    density: distributionOf(estimate.pathDensity),
-    updated,
-    attribution: CITY.pathAttribution,
-    sourceUrl: CITY.pathSourceUrl,
-  };
-  const entry: CityEntry = {
-    id: CITY.id,
-    name: CITY.name,
-    bounds: estimate.bounds,
-    trees: trees.length,
-    updated,
-    attribution: CITY.attribution,
-    sourceUrl: CITY.sourceUrl,
-    field,
-    streets,
-    paths,
+    cityTrees: trees.length,
+    sidewalks,
   };
 
-  const manifest = await readManifest();
-  const existing = manifest.cities.findIndex((other) => other.id === CITY.id);
-  if (existing === -1) {
-    manifest.cities.push(entry);
-  } else {
-    manifest.cities[existing] = entry;
-  }
-  await writeManifest(manifest);
+  await mkdir(dirname(INGEST_PARAMS_PATH), { recursive: true });
+  await writeFile(INGEST_PARAMS_PATH, JSON.stringify(params));
+  await writeFile(SIDECAR_PATH, JSON.stringify(sidecar));
 
-  const megabytes = (bytes: number): string => (bytes / 1024 / 1024).toFixed(1);
   const seconds = ((performance.now() - started) / 1000).toFixed(1);
-  console.error(
-    `${CITY.id}: wrote trees (${megabytes(treeFile.bytes)} MiB), canopy (${canopyOnLand.length} polygons, ${megabytes(canopyFile.bytes)} MiB), land (${megabytes(landFile.bytes)} MiB), streets (${segments.length} segments, ${vertices} vertices, ${megabytes(streetBytes.length)} MiB), paths (${pathSegments.length} ways, ${pathVertices} vertices, ${megabytes(pathBytes.length)} MiB) and sidewalks (${sidewalks.count} ways, ${megabytes(sidewalks.bytes)} MiB) in ${seconds}s`,
-  );
+  console.error(`${CITY.id}: fetched and encoded in ${seconds}s`);
 }
 
-// `bun run build-tree-data [city ...]`; with none, every city the pipeline knows.
-const requested = process.argv.slice(2).filter((arg) => !arg.startsWith("--"));
-const selected = requested.length > 0 ? requested : Object.keys(CITIES);
-for (const id of selected) {
-  const city = CITIES[id];
-  if (!city) {
-    throw new Error(`no city ${id}; known: ${Object.keys(CITIES).join(", ")}`);
-  }
-  await ingest(city);
+// `bun run scripts/tree-data-fetch.ts --city <id>`, one city a run: the two JSON files it leaves
+// behind name one city's blobs, and the tiler pass between the halves reads exactly one of them.
+// `--refresh` belongs to scripts/cache.ts, which reads process.argv for itself; it is named here so
+// parseArgs does not reject it.
+const { values } = parseArgs({
+  options: {
+    city: { type: "string" },
+    refresh: { type: "boolean" },
+  },
+});
+const known = Object.keys(CITIES).join(", ");
+if (values.city === undefined) {
+  throw new Error(`--city is required, one of: ${known}`);
 }
+const city = CITIES[values.city];
+if (!city) {
+  throw new Error(`no city ${values.city}; known: ${known}`);
+}
+await fetchCity(city);

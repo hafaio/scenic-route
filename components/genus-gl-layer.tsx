@@ -13,7 +13,7 @@ import { useCity } from "./city-context";
 import TreeDotsLayer from "./tree-dots-layer";
 
 // The low-zoom genus overlay: a client-shaded dominance texture. The raster half (z9-z14) is a stack
-// of DATA tiles baked by `tiler genus-field` — four lossless tiles per position, each carrying three
+// of DATA tiles baked by the genus-field pass — four lossless tiles per position, each carrying three
 // genera's local crown density in its R/G/B (12 genera / 3 = 4 tiles). One shared WebGL2 context reads
 // the enabled channels per pixel and shades them: the dominant genus, dithered against its runner-up
 // in proportion, faded by the total density so it reads like thinning-and-thickening tree cover rather
@@ -21,7 +21,7 @@ import TreeDotsLayer from "./tree-dots-layer";
 // live (a region hands off to its runner-up) with no refetch — which a stack of pre-coloured tiles,
 // which can only add ink, structurally could not do. From z15 up TreeDotsLayer draws crisp live dots.
 const TILE_URL = "tiles/genus-field/{layer}/{z}/{x}/{y}.webp";
-const LAYERS = 4; // 12 genera packed three-per-tile (R,G,B); see tiler genus-field
+const LAYERS = 4; // 12 genera packed three-per-tile (R,G,B); see crates/tiler/src/genus_field.rs
 const TILE_SIZE = 256;
 const MIN_NATIVE_ZOOM = 9;
 const MAX_NATIVE_ZOOM = 14; // the data pyramid's finest zoom; from z15 TreeDotsLayer draws instead

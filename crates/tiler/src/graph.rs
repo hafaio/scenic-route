@@ -1,4 +1,4 @@
-//! `tiler graph`: contracts STRT v6 into the pedestrian routing graph the client searches, then
+//! The graph pass: contracts STRT v6 into the pedestrian routing graph the client searches, then
 //! places the pavement a walker uses — where OSM maps a sidewalk that way is the edge, a street's
 //! own offset is derived only on the sides OSM leaves, the two are joined at corner nodes, a
 //! crossing is synthesized at every corner pair OSM does not serve for itself, and paths are
@@ -129,10 +129,11 @@ const STEP_STREET: u8 = 7;
 const SHORT_CHORD_METERS: f64 = 10.0;
 const LENGTH_SLACK_METERS: f32 = 0.5; // f32 length vs great-circle node distance rounding
 const EARTH_RADIUS_METERS: f64 = 6_371_000.0; // matches the client's haversineMeters
-// The chunk offset uses the manifest's sidewalkInsetMeters; graph.rs takes only --streets/--out,
-// so it mirrors that value here. It never turns a width-based offset into 0, and the path-like
-// road types return 0 regardless, so the PATHLIKE classification does not depend on it — only the
-// exact decimetre byte does, and this keeps it identical to the chunk the street layer draws.
+// The chunk offset uses the manifest's sidewalkInsetMeters; this pass is handed the street file and
+// no manifest, so it mirrors that value here. It never turns a width-based offset into 0, and the
+// path-like road types return 0 regardless, so the PATHLIKE classification does not depend on it —
+// only the exact decimetre byte does, and this keeps it identical to the chunk the street layer
+// draws.
 const SIDEWALK_INSET_METERS: f64 = 2.0;
 
 const MERGE_RADIUS_METERS: f64 = 1.0; // CSCL digitization slivers, mopped up after exact noding
@@ -263,22 +264,17 @@ pub struct Args {
     pub highways: Option<PathBuf>,
     pub commercial: Option<PathBuf>,
     pub out: PathBuf,
-    // Where the OSM way ids of the paths the island drop stranded are written. `tiler chunks` reads
-    // the file back so the overlay stops painting a walk this graph holds no edge for.
-    /// Where to WRITE this city's dropped ways. `tiler chunks` reads them back by directory,
-    /// under `--stranded-dir`.
+    /// Where to WRITE this city's dropped ways, as the documented STRD artifact. Nothing reads it
+    /// back: the re-chunk that clears those walks off the overlay takes the ids `run` returns.
     pub stranded_out: Option<PathBuf>,
-    // The optional SHDE bake: building footprints, the shade sun-position params (the same file
-    // `tiler shade` reads), and the directory the per-bin shade files are written to. All three or none.
+    // The optional SHDE bake: building footprints, the shade sun-position grid (the same one the
+    // shade pass bakes its pyramid from), and the directory the per-bin shade files are written
+    // to. All three or none.
     pub buildings: Option<PathBuf>,
-    pub shade_params: Option<PathBuf>,
+    pub shade_params: Option<shade::Params>,
     pub shade_dir: Option<PathBuf>,
-    /// The city's DEM tiles as a newline-separated list, plus what is needed to read them: the
-    /// projection they are published on, which band carries the ground, and the city's bounds to
-    /// resample over.
-    pub elevation: Option<PathBuf>,
-    pub elevation_projection: Option<crate::heights::Tmerc>,
-    pub elevation_band: usize,
+    /// The bounds to resample the DEM over, when `run` is handed one. The city's own box: the
+    /// terrain overlay widens it to keep its shoreline, the relief byte has no shore to keep.
     pub elevation_bounds: Option<crate::manifest::Bounds>,
     /// Whether this city's centreline classifies alleys — see the alley bounds in `run`.
     pub alleys: bool,
@@ -291,6 +287,10 @@ pub struct Args {
     // they are skipped, and nothing else is. What the probe reports is the `keyHash` this same run
     // would give the city: scripts/graph-inputs.ts is what asks, and scripts/README.md says why.
     pub probe: bool,
+    // Where to write the stats line instead of stdout. The probe's consumer is a later link in a
+    // package.json chain rather than something holding the pipe, so it reads a file; a build leaves
+    // this unset and the line goes to the log with the rest of the pass.
+    pub report: Option<PathBuf>,
 }
 
 /// One edge, before and after contraction: the polyline runs a -> b with its endpoints pinned to
@@ -1714,7 +1714,7 @@ fn write_version(
 
 /// The STRD file: the magic, the format, the header size and the count, then that many sorted u32 OSM
 /// way ids. Written beside the graph because it is the graph's own answer to which drawn walks it
-/// keeps, and read by `tiler chunks`. Layout: scripts/README.md.
+/// keeps. Layout: scripts/README.md.
 fn write_stranded(out: &std::path::Path, ways: &[u32]) -> Fallible<()> {
     let mut bytes = Vec::with_capacity(STRANDED_HEADER_BYTES + 4 * ways.len());
     bytes.extend_from_slice(b"STRD");
@@ -1731,7 +1731,12 @@ fn write_stranded(out: &std::path::Path, ways: &[u32]) -> Fallible<()> {
     Ok(())
 }
 
-pub fn run(args: &Args) -> Fallible<()> {
+/// Returns the OSM way ids the island drop stranded, sorted — what the second chunks pass folds
+/// into each chunk's trailing bitmap so the overlay stops painting a walk no route can follow.
+///
+/// `dem` is borrowed rather than opened from a path because the elevation pass resamples the same
+/// mosaic for its overlay; `tiler build` opens it once and hands it to both.
+pub fn run(args: &Args, dem: Option<&mut crate::dem::Dem>) -> Fallible<Vec<u32>> {
     let streets = binfmt::read_streets(&args.streets)?;
     let origin_lng = streets.origin_lng;
     let origin_lat = streets.origin_lat;
@@ -3621,21 +3626,12 @@ pub fn run(args: &Args) -> Fallible<()> {
 
     // The relief byte (v7): the height climbed and dropped along each edge, sampled off the city's
     // DEM resampled to a lat/lng field. A city with no elevation source leaves every edge flat.
-    let relief_bytes = match &args.elevation {
-        Some(paths_file) => {
-            let paths: Vec<std::path::PathBuf> = std::fs::read_to_string(paths_file)?
-                .lines()
-                .filter(|line| !line.trim().is_empty())
-                .map(std::path::PathBuf::from)
-                .collect();
-            let projection = args
-                .elevation_projection
-                .ok_or("--elevation needs a projection for the city's DEM")?;
-            let mut dem = crate::dem::Dem::open(&paths, projection, args.elevation_band)?;
+    let relief_bytes = match dem {
+        Some(dem) => {
             let bounds = args
                 .elevation_bounds
-                .ok_or("--elevation needs the city bounds")?;
-            let field = crate::dem::resample(&bounds, RELIEF_FIELD_ZOOM, &mut dem)?;
+                .ok_or("a DEM needs the city bounds to resample over")?;
+            let field = crate::dem::resample(&bounds, RELIEF_FIELD_ZOOM, dem)?;
             let lengths: Vec<f32> = v2_edges.iter().map(|edge| edge.length).collect();
             let baked = relief::relief(&edge_polys, &lengths, &field)?;
             eprintln!(
@@ -4055,12 +4051,11 @@ pub fn run(args: &Args) -> Fallible<()> {
     // The SHDE artifact (optional): the building and crown occlusion fractions per edge per
     // sun-position bin, keyed off the same finalized `v2_edges` order the client reads GRPH records
     // in, over the same `edge_polys` the direct-canopy bake sampled.
-    if let (Some(buildings_path), Some(shade_params_path), Some(shade_dir_path)) =
+    if let (Some(buildings_path), Some(params), Some(shade_dir_path)) =
         (&args.buildings, &args.shade_params, &args.shade_dir)
     {
-        let params: shade::Params = serde_json::from_slice(&fs::read(shade_params_path)?)?;
         let (building_bytes, tree_bytes, positions) =
-            shade::edge_shade_attrs(buildings_path, args.canopy.as_deref(), &params, &edge_polys)?;
+            shade::edge_shade_attrs(buildings_path, args.canopy.as_deref(), params, &edge_polys)?;
         assert_eq!(building_bytes.len(), positions.len() * v2_edges.len());
         assert_eq!(tree_bytes.len(), building_bytes.len());
         write_shade(
@@ -4219,8 +4214,11 @@ pub fn run(args: &Args) -> Fallible<()> {
         "totalKm": total_km,
         "bytes": bytes.len(),
     });
-    println!("{}", serde_json::to_string(&stats)?);
-    Ok(())
+    match &args.report {
+        Some(path) => crate::write_report(path, &stats)?,
+        None => println!("{}", serde_json::to_string(&stats)?),
+    }
+    Ok(stranded_ways)
 }
 
 #[cfg(test)]

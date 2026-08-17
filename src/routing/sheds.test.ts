@@ -694,7 +694,7 @@ test("re-aiming the sun moves the shade without rebuilding the coverage", () => 
 // The hash both of the artifact's graph figures are built on. Recomputed from the graph's own bytes
 // rather than read out of routing/version.json, because the daily job snaps against whatever graph
 // the live site is serving and that deploy can predate the version file. Pinned against the FNV-1a
-// 64 reference vectors, not against `tiler graph`'s output, so the two implementations stay
+// 64 reference vectors, not against the graph pass's output, so the two implementations stay
 // independent.
 test("the graph hash is FNV-1a 64", () => {
   const of = (text: string): string =>

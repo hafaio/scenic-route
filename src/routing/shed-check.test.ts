@@ -103,7 +103,7 @@ test("a deploy whose artifact names its own key space passes", async () => {
   await expect(checkSheds(join(dir, "nyc.bin"), dir)).resolves.toBeUndefined();
 });
 
-// The failure this gate had all along: `tiler graph` runs on the deploy's Linux and by hand on a
+// The failure this gate had all along: the graph pass runs on the deploy's Linux and by hand on a
 // macOS laptop, and the geodesic and offset maths land a few f32 lengths a ulp apart between them.
 // Not one shed moves, and a gate on the graph's bytes could never be passed by an artifact placed on
 // the other machine.

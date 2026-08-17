@@ -1,4 +1,4 @@
-// `bun run scripts/shed-drill.ts [job...]`: the append-only property of the shed artifact, measured
+// `bun run shed-drill [job...]`: the append-only property of the shed artifact, measured
 // against the real feed rather than a fixture.
 //
 // `closed.bin` is only append-only if a record is a function of ITS OWN permit and the graph — if
@@ -17,8 +17,8 @@
 // a kerb into different edges moved the anchor. That is why the drill re-runs the whole pipeline
 // below the permit walk, parcel fetch included, rather than re-placing the requests it already has.
 //
-// It reads public/routing/nyc.bin and the DOB snapshot clone, so it is a by-hand check next to
-// `bun run check-sheds` after a graph change, not part of `bun test src`.
+// It reads public/routing/nyc.bin and the DOB snapshots package.json pipes in, so it is a by-hand
+// check next to `bun run check-sheds` after a graph change, not part of `bun test src`.
 
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
@@ -26,7 +26,6 @@ import { join } from "node:path";
 import { edgeName, type RoutingGraph } from "../src/routing/graph";
 import {
   byJobNumber,
-  cloneSnapshots,
   encodedShedsOf,
   loadGraphBytes,
   parcelRequestsOf,
@@ -48,6 +47,7 @@ import {
   readShedPermits,
   type ShedAttributes,
   type ShedPermit,
+  shedSnapshots,
 } from "./shed-permits";
 
 const GRAPH_PATH = join(
@@ -375,7 +375,8 @@ function describe(
 }
 
 export async function runDrill(chosen: readonly string[]): Promise<void> {
-  const { permits, lastDay } = await readShedPermits(await cloneSnapshots());
+  const { sources, blobs } = await shedSnapshots("shed-drill");
+  const { permits, lastDay } = await readShedPermits(sources, blobs);
   permits.sort(byJobNumber);
   const day = shedDayOf(lastDay);
   const graph = loadGraphBytes(await readFile(GRAPH_PATH));
@@ -438,5 +439,6 @@ export async function runDrill(chosen: readonly string[]): Promise<void> {
 }
 
 if (import.meta.main) {
-  await runDrill(process.argv.slice(2));
+  // argv[2] is the commit index the pipeline hands every shed script; the jobs to drop follow it.
+  await runDrill(process.argv.slice(3));
 }
