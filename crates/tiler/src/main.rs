@@ -12,6 +12,7 @@ mod binfmt;
 mod canopy;
 mod caster_chunks;
 mod chunks;
+mod commercial;
 mod conflate;
 mod corners;
 mod crown;
@@ -43,6 +44,7 @@ const USAGE: &str = "usage:
   tiler heights --canopy <file.bin> --chm-crs <sf-cs13|utm18n> (--chm <file.tif> | --chm-mosaic <file.txt> --chm-band <n>)
   tiler chunks --manifest <file.json> --data <dir> --chunks <dir> [--stranded-dir <dir>]
   tiler caster-chunks --manifest <file.json> --data <dir> --chunks <dir> --params <file.json>
+  tiler commercial --manifest <file.json> --data <dir> --chunks <dir> --signals <dir> --lines <dir>
   tiler canopy --manifest <file.json> --ramp <file.bin> --data <dir> --tiles <dir>
   tiler shade --manifest <file.json> --data <dir> --tiles <dir> --params <file.json> --city <id>
   tiler elevation --manifest <file.json> --tiles <dir> --city <id> --dem <file.txt> --elevation-crs <sf-cs13|utm18n> --land <file.bin> [--band <n>]
@@ -119,6 +121,13 @@ fn run() -> Fallible<()> {
             data: path(&flags, "data")?,
             chunks: path(&flags, "chunks")?,
             stranded_dir: flags.get("stranded-dir").map(PathBuf::from),
+        }),
+        "commercial" => commercial::run(&commercial::Args {
+            manifest: path(&flags, "manifest")?,
+            data: path(&flags, "data")?,
+            chunks: path(&flags, "chunks")?,
+            signals: path(&flags, "signals")?,
+            lines: path(&flags, "lines")?,
         }),
         "caster-chunks" => caster_chunks::run(&caster_chunks::Args {
             manifest: path(&flags, "manifest")?,

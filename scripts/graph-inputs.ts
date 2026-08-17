@@ -45,8 +45,6 @@ const BUILD_ENTRY = join(import.meta.dirname, "build-street-tiles.ts");
 // `tiler graph` bakes onto edges that were final before the bake ran — the same argument
 // `graphInputPaths` makes about the data those modules read.
 const ATTRIBUTE_ONLY_IMPORTS = new Set([
-  // public/commercial-lines, which `tiler graph --commercial` turns into one attribute byte.
-  "./build-commercial",
   // The sun-position bins the shade pyramid and the per-edge SHDE bake are cut by, the latter
   // written after the graph blob is. Takes src/shade/sun.ts with it.
   "./shade-schedule",
@@ -173,8 +171,8 @@ export async function codeClosure(
 //   append moves no earlier edge, so a ferry cannot perturb a key even indirectly.
 // - landmarks, art and highways are read after the last edge is pushed: each becomes one per-edge
 //   attribute byte over a `scenic::Network` built from the finished edges.
-// - the commercial chain — landuse, buildings, openstreets and dining, which build-commercial snaps
-//   onto the street chunks to make public/commercial-lines — is one more such byte.
+// - the commercial chain — landuse, buildings, openstreets and dining, which `tiler commercial`
+//   snaps onto the street chunks to make public/commercial-lines — is one more such byte.
 // - canopy is the direct-canopy byte, integrated along edge polylines that are already final, and
 //   the crowns of the SHDE bake.
 // - buildings and the shade params drive that bake, which runs after `fs::write(&args.out)`: it

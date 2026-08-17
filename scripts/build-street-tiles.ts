@@ -18,7 +18,6 @@ import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import manifest from "../src/tree-cover/manifest.json";
 import { rampAlpha, rampColor } from "../src/tree-cover/ramp";
-import { buildCommercial, commercialLinesPath } from "./build-commercial";
 import { fetchElevationRaster } from "./elevation";
 import {
   computeShadeBuckets,
@@ -52,8 +51,13 @@ const CHUNK_DIR = join(PUBLIC_DIR, "streets");
 // by `tiler caster-chunks` from the same footprints and crowns `tiler shade` rasterizes.
 const CASTER_DIR = join(PUBLIC_DIR, "casters");
 // The commercial overlay's precomputed per-segment signals, one file per STCK chunk, written by
-// scripts/build-commercial.ts after the chunks exist. Derived, gitignored, like the chunks.
+// `tiler commercial` after the chunks exist. Derived, gitignored, like the chunks.
 const COMMERCIAL_DIR = join(PUBLIC_DIR, "commercial");
+// The qualifying-block centrelines the same pass emits, one file per city (magic CMLN), which
+// `tiler graph --commercial` proximity-bakes into the per-edge commercial discount.
+const COMMERCIAL_LINES_DIR = join(PUBLIC_DIR, "commercial-lines");
+const commercialLinesPath = (cityId: string): string =>
+  join(COMMERCIAL_LINES_DIR, `${cityId}.bin`);
 const ROUTING_DIR = join(PUBLIC_DIR, "routing");
 // The graph's list of the OSM paths its island drop stranded, which the second chunk pass reads back.
 // Per city, beside its graph: the ids are OSM's and cannot collide, but one file would be
@@ -129,11 +133,11 @@ async function fileExists(path: string): Promise<boolean> {
 // mtimes without changing the bytes, which would otherwise force a needless full rebuild and, worse,
 // leave a cache of the derived tiles unusable across CI runs. The stamp file stores this hash.
 async function inputsHash(cities: City[]): Promise<string> {
-  // Every build script, not just this one and the two it calls by name: build-commercial and others
-  // import shared helpers (geometry.ts, land.ts, …) whose output the tiles depend on, so hashing the
-  // whole scripts/ dir is what actually closes the "edit a helper, stay falsely fresh" hole. Over-
-  // inclusive (an unrelated script forces a rebuild) but never false-fresh, and it matches the CI
-  // cache key's `scripts/*.ts` glob.
+  // Every build script, not just this one and the ones it imports: the ingests share helpers
+  // (geometry.ts, land.ts, …) whose output the tiles depend on, so hashing the whole scripts/ dir
+  // is what actually closes the "edit a helper, stay falsely fresh" hole. Over-inclusive (an
+  // unrelated script forces a rebuild) but never false-fresh, and it matches the CI cache key's
+  // `scripts/*.ts` glob.
   const scripts = (await readdir(import.meta.dirname))
     .filter((file) => file.endsWith(".ts"))
     .map((file) => join(import.meta.dirname, file));
@@ -162,7 +166,7 @@ async function inputsHash(cities: City[]): Promise<string> {
       "art",
       "highways",
       // The commercial overlay's precomputed signals are snapped from these; a re-ingest of any must
-      // refresh the build so build-commercial re-runs.
+      // refresh the build so `tiler commercial` re-runs.
       "landuse",
       "dining",
       "openstreets",
@@ -271,8 +275,23 @@ async function build(): Promise<void> {
   runTiler(chunksArgs, false);
 
   // The commercial overlay's per-segment signals: snapped from the committed sources onto the STCK
-  // chunks the tiler just wrote, so this must run after them. Own rm/mkdir of public/commercial.
-  await buildCommercial();
+  // chunks the tiler just wrote, so this must run after them. Own rm/mkdir of both directories.
+  runTiler(
+    [
+      "commercial",
+      "--manifest",
+      MANIFEST_PATH,
+      "--data",
+      DATA_DIR,
+      "--chunks",
+      CHUNK_DIR,
+      "--signals",
+      COMMERCIAL_DIR,
+      "--lines",
+      COMMERCIAL_LINES_DIR,
+    ],
+    false,
+  );
 
   // The shade overlay's shadow-tile pyramids, one per time-of-day bucket, cast from the building
   // footprints and from the canopy's crown heights by `tiler shade` — the tree one only when a city

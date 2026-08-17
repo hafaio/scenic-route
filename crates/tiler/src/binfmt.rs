@@ -19,6 +19,10 @@ pub const LANDMARK_FORMAT: u16 = 1; // scenic POI points, the shared point layou
 pub const ART_FORMAT: u16 = 1; // public-art POI points, the shared point layout, magic "ARTW"
 pub const HIGHWAY_FORMAT: u16 = 1; // highway/elevated-rail nuisance lines, the LAND polygon layout, magic "HWAY"
 pub const COMMERCIAL_FORMAT: u16 = 1; // qualifying commercial-block lines, the LAND polygon layout, magic "CMLN"
+pub const LANDUSE_FORMAT: u16 = 1; // tax lots carrying a land-use class byte, magic "PLUT"
+pub const DINING_FORMAT: u16 = 1; // outdoor-dining points, the shared point layout, magic "DINE"
+pub const OPENSTREET_FORMAT: u16 = 1; // Open Streets corridor samples, the shared point layout, magic "OSTR"
+pub const CHUNK_FORMAT: u16 = 4; // the served z12 street chunk, magic "STCK"; v4 adds the stranded bitmap
 
 pub const SIDES: usize = 2; // the two sidewalks a density blob carries per vertex, left then right
 pub const DECIMETERS_PER_METER: f64 = 10.0; // the crown byte's unit: a decimetre of crown radius
@@ -314,17 +318,9 @@ pub fn read_canopy(path: &Path) -> Fallible<Canopy> {
     })
 }
 
-/// A bare point set (the scenic POI sources: `LMRK` landmarks, `ARTW` public art). The shared
-/// point layout — the header, then `count` (lng, lat) varint deltas, no trailing payload. `tiler
-/// graph` snaps each to the nearest walking node and fans it out into a per-edge discount.
-pub fn read_points(path: &Path, magic: &str, format: u16) -> Fallible<Vec<Coord>> {
-    let bytes = fs::read(path)?;
-    check_magic(&bytes, magic, format, path)?;
-    let head = header(&bytes);
-    let mut cursor = Cursor {
-        bytes: &bytes,
-        offset: head.body,
-    };
+// The shared point body: `count` zigzag-varint (lng, lat) deltas. Advances the cursor past them,
+// so a caller with a trailing region (PLUT's class bytes) can read on from there.
+fn decode_points(cursor: &mut Cursor, head: &Header) -> Vec<Coord> {
     let mut coords = Vec::with_capacity(head.count);
     let mut x: i64 = 0;
     let mut y: i64 = 0;
@@ -336,7 +332,85 @@ pub fn read_points(path: &Path, magic: &str, format: u16) -> Fallible<Vec<Coord>
             lat: head.origin_lat + y as f64 * head.scale,
         });
     }
-    Ok(coords)
+    coords
+}
+
+/// A bare point set (the scenic POI sources: `LMRK` landmarks, `ARTW` public art; the commercial
+/// overlay's `DINE` and `OSTR` samples). The shared point layout — the header, then `count` (lng,
+/// lat) varint deltas. A trailing name blob, where the source wrote one, is left unread. `tiler
+/// graph` snaps each to the nearest walking node and fans it out into a per-edge discount.
+pub fn read_points(path: &Path, magic: &str, format: u16) -> Fallible<Vec<Coord>> {
+    let bytes = fs::read(path)?;
+    check_magic(&bytes, magic, format, path)?;
+    let head = header(&bytes);
+    let mut cursor = Cursor {
+        bytes: &bytes,
+        offset: head.body,
+    };
+    Ok(decode_points(&mut cursor, &head))
+}
+
+/// PLUT v1: the tax lots, in the shared point layout plus ONE trailing region of one class byte per
+/// point in the same sorted order, as TREE carries its crowns. Returns the points and their
+/// land-use classes, parallel — index `i` is one lot.
+pub fn read_classified_points(
+    path: &Path,
+    magic: &str,
+    format: u16,
+) -> Fallible<(Vec<Coord>, Vec<u8>)> {
+    let bytes = fs::read(path)?;
+    check_magic(&bytes, magic, format, path)?;
+    let head = header(&bytes);
+    let mut cursor = Cursor {
+        bytes: &bytes,
+        offset: head.body,
+    };
+    let coords = decode_points(&mut cursor, &head);
+    let classes = cursor.offset;
+    let end = classes + head.count;
+    if bytes.len() < end {
+        return Err(format!(
+            "{} is truncated: {} bytes, {end} needed for {} class bytes",
+            path.display(),
+            bytes.len(),
+            head.count
+        )
+        .into());
+    }
+    Ok((coords, bytes[classes..end].to_vec()))
+}
+
+/// STCK v4: one served z12 street chunk read back into the segment polylines it carries, in file
+/// order — `tiler commercial` keys its per-segment signals on that order, and so does the client.
+/// The per-vertex density bytes are stepped over to keep the cursor aligned and the trailing
+/// stranded bitmap is left unread: a signal is computed for every segment the chunk carries.
+pub fn read_chunk(path: &Path) -> Fallible<Vec<Vec<Coord>>> {
+    let bytes = fs::read(path)?;
+    check_magic(&bytes, "STCK", CHUNK_FORMAT, path)?;
+    let head = header(&bytes);
+    let mut cursor = Cursor {
+        bytes: &bytes,
+        offset: head.body,
+    };
+    let mut segments = Vec::with_capacity(head.count);
+    for _ in 0..head.count {
+        let vertices = usize::from(u16_at(cursor.bytes, cursor.offset));
+        cursor.offset += 3; // the vertex count, then the sidewalk-offset byte the snap has no use for
+        let mut polyline = Vec::with_capacity(vertices);
+        let mut x: i64 = 0;
+        let mut y: i64 = 0;
+        for _ in 0..vertices {
+            x += i64::from(cursor.varint());
+            y += i64::from(cursor.varint());
+            polyline.push(Coord {
+                lng: head.origin_lng + x as f64 * head.scale,
+                lat: head.origin_lat + y as f64 * head.scale,
+            });
+        }
+        cursor.offset += SIDES * vertices;
+        segments.push(polyline);
+    }
+    Ok(segments)
 }
 
 /// The street network, plus the file it came from: `tiler densities` patches the trailing

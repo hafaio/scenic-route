@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use crate::Fallible;
-use crate::binfmt::{self, SIDES, Streets, write_varint, zigzag};
+use crate::binfmt::{self, CHUNK_FORMAT, SIDES, Streets, write_varint, zigzag};
 use crate::geometry::round_half_up;
 use crate::graph::{STRANDED_FORMAT, STRANDED_HEADER_BYTES};
 use crate::manifest::Manifest;
@@ -18,7 +18,6 @@ use crate::raster::{
 use crate::sidewalks;
 
 // layouts: scripts/README.md
-const CHUNK_FORMAT: u16 = 4;
 const CHUNK_HEADER_BYTES: usize = 40;
 const CHUNK_COORD_SCALE: f64 = 1e-6; // degrees per quantized unit, ~0.1 m
 const CHUNK_ZOOM: u32 = 12;
