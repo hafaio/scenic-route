@@ -100,7 +100,6 @@ test("the input set is the sources a durable key can come out of", async () => {
   expect(paths).not.toContain("data/landuse/nyc.bin");
   expect(paths).not.toContain("data/openstreets/nyc.bin");
   expect(paths).not.toContain("data/dining/nyc.bin");
-  expect(paths).not.toContain("scripts/build-commercial.ts");
   // Nor the buildings and the sun schedule: the SHDE bake they drive runs after the graph blob is
   // written, and the shade pyramid is not the graph at all.
   expect(paths).not.toContain("data/buildings/nyc.bin");

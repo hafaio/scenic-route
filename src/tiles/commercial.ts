@@ -6,7 +6,7 @@ import type { TileRenderer } from "./renderer";
 
 // The "commercial" overlay. It highlights whole blocks, not points. The heavy work — snapping ~800k
 // PLUTO land-use lots and ~1M building footprints onto every street segment — is done at BUILD TIME by
-// scripts/build-commercial.ts, which writes per-segment SIGNALS to public/commercial/{x}/{y}.bin
+// `tiler commercial`, which writes per-segment SIGNALS to public/commercial/{x}/{y}.bin
 // (magic CMRC), one file per STCK street chunk, aligned by segment index. Each segment carries three
 // bytes: commercialFrac (commercial lots / all fronting lots, 0..255), medianHeightMeters (median
 // snapped roof height, 255 when none), and flags (bit0 an Open Street, bit1 outdoor seating).

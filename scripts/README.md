@@ -17,7 +17,7 @@ automatically whenever an input is newer than the last run.
 
 ## Who does what: TypeScript fetches, Rust computes
 
-**All of the model math lives in `crates/tiler`**, a Rust binary with eight subcommands. The
+**All of the model math lives in `crates/tiler`**, a Rust binary with eleven subcommands. The
 scripts fetch, encode and orchestrate; they compute nothing about trees.
 
 | | |
@@ -31,8 +31,10 @@ tiler heights --canopy <file.bin> --chm-crs <sf-cs13|utm18n> (--chm <file.tif> |
 tiler canopy --manifest … --ramp … --data … --tiles …         # the LiDAR-canopy cover fill pyramid
 tiler genus  --manifest … --palette … --data … --tiles …      # the genus-dot raster pyramid
 tiler shade  --manifest … --data … --tiles … --params …       # the building- and tree-shadow pyramids
+tiler elevation --manifest … --tiles … --city … --dem … --elevation-crs … --land …   # the terrain-relief pyramid
 tiler chunks --manifest … --data … --chunks … [--paths …]     # slices STRT (+PATH) into the client's street chunks
 tiler caster-chunks --manifest … --data … --chunks … --params …  # slices BLDG+CNPY+TREE into the client's shadow-caster chunks
+tiler commercial --manifest … --data … --chunks … --signals … --lines …   # snaps the commercial signals onto those chunks, and the qualifying blocks' lines
 tiler graph  --streets <in.bin> --out <out.bin> [--paths …] [--sidewalks …] [--ferries …] [--canopy …]  # contracts STRT (+PATH, +SWLK, +FERR) into the GRPH routing graph
 tiler key-probe --streets … [--paths …] [--sidewalks …] --out …  # the same pipeline over a fixture, for the durable key hash the shed gate stamps
 ```
@@ -238,7 +240,7 @@ in its own band.
 | dining | NYC Dining Out `fpeh-f7ci` + OSM `outdoor_seating` via Overpass | outdoor-dining points; a committed source, magic `DINE` — a "cute" signal for the commercial overlay |
 | openstreets | NYC DOT Open Streets `uiay-nctu` (non-school), sampled every ~10 m | Open Streets corridor points; a committed source, magic `OSTR` — a "cute" signal for the commercial overlay |
 
-The commercial overlay's per-segment signals are then precomputed at **build time** by `scripts/build-commercial.ts` (run after `tiler chunks`): it snaps `landuse`/`buildings`/`dining`/`openstreets` onto each street segment by *frontage* (perpendicular, projection in-span) and writes `public/commercial/{x}/{y}.bin` (magic `CMRC`, 3 bytes/segment: commercial fraction, median roof height, flags for open-street/seating), one file per `STCK` chunk, gitignored. The overlay reads those and applies the gate (>50% commercial AND low-rise AND (open-street OR seating)) client-side, so its thresholds stay tunable without a rebuild. The **same gate** also runs at build time to emit the qualifying blocks' centrelines as `public/commercial-lines/<id>.bin` (magic `CMLN`, the `HWAY` single-ring-polygon layout, gitignored), which `tiler graph --commercial` proximity-bakes into the per-edge commercial routing discount (GRPH byte 27).
+The commercial overlay's per-segment signals are then precomputed at **build time** by `tiler commercial` (run after `tiler chunks`): it snaps `landuse`/`buildings`/`dining`/`openstreets` onto each street segment by *frontage* (perpendicular, projection in-span) and writes `public/commercial/{x}/{y}.bin` (magic `CMRC`, 3 bytes/segment: commercial fraction, median roof height, flags for open-street/seating), one file per `STCK` chunk, gitignored. The overlay reads those and applies the gate (>50% commercial AND low-rise AND (open-street OR seating)) client-side, so its thresholds stay tunable without a rebuild. The **same gate** also runs at build time to emit the qualifying blocks' centrelines as `public/commercial-lines/<id>.bin` (magic `CMLN`, the `HWAY` single-ring-polygon layout, gitignored), which `tiler graph --commercial` proximity-bakes into the per-edge commercial routing discount (GRPH byte 27).
 
 Only walkable road types are kept. Highways, ramps, driveways, ferry routes, u-turns and
 non-physical segments are not part of the network a person walks. Bridges and tunnels come in
@@ -726,7 +728,7 @@ verbatim to `public/{landmarks,art}/<id>.bin` for the overlay.
 layout (name blob empty), for the commercial overlay's "cute" signals. **`data/landuse/<id>.bin`
 (`PLUT`)** is the point layout with a **trailing class byte per point** (the land-use digit 1..5) in
 place of the name blob, via `encodeClassifiedPoints` — mirroring how `TREE` appends parallel per-point
-bytes. All three are consumed only at build time by `scripts/build-commercial.ts` (see "The sources").
+bytes. All three are consumed only at build time by `tiler commercial` (see "The sources").
 
 ### `data/highways/<id>.bin` — the nuisance lines, magic `HWAY` (v1)
 
@@ -1532,7 +1534,7 @@ across POIs and saturated `1 − e^{−k·field}` (so a dense cluster stops stac
 per-mood (landmarks wide, art tight). The highway byte is an areal **penalty**: a Gaussian of the
 edge's metre distance to the nearest highway or above-ground-rail line (`HWAY`). The commercial byte
 is the same proximity Gaussian over the qualifying commercial-block lines (`CMLN`, derived by
-`build-commercial.ts`), read instead as a **discount** with a tight σ so the reward lands on the
+`tiler commercial`), read instead as a **discount** with a tight σ so the reward lands on the
 block's own street and sidewalks. All four quantize to a 0–254 ceiling so the client's
 `maxLandmark`/`maxArt`/`maxCommercial` stay `< 1` (the cost model's admissibility invariant, as
 `maxCover` already relies on); a later phase reads the discounts as `1 − w·attr` and the penalty as
@@ -2105,7 +2107,7 @@ goes back in:
 | --- | --- | --- |
 | `data/ferries` | the KIND_FERRY edges | they carry `NO_SOURCE_ID`, and are appended after the walking sort and the node renumber onto nodes that already exist — `assign_ordinals` skips them and an append moves no earlier edge |
 | `data/landmarks`, `data/art`, `data/highways` | one scenic attribute byte each | read at `graph.rs:3501-3535`, after the last `v2_edges.push`, over a `scenic::Network` built from the finished edges |
-| `data/landuse`, `data/buildings`, `data/openstreets`, `data/dining` → `public/commercial-lines` | the commercial attribute byte | one more such byte, read at `graph.rs:3542`. `tiler chunks` and `build-commercial.ts` are on this branch and nowhere else |
+| `data/landuse`, `data/buildings`, `data/openstreets`, `data/dining` → `public/commercial-lines` | the commercial attribute byte | one more such byte, read at `graph.rs:3542`. `tiler chunks` and `tiler commercial` are on this branch and nowhere else |
 | `data/canopy` | the direct-canopy byte, and the crowns of the SHDE bake | integrated along edge polylines that are already final |
 | `data/buildings` + the shade params (`shade-schedule.ts`, `src/shade/sun.ts`) | the per-edge SHDE bake | it runs *after* `fs::write(&args.out)`; it cannot move a key in the file it is written beside |
 | `data/land`, `data/trees` | the canopy and genus pyramids | nothing on the graph's chain reads either |

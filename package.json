@@ -17,7 +17,6 @@
     "build-dining": "bun run scripts/dining.ts",
     "build-openstreets": "bun run scripts/openstreets.ts",
     "build-landuse": "bun run scripts/landuse.ts",
-    "build-commercial": "bun run scripts/build-commercial.ts",
     "build-sheds": "bun run scripts/build-sheds.ts",
     "check-sheds": "bun run scripts/check-sheds.ts",
     "check-shed-inputs": "bun run scripts/check-shed-inputs.ts",
