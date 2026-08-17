@@ -232,7 +232,7 @@
         "east": -122.36071693700956
       },
       "trees": 194983,
-      "updated": "2026-08-14",
+      "updated": "2026-08-16",
       "attribution": "SF Public Works street trees via DataSF",
       "sourceUrl": "https://data.sfgov.org/d/tkzw-k3nq",
       "field": {
@@ -241,7 +241,7 @@
           "format": 3,
           "count": 203608,
           "bytes": 1116661,
-          "sha256": "6cb40b70d34da91b94470c6e5cae1bdba6a6d8198936490a72e56a7ec8e6b066"
+          "sha256": "c7ca3fb60d19034a70eb40a3bfb371d5b80d420d33c09173384b0c1dd2928be9"
         },
         "land": {
           "file": "sf.bin",
@@ -259,7 +259,7 @@
           "sha256": "f2287b1054607afdf991acae81007f3501605bf5fee94c2e6c20471dad531ef3",
           "squareKm": 16.8,
           "measuredHeights": 233762,
-          "updated": "2026-08-14",
+          "updated": "2026-08-16",
           "attribution": "Urban tree canopy © SF Planning (2013 Urban Forest Plan)",
           "sourceUrl": "https://data.sfgov.org/d/ni2e-vpbg",
           "heightAttribution": "Elevation © USGS 3DEP / NASA WERK (CC0)",
@@ -367,7 +367,7 @@
             "p99": 0.913
           }
         },
-        "updated": "2026-08-14",
+        "updated": "2026-08-16",
         "attribution": "path & tree data © OpenStreetMap contributors",
         "sourceUrl": "https://www.openstreetmap.org/copyright"
       },
@@ -403,7 +403,7 @@
             "p99": 0.793
           }
         },
-        "updated": "2026-08-14",
+        "updated": "2026-08-16",
         "attribution": "SF basemap street centrelines via DataSF",
         "sourceUrl": "https://data.sfgov.org/d/3psu-pn9h"
       },
@@ -438,7 +438,7 @@
             "p99": 0.994
           }
         },
-        "updated": "2026-08-14",
+        "updated": "2026-08-16",
         "attribution": "OpenStreetMap contributors",
         "sourceUrl": "https://www.openstreetmap.org/copyright"
       }
