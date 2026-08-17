@@ -47,18 +47,45 @@ function cacheKey(host: string, query: Record<string, string>): string {
   return JSON.stringify({ host, ...query });
 }
 
+// Bun's own suggestion when a socket dies mid-request, behind a switch because it prints per
+// connection and only CI needs it.
+const VERBOSE = process.env.SOCRATA_VERBOSE === "1";
+
+// What a failed attempt took, which is the difference between a request that was never accepted and
+// one the server thought about. Reading it off the CI timestamps meant reconstructing it by hand.
+function attemptShape(elapsedMs: number): string {
+  const seconds = (elapsedMs / 1000).toFixed(1);
+  if (elapsedMs >= REQUEST_TIMEOUT_MS - 1_000) {
+    return `${seconds}s (ran out the clock)`;
+  } else if (elapsedMs < 5_000) {
+    return `${seconds}s (refused early)`;
+  } else {
+    return `${seconds}s`;
+  }
+}
+
 async function fetchJson<Row>(url: string): Promise<Row[]> {
   const headers: Record<string, string> =
     APP_TOKEN === undefined ? {} : { "X-App-Token": APP_TOKEN };
   try {
+    // Written by the attempt and read by its failure handler, which runs outside the attempt's own
+    // scope.
+    let attemptStarted = Date.now();
     return await pRetry(
       async () => {
+        attemptStarted = Date.now();
         const response = await fetch(url, {
           headers,
           signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-        });
+          verbose: VERBOSE,
+        } as RequestInit);
         if (!response.ok) {
-          throw new Error(`${response.status} ${response.statusText}`);
+          // Socrata says WHY in its own headers, and a bare status line throws that away — an
+          // expired token and an over-quota address are both "403" until you read them.
+          const told = ["x-socrata-requestid", "x-error-code", "server", "date"]
+            .map((name) => `${name}=${response.headers.get(name) ?? "-"}`)
+            .join(" ");
+          throw new Error(`${response.status} ${response.statusText} ${told}`);
         }
         return (await response.json()) as Row[];
       },
@@ -69,12 +96,25 @@ async function fetchJson<Row>(url: string): Promise<Row[]> {
         randomize: true,
         onFailedAttempt: ({ error, attemptNumber }) => {
           console.error(
-            `  attempt ${attemptNumber}/${MAX_ATTEMPTS} failed: ${error}`,
+            `  attempt ${attemptNumber}/${MAX_ATTEMPTS} failed after ${attemptShape(Date.now() - attemptStarted)}: ${error}`,
           );
         },
       },
     );
   } catch (error) {
+    // One last read of the same URL without the token, from this process and this network stack, so
+    // the token is tested where the failure actually happens rather than from a laptop that cannot
+    // reproduce it. Short, and its own failure is swallowed — this is a note for the log, not a
+    // retry.
+    if (APP_TOKEN !== undefined) {
+      const verdict = await fetch(url, {
+        signal: AbortSignal.timeout(15_000),
+      }).then(
+        (response) => `answered ${response.status}`,
+        (reason) => `failed too: ${reason}`,
+      );
+      console.error(`  the same read without the app token ${verdict}`);
+    }
     throw new Error(`failed to fetch ${url}: ${error}`);
   }
 }

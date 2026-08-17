@@ -50,9 +50,17 @@ jobs:
       #
       # A runner shares its egress address with the whole fleet, and the anonymous Socrata pool is
       # throttled per address. Absent on a fork, which reads unauthenticated instead.
+      # What this runner can reach, recorded whether or not the read below works. The failures are
+      # invisible from a laptop, so the only place the evidence exists is here; scripts/socrata-probe.sh
+      # says what each column distinguishes. Observational, and never allowed to fail the job.
+      - run: bash scripts/socrata-probe.sh
+        continue-on-error: true
+        env:
+          SOCRATA_APP_TOKEN: ${{ secrets.SOCRATA_APP_TOKEN }}
       - run: bun run update-sheds
         env:
           SOCRATA_APP_TOKEN: ${{ secrets.SOCRATA_APP_TOKEN }}
+          SOCRATA_VERBOSE: "1"
 
       # The ferry timetable, riding along because it wants exactly the same thing: a daily look at a
       # feed that rarely moves. It re-reads both GTFS zips and opens a new timetable only when the
