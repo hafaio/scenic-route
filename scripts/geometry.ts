@@ -332,8 +332,8 @@ export function encodePolygons(
 
 // The measured canopy polygons, magic `CNPY`: the encodePolygons body, then ONE trailing region of
 // one u16 little-endian per polygon in the same polygon order — the crown height in decimetres, as
-// BLDG carries its roof heights. The ingest writes the region zeroed and `tiler heights` samples
-// the LiDAR height model into it in place, the way `tiler densities` fills the street density blob;
+// BLDG carries its roof heights. The ingest writes the region zeroed and the height pass samples
+// the LiDAR height model into it in place, the way the density pass fills the street density blob;
 // a polygon the model saw no cell for keeps the 0, which reads as unknown. layout: scripts/README.md
 export function encodeCanopy(
   format: number,
@@ -476,7 +476,7 @@ export interface NetworkRecord {
 
 // The one encoder all three networks share: STRT's layout, parameterized by magic and format. The
 // density blob is written zeroed — two bytes a vertex, one sidewalk each — and filled in place by
-// `tiler densities` for STRT and PATH, so the coordinates it offsets the sidewalks from are the
+// the density pass for STRT and PATH, so the coordinates it offsets the sidewalks from are the
 // ones that ship rather than a parallel copy. SWLK's stays zeroed and no pass fills it: a mapped
 // sidewalk takes the cover byte of the street side it was matched to. layout: scripts/README.md
 export function encodeNetwork(

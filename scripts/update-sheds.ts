@@ -31,14 +31,16 @@
 // What it costs in steady state: a shallow fetch of the DOB repo, the deployed graph off the Pages
 // site, and one Socrata batch for the ~16 permits that are new. No LFS object is touched on any path,
 // nothing deploys, and what it leaves behind is a commit on `main`.
+//
+// package.json fetches that history and pipes the snapshots in, so the clone happens before the
+// graph check below rather than after it: a run that stops on a key-space mismatch has spent a
+// shallow fetch it did not need, and writes nothing either way.
 
-import { spawnSync } from "node:child_process";
-import { mkdir, readFile, stat } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { RoutingGraph } from "../src/routing/graph";
 import {
   byJobNumber,
-  cloneSnapshots,
   encodedShedsOf,
   loadGraphBytes,
   parcelRequestsOf,
@@ -46,7 +48,6 @@ import {
   placeRecords,
   SHED_DIR,
   type ShedCoverage,
-  SNAPSHOT_DIR,
   toConfidenceByte,
   toEncodedSpans,
   toShedRecord,
@@ -69,6 +70,7 @@ import {
   resumeFrom,
   type ShedAttributes,
   type ShedPermit,
+  shedSnapshots,
 } from "./shed-permits";
 
 // The graph the day's new sheds are placed against has to be the one the client is running, and the
@@ -79,10 +81,7 @@ const GRAPH_URL = `${SITE}/routing/nyc.bin`;
 // read out of the checkout and written back over. SHED_ARTIFACT names another directory, or a URL to
 // read one over HTTP — what `raw` serves off `main`, say.
 const ARTIFACT = process.env.SHED_ARTIFACT ?? SHED_DIR;
-// How far back a shallow clone reaches, counted from the first day the walk applies. The walk itself
-// wants only the commits from a couple of days before that; a month of slack costs a megabyte or two
-// and covers a feed whose commit stamps have drifted from the days their snapshots claim. The full
-// history is ~370 MB.
+// How far back the history this run reads reaches, counted from the first day the walk applies.
 const SHALLOW_DAYS = 30;
 const DAY_MS = 86_400_000;
 const EPOCH_MS = Date.UTC(2017, 11, 28); // the first DOB snapshot; every day number counts from here
@@ -108,44 +107,28 @@ async function readArtifact(name: string): Promise<Uint8Array> {
   }
 }
 
-// A clone deep enough to hold the walk. An existing one is fetched rather than replaced, so a
-// developer's full clone and CI's shallow one both work and neither is re-downloaded.
-async function snapshotsSince(applyFrom: string): Promise<string> {
-  if ((await stat(SNAPSHOT_DIR).catch(() => null)) === null) {
-    const since = new Date(Date.parse(applyFrom) - SHALLOW_DAYS * DAY_MS)
-      .toISOString()
-      .slice(0, 10);
-    await mkdir(join(SNAPSHOT_DIR, ".."), { recursive: true });
-    console.error(`  cloning the DOB snapshots since ${since}`);
-    const clone = spawnSync(
-      "git",
-      [
-        "clone",
-        "--bare",
-        `--shallow-since=${since}`,
-        "https://github.com/NYCDOB/ActiveShedPermits.git",
-        SNAPSHOT_DIR,
-      ],
-      { stdio: "inherit" },
-    );
-    if (clone.status !== 0) {
-      // A shallow clone can fail on a repo whose history is shaped wrong for it; the full one always
-      // works and is only expensive the once.
-      console.error("  shallow clone failed, taking the whole history");
-      return await cloneSnapshots();
-    } else {
-      return SNAPSHOT_DIR;
-    }
-  } else {
-    const fetched = spawnSync("git", ["fetch", "--all", "--tags", "--force"], {
-      cwd: SNAPSHOT_DIR,
-      stdio: "inherit",
-    });
-    if (fetched.status !== 0) {
-      throw new Error("could not fetch the DOB snapshots");
-    }
-    return SNAPSHOT_DIR;
-  }
+// The first day of the feed's history this run has to read, which is what package.json bounds both
+// its shallow clone and its blob stream by. A month before the day the walk applies from: the walk
+// itself wants only the commits from a day or two before that, since a commit's UTC stamp can fall
+// after the New York day its CSV claims, and the rest is slack for a feed whose stamps have drifted
+// further. It costs a megabyte or two of history against the ~370 MB of the whole of it.
+export function readCommitsFrom(applyFrom: string): string {
+  return new Date(Date.parse(applyFrom) - SHALLOW_DAYS * DAY_MS)
+    .toISOString()
+    .slice(0, 10);
+}
+
+// The same day, worked out from the artifact alone, so `scripts/shed-window.ts` can print it before
+// any of the pipeline runs. The update reads the artifact again for itself; this is the one thing the
+// clone depth has to know and cannot learn from anything already on disk.
+export async function shedWindow(): Promise<string> {
+  const [open, closed] = await Promise.all([
+    readArtifact("open.bin"),
+    readArtifact("closed.bin"),
+  ]);
+  return readCommitsFrom(
+    resumeFrom(isoDay(decodeShedArtifact(open, closed).lastDay)),
+  );
 }
 
 async function loadDeployedGraph(): Promise<RoutingGraph> {
@@ -290,8 +273,13 @@ export async function updateSheds(): Promise<void> {
   // Every day whose intervals could still change, which is every day a reappearance could still be
   // merged back into: the renewal tolerance and no more.
   const applyFrom = resumeFrom(through);
+  const { sources, blobs } = await shedSnapshots(
+    "update-sheds",
+    readCommitsFrom(applyFrom),
+  );
   const { permits, lastDay, counts } = await readShedPermits(
-    await snapshotsSince(applyFrom),
+    sources,
+    blobs,
     applyFrom,
     artifact.counts,
   );

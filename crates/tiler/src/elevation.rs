@@ -21,7 +21,6 @@ use crate::Fallible;
 use crate::binfmt::{self, LAND_FORMAT};
 use crate::dem::{Dem, Field, resample};
 use crate::geometry::PolygonIndex;
-use crate::heights::Tmerc;
 use crate::manifest::{Bounds, Manifest};
 use crate::raster::{
     MIN_ZOOM, TILE_SIZE, Tile, encode_webp, pixel_x_to_lng, pixel_y_to_lat, plan_tiles,
@@ -45,15 +44,6 @@ pub struct Args {
     pub manifest: PathBuf,
     pub tiles: PathBuf,
     pub city: String,
-    /// The DEM tiles, as a newline-separated list — several hundred paths is more than a command
-    /// line should carry.
-    pub dem: PathBuf,
-    pub band: usize,
-    /// The projection those tiles are published on. Named by the caller rather than resolved from a
-    /// table here, because `tiler graph` is already told the same thing by `--elevation-crs` and two
-    /// tables disagreeing means a city whose graph bakes correct relief and whose overlay is simply
-    /// absent, with the build reporting success.
-    pub projection: Tmerc,
     /// The city's land polygons. The DEM covers water — 3DEP writes a returned surface for the bay
     /// as readily as for a hill — so without this the overlay tints the sea at sea level and reads
     /// as ground. Also clips the shoreline back from the small creep the gap fill leaves behind it.
@@ -211,27 +201,25 @@ fn render(field: &Field, directory: &std::path::Path, tile: &Tile) -> Fallible<u
     Ok(bytes.len() as u64)
 }
 
-pub fn run(args: &Args) -> Fallible<()> {
+/// `dem` is borrowed rather than opened here because the graph pass resamples the same mosaic for its
+/// relief byte, over different bounds at a different zoom; `tiler build` opens it once and hands it
+/// to both.
+pub fn run(args: &Args, dem: &mut Dem) -> Fallible<()> {
     let started = Instant::now();
     let mut manifest: Manifest = serde_json::from_slice(&fs::read(&args.manifest)?)?;
     manifest.cities.retain(|city| city.id == args.city);
     if manifest.cities.is_empty() {
         return Err(format!("no city {} in the manifest", args.city).into());
     }
-    let paths: Vec<PathBuf> = fs::read_to_string(&args.dem)?
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(PathBuf::from)
-        .collect();
-    let mut dem = Dem::open(&paths, args.projection, args.band)?;
     eprintln!("{}: {} DEM tiles", args.city, dem.tiles());
     // Widened by the same reach the mask is allowed, because the city's bounds are the box around
     // those same shoreline polygons: without this the field simply ends where the polygons do and
     // there is nothing out there for the reach to keep. Hunters Point's docks sat past the east edge
     // and were cut by a ruler-straight line down the middle of the shipyard.
     manifest.cities[0].bounds = widen(&manifest.cities[0].bounds, SHORE_REACH_METERS);
-    let mut field = resample(&manifest.cities[0].bounds, ELEVATION_MAX_ZOOM, &mut dem)?;
-    drop(dem);
+    let mut field = resample(&manifest.cities[0].bounds, ELEVATION_MAX_ZOOM, dem)?;
+    // The decoded tile is a city of float32 at one metre; nothing below reads the mosaic again.
+    dem.release();
 
     // Water out. The DEM answers over the bay and the ocean the same way it answers over a hill, so
     // an unmasked overlay tints the sea a valley green and the reader has to know the coastline to

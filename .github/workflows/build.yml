@@ -40,10 +40,11 @@ jobs:
       # and this compares that against the same in this checkout — so a change that lands without a
       # `bun run build-sheds` fails here rather than one deploy later. It reads data/** only as the
       # LFS POINTER text, whose oid is the object's own sha256, so it needs no LFS objects and this
-      # job's `lfs: false` stays as it is. Its code half is `tiler key-probe` over a 268 KB committed
-      # fixture: a debug build of the crate (the clippy run above is check-only, so this is the
-      # job's one codegen build; rust-cache keeps it) and 0.09 s to run.
-      # scripts/graph-inputs.ts has the set, scripts/README.md has why it is that set.
+      # job's `lfs: false` stays as it is. Both halves are the tiler's — `tiler graph-inputs` over
+      # the plan's sources decision, and `tiler key-probe` over a 268 KB committed fixture — so this
+      # is a debug build of the crate (the clippy run above is check-only, so this is the job's one
+      # codegen build; rust-cache keeps it) and under a second to run.
+      # scripts/graph-inputs.ts reads their reports, scripts/README.md has why the set is that set.
       - run: bun run check-shed-inputs
       # The tile render + static export is expensive (the shade pyramid alone is ~20 min) and its
       # output is only consumed by the Pages deploy, so it runs only on that path. A push or PR stops
@@ -60,7 +61,7 @@ jobs:
           key: ${{ runner.os }}-nextjs-${{ hashFiles('bun.lock') }}-${{ hashFiles('**.[jt]s', '**.[jt]sx') }}
           restore-keys: |
             ${{ runner.os }}-nextjs-${{ hashFiles('bun.lock') }}-
-      # The derived tiles/graph (public/**), keyed on the tiler's inputs. On a hit, build-street-tiles'
+      # The derived tiles/graph (public/**), keyed on the tiler's inputs. On a hit, `tiler build`'s
       # content-hash freshness check recognizes them as current and skips the ~20-min render; on a miss
       # (any data/tiler/script change) it rebuilds and this saves the new set. The freshness check is the
       # correctness net, so the key only needs to be a good hit heuristic, not exhaustive.

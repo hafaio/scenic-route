@@ -259,7 +259,7 @@ pub fn read_buildings(path: &Path) -> Fallible<(Vec<Polygon>, Vec<f64>)> {
     Ok((polygons, heights))
 }
 
-/// The measured canopy polygons, plus the file they came from: `tiler heights` patches the
+/// The measured canopy polygons, plus the file they came from: the height pass patches the
 /// trailing height region back into `bytes` and rewrites it, so the region is not decoded away.
 pub struct Canopy {
     pub bytes: Vec<u8>,
@@ -381,7 +381,7 @@ pub fn read_classified_points(
 }
 
 /// STCK v4: one served z12 street chunk read back into the segment polylines it carries, in file
-/// order — `tiler commercial` keys its per-segment signals on that order, and so does the client.
+/// order — the commercial pass keys its per-segment signals on that order, and so does the client.
 /// The per-vertex density bytes are stepped over to keep the cursor aligned and the trailing
 /// stranded bitmap is left unread: a signal is computed for every segment the chunk carries.
 pub fn read_chunk(path: &Path) -> Fallible<Vec<Vec<Coord>>> {
@@ -413,7 +413,7 @@ pub fn read_chunk(path: &Path) -> Fallible<Vec<Vec<Coord>>> {
     Ok(segments)
 }
 
-/// The street network, plus the file it came from: `tiler densities` patches the trailing
+/// The street network, plus the file it came from: the density pass patches the trailing
 /// density blob back into `bytes` and rewrites it, so the blob is not decoded away.
 pub struct Streets {
     pub bytes: Vec<u8>,
@@ -430,7 +430,7 @@ pub struct Streets {
     pub name_ids: Vec<u16>, // per segment: index into `names`, 0xFFFF when the row carried no label
     pub names: Vec<String>, // the distinct street names, decoded from the trailing name blob
     pub lengths_m: Vec<f32>, // per segment: the stored geodesic length; the graph sums, never recomputes
-    pub origin_lng: f64, // the quantized deltas' reference, so `tiler graph` can recover the ints
+    pub origin_lng: f64, // the quantized deltas' reference, so the graph pass can recover the ints
     pub origin_lat: f64,
     pub scale: f64, // degrees per quantized unit (1e-6)
     density_offset: usize,
@@ -590,7 +590,7 @@ fn read_network(path: &Path, magic: &str, format: u16) -> Fallible<Streets> {
 }
 
 /// One ferry stop, in final geographic coordinates with its GTFS name — unsnapped in the file;
-/// `tiler graph` snaps it to the nearest walking node.
+/// the graph pass snaps it to the nearest walking node.
 pub struct FerryStop {
     pub lng: f64,
     pub lat: f64,

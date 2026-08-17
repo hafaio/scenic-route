@@ -1,7 +1,7 @@
-//! `tiler heights`: the crown height of every measured-canopy polygon, sampled from a 1 m LiDAR
-//! raster. Run by scripts/build-tree-data.ts once the canopy `.bin` is written — the file arrives
-//! with its height region zeroed and leaves with it filled, in place, exactly as the street density
-//! blob does under `tiler densities`.
+//! The crown height of every measured-canopy polygon, sampled from a 1 m LiDAR raster. The first
+//! half of `tiler ingest`, run once scripts/tree-data-fetch.ts has written the canopy `.bin` — the
+//! file arrives with its height region zeroed and leaves with it filled, in place, exactly as the
+//! street density blob does in the pass after it.
 //!
 //! A polygon's height is the 75th percentile of the raster cells whose centres fall inside it, in
 //! decimetres. A polygon that catches no cell keeps 0, meaning unknown, which no real height can
@@ -104,9 +104,20 @@ pub const SF_CS13: Tmerc = Tmerc {
     false_northing: 24_000.0,
 };
 
+/// The five numbers a CRS name stands for. ONE table, because two of them disagreeing means a city
+/// whose graph bakes correct relief and whose terrain overlay is silently absent — so every caller
+/// that is handed a name (the ingest params' `chm.crs`, a build plan's `crs`) resolves it here.
+pub fn projection(name: &str) -> crate::Fallible<Tmerc> {
+    match name {
+        "sf-cs13" => Ok(SF_CS13),
+        "utm18n" => Ok(UTM_18N),
+        other => Err(format!("unknown projection {other}").into()),
+    }
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct Report {
+pub struct Report {
     polygons: usize,
     measured: usize,      // polygons the CHM had at least one cell for
     skipped_tiles: usize, // raster tiles whose LZW stream would not decode
@@ -679,7 +690,7 @@ fn describe(heights_m: &[f64], areas: &[u32]) -> usize {
     measured.len()
 }
 
-pub fn run(args: &Args) -> Fallible<()> {
+pub fn run(args: &Args) -> Fallible<Report> {
     let started = Instant::now();
     let mut canopy = binfmt::read_canopy(&args.canopy)?;
     let tiles: Vec<TileGrid> = match &args.raster {
@@ -753,15 +764,11 @@ pub fn run(args: &Args) -> Fallible<()> {
         args.canopy.display()
     );
 
-    println!(
-        "{}",
-        serde_json::to_string(&Report {
-            polygons: canopy.polygons.len(),
-            measured,
-            skipped_tiles,
-        })?
-    );
-    Ok(())
+    Ok(Report {
+        polygons: canopy.polygons.len(),
+        measured,
+        skipped_tiles,
+    })
 }
 
 #[cfg(test)]

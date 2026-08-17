@@ -8,8 +8,8 @@ import { type Cursor, readVarint } from "./varint";
 // The crisp half of the genus overlay. Below the layer's MIN_ZOOM the pre-rendered raster tiles
 // carry it — far too many trees to draw live across a zoomed-out screen. Above it those tiles would
 // upscale and blur, so each tree is instead drawn as a canvas disc at the tile's own zoom, sharp
-// however far the map goes in. Sizing and opacity mirror the raster tiler (crates/tiler/src/genus.rs)
-// so a dot does not jump as the map crosses the handoff.
+// however far the map goes in. Sizing and opacity mirror the raster half
+// (crates/tiler/src/genus_field.rs) so a dot does not jump as the map crosses the handoff.
 const TREE_URL = "trees/{file}"; // relative, picks up the deploy basePath; layout: scripts/README.md
 const TREE_FORMAT = 3;
 

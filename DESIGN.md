@@ -557,8 +557,8 @@ avoidable.
 
 ### The overlay may not offer a walk the router cannot give
 
-The tree-cover overlay and the routing graph are built from different sets. `tiler chunks` draws
-straight from `data/paths/<id>.bin`; `tiler graph` conflates that same file against CSCL and then
+The tree-cover overlay and the routing graph are built from different sets. The chunks pass draws
+straight from `data/paths/<id>.bin`; the graph pass conflates that same file against CSCL and then
 **drops whole OSM path components nothing anchors** — 1,815 islands, 211.2 km, once step 7 above has
 noded onto the network everything that was standing on it — as unreachable. So the map paints 4,036
 ways green and tree-lined that no route can enter or leave, covering 3,979 `PATH` records and 204.5

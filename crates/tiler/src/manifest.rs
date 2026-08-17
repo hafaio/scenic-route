@@ -66,7 +66,7 @@ pub struct Manifest {
     pub cities: Vec<City>,
 }
 
-/// What `tiler densities` reports back for the manifest, in the shape scripts/manifest.ts
+/// What the density pass reports back for the manifest, in the shape scripts/manifest.ts
 /// declares. The percentile labels are the ingest's; this only fills them in.
 #[derive(Serialize)]
 pub struct Distribution {

@@ -6,10 +6,11 @@ import type { TileRenderer } from "./renderer";
 
 // The "commercial" overlay. It highlights whole blocks, not points. The heavy work — snapping ~800k
 // PLUTO land-use lots and ~1M building footprints onto every street segment — is done at BUILD TIME by
-// `tiler commercial`, which writes per-segment SIGNALS to public/commercial/{x}/{y}.bin
-// (magic CMRC), one file per STCK street chunk, aligned by segment index. Each segment carries three
-// bytes: commercialFrac (commercial lots / all fronting lots, 0..255), medianHeightMeters (median
-// snapped roof height, 255 when none), and flags (bit0 an Open Street, bit1 outdoor seating).
+// the commercial pass (crates/tiler/src/commercial.rs), which writes per-segment SIGNALS to
+// public/commercial/{x}/{y}.bin (magic CMRC), one file per STCK street chunk, aligned by segment
+// index. Each segment carries three bytes: commercialFrac (commercial lots / all fronting lots,
+// 0..255), medianHeightMeters (median snapped roof height, 255 when none), and flags (bit0 an Open
+// Street, bit1 outdoor seating).
 //
 // The overlay just reads those signals and applies the GATE client-side, so the thresholds stay
 // tunable without a rebuild. A block lights when it is commercial (>50% commercial frontage) AND

@@ -1,7 +1,7 @@
-//! `tiler caster-chunks`: bakes the shadow CASTERS — building footprints with their roof heights,
+//! The caster-chunks pass: bakes the shadow CASTERS — building footprints with their roof heights,
 //! canopy crowns with their measured ones, census trunks holding those crowns up — into one chunk
 //! per z15 tile at public/casters/{x}/{y}.bin, so the client can sweep the shadows itself past where
-//! the baked raster pyramid stops. `tiler chunks` is the model: the same bucketing, the same
+//! the baked raster pyramid stops. The chunks pass is the model: the same bucketing, the same
 //! varint-delta codec, the same manifest conventions.
 //!
 //! A caster is CLIPPED to the chunk it ships in, so a canopy blob spanning fifty tiles costs its
@@ -13,7 +13,7 @@
 //! Footprints ship at full source detail. A crown ships as the nested SLICES of crates/tiler/src/
 //! crown.rs — its outline and the rings that outline insets to, one per band of the crown's height —
 //! since a crown's shadow is the union over the heights it spans and not its outline moved sideways.
-//! The slices are cut once per crown, before any of this, so the pyramid `tiler shade` bakes and the
+//! The slices are cut once per crown, before any of this, so the pyramid the shade pass bakes and the
 //! chunks the client sweeps are built from the same rings. See scripts/README.md.
 
 use std::collections::HashMap;
@@ -41,14 +41,14 @@ const CASTER_HEADER_BYTES: usize = 44;
 const CASTER_COORD_SCALE: f64 = 1e-6;
 // The zoom the baked pyramid stops at, so it is also the grid the client fetches its casters on.
 const CHUNK_ZOOM: u32 = 15;
-// The crown allometry of scripts/build-tree-data.ts run BACKWARDS, to recover the trunk the crown
+// The crown allometry of scripts/tree-data-fetch.ts run BACKWARDS, to recover the trunk the crown
 // radius was grown from: crownDiameter = exp(a + b*ln(ln(dbh_cm + 1)) + bias) is monotone in dbh, so
 // the inversion is exact wherever a dbh was what produced the crown.
 const CROWN_A: f64 = -0.752;
 const CROWN_B: f64 = 2.414;
 const CROWN_LOG_BIAS: f64 = 0.00988;
 // The dbh the inversion is allowed to return, 1 and 60 inches in centimetres. Only the upper bound
-// mirrors the forward pass, which clamps there (MAX_DBH_INCHES in scripts/build-tree-data.ts); the
+// mirrors the forward pass, which clamps there (MAX_DBH_INCHES in scripts/tree-data-fetch.ts); the
 // lower one is this side's own floor, since the forward pass imputes a missing dbh to its median
 // rather than clamping and so never produces a small one to mirror.
 const MIN_DBH_CM: f64 = 2.54;
@@ -59,7 +59,9 @@ pub struct Args {
     pub manifest: PathBuf,
     pub data: PathBuf,
     pub chunks: PathBuf,
-    pub params: PathBuf, // the sun-position file `tiler shade` reads, for max_shadow_meters
+    // The same sun-position grid the shade pass bakes from, for its max_shadow_meters alone: the
+    // chunks carry no sun position, so any city's grid does.
+    pub params: shade::Params,
 }
 
 /// One shadow caster as it ships: its rings in degrees, in GROUPS, and the height it casts from in
@@ -119,12 +121,12 @@ struct ChunkEntry {
 }
 
 /// The casters one source contributes: every polygon that casts something, at full source detail. A
-/// polygon that casts nothing is dropped exactly as `tiler shade` drops it: no height (the canopy
+/// polygon that casts nothing is dropped exactly as the shade pass drops it: no height (the canopy
 /// file's 0 unknown sentinel, a footprint with no roof) or no ring to sweep.
 ///
 /// `holes` keeps the inner rings. A footprint needs them, since the display path punches a
 /// building's base back out of the shade and a courtyard would otherwise punch as though it were
-/// roof; they cost 21k vertices across the city. A crown is never punched and `tiler shade`
+/// roof; they cost 21k vertices across the city. A crown is never punched and the shade pass
 /// translates its outer ring alone, and its LiDAR gaps would be a quarter of everything shipped.
 fn casters(polygons: &[Polygon], heights: &[f64], holes: bool) -> Vec<Caster> {
     polygons
@@ -148,7 +150,7 @@ fn casters(polygons: &[Polygon], heights: &[f64], holes: bool) -> Vec<Caster> {
 }
 
 /// The crowns as casters, each carrying its slices. A crown whose outline casts nothing — the canopy
-/// file's 0 unknown-height sentinel, or a ring with no area — is dropped exactly as `tiler shade`
+/// file's 0 unknown-height sentinel, or a ring with no area — is dropped exactly as the shade pass
 /// drops it.
 fn crown_casters(crowns: Vec<crown::Crown>, heights: &[f64]) -> Vec<Caster> {
     crowns
@@ -169,7 +171,7 @@ fn crown_casters(crowns: Vec<crown::Crown>, heights: &[f64]) -> Vec<Caster> {
 /// The city's crowns that cast anything and their measured heights, empty when it has no canopy layer
 /// or the file is missing. The 0 unknown-height sentinel is dropped HERE rather than downstream, since
 /// slicing a crown is the expensive half of this pass and half the file's polygons carry it — the same
-/// filter `tiler shade` applies before it slices.
+/// filter the shade pass applies before it slices.
 fn city_crowns(city: &City, data: &Path) -> Fallible<(Vec<Polygon>, Vec<f64>)> {
     let Some(layer) = &city.field.canopy else {
         return Ok((Vec::new(), Vec::new()));
@@ -274,7 +276,7 @@ fn stand_trunks(trunks: Vec<Trunk>, crowns: &[Caster]) -> Vec<Trunk> {
         .collect()
 }
 
-/// Buckets casters into every z15 tile their outer ring's bounding box touches, as `tiler chunks`
+/// Buckets casters into every z15 tile their outer ring's bounding box touches, as the chunks pass
 /// does its segments. The box only has to cover the tiles a caster could reach — the clip decides
 /// what it actually leaves there, and a tile the box overshoots into is one the clip empties. A
 /// caster lands where it STANDS, not where its shadow falls; gathering the casters beyond the
@@ -849,7 +851,7 @@ fn write_chunks(
 pub fn run(args: &Args) -> Fallible<()> {
     let started = Instant::now();
     let manifest: Manifest = serde_json::from_slice(&fs::read(&args.manifest)?)?;
-    let params: shade::Params = serde_json::from_slice(&fs::read(&args.params)?)?;
+    let params = &args.params;
 
     let mut entries: Vec<ChunkEntry> = Vec::new();
     for city in &manifest.cities {

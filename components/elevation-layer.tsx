@@ -7,7 +7,7 @@ import manifest from "../src/tree-cover/manifest.json";
 import { useCity } from "./city-context";
 
 // The elevation overlay: the city's ground, tinted by height and relief-shaded, baked by
-// `tiler elevation` into public/tiles/elevation/<city>/{z}/{x}/{y}.webp.
+// the elevation pass into public/tiles/elevation/<city>/{z}/{x}/{y}.webp.
 //
 // A plain raster layer rather than one of the worker-drawn ones. There is nothing to composite and
 // nothing that depends on the clock or the date — the ground does not move — so the tiles go
@@ -20,12 +20,12 @@ import { useCity } from "./city-context";
 const Z_INDEX = 1;
 const MIN_ZOOM = 9;
 const MAX_ZOOM = 20;
-// The finest level `tiler elevation` bakes. Keep in sync with ELEVATION_MAX_ZOOM in
+// The finest level the elevation pass bakes. Keep in sync with ELEVATION_MAX_ZOOM in
 // crates/tiler/src/elevation.rs. Past it Leaflet upscales: the tint survives that happily, being
 // smooth, but the COASTLINE does not — the land mask is applied per field cell, so magnifying shows
 // its steps as a staircase. Baking to 16 puts a step at about 2.4 m, near the 1 m source.
 const MAX_NATIVE_ZOOM = 16;
-// Degrees of slack on the city's box, comfortably over the 300 m `tiler elevation` widens by. Erring
+// Degrees of slack on the city's box, comfortably over the 300 m the elevation pass widens by. Erring
 // wide costs nothing: a tile that was never baked 404s, which this layer already reads as no terrain.
 const BAKED_MARGIN = 0.01;
 
@@ -46,7 +46,7 @@ export default function ElevationLayer(): null {
       // Clipped to the city, so panning away does not ask for tiles of ground that was never baked —
       // but with a margin, because the pyramid deliberately runs past the city's box. The box is
       // drawn around the same shoreline polygons the land mask uses, and the piers and port fill
-      // stand outside both; `tiler elevation` widens by SHORE_REACH_METERS to reach them, and asking
+      // stand outside both; the elevation pass widens by SHORE_REACH_METERS to reach them, and asking
       // only within the box would leave the tiles it baked out there unrequested.
       bounds: L.latLngBounds(
         [city.bounds.south - BAKED_MARGIN, city.bounds.west - BAKED_MARGIN],

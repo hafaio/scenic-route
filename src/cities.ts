@@ -21,7 +21,7 @@ export interface City {
   // The overlays this city offers, in switcher order. A city without a pyramid simply omits it, so a
   // shared link naming an overlay the active city lacks drops that one rather than breaking.
   overlays: readonly OverlayId[];
-  // Kerb to the baked sidewalk line, the offset `tiler graph` lays this city's sidewalks at.
+  // Kerb to the baked sidewalk line, the offset the graph pass lays this city's sidewalks at.
   sidewalkInsetMeters: number;
 }
 

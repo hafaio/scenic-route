@@ -1,4 +1,4 @@
-//! `tiler commercial` (run after `tiler chunks`): precomputes the commercial overlay's per-segment
+//! The commercial pass, over the chunks just written: precomputes the overlay's per-segment
 //! SIGNALS and writes them as public/commercial/{x}/{y}.bin, one file per served STCK street chunk,
 //! in the SAME segment order (aligned by index). The signals are heavy to snap (≈800k land-use lots
 //! and ≈1M building footprints against every street segment), and the building set is ~30 MB — far
@@ -31,7 +31,7 @@ const SIGNAL_FORMAT: u16 = 1;
 const SIGNAL_HEADER_BYTES: usize = 12; // magic(4) + version(2) + headerSize(2) + count(4)
 const SIGNAL_BYTES: usize = 3; // commercial fraction, median roof height, flags
 // The qualifying-block centrelines for the ROUTING bake, one file per city (magic CMLN, the LAND
-// polygon layout — each segment is a single-ring "polygon"). `tiler graph` proximity-bakes these
+// polygon layout — each segment is a single-ring "polygon"). The graph pass proximity-bakes these
 // into a per-edge commercial discount.
 const LINE_MAGIC: &[u8; 4] = b"CMLN";
 const LINE_HEADER_BYTES: usize = 40;
@@ -69,12 +69,23 @@ pub struct Args {
     pub manifest: PathBuf,
     /// The committed sources the signals are snapped from: data/{landuse,buildings,openstreets,dining}.
     pub data: PathBuf,
-    /// The served STCK chunks, public/streets — the segments the signals are keyed on.
-    pub chunks: PathBuf,
     /// public/commercial, the per-chunk signal files.
     pub signals: PathBuf,
     /// public/commercial-lines, the per-city qualifying-block lines.
     pub lines: PathBuf,
+}
+
+/// Where each city's qualifying-block centrelines landed, for the graph pass's commercial bake.
+/// A city whose chunks hold no segment writes no file and appears here not at all.
+#[derive(Default)]
+pub struct Lines {
+    by_city: HashMap<String, PathBuf>,
+}
+
+impl Lines {
+    pub fn get(&self, city: &str) -> Option<&Path> {
+        self.by_city.get(city).map(PathBuf::as_path)
+    }
 }
 
 type Segment = Vec<Coord>;
@@ -94,7 +105,7 @@ struct Signals {
     flags: Vec<u8>,
 }
 
-/// The z12 slippy-tile range a lat/lng box covers, the same way `tiler chunks` placed the files:
+/// The z12 slippy-tile range a lat/lng box covers, the same way the chunks pass placed the files:
 /// north maps to the smaller tile y. Used to group the served chunks by city.
 fn tile_range(bounds: &Bounds) -> (u32, u32, u32, u32) {
     (
@@ -401,7 +412,7 @@ fn qualifies(signals: &Signals, index: usize) -> bool {
 }
 
 /// The qualifying segments' polylines as a CMLN line file: each becomes one single-ring polygon —
-/// the exact LAND layout `tiler graph` reads via `read_polygons` — so the routing bake needs no new
+/// the exact LAND layout the graph pass reads via `read_polygons` — so the routing bake needs no new
 /// format. The origin is the south-west corner of what is written, which for a city with no
 /// qualifying block is the infinity the running minimum started at; the count is then 0 and no
 /// reader looks.
@@ -446,7 +457,7 @@ fn encode_qualifying_lines(segments: &[Segment], signals: &Signals) -> (Vec<u8>,
     (bytes, lines.len())
 }
 
-pub fn run(args: &Args) -> Fallible<()> {
+pub fn run(args: &Args, chunks: &crate::chunks::Chunks) -> Fallible<Lines> {
     let manifest: Manifest = serde_json::from_slice(&fs::read(&args.manifest)?)?;
     for directory in [&args.signals, &args.lines] {
         if directory.exists() {
@@ -455,9 +466,10 @@ pub fn run(args: &Args) -> Fallible<()> {
         fs::create_dir_all(directory)?;
     }
 
+    let mut written = Lines::default();
     for city in &manifest.cities {
         let started = Instant::now();
-        let (chunks, segments) = load_city_chunks(&city.bounds, &args.chunks)?;
+        let (chunks, segments) = load_city_chunks(&city.bounds, &chunks.dir)?;
         if segments.is_empty() {
             eprintln!("{}: no served street chunks, skipped", city.id);
             continue;
@@ -474,7 +486,9 @@ pub fn run(args: &Args) -> Fallible<()> {
         }
 
         let (lines, passing) = encode_qualifying_lines(&segments, &signals);
-        fs::write(args.lines.join(format!("{}.bin", city.id)), lines)?;
+        let line_file = args.lines.join(format!("{}.bin", city.id));
+        fs::write(&line_file, lines)?;
+        written.by_city.insert(city.id.clone(), line_file);
 
         eprintln!(
             "{}: {} segments in {} chunks, {passing} pass the default gate (>={GATE_COMMERCIAL_FRACTION} commercial, <={GATE_LOW_RISE_METERS} m, open-street|seating), {:.1}s",
@@ -484,7 +498,7 @@ pub fn run(args: &Args) -> Fallible<()> {
             started.elapsed().as_secs_f64()
         );
     }
-    Ok(())
+    Ok(written)
 }
 
 #[cfg(test)]

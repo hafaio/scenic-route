@@ -7,7 +7,7 @@ import WorkerTileLayer from "../src/tiles/layer";
 import manifest from "../src/tree-cover/manifest.json";
 import { useCity } from "./city-context";
 
-// Pre-rendered by scripts/build-street-tiles.ts (`tiler canopy`): the measured 2017 LiDAR tree
+// Pre-rendered by `bun run build-tiles` (the canopy pass): the measured 2017 LiDAR tree
 // canopy, rasterized to a per-pixel covered fraction, blurred, and coloured by the emerald ramp.
 // This is the map's cover fill; its street-line companion (StreetScoreLayer) samples the same
 // canopy at each sidewalk, so the block fill and the lines speak of one measured field.

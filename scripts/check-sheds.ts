@@ -35,7 +35,7 @@ export async function checkSheds(
     readFile(join(shedDir, "open.bin")),
     readFile(join(shedDir, "closed.bin")),
   ]);
-  // Recomputed here in TypeScript from the graph `tiler graph` wrote in Rust, so the two
+  // Recomputed here in TypeScript from the graph the tiler wrote in Rust, so the two
   // implementations of the key-space hash are compared against each other on every deploy as well.
   const { hash, keyHash } = loadGraphBytes(graphBytes);
 

@@ -1,4 +1,4 @@
-// The client's view of the routing graph baked by `tiler graph`. Layout: scripts/README.md
+// The client's view of the routing graph baked by the graph pass. Layout: scripts/README.md
 // (magic GRPH, v6 — the sidewalk graph with inert ferry edges). Fixed sections are viewed in place
 // over the fetched buffer; the strided edge records are copied once into parallel typed arrays so
 // the search loop touches only flat arrays.
@@ -192,7 +192,7 @@ export const FORMAT_VERSION = 8;
 const HEADER_BYTES = 64;
 const EDGE_RECORD_BYTES = 35;
 // relative, so both pick up the deploy basePath
-// Written by the same `tiler graph` run as the graph, and named after it: one directory holds
+// Written by the same pass as the graph itself, and named after it: one directory holds
 // every city's, so a shared name would describe whichever built last.
 const versionUrl = (cityId: string): string => `routing/${cityId}.version.json`;
 const PATH_CACHE_LIMIT = 512;
@@ -203,7 +203,7 @@ function fourByteAlign(offset: number): number {
 
 // `identity` is what these bytes hash to and what their key space hashes to, neither of which the
 // bytes themselves can carry — a file cannot hold its own FNV, and walking 600k keys to recover the
-// second is work `tiler graph` already did. The deploy writes both beside the graph and the pipeline
+// second is work the graph pass already did. The deploy writes both beside the graph and the pipeline
 // recomputes them; either way the caller is the one that knows.
 export function decodeGraph(
   buffer: ArrayBuffer,
@@ -449,7 +449,7 @@ const graphPromises = new Map<string, Promise<RoutingGraph>>();
 // How the graph beside it names itself, read out of the deploy's own record rather than recomputed
 // here: FNV-1a over 30 MB of graph is ~0.5 s of blocked main thread on a laptop and several times
 // that on a phone, and the key space would want a 600k-element sort on top, to arrive at two numbers
-// `tiler graph` already wrote down. The two files are written by one run, so they cannot skew. An
+// the graph pass already wrote down. The two files are written by one pass, so they cannot skew. An
 // unreadable version file leaves both unknown, which no artifact then matches — the graph itself
 // still loads, so only what is placed against it goes quiet. A version file from before `keyHash`
 // existed is the same case.

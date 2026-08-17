@@ -23,7 +23,7 @@ import { useCity } from "./city-context";
 
 // The "Shade" overlay: shadow tiles for the sun's actual position, drawn as a smooth cool wash over all
 // ground. The heavy work — casting ~1M building footprints with a physically-modelled penumbra
-// (area-light sampling of the sun disk) — is baked by `tiler shade` into one WebP pyramid per SUN-POSITION
+// (area-light sampling of the sun disk) — is baked by the shade pass into one WebP pyramid per SUN-POSITION
 // bin: the sun's (azimuth, elevation) envelope over the whole year, gridded, at public/tiles/shade/<bin>/
 // {z}/{x}/{y}.webp, with public/tiles/shade/buckets.json listing each bin's position. This layer maps the
 // picked date and time to a sun position, shows the nearest bin, and CROSSFADES between bins as the sun
@@ -51,7 +51,7 @@ const PANE_Z_INDEX = 275; // just under the commercial band (280), above the can
 
 const MIN_ZOOM = 10;
 const MAX_ZOOM = 20;
-// The finest level `tiler shade` bakes. Keep in sync with SHADE_MAX_ZOOM in
+// The finest level the shade pass bakes. Keep in sync with SHADE_MAX_ZOOM in
 // scripts/shade-schedule.ts.
 const MAX_NATIVE_ZOOM = 14;
 // Where the worker stops reading the pyramid and starts sweeping the casters itself. One past the

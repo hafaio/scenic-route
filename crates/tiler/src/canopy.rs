@@ -1,4 +1,4 @@
-//! `tiler canopy`: rasterizes data/canopy/<id>.bin — the measured 2017 LiDAR tree canopy,
+//! The canopy pass: rasterizes data/canopy/<id>.bin — the measured 2017 LiDAR tree canopy,
 //! magic CNPY, ~1.08 M polygons — into a per-pixel coverage pyramid at
 //! public/tiles/canopy/{z}/{x}/{y}.webp, blurred and coloured by the shared ramp. This is the
 //! map's cover fill; the routing graph reads the same canopy through `densities`, so the block
@@ -27,13 +27,16 @@ const SUPERSAMPLE: usize = 4;
 // The raw polygon coverage is too concentrated to read as density — a hard 1 under a crown, 0
 // between — and shade physically reaches past a crown's edge. So the fraction is convolved with
 // an isotropic Gaussian before colouring, the same blur the sidewalk sampler uses, at the same
-// sigma. Mirrors the ingest's FILL_SIGMA_METERS, which build-tree-data passes to densities and
-// records in the manifest as `field.fillSigmaMeters`.
+// sigma. Mirrors the ingest's FILL_SIGMA_METERS, which scripts/tree-data-fetch.ts hands to the
+// density pass and the manifest records as `field.fillSigmaMeters`.
 const FILL_SIGMA_METERS: f64 = 15.0;
 
 pub struct Args {
     pub manifest: PathBuf,
-    pub ramp: PathBuf,
+    /// The 256-step RGBA lookup table of src/tree-cover/ramp.ts, 1024 bytes. It comes from the
+    /// caller rather than from a table here because the client's street layer imports that very
+    /// module, which is what makes the block fill and the street lines one colour function.
+    pub ramp: Vec<u8>,
     pub data: PathBuf,
     pub tiles: PathBuf,
 }
@@ -314,11 +317,10 @@ fn render(
 pub fn run(args: &Args) -> Fallible<()> {
     let started = Instant::now();
     let manifest: Manifest = serde_json::from_slice(&fs::read(&args.manifest)?)?;
-    let ramp = fs::read(&args.ramp)?;
+    let ramp = &args.ramp;
     if ramp.len() != 256 * 4 {
         return Err(format!(
-            "{} is {} bytes, not the 1024 of a 256-step RGBA ramp",
-            args.ramp.display(),
+            "the ramp is {} bytes, not the 1024 of a 256-step RGBA ramp",
             ramp.len()
         )
         .into());
@@ -356,7 +358,7 @@ pub fn run(args: &Args) -> Fallible<()> {
     );
     let stats = plan
         .par_iter()
-        .map(|tile| render(&canopies, &ramp, &blank, &args.tiles, tile))
+        .map(|tile| render(&canopies, ramp, &blank, &args.tiles, tile))
         .try_reduce(Stats::default, |left, right| Ok(left + right))?;
 
     let mean = if stats.land_pixels > 0 {

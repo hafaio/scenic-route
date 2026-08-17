@@ -2,7 +2,7 @@
 // artifact rather than a number baked into the graph.
 //
 // data/ferries/<id>.bin (FERR) collapses the whole schedule into one crossing-plus-average-wait
-// figure per stop pair, and `tiler graph` bakes that into the 37 MB routing graph. Nothing in the
+// figure per stop pair, and the graph pass bakes that into the 37 MB routing graph. Nothing in the
 // daily path can rebuild that graph, so the timetable lives on its own instead, in
 // public/ferry-schedule/<id>.bin — magic FSCH, ~15 KB, fetched by the client the way the shed
 // artifact is. A client that cannot read it falls back to the graph's baked figure and routes
