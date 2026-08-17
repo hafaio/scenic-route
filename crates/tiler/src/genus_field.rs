@@ -1,5 +1,5 @@
-//! `tiler genus-field`: the low-zoom genus overlay as CLIENT-SHADED data tiles, replacing the split
-//! per-genus colour pyramids `tiler genus` bakes. Where those pre-colour each tree's disc and lean on
+//! The genus-field pass: the low-zoom genus overlay as CLIENT-SHADED data tiles, which replaced
+//! the split per-genus colour pyramids. Where those pre-coloured each tree's disc and leaned on
 //! the client to alpha-stack the enabled layers — which can only add ink, never renormalise — this
 //! bakes the raw material and defers the colouring: each tile channel carries ONE genus's local crown
 //! density (12 genera packed 4 to an RGBA tile, so 3 tiles cover them all), and the client's shader
@@ -26,10 +26,10 @@ use crate::raster::{
     lng_to_pixel_x, pixel_x_to_lng, pixel_y_to_lat, plan_tiles,
 };
 
-// Matches `tiler genus`: the raster half stops at z14 and the client's live dots take over at z15.
+// As in the colour pyramids: the raster half stops at z14 and the client's live dots take over at z15.
 const GENUS_MAX_ZOOM: u32 = 14;
 
-// A crown's disc, in pixels, is clamped to this band just as the colour pyramid clamps it: a floor so
+// A crown's disc, in pixels, is clamped to this band just as the colour pyramids clamped it: a floor so
 // a sub-pixel crown at low zoom still deposits density, a ceiling so a lone giant crown does not smear.
 const MIN_DOT_PX: f64 = 1.5;
 const MAX_DOT_PX: f64 = 16.0;
@@ -99,7 +99,7 @@ fn read_field(city: &City, data: &Path) -> Fallible<Option<Field>> {
 /// Accumulate one city's crown coverage into a tile's per-genus density buffer (`GENUS_BINS` floats
 /// per pixel). Every tree adds its disc's anti-aliased coverage into its own genus channel — additive,
 /// so overlapping crowns of a genus build density and crowns of different genera are kept apart per
-/// channel rather than compositing into one colour. Mirrors the disc geometry of `tiler genus`.
+/// channel rather than compositing into one colour. Mirrors the colour pyramids' disc geometry.
 fn accumulate(density: &mut [f32], field: &Field, tile: &Tile) {
     let zoom = tile.zoom;
     let origin_x = f64::from(tile.x) * TILE_SIZE as f64;

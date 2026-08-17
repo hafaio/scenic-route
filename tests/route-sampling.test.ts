@@ -6,7 +6,7 @@
 // held to", is why, and carries the calibration campaign every bound below was read off.
 //
 // WHERE THIS RUNS. Not in `bun test src`, and not in ordinary CI. It reads public/routing/nyc.bin,
-// which is gitignored, ~37 MB and only exists after a `tiler graph` build, and two LFS files under
+// which is gitignored, ~37 MB and only exists after a `tiler build`, and two LFS files under
 // data/ that standard CI deliberately checks out as pointers (see .github/workflows/build.yml — the
 // LFS payload burned the account's whole bandwidth budget). So it runs on the manual deploy path,
 // after `bun export` has built the graph, beside `bun run check-sheds`. `bun run test-routes` runs it

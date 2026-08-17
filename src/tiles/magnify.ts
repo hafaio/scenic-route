@@ -52,7 +52,7 @@ export function tileUrl(
 
 async function fetchBitmap(url: string): Promise<ImageBitmap | null> {
   const response = await fetch(url);
-  // The pyramids are sparse — `tiler shade` skips tiles with no shadow in them, and neither pyramid is
+  // The pyramids are sparse — the shade pass skips tiles with no shadow in them, and neither pyramid is
   // baked outside its city — so a 404 means "nothing here", not a failure.
   if (!response.ok) {
     return null;

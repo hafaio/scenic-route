@@ -1,9 +1,9 @@
-//! `tiler shade`: rasterizes building shadows from data/buildings/<id>.bin — footprints with roof
+//! The shade pass: rasterizes building shadows from data/buildings/<id>.bin — footprints with roof
 //! heights, magic BLDG — into one lossless WebP tile pyramid per time-of-day bucket at
 //! <tiles>/shade/<bucket>/{z}/{x}/{y}.webp, with a physically-modelled penumbra. A bucket carries
 //! several sun-disk samples; each building casts one shadow hull per sample, and a pixel's fill is
 //! the fraction of samples that reach it — umbra where all do, penumbra where some do. Mirrors
-//! `tiler canopy`'s rasterize/coverage/paint shape. See scripts/README.md.
+//! the canopy pass's rasterize/coverage/paint shape. See scripts/README.md.
 //!
 //! The canopy casts a SECOND pyramid, <tiles>/tree-shade/<bucket>/{z}/{x}/{y}.webp, from the crown
 //! heights in data/canopy/<id>.bin. Both pyramids are pure geometry at the same alpha scale, so the
@@ -46,7 +46,9 @@ pub struct Args {
     pub manifest: PathBuf,
     pub data: PathBuf,
     pub tiles: PathBuf,
-    pub params: PathBuf,
+    /// The sun-position grid, synthesised by scripts/shade-schedule.ts. It comes from the caller
+    /// because the client inverts the same grid (src/shade/sun.ts) to map "now" onto a bin.
+    pub params: Params,
     /// Which city to render. One invocation is one city because a bin's sun position depends on the
     /// latitude it was synthesised at, so two cities cannot share a bin index or a pyramid.
     pub city: String,
@@ -54,7 +56,7 @@ pub struct Args {
 
 /// One sun-disk sample of the area light: a ground unit vector pointing down the shadow (anti-sun)
 /// and the shadow length per unit of roof height, `1/tan(sunElevation)`. Precomputed by suncalc.
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Sample {
     east: f64,  // east component of the anti-sun ground direction
@@ -65,9 +67,9 @@ struct Sample {
 /// One bin of the (declination, hourAngle) grid: its season/hour keys (echoed to the client so it can
 /// map "now" to a bin), the representative sun position, and the sun-disk samples whose shadows
 /// accumulate into its penumbra.
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct Bucket {
+pub struct Bucket {
     season: usize,   // the declination band this bin sits in — its season key
     hour_angle: f64, // the sun's hour angle (degrees, 0 at solar noon) — its time-of-day key
     elevation: f64, // the bin's representative sun position, echoed to the client's schedule alongside
@@ -76,9 +78,9 @@ pub(crate) struct Bucket {
     samples: Vec<Sample>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct Params {
+pub struct Params {
     pub max_zoom: u32,
     pub max_shadow_meters: f64, // a shadow is clipped to this, so a lone tower does not streak the city
     pub buckets: Vec<Bucket>,
@@ -875,7 +877,7 @@ impl BucketRender<'_> {
 pub fn run(args: &Args) -> Fallible<()> {
     let started = Instant::now();
     let mut manifest: Manifest = serde_json::from_slice(&fs::read(&args.manifest)?)?;
-    let params: Params = serde_json::from_slice(&fs::read(&args.params)?)?;
+    let params = &args.params;
     manifest.cities.retain(|city| city.id == args.city);
     if manifest.cities.is_empty() {
         return Err(format!("no city {} in the manifest", args.city).into());

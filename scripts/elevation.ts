@@ -47,7 +47,7 @@ const WERK_ATTRIBUTION = "Elevation © USGS 3DEP / NASA WERK (CC0)";
 const DTM_BAND = 0;
 // Band 2 is the surface model less the terrain model: how far above the ground each cell's return
 // stood. It is not a canopy product — the Salesforce Tower measures 324 m in it — so it is only
-// ever read through the measured-canopy polygons, in `tiler heights`.
+// ever read through the measured-canopy polygons, in the height pass (crates/tiler/src/heights.rs).
 export const SF_CANOPY_BAND = 2;
 
 interface StacItem {

@@ -1,8 +1,8 @@
 // The 1 m LiDAR canopy height model every canopy polygon's height is measured from: a 47008 x
 // 47697 uint16 GeoTIFF of decimetres over NAD83(2011) UTM 18N, thresholded to crown cores (its
 // lowest reading is 2.1 m and 95% of its cells are nodata). It is downloaded once through the disk
-// cache and handed to `tiler heights`, which samples it per polygon; nothing here reads a pixel.
-// See scripts/README.md.
+// cache and named in the ingest params, where the height pass (crates/tiler/src/heights.rs) samples
+// it per polygon; nothing here reads a pixel. See scripts/README.md.
 
 import { createHash } from "node:crypto";
 import pRetry from "p-retry";

@@ -4,8 +4,13 @@
 // attributes the feed last carried for it, and the stretches of days it was actually standing.
 // Every commit is resolved to its snapshot blob in one batch, and each distinct blob is parsed
 // exactly once as it streams past, so the ~2,600 snapshots are read in a single pass.
+//
+// The git half of that is package.json's, not this file's: `git log` naming every commit's candidate
+// paths, `git cat-file --batch-check` resolving them into .build/shed-index.txt, and `git cat-file
+// --batch` streaming the blobs into the walk's stdin. What is left here is the reading — which commit
+// a blob belongs to, and the framing the batch stream hands its bytes over in.
 
-import { spawn } from "node:child_process";
+import { readFile } from "node:fs/promises";
 
 // Everything the placement reads off a snapshot row, parsed. An interval carries the reading in
 // force on the day it ended and is placed from that, never from the one the feed carries now: the
@@ -43,8 +48,6 @@ export interface ShedInterval {
   attributes: ShedAttributes; // as the feed had them on `last`, which is what places this record
 }
 
-// The snapshot moved into data/ in Dec 2022; a commit is read from the first of these it carries.
-const SNAPSHOT_PATHS = ["data/Active_Sheds2.csv", "Active_Sheds2.csv"];
 // A shed that reappears within this many days of coming down was never really down: the feed drops
 // permits for a few days around a renewal, and the two runs are one shed standing.
 export const MERGE_TOLERANCE_DAYS = 14;
@@ -433,109 +436,124 @@ function parseSnapshot(bytes: Uint8Array): ParsedSnapshot {
   return { csvDate, rows };
 }
 
-interface Commit {
-  sha: string;
-  date: string; // the commit's own UTC date, the fallback when the CSV carries none
-}
-
 // A commit that carries a snapshot, paired with the blob it carries.
-interface SnapshotSource {
+export interface SnapshotSource {
   blob: string;
-  commitDate: string;
+  commitDate: string; // the commit's own UTC date, the fallback when the CSV carries none
 }
 
-async function gitText(
-  repoDir: string,
-  args: string[],
-  input: string,
-): Promise<string> {
-  const proc = spawn("git", args, {
-    cwd: repoDir,
-    stdio: ["pipe", "pipe", "inherit"],
-  });
-  proc.stdin!.end(input);
-  const chunks: Buffer[] = [];
-  for await (const chunk of proc.stdout!) {
-    chunks.push(chunk as Buffer);
-  }
-  const status = await new Promise<number>((resolve) =>
-    proc.on("close", (code) => resolve(code ?? -1)),
-  );
-  if (status !== 0) {
-    throw new Error(`git ${args.join(" ")} exited ${status}`);
-  }
-  return Buffer.concat(chunks).toString("utf8");
-}
-
-async function listCommits(repoDir: string): Promise<Commit[]> {
-  const log = await gitText(
-    repoDir,
-    ["log", "--reverse", "--format=%H %ct", "HEAD"],
-    "",
-  );
-  const commits: Commit[] = [];
-  for (const line of log.split("\n")) {
-    if (line.trim() !== "") {
-      const [sha, seconds] = line.split(" ");
-      commits.push({
-        sha,
-        date: new Date(Number(seconds) * 1000).toISOString().slice(0, 10),
-      });
-    }
-  }
-  return commits;
-}
-
-// Asks one batch-check process for every commit-and-path pair at once, which is far cheaper than a
-// process per commit. Commits carrying neither path (the ones that only delete) drop out.
-async function resolveSources(
-  repoDir: string,
-  commits: readonly Commit[],
-): Promise<SnapshotSource[]> {
-  const queries: string[] = [];
-  for (const commit of commits) {
-    for (const path of SNAPSHOT_PATHS) {
-      queries.push(`${commit.sha}:${path}\n`);
-    }
-  }
-  const answers = (
-    await gitText(repoDir, ["cat-file", "--batch-check"], queries.join(""))
-  ).split("\n");
+// The commit-to-blob table package.json resolves before the walk starts, as `git cat-file
+// --batch-check` answered it: one line per commit and candidate path, in commit order, reading
+// "<blob> blob <commit sha> <commit seconds>" for a path that commit carries and "<commit sha>:<path>
+// missing" for one it does not. A commit is read from the FIRST path it carries — 747 of them carry
+// both, having kept the old copy beside the new one when the snapshot moved into data/ — so which
+// paths the log names, and in which order, is package.json's to say and is not repeated here.
+//
+// `readFrom` drops everything before that day, which is how an update reads a month of history rather
+// than nine years of it. It takes the whole run of commits from the first one that reaches the day
+// rather than filtering by date, because a commit stamp can fall before the one committed ahead of it
+// and a filter would leave a hole where the walk needs a stretch.
+export function readSnapshotIndex(
+  text: string,
+  readFrom?: string,
+): SnapshotSource[] {
   const sources: SnapshotSource[] = [];
-  for (const [position, commit] of commits.entries()) {
-    for (let offset = 0; offset < SNAPSHOT_PATHS.length; offset++) {
-      const parts =
-        answers[position * SNAPSHOT_PATHS.length + offset].split(" ");
-      if (parts.length >= 3 && parts[1] === "blob") {
-        sources.push({ blob: parts[0], commitDate: commit.date });
-        break;
+  let taken = ""; // the commit the last source came from, so a second path it carries is skipped
+  for (const line of text.split("\n")) {
+    const [blob, kind, commit, seconds] = line.split(" ");
+    if (kind !== "blob") {
+      // "missing" is a path the commit does not carry, and the empty line is the one the file ends
+      // with. Anything else is a git that answered something this cannot read.
+      if (kind !== "missing" && line !== "") {
+        throw new Error(`git cat-file --batch-check answered "${line}"`);
       }
+    } else if (commit !== taken) {
+      const stamp = new Date(Number(seconds) * 1000);
+      if (Number.isNaN(stamp.getTime())) {
+        throw new Error(`git cat-file --batch-check answered "${line}"`);
+      }
+      taken = commit;
+      sources.push({ blob, commitDate: stamp.toISOString().slice(0, 10) });
     }
   }
-  return sources;
+  if (readFrom === undefined) {
+    return sources;
+  }
+  const pivot = sources.findIndex((source) => source.commitDate >= readFrom);
+  return pivot === -1 ? [] : sources.slice(pivot);
+}
+
+export async function loadSnapshotIndex(
+  path: string,
+  readFrom?: string,
+): Promise<SnapshotSource[]> {
+  return readSnapshotIndex(await readFile(path, "utf-8"), readFrom);
+}
+
+// What the pipeline package.json puts a shed script at the END of reads: the commit index git
+// resolved, named as the script's first argument, and the blobs git is piping into its stdin.
+// `readFrom` has to be the day package.json handed `scripts/shed-blobs.ts`, because that is what
+// decided which blobs are in the stream — a script reading further back would wait for one nobody
+// asked git for.
+export async function shedSnapshots(
+  script: string,
+  readFrom?: string,
+): Promise<{
+  sources: SnapshotSource[];
+  blobs: AsyncIterable<Uint8Array>;
+}> {
+  const index = process.argv[2];
+  if (index === undefined || process.stdin.isTTY === true) {
+    throw new Error(
+      `${script} reads the DOB snapshots off a git pipeline: run \`bun run ${script}\`, which is` +
+        " where package.json clones the feed, resolves the commit index and streams the blobs",
+    );
+  }
+  return {
+    sources: await loadSnapshotIndex(index, readFrom),
+    blobs: process.stdin,
+  };
+}
+
+// Every blob the walk has to be sent, in the order it first needs one. Distinct, because the feed
+// commits a CSV it did not change often enough that 3,623 snapshot-carrying commits name 2,614
+// different blobs, and asking for each one once is 4.6 GB down the pipe rather than 7.5 GB.
+export function distinctBlobs(sources: readonly SnapshotSource[]): string[] {
+  const blobs: string[] = [];
+  const seen = new Set<string>();
+  for (const source of sources) {
+    if (!seen.has(source.blob)) {
+      seen.add(source.blob);
+      blobs.push(source.blob);
+    }
+  }
+  return blobs;
 }
 
 // The blobs `git cat-file --batch` writes back, in the order they were asked for. Each record is a
 // "<sha> blob <size>" line, the bytes, and a newline; the bytes are yielded as they arrive so the
 // several gigabytes of history never sit in memory at once. Every blob is handed back in the same
 // reused buffer, so it is only valid until the next one is asked for.
+//
+// The sha on each record is checked against the blob it should be answering. That is what stands in
+// for a failed stage of the pipeline being noticed: a pipeline exits with the status of its LAST
+// command, so git dying halfway would otherwise reach the walk as a history that simply stopped.
 async function* readBlobs(
-  repoDir: string,
+  stream: AsyncIterable<Uint8Array>,
   blobs: readonly string[],
 ): AsyncGenerator<Uint8Array> {
-  const proc = spawn("git", ["cat-file", "--batch"], {
-    cwd: repoDir,
-    stdio: ["pipe", "pipe", "inherit"],
-  });
-  proc.stdin!.end(blobs.map((blob) => `${blob}\n`).join(""));
-  const chunks: AsyncIterator<Buffer> = proc.stdout![Symbol.asyncIterator]();
+  const chunks: AsyncIterator<Uint8Array> = stream[Symbol.asyncIterator]();
   const queue: Uint8Array[] = [];
   let queued = 0;
+  let read = 0;
 
   async function pull(): Promise<void> {
     const next = await chunks.next();
     if (next.done === true) {
-      throw new Error("git cat-file --batch ended before its last blob");
+      throw new Error(
+        `the snapshot stream ended after ${read}/${blobs.length} blobs:` +
+          " `git cat-file --batch` did not write the history out",
+      );
     }
     queue.push(next.value);
     queued += next.value.length;
@@ -582,9 +600,12 @@ async function* readBlobs(
     take(lineEnd, header);
     take(1, null);
     const line = decoder.decode(header);
-    const size = Number(line.split(" ")[2]);
-    if (!Number.isFinite(size)) {
-      throw new Error(`git cat-file --batch answered "${line}"`);
+    const [sha, kind, bytes] = line.split(" ");
+    const size = Number(bytes);
+    if (sha !== blobs[index] || kind !== "blob" || !Number.isFinite(size)) {
+      throw new Error(
+        `git cat-file --batch answered "${line}" where blob ${blobs[index]} was asked for`,
+      );
     }
     while (queued < size + 1) {
       await pull();
@@ -594,6 +615,7 @@ async function* readBlobs(
     }
     take(size, buffer);
     take(1, null);
+    read += 1;
     yield buffer.subarray(0, size);
   }
 }
@@ -815,19 +837,6 @@ function acceptSnapshot(
   }
 }
 
-// A commit's UTC date can fall a day after the New York calendar day its CSV claims, so a windowed
-// walk reads a couple of days of commits before the day it applies from. Whatever they turn out to
-// be dated, the fold drops everything before that day.
-const COMMIT_DATE_MARGIN_DAYS = 2;
-
-// The stretch of history a windowed walk reads: every commit that could carry a snapshot dated
-// `applyFrom` or later.
-function tailFrom(commits: readonly Commit[], applyFrom: string): Commit[] {
-  const from = shiftDay(applyFrom, -COMMIT_DATE_MARGIN_DAYS);
-  const pivot = commits.findIndex((commit) => commit.date >= from);
-  return pivot === -1 ? [] : commits.slice(pivot);
-}
-
 export interface ShedWalk {
   permits: ShedPermit[];
   lastDay: string; // the newest usable snapshot; every run reaches it or ended before it
@@ -928,35 +937,40 @@ export function finishFold(fold: ShedFold): ShedWalk {
   return { permits, lastDay: window.lastDate, counts };
 }
 
-// Reads a NYCDOB/ActiveShedPermits clone and returns one record per shed permit, in the order the
-// feed first mentioned them. With `applyFrom` it reads only the snapshots from that day onward, and
-// `before` is the truncation window the artifact it is updating carried away, which is what lets it
-// judge that first day the same way a walk over the whole history would.
+// Turns the snapshots `git cat-file --batch` is streaming into one record per shed permit, in the
+// order the feed first mentioned them. `sources` says which blob every commit carries and is what the
+// stream has to answer with, in that order and once per distinct blob. With `applyFrom` only the
+// snapshots from that day onward are folded, and `before` is the truncation window the artifact it is
+// updating carried away, which is what lets it judge that first day the same way a walk over the
+// whole history would.
 export async function readShedPermits(
-  repoDir: string,
+  sources: readonly SnapshotSource[],
+  stream: AsyncIterable<Uint8Array>,
   applyFrom?: string,
   before: readonly number[] = [],
 ): Promise<ShedWalk> {
-  const all = await listCommits(repoDir);
-  const commits = applyFrom === undefined ? all : tailFrom(all, applyFrom);
-  const sources = await resolveSources(repoDir, commits);
-  const blobOrder: string[] = [];
+  if (sources.length === 0) {
+    // Nothing upstream can report a failure of its own: a shell pipeline exits with the status of its
+    // last command, and an empty index reaches this far as a feed that published nothing at all.
+    throw new Error(
+      "the commit index names no DOB snapshot at all: the git half of the pipeline resolved" +
+        " nothing, so there is no history to walk",
+    );
+  }
+  const blobOrder = distinctBlobs(sources);
   const lastUse = new Map<string, number>();
   for (const [position, source] of sources.entries()) {
-    if (!lastUse.has(source.blob)) {
-      blobOrder.push(source.blob);
-    }
     lastUse.set(source.blob, position);
   }
   console.error(
-    `  ${commits.length} commits, ${sources.length} carry a snapshot, ${blobOrder.length} distinct blobs`,
+    `  ${sources.length} commits carry a snapshot, ${blobOrder.length} distinct blobs`,
   );
 
   const fold = startFold(applyFrom, before);
   // A blob is parsed the first time a commit points at it and held only while a later commit still
   // does, which for this history is never more than a handful at a time.
   const parsed = new Map<string, ParsedSnapshot>();
-  const blobs = readBlobs(repoDir, blobOrder);
+  const blobs = readBlobs(stream, blobOrder);
   for (const [position, source] of sources.entries()) {
     const cached = parsed.get(source.blob);
     let snapshot: ParsedSnapshot;
@@ -997,14 +1011,9 @@ export async function readShedPermits(
 }
 
 if (import.meta.main) {
-  const repoDir = process.argv[2];
-  if (repoDir === undefined) {
-    throw new Error(
-      "usage: bun run scripts/shed-permits.ts <ActiveShedPermits clone>",
-    );
-  }
   const started = performance.now();
-  const { permits } = await readShedPermits(repoDir);
+  const { sources, blobs } = await shedSnapshots("shed-walk");
+  const { permits } = await readShedPermits(sources, blobs);
   let intervals = 0;
   let open = 0;
   for (const permit of permits) {

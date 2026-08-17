@@ -4,8 +4,8 @@
 // four bits into every offsetted STRT record: whether OSM maps a sidewalk on each side, and
 // whether the city's aerial survey drew one there. DESIGN.md, "Whether there is pavement at all",
 // is why both sources are needed and why the planimetric layer is `52n9-sdep` and not its
-// look-alike sibling; the gate in `tiler graph` drops a side only when both are silent. Layouts:
-// scripts/README.md.
+// look-alike sibling; the gate in the graph pass (crates/tiler/src/graph.rs) drops a side only when
+// both are silent. Layouts: scripts/README.md.
 
 import { createHash } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";

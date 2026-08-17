@@ -294,7 +294,7 @@ interface Step {
 // wall is. The kerb edge is the deck's depth back from there — the FLOORED depth, so a shed measured
 // narrower than one can be built keeps the wall it was measured from and reaches over the roadway.
 function buildingEdgeMeters(depth: number): number {
-  // less the kerb-to-baked-sidewalk offset `tiler graph` lays the sidewalks at
+  // less the kerb-to-baked-sidewalk offset the graph pass lays the sidewalks at
   return measuredDepth(depth) + KERB_MARGIN_METERS - sidewalkInset();
 }
 

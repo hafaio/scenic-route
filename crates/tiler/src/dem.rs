@@ -9,10 +9,11 @@
 //! the resample visits points GROUPED BY TILE rather than in grid order, and decodes each tile
 //! exactly once per resample; the same sweep in row order re-decodes every tile on every row.
 //!
-//! A build resamples TWICE — `tiler elevation` at the pyramid's finest zoom and `tiler graph` at a
-//! finer one for the relief bake — because they are separate processes and the field is not written
-//! down between them. At around five seconds each that has not been worth a temporary artifact and
-//! the coupling it would add, but it is two passes over the mosaic and not one.
+//! A build resamples TWICE — the elevation pass at the pyramid's finest zoom and the graph pass at a
+//! finer one for the relief bake — because the two want different grids over different bounds and
+//! neither field is written down. What `tiler build` shares is the OPEN: it hands the same `Dem` to
+//! both, so San Francisco's 1.77 GB of tiles are georeferenced and indexed once rather than twice.
+//! The pixels are not — only one decoded tile is ever held, and `release` drops it between passes.
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -228,6 +229,13 @@ impl Dem {
 
     pub fn tiles(&self) -> usize {
         self.tiles.len()
+    }
+
+    /// Drops the decoded tile. A caller that has finished resampling but is still holding the `Dem`
+    /// for a later pass — `tiler build` hands one mosaic to both readers — would otherwise keep a
+    /// tile of float32 alive across the tile render that follows.
+    pub fn release(&mut self) {
+        self.loaded = None;
     }
 }
 

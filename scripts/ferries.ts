@@ -1,4 +1,4 @@
-// `bun run scripts/ferries.ts` (and, in the full pipeline, build-tree-data): downloads the two NYC
+// `bun run scripts/ferries.ts` (and, in the full pipeline, tree-data-fetch): downloads the two NYC
 // ferry GTFS feeds, collapses their whole schedule into one time-independent ferry graph, and
 // writes it as data/ferries/nyc.bin (magic FERR). It also freezes the raw feed zips under
 // data/ferries/ so a later time-of-day pass can re-derive from the exact feeds this build read.
@@ -618,7 +618,7 @@ export interface FerrySource {
 
 // Fetches both feeds (cached), freezes their raw zips under data/ferries/, consolidates them into
 // the time-independent graph and writes data/ferries/nyc.bin. Returns the file's stats. Callable on
-// its own (`bun run scripts/ferries.ts`) and from the build-tree-data ingest.
+// its own (`bun run scripts/ferries.ts`) and from the tree-data ingest's fetch half.
 export async function ingestFerries(cityId: string): Promise<FerrySource> {
   const started = performance.now();
   await mkdir(FERRY_DIR, { recursive: true });

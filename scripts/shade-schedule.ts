@@ -1,12 +1,12 @@
 // The shade tiler's bins: the sun's positions gridded on (declination, hourAngle) — its natural
 // season × time-of-day axes — and per bin the SUN-DISK samples that give the shadow its penumbra.
-// `tiler shade` bakes one tile pyramid per bin; the client maps "now" (today's declination + hour
+// The shade pass bakes one tile pyramid per bin; the client maps "now" (today's declination + hour
 // angle) to the bin and shows it. See src/shade/sun.ts for why this grid, not the raw (azimuth,
 // elevation) envelope, is the one that scrubs without jitter.
 //
 // A shadow depends only on where the sun is, and (declination, hourAngle) fixes that exactly, so each
 // bin's sun position is SYNTHESISED straight from its grid cell — no year sweep, no astronomy library
-// here. `tiler shade` does the geometry; this does the trig.
+// here. The shade pass does the geometry; this does the trig.
 
 import {
   DECL_MAX_DEG,
