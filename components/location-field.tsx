@@ -2,9 +2,11 @@
 
 import { useEffect, useRef, useState } from "react";
 import { FiCrosshair, FiNavigation, FiX } from "react-icons/fi";
+import { PiTrainSimpleFill } from "react-icons/pi";
 import {
   type GeocodeResult,
   type SearchBias,
+  SUBWAY_RESULT_TYPE,
   searchAddress,
 } from "../src/geocode";
 
@@ -205,13 +207,19 @@ export default function LocationField({
                 onMouseDown={(event) => event.preventDefault()}
                 onClick={() => select(result)}
                 onMouseEnter={() => setActiveIndex(index)}
-                className={`block w-full truncate px-3 py-2 text-left text-sm ${
+                className={`flex w-full items-center gap-2 px-3 py-2 text-left text-sm ${
                   index === activeIndex
                     ? "bg-brand-50 text-brand-700 dark:bg-brand-500/10 dark:text-brand-300"
                     : "text-slate-700 hover:bg-slate-50 dark:text-slate-200 dark:hover:bg-slate-700/60"
                 }`}
               >
-                {result.displayName}
+                {result.type === SUBWAY_RESULT_TYPE ? (
+                  <PiTrainSimpleFill
+                    className="h-4 w-4 shrink-0 text-[#0062cf]"
+                    aria-hidden="true"
+                  />
+                ) : null}
+                <span className="truncate">{result.displayName}</span>
               </button>
             </li>
           ))}

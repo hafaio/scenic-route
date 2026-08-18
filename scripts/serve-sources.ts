@@ -26,6 +26,7 @@ const SERVED_SOURCES = [
   "landmarks",
   "art",
   "ferries",
+  "subway",
   "highways",
   "dining",
   "openstreets",

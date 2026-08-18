@@ -245,6 +245,8 @@ in its own band.
 | paths | OSM pedestrian/park ways (footway/path/pedestrian/steps/cycleway/bridleway/track) plus park drives (roads closed to through motor traffic), via Overpass | the park, greenway and car-free-drive network CSCL lacks; a separate committed source, magic `PATH` — see below and "Binary layouts" |
 | sidewalks | OSM `footway=sidewalk`/`crossing`/`traffic_island` ways via Overpass, plus the NYC planimetric SIDEWALK polygons, Socrata `52n9-sdep` (`sub_code` 380000 = street right-of-way) | the ways are a committed source, magic `SWLK`; both together settle the four per-side sidewalk bits of every offsetted `STRT` record, and the ways themselves are the walking network wherever they exist — see below and "Binary layouts" |
 | ferries | the two NYC ferry GTFS feeds — Staten Island Ferry (NYC DOT) and NYC Ferry (Hornblower, via Connexionz) | consolidated to a time-independent ferry graph, a committed source, magic `FERR` — OSM- and canopy-independent, read by a later phase's routing graph, not the cover pipeline; see below and "Binary layouts" |
+| subway | the MTA's subway GTFS feed, `https://rrgtfsfeeds.s3.amazonaws.com/gtfs_subway.zip` | the 29 routes as 93 polylines (every shape variant the feed runs that draws track nothing else does) and the 496 stations, with the colours and names the MTA publishes for each route and, per station, the set of routes that genuinely serve it; a committed source, magic `SBWY` — **display only**, it enters no routing input (this is a walking router and nobody walks the subway); see below and "Binary layouts" |
+| transit (San Francisco) | SFMTA's Muni GTFS, `https://muni-gtfs.apps.sfmta.com/data/muni_gtfs-current.zip`, and BART's, `https://www.bart.gov/dev/schedules/google_transit.zip` — both keyless | Muni's rail (the six Metro lines, the F streetcar, the three cable cars) and the four BART lines that run through the city, as 42 polylines clipped to the city's land, and the 268 stations, in the **same `SBWY`** blob New York's subway ships as; **display only**, it enters no routing input; see below |
 | landmarks | NYC LPC Individual Landmark Sites, Socrata `buis-pvji` | ~1.5k designated historic/touristy sites, taken at their WGS84 centroid; a committed POI source, magic `LMRK` — fanned out into a per-edge routing discount, not the cover pipeline; see "Binary layouts" |
 | art | NYC PDC Outdoor Public Art Inventory (Socrata `2pg3-gcaa`) + OSM `tourism=artwork` via Overpass | public art and murals (OSM carries the murals the PDC set is thin on), deduped by proximity; a committed POI source, magic `ARTW` — its own routing discount, distinct scenery from landmarks; see "Binary layouts" |
 | highways | OSM limited-access highways (`motorway`/`trunk` + ramps) and above-ground rail (surface, open cut, or elevated — anything not `tunnel`), via Overpass | the lines walking near is unpleasant, as polylines; a committed source, magic `HWAY` — proximity to it is a per-edge routing *penalty*; never itself routed; see "Binary layouts" |
@@ -554,6 +556,185 @@ segment:
 is projected to its nearest shape vertex (forced monotonic along the trip) and the shape slice
 between them is taken, capped by the two stop coordinates; a segment with no shape falls back to a
 straight line (no stored geometry). Stops stay in geographic lng/lat with their GTFS name.
+
+### The subway route lines and stations (`SBWY` v2)
+
+`scripts/subway.ts` (`bun run build-subway`) reads the MTA's one subway GTFS zip — 5.3 MiB, cached
+by `cachedFile` — and writes `data/subway/nyc.bin`, the route geometry and the station markers the
+map draws the system with. **Display only.** Nothing here reaches the routing graph, the key space or the tile build: the
+app routes a person on foot, and no walking route rides a train. `serve-sources.ts` copies it to
+`public/subway/<id>.bin` for the client, and it is not in the manifest — the same place `FERR`,
+`LMRK`, `ARTW` and `HWAY` sit, all of them committed sources that no cover-pipeline layer owns.
+
+**Colours and names come from `routes.txt` and nowhere else.** `route_color` is the hex the MTA
+publishes and it is *not* the palette people remember: at the 2026-05-26 feed the 1/2/3 are
+`D82233`, not the old `EE352E`, and the A/C/E are `0062CF`, not `0039A6`. The file also carries
+`route_text_color` (the colour of the letter inside the bullet), `route_short_name` (the "1", "A",
+"S" a rider says) and `route_long_name` (the corridor). All three shuttles are short-named `S`, so
+only the long name — "42 St Shuttle", "Franklin Avenue Shuttle", "Rockaway Park Shuttle" —
+distinguishes them.
+
+**Which services.** `route_type` 1 is the subway, 28 routes. The feed also carries the Staten Island
+Railway as `route_type` 2, and it is **kept**: it is drawn on the MTA's own subway map, it is inside
+the fare system, and this map covers Staten Island, so leaving it out would blank a whole borough
+while every other borough drew its lines. That makes 29 routes. The diamond expresses (`6X`, `7X`,
+`FX`) and the `Z` are separate routes in the feed and stay separate here — they retrace their
+parent's track, so a renderer that wants one line per corridor can skip them by short name.
+
+**The stations.** GTFS models a station as a *parent* stop (`location_type` 1) with one child
+platform per direction sitting at the same coordinate, so the parents are what a marker wants:
+drawing the platforms would put two markers a few metres apart at every station. That gives **496
+stations** — 475 subway plus the SIR's 21 — and this feed leaves none of its 992 platforms
+parentless, so the fall-back to a platform standing in for itself has never fired. Each station
+carries the set of routes serving it, taken from the trips of a kept route that stop at it, in both
+directions and on every shape variant — which routes call at a station is a fact about the schedule,
+not about what got drawn.
+
+**A route that runs once is not a route that serves the station.** A raw count of callers labels 96
+St-2 Av with three routes, as though the N and the R belonged there beside the Q, when the schedule
+says Q 859 trips, N 12, R **one trip in the whole feed**. So a route enters a station's mask only
+when it clears a floor on the *share of that route's trips* that stop there. The 2026-05-26 feed
+splits the two kinds of service apart cleanly: of the 1,028 station-route pairs, **956 stand at
+10.09% of the route's trips or more and the other 72 at 3.38% or less, with nothing in between**.
+Any floor from 3.4% to 10.1% therefore keeps exactly the same 956 pairs; the constant, `5.8%`, is the
+geometric middle of that empty band. What it removes is rush-hour put-ins and reroutes: the W's 24
+Brooklyn stations, 2–5 trips each, from DeKalb Av down Fourth Avenue and out the Sea Beach and West
+End lines; the 5's 10 in Brooklyn (1–24 trips) and 9 up White Plains Rd (22–27); the 2's 10 to New
+Lots Av (9); the R's 7, one trip apiece, four of them the Second Avenue stations; the A's 4 to
+Rockaway Park (10); the E's 4 out to 179 St (2–14); and the N's 4 up Second Avenue (12). No station
+loses every route, so the count stays at 496; the widest mask drops from six routes to five (DeKalb
+Av loses the W's five trips) and 199 stations are left with a single route.
+
+**The floor is on the masks and nothing else.** Every shape a route runs is still drawn, so a line
+that passes through a station whose mask no longer names that route is correct and expected: the
+track is there, the service is not.
+
+**Every station sits on a line of every route that serves it.** The check measures the whole
+geometry — the true perpendicular distance from the station to the nearest segment of any drawn line
+of that route — and all **956 pairs are within 8.5 m**, all but one within 4.3 m. The one is 96 St-2
+Av on the Q: all nine of the MTA's Q shapes stop 103 m short of the terminal platform, so no variant
+of the route reaches it and none can be swapped in. Instead both drawn Q lines are **run on 103 m
+along the heading their own last segment arrives on**, up Second Avenue, which leaves the platform
+8.5 m off the axis (that heading is 4.6° off the bearing to the platform). That is the only
+extension in the file, and the rule that made it is deliberately narrow: at most 250 m of run-on, at
+most 25 m of offset, and the station must lie *ahead* of the line's end. Anything else is reported
+and left alone — track that bends towards a marker is invented track.
+
+Stations are sorted south to north, then west to east, then by name — the order the point sources
+are written in.
+
+**Which shapes — all of them.** A route runs up to 35 shape variants (35 for the 5 alone): each
+direction, express and late-night patterns, rush-hour put-ins, reroutes. **Every one is drawn.** A
+variant is real service on real track, and thinning them to a representative set is a rendering
+decision the ingest has no business making — several variants of a route sharing a trunk is the
+renderer's problem, solved with an offset, and it cannot be solved at all with data that was thrown
+away. Two things are dropped, and only two:
+
+- **Exact duplicates.** A variant whose vertices are identical to one already taken adds nothing a
+  renderer can see. Variants that merely *share* track are all kept.
+- **Reverse-direction variants that retrace.** Every `direction_id` 0 shape is taken first; a
+  `direction_id` 1 shape is then taken only if it covers track no shape of that route already
+  covers. Coverage is measured on a ~30 m grid dilated by one cell — deliberately coarser than the
+  two rails of a track are apart, so a shape running the opposite rail of one already drawn reads as
+  covered — and the shape must add at least **20 cells, about 600 m**. That is above the few metres
+  the two directions wobble apart at terminals and relay tracks and far below a branch, so a variant
+  that shares a whole trunk and branches once is kept for the branch. Anything from 5 to 30 cells
+  selects the same shapes out of this feed, so the number sits in the middle of a wide plateau
+  rather than on an edge that decides anything.
+
+Over the 2026-05-26 feed that is 133 direction-0 shapes, of which 42 are byte-identical duplicates,
+plus **2 of the 124 direction-1 shapes** — the R's and W's West End line patterns, which run
+southbound only and which nothing else in the file draws. That leaves **93 lines and 54,908
+vertices** — 54,906 from the feed's shapes plus the one vertex each of the two Q lines gains from
+the terminal extension above. Within a route they are ordered forward-direction first and busiest-first within a
+direction, so a renderer that wants a single representative line can take the first of a route's
+run.
+
+#### San Francisco: Muni and BART (`SBWY` again, not a new format)
+
+`scripts/subway-sf.ts` (`bun run build-subway:sf`) writes `data/subway/sf.bin` in the **same SBWY v2
+layout** — same magic, same tables, no field added — from two feeds rather than one, because Muni and
+BART are two agencies. The encoder and the variant selection both files use live in
+`scripts/subway-format.ts`; New York's ingest predates that module and still carries its own copy.
+
+| feed | url | key |
+| --- | --- | --- |
+| Muni | `https://muni-gtfs.apps.sfmta.com/data/muni_gtfs-current.zip` | none — the zip SFMTA's own GTFS page links, 10.0 MiB, feed of 2026-07-23 |
+| BART | `https://www.bart.gov/dev/schedules/google_transit.zip` | none — 0.9 MiB, redirects to whichever dated zip is current (`google_transit_20260810-20270108_v02.zip` at the last read), so the cache key is on the stable URL |
+
+**No key, deliberately.** 511.org's regional feed carries both agencies in one file and is the
+obvious thing to reach for, but it needs an API key this pipeline does not hold — the same wall that
+keeps San Francisco's ferries unbuilt — so the two publishers' own feeds are read directly. BART's
+*other* endpoint, `api.bart.gov/gtfs/google_transit.zip`, is keyless too and serves a **2013** feed;
+it is not used.
+
+**What Muni contributes.** Its rail, and only its rail. `route_type` 0 is the six Metro lines (J, K,
+L, M, N, T) plus the **F historic streetcar**, which runs the same Market Street rails and is on
+Muni's own system map; `route_type` 5 is the three **cable car** lines (Powell-Hyde, Powell-Mason,
+California St), kept for the same reason — scheduled rail service with published colours and shapes,
+and a San Francisco transit map without the cable cars is not one. The feed's other 58 routes are
+buses, which are not drawn here any more than they are in New York, and which alone would overflow
+the station mask's 32 routes. That is **10 Muni routes**.
+
+**What BART contributes.** The feed splits every line into two `route_id`s — `Yellow-S` (route 1) and
+`Yellow-N` (route 2) — which are the two directions of one line down one pair of rails. They are
+folded into one route per colour, named by that colour, exactly as `direction_id` 0 and 1 are folded
+within a Muni route: the lower-numbered `route_id`'s shapes are the primary ones and the other's have
+to reach track they do not already cover. Drawing them apart would put every BART line on the map
+twice, in one colour, under two names no station sign uses.
+
+**Lines that leave the city are clipped, not dropped — unless nothing is left.** Every shape is cut
+against the **same land polygons every other source here is clipped with**, the crossing found by
+bisection, so BART stops at the shoreline where the streets and the canopy do rather than running out
+over the bay to the corner of a bounding box. A piece shorter than 50 m is dropped as a graze. What
+survives is 13.05 km of each BART line, Embarcadero to Balboa Park; **Orange** (Richmond to Berryessa)
+and **Grey** (the Oakland airport connector) never enter San Francisco at all and are dropped whole,
+as is anything of Muni's that leaves — nothing does. Neither feed has a shape that leaves the city and
+comes back, so every drawn line is one contiguous piece. That leaves **14 routes**.
+
+**Colours, names and order.** All from `routes.txt`: Muni publishes a colour and text colour per
+route (the Metro lines' own hues, `B49A36` for the F and all three cable cars) and long names in caps
+("JUDAH", "MARKET & WHARVES"); BART's colours are the line colours, and a merged line takes its
+primary route's long name ("Antioch to SF Int'l Airport SFO/Millbrae"). Neither feed publishes
+`route_sort_order`, so the display order is built here and recorded in that field: Muni's rail and
+the F, then the cable cars, alphabetically within each, then BART's lines in BART's own `route_id`
+order (Yellow, Green, Red, Blue).
+
+**The stations.** Muni's feed has no `parent_station` column *at all* — the column New York's ingest
+collapses a station's platforms with — and it publishes one stop per kerb, so an intersection served
+both ways is two stops of the same name a median apart. Stops that **share a name and lie within
+100 m** of one another therefore become one marker at their centroid carrying every route that calls
+at any of them: 149 of the 152 same-named rail pairs are inside 100 m (76 inside 25 m), and the three
+left out are genuinely different stops sharing a name (19th Ave & Randolph St is three stops spread
+over 245 m). The rule runs over both agencies together; BART's own `parent_station` collapse happens
+first, and its entrances (`location_type` 2) never appear in `stop_times` and so never reach it.
+That is **268 stations** — 260 Muni, 8 BART (Embarcadero, Montgomery, Powell, Civic Center, 16th St,
+24th St, Glen Park, Balboa Park; Daly City is in San Mateo County and outside the city).
+
+What the merge does *not* fold is a place the feed gives two different names — the Metro's
+underground stations are named per direction ("Metro Powell Station/Downtown" and
+"…/Outbound", 20-50 m apart), and Muni names a corner both ways round ("Church St & Market St",
+"Market St & Church St"). 63 pairs of markers sit within 60 m of another, and picking a winning name
+for them would be inventing one.
+
+**A trap, since it cost a debugging pass:** a `route_id` is unique within a feed and **nowhere else**.
+Muni's bus routes are named 1, 2, 5, 6, 7, 8 and 12; BART's `route_id`s for Yellow, Green, Red and
+Blue are 1/2, 5/6, 7/8 and 11/12. Building the station masks against both feeds' routes at once hangs
+a BART bit on every stop of seven bus lines — 689 stations instead of 268, with the Red line calling
+at 172 of them. Each feed's trips are resolved against that feed's routes only.
+
+Over these feeds, 84 shape variants have any geometry inside the city — 41 primary, 43
+reverse-direction — and **42 lines with 6,182 vertices** are drawn from them: every primary shape but
+the one byte-identical duplicate (BART's `001E_shp`), plus **2 of the 43 reverse shapes** — the F's
+Jefferson Street loop at Fisherman's Wharf and the Powell-Hyde cable car's Washington Street leg, the
+two places a Muni line genuinely runs back down a different street. The threshold that picks them up
+is 5 grid cells of new track (~150 m) rather than New York's 20: San Francisco's reverse shapes
+measure 0-4 fresh cells each except three, at 7, 8 and 10 (two of which are the same Washington
+Street leg, so taking the first leaves the second retracing it), so anything from 5 to 7 selects the
+same set — and 5 is inside the 5-to-30 plateau New York's own feed has. Drawing those two cuts the
+stations sitting more than 100 m from a line of a route they are on from 12 of 367 station-route
+pairs to 5, and the five left are terminal loops and a mezzanine entrance. The file is **32.5 KiB**.
+
 
 ## The colour scale
 
@@ -1110,6 +1291,91 @@ Finally the **name blob**: a `u32` count of distinct names, then each name as a 
 and that many UTF-8 bytes, back to back — the GRPH/STRT trailing-name-blob layout. It holds the GTFS
 `stop_name`s **and** the route display names together, deduped and sorted; a stop record's name id
 and a segment's routeNameId both index it.
+
+### `data/subway/<id>.bin` — the subway route lines and stations, magic `SBWY` (v2)
+
+The subway system's route geometry and its station markers, each route with its published colour and
+names and each station with the set of routes serving it, so a renderer can draw one route at a
+time — and one marker per station, or a bullet per line at it — without opening a second file. The
+polyline body is the `HWAY` polyline idea (varint-delta vertices about a south-west origin) with an
+explicit line table in front of it, and the station record is `FERR`'s stop record plus a route mask.
+Little-endian throughout; coordinates quantized to `COORD_SCALE` (1e-6°), exactly the shared codec.
+Never routed and never in the manifest; served verbatim to `public/subway/<id>.bin`.
+
+Header, 60 bytes:
+
+| offset | type | field |
+| --- | --- | --- |
+| 0 | u8[4] | magic `SBWY` |
+| 4 | u16 | format version = 2 |
+| 6 | u16 | header bytes = 60 |
+| 8 | u32 | route count R |
+| 12 | u32 | line count L |
+| 16 | f64 | origin longitude, degrees |
+| 24 | f64 | origin latitude, degrees |
+| 32 | f64 | coordinate scale, degrees per quantized unit |
+| 40 | u32 | station count S |
+| 44 | u32 | geometry blob offset, from the start of the file |
+| 48 | u32 | geometry blob length |
+| 52 | u32 | name blob offset, from the start of the file |
+| 56 | u32 | name blob length |
+
+Then the **route table** (R × 16 bytes), the **line table** (L × 8 bytes) and the **station table**
+(S × 16 bytes), back to back after the header, so their offsets are implicit (`60`, `60 + 16·R` and
+`60 + 16·R + 8·L`); the geometry and name blobs carry explicit offsets because they are
+variable-length.
+
+Route record, 16 bytes — routes are in the MTA's own `route_sort_order`, so walking the table builds
+a legend in map order:
+
+| offset | type | field |
+| --- | --- | --- |
+| 0 | u8[3] | `route_color`, RGB — the line's colour, straight from the feed |
+| 3 | u8[3] | `route_text_color`, RGB — the colour of the letter inside the bullet |
+| 6 | u16 | short name id, an index into the name blob (the "1", "A", "S" a rider says) |
+| 8 | u16 | long name id (the corridor; the only thing telling the three `S` shuttles apart) |
+| 10 | u16 | index of this route's first line in the line table |
+| 12 | u16 | how many lines this route owns — they are contiguous, so one route is one slice |
+| 14 | u16 | `route_sort_order`, the MTA's display order (`0xFFFF` when the feed gives none) |
+
+Line record, 8 bytes — one polyline:
+
+| offset | type | field |
+| --- | --- | --- |
+| 0 | u32 | geometry offset within the geometry blob |
+| 4 | u16 | vertex count, at least 2 |
+| 6 | u16 | owning route index, so a line read on its own still knows its colour |
+
+Station record, 16 bytes — `FERR`'s stop record with a route mask on the end. Stations are sorted
+south to north, then west to east, then by name, so a renderer can rely on the order:
+
+| offset | type | field |
+| --- | --- | --- |
+| 0 | i32 | longitude, quantized |
+| 4 | i32 | latitude, quantized |
+| 8 | u32 | station name id, an index into the name blob |
+| 12 | u32 | route mask — **bit *i* set means route *i* of the route table serves this station** |
+
+The mask is a bitmask rather than a per-station list because 29 routes fit one word with room to
+spare, which makes "does this route stop here" a single test and the whole set one read; the encoder
+refuses to write a 30th route rather than silently dropping the ones that no longer fit. A bit is
+set only where the route clears the service floor above, so a route whose track passes through is
+not necessarily in the mask. Five routes is the widest mask in the city — nine stations reach it,
+DeKalb Av and W 4 St-Wash Sq among them — and 199 stations are served by exactly one route.
+
+Then the **geometry blob**: per line, `vertex count` (longitude, latitude) zigzag-LEB128 varint delta
+pairs. The **first pair is the absolute quantized position** (delta from the origin) and the rest are
+from the previous vertex — the `FERR`/`GRPH` geometry convention. Zero-padded to a 4-byte boundary
+so the name blob starts aligned.
+
+Finally the **name blob**: a `u32` count of distinct names, then each name as a `u16` byte length
+and that many UTF-8 bytes — the `FERR`/`GRPH` trailing-name-blob layout. Route short names, route
+long names and station names share the one deduped, sorted table, so every name id in the file
+indexes it. There is no unnamed sentinel: a name the feed leaves empty gets the index of the empty
+name.
+
+At the 2026-05-26 feed: **29 routes, 93 lines, 54,908 vertices, 496 stations, 956 station-route
+pairs, 429 distinct names, 169,683 bytes.**
 
 ### `public/ferry-schedule/` — the ferry timetable, magic `FSCH` (v1, derived, **committed**)
 

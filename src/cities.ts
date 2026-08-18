@@ -34,6 +34,7 @@ const OVERLAYS_BY_CITY: Record<string, readonly OverlayId[]> = {
     "landmarks",
     "art",
     "ferries",
+    "subway",
     "highways",
     "commercial",
     "shade",
@@ -41,7 +42,18 @@ const OVERLAYS_BY_CITY: Record<string, readonly OverlayId[]> = {
   ],
   // San Francisco has no scaffolding feed to build a shed layer from, and its ferries are behind a
   // 511.org key this pipeline does not hold. Commercial waits on its own signals being wired up.
-  sf: ["canopy", "genus", "elevation", "landmarks", "art", "highways", "shade"],
+  // Its rail is Muni's and BART's rather than a subway, but it is the same artifact and the same
+  // layer, so it rides under the same id.
+  sf: [
+    "canopy",
+    "genus",
+    "elevation",
+    "landmarks",
+    "art",
+    "subway",
+    "highways",
+    "shade",
+  ],
 };
 
 const METERS_PER_DEGREE_LAT = 111_320;
