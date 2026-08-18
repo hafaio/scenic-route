@@ -1,11 +1,12 @@
-// A minimal GTFS reader for the ferry ingest: it downloads a feed zip (through the disk cache),
-// unzips it in memory and parses the handful of CSV tables the consolidation needs. It leans on
+// A minimal GTFS reader for the ferry and subway ingests: it downloads a feed zip (through the disk
+// cache), unzips it in memory and parses the handful of CSV tables they read. It leans on
 // node:zlib for the one deflate step and parses the central directory by hand, so it pulls in no
 // zip or csv dependency. See scripts/README.md.
 
+import { readFile } from "node:fs/promises";
 import { inflateRawSync } from "node:zlib";
 import pRetry from "p-retry";
-import { cached } from "./cache";
+import { cached, cachedFile } from "./cache";
 
 // A browser-ish User-Agent: NYC DOT's Akamai edge answers the plain download with a 403 unless the
 // request looks like a browser. The NYC Ferry endpoint does not care, but the header is harmless
@@ -75,6 +76,20 @@ export async function fetchGtfsZip(
     return Buffer.from(await download(url)).toString("base64");
   });
   return new Uint8Array(Buffer.from(base64, "base64"));
+}
+
+// The same download for a feed that is only read, never frozen under data/: the raw-bytes cache
+// entry rather than fetchGtfsZip's base64-inside-JSON one, which costs a third more disk and a
+// parse of the whole string on every hit. The subway feed is 5.3 MiB of zip.
+export async function fetchGtfsZipFile(
+  name: string,
+  url: string,
+): Promise<Uint8Array> {
+  const path = await cachedFile(name, url, async () => {
+    console.error(`  ${name}: downloading ${url}`);
+    return await download(url);
+  });
+  return new Uint8Array(await readFile(path));
 }
 
 const EOCD_SIGNATURE = 0x06054b50;

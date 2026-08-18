@@ -22,6 +22,8 @@
     "build-dining": "bun run scripts/dining.ts",
     "build-openstreets": "bun run scripts/openstreets.ts",
     "build-landuse": "bun run scripts/landuse.ts",
+    "build-subway": "bun run scripts/subway.ts",
+    "build-subway:sf": "bun run scripts/subway-sf.ts",
     "shed-mirror": "dir=${SHED_SNAPSHOTS:-.cache/ActiveShedPermits}; test -d $dir || git clone --bare https://github.com/NYCDOB/ActiveShedPermits.git $dir",
     "shed-index": "set -e; dir=${SHED_SNAPSHOTS:-.cache/ActiveShedPermits}; mkdir -p .build; git -C $dir log --reverse --format='%H:data/Active_Sheds2.csv %H %ct%n%H:Active_Sheds2.csv %H %ct' HEAD > .build/shed-commits.txt; git -C $dir cat-file --batch-check='%(objectname) %(objecttype) %(rest)' < .build/shed-commits.txt > .build/shed-index.txt",
     "shed-blobs": "bun run scripts/shed-blobs.ts .build/shed-index.txt",

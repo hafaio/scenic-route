@@ -8,6 +8,7 @@ import type { TileRenderer } from "./renderer";
 import { repaintOnRestore, repeatable } from "./repaint";
 import { shadeRenderer, warm as warmShade } from "./shade";
 import { streetScoreRenderer } from "./street-score";
+import { subwayRenderer } from "./subway";
 import { setShedDecks } from "./sweep";
 import { treeDotsRenderer } from "./tree-dots";
 
@@ -69,6 +70,8 @@ function rasterize(message: DrawMessage): Promise<void> {
       return run(commercialRenderer, params, message);
     case "lines":
       return run(linesRenderer, params, message);
+    case "subway":
+      return run(subwayRenderer, params, message);
     case "poi":
       return run(poiRenderer, params, message);
     case "tree-dots":

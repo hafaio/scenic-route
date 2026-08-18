@@ -3,7 +3,11 @@
 import { useEffect, useRef, useState } from "react";
 import { FiCheck, FiLayers } from "react-icons/fi";
 import type { City } from "../src/cities";
-import { OVERLAYS, type OverlayId } from "../src/overlays/registry";
+import {
+  OVERLAYS,
+  type OverlayId,
+  overlayLabel,
+} from "../src/overlays/registry";
 
 interface LayersControlProps {
   city: City;
@@ -92,7 +96,7 @@ export default function LayersControl({
                 className={on ? ROW_ACTIVE : ROW_IDLE}
               >
                 {overlay.icon}
-                {overlay.label}
+                {overlayLabel(overlay, city)}
                 {on ? (
                   <FiCheck className="ml-auto h-4 w-4" aria-hidden="true" />
                 ) : null}
