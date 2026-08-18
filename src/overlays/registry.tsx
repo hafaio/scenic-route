@@ -2,6 +2,7 @@
 
 import dynamic from "next/dynamic";
 import type { ReactNode } from "react";
+import type { City } from "../cities";
 import {
   MdAccountBalance,
   MdConstruction,
@@ -11,7 +12,12 @@ import {
   MdStorefront,
   MdWbShade,
 } from "react-icons/md";
-import { PiBoatFill, PiTreeFill, PiTreeStructureFill } from "react-icons/pi";
+import {
+  PiBoatFill,
+  PiTrainSimpleFill,
+  PiTreeFill,
+  PiTreeStructureFill,
+} from "react-icons/pi";
 import ElevationLegend from "../../components/elevation-legend";
 import TreeLegend from "../../components/tree-legend";
 
@@ -40,6 +46,9 @@ const PoiLayer = dynamic(() => import("../../components/poi-layer"), {
 const LinesLayer = dynamic(() => import("../../components/lines-layer"), {
   ssr: false,
 });
+const SubwayLayer = dynamic(() => import("../../components/subway-layer"), {
+  ssr: false,
+});
 const ShedLayer = dynamic(() => import("../../components/shed-layer"), {
   ssr: false,
 });
@@ -54,15 +63,23 @@ export type OverlayId =
   | "landmarks"
   | "art"
   | "ferries"
+  | "subway"
   | "highways"
   | "commercial"
   | "shade"
   | "scaffolding"
   | "elevation";
 
+// A layer's menu text for the city it is being shown in.
+export function overlayLabel(overlay: OverlayDef, city: City): string {
+  return typeof overlay.label === "string" ? overlay.label : overlay.label(city);
+}
+
 export interface OverlayDef {
   id: OverlayId;
-  label: string; // menu text
+  // Menu text. A function where the layer is the same artifact in every city but goes by a different
+  // name in each — New York rides the subway, San Francisco rides Muni and BART.
+  label: string | ((city: City) => string);
   icon: ReactNode; // menu glyph; a tinted one shows the layer's colour code
   render: () => ReactNode; // the Leaflet layer(s) this overlay mounts on the map
   legend?: ReactNode; // floating key shown while this overlay is active
@@ -76,6 +93,8 @@ export interface OverlayDef {
 const LANDMARK_COLOR = "#f59e0b"; // amber-500
 const ART_COLOR = "#d946ef"; // fuchsia-500
 const FERRY_COLOR = "#2563eb"; // blue-600, the route layer's ferry-leg colour
+// The subway draws each route in the MTA's own published colour (in subway.ts); only its menu glyph
+// is tinted here, to the A/C/E blue the feed publishes, so the switcher still reads as a colour code.
 const HIGHWAY_COLOR = "#ef4444"; // red-500
 // Scaffolding draws its own orange-600 bands (in shed-layer.tsx); only its menu glyph is tinted
 // here, so the switcher still reads as the layer's colour code.
@@ -159,6 +178,17 @@ export const OVERLAYS: readonly OverlayDef[] = [
     label: "Ferry routes",
     icon: <PiBoatFill className="h-4 w-4 text-blue-600" aria-hidden="true" />,
     render: () => <LinesLayer dir="ferries" format="ferr" color={FERRY_COLOR} />,
+  },
+  {
+    id: "subway",
+    label: (city) => (city.id === "sf" ? "Muni & BART" : "Subway"),
+    icon: (
+      <PiTrainSimpleFill
+        className="h-4 w-4 text-[#0062cf]"
+        aria-hidden="true"
+      />
+    ),
+    render: () => <SubwayLayer />,
   },
   {
     id: "highways",

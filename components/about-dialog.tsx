@@ -127,6 +127,12 @@ export default function AboutDialog({ onClose }: AboutDialogProps) {
               label="Ferries"
               detail="Staten Island Ferry (NYC DOT) & NYC Ferry GTFS"
             />
+            {/* SFMTA's feed licence requires this wording verbatim on anything derived from it, so
+              the detail line carries it rather than paraphrasing. */}
+            <Source
+              label="Transit lines"
+              detail="MTA subway GTFS; BART GTFS; Muni GTFS — reproduced with permission granted by the City and County of San Francisco, under a nonexclusive, limited and revocable license"
+            />
             <Source
               label="Landmarks"
               detail="LPC Individual Landmark Sites · NYC Open Data"

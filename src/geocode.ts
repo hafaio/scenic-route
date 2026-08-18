@@ -1,4 +1,5 @@
 import { activeCity } from "./cities";
+import { searchStations, stationLabel } from "./subway/stations";
 
 const NOMINATIM_BASE = "https://nominatim.openstreetmap.org";
 const USER_AGENT_NOTE = "scenic-route (https://github.com/hafaio/scenic-route)";
@@ -14,6 +15,16 @@ function photonBbox(): string {
   return `${west},${south},${east},${north}`;
 }
 const MAX_SEARCH_RESULTS = 5;
+// How many subway stations may sit above the geocoder's own results. A station whose name starts
+// with what was typed is a hit off an authoritative 496-row list, where Photon's answer to a bare
+// street name is one arbitrary point on a street kilometres long — so those lead. Weaker station
+// matches (the query starting a word inside the name) follow the addresses instead: "Union Sq"
+// should still reach 14 St-Union Sq, but not ahead of a place actually called that. Three is enough
+// for every station a prefix can name at once and short of crowding a five-row list.
+const MAX_LEADING_STATIONS = 3;
+// The `type` a station result carries, which the search box renders with a train glyph rather than
+// leaving it to read as an address.
+export const SUBWAY_RESULT_TYPE = "subway-station";
 
 export interface GeocodeResult {
   placeId: string;
@@ -172,6 +183,8 @@ export async function searchAddress(
     url.searchParams.set("lat", String(bias.lat));
     url.searchParams.set("lon", String(bias.lng));
   }
+  // Local first and unawaited, so the station lookup and the geocoder round trip overlap.
+  const stations = searchStations(trimmed);
   const response = await fetch(url.toString(), { signal });
   if (!response.ok) {
     throw new Error(`Photon search failed: ${response.status}`);
@@ -209,6 +222,26 @@ export async function searchAddress(
       type: props.osm_value ?? props.type ?? "place",
     });
   }
-  setBounded(searchCache, cacheKey, results);
-  return results;
+  const leading: GeocodeResult[] = [];
+  const trailing: GeocodeResult[] = [];
+  for (const { station, rank } of await stations) {
+    const result: GeocodeResult = {
+      placeId: `subway:${scope}:${station.index}`,
+      lat: station.lat,
+      lng: station.lng,
+      displayName: stationLabel(station),
+      type: SUBWAY_RESULT_TYPE,
+    };
+    if (rank === 2 && leading.length < MAX_LEADING_STATIONS) {
+      leading.push(result);
+    } else {
+      trailing.push(result);
+    }
+  }
+  const merged = [...leading, ...results, ...trailing].slice(
+    0,
+    MAX_SEARCH_RESULTS + MAX_LEADING_STATIONS,
+  );
+  setBounded(searchCache, cacheKey, merged);
+  return merged;
 }

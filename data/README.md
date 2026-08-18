@@ -15,6 +15,8 @@ fetches. None of these files is ever served to a browser. Layouts are documented
 | `sidewalks/nyc.bin` | the OSM ways describing a street's own pavement — `footway=sidewalk`, `footway=crossing`, `footway=traffic_island` — the set the paths extract excludes | **OpenStreetMap** |
 | `ferries/nyc.bin` | the time-independent ferry graph (stops, crossings, per-segment crossing+wait time and drawing geometry) — OSM- and canopy-independent | NYC DOT Staten Island Ferry GTFS + NYC Ferry (Hornblower) GTFS |
 | `ferries/siferry-gtfs.zip`, `ferries/nycferry-gtfs.zip` | the two raw GTFS feeds, frozen so a later time-of-day pass can re-derive from the exact feeds a build read | NYC DOT + NYC Ferry (Hornblower) |
+| `subway/nyc.bin` | the 29 subway route lines (28 subway routes + the Staten Island Railway) with the colour, bullet-text colour and both names the MTA publishes for each, and the 496 stations with the routes calling at each — drawn only, read by no routing input | MTA subway GTFS (`rrgtfsfeeds.s3.amazonaws.com/gtfs_subway.zip`) |
+| `subway/sf.bin` | San Francisco's 14 rail lines — Muni's six Metro lines, the F historic streetcar and the three cable cars, plus the four BART lines that run through the city — as 42 polylines clipped to the city's land, with each agency's own colours and names, and the 268 stations with the routes calling at each; the same `SBWY` layout as `subway/nyc.bin`, drawn only, read by no routing input | SFMTA Muni GTFS (`muni-gtfs.apps.sfmta.com`) + BART GTFS (`bart.gov/dev/schedules`) |
 | `landmarks/nyc.bin` | ~1,530 designated landmark sites (points) — the "passes a landmark" routing discount | NYC LPC Individual Landmark Sites (`buis-pvji`) |
 | `art/nyc.bin` | public-art points (murals, sculpture, installations) — the "passes public art" routing discount | NYC PDC Outdoor Public Art Inventory (`2pg3-gcaa`) + **OpenStreetMap** (`tourism=artwork`) |
 | `highways/nyc.bin` | limited-access highways and above-ground rail as polylines — the highway/rail proximity *penalty* | **OpenStreetMap** |
@@ -56,6 +58,25 @@ rather than argue de-minimis.
 
 `landmarks/nyc.bin`, `buildings/nyc.bin`, `landuse/nyc.bin`, and `openstreets/nyc.bin` are pure
 **NYC Open Data** (no OSM), so they carry no share-alike obligation — see below.
+
+`subway/sf.bin` carries no OSM either, and its two feeds are licensed rather than merely published.
+**BART**'s GTFS is public with no restriction. **SFMTA**'s comes with a licence agreement in the zip
+that permits redistribution and derived works, forbids using Muni's or the City's trademarks, logos
+and maps, and requires every derivative to bear this notice:
+
+> Reproduced with permission granted by the City and County of San Francisco. The information has
+> been provided by means of a nonexclusive, limited, and revocable license granted by the City and
+> County of San Francisco.
+>
+> The City and County of San Francisco does not guarantee the accuracy, adequacy, completeness or
+> usefulness of any information. The City and County of San Francisco provides this information "as
+> is," without warranty of any kind, express or implied, including but not limited to warranties of
+> merchantability or fitness for a particular purpose, and assumes no responsibility for anyone's use
+> of the information.
+
+What the file carries is the feed's own route colours, names, shapes and stop positions — data, not
+Muni's map or wordmark — so the trademark clause bites on how the overlay is *drawn* and named, not
+on the ingest.
 
 The rendered map is a different matter. Tiles and street chunks are *Produced Works*, which ODbL
 covers with attribution alone — which the app gives, in the Leaflet attribution control.

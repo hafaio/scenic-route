@@ -1,4 +1,5 @@
 import { resolveUrl } from "./base-url";
+import { drawLabels, type PlacedLabels, placeLabels } from "./labels";
 import { projectX, projectY, unproject } from "./mercator";
 import type { PoiParams, TileCoords } from "./protocol";
 import type { TileRenderer } from "./renderer";
@@ -12,23 +13,6 @@ const TILE_SIZE = 256;
 const BASE_RADIUS_PX = 3.5;
 const CELL_DEG = 0.004; // ~440 m spatial buckets, so a tile query scans only nearby points
 const LABEL_MIN_ZOOM = 16; // labels only when zoomed in enough to be sparse and readable
-// A generic stack, so the worker resolves it without any font plumbing.
-const LABEL_FONT = "600 11px system-ui, sans-serif";
-const LABEL_MAX_CHARS = 26; // long names truncate with an ellipsis so a box stays bounded
-const LABEL_LINE_HEIGHT = 12;
-const LABEL_GAP_PX = 3; // between the dot's edge and the start of the text
-
-// One label the placement pass kept, in world pixels at its zoom: where to draw the text and the box
-// that reserved the space.
-interface PlacedLabel {
-  text: string;
-  x: number;
-  y: number;
-  x0: number;
-  y0: number;
-  x1: number;
-  y1: number;
-}
 
 interface Points {
   lngs: Float64Array;
@@ -37,9 +21,9 @@ interface Points {
   // Point indices bucketed by `${floor(lng/CELL_DEG)},${floor(lat/CELL_DEG)}`, so a tile draw touches
   // only the cells it overlaps rather than the whole city.
   buckets: Map<string, number[]>;
-  // Per zoom, the placed labels bucketed by `${tileX},${tileY}`; filled on the first tile that needs
-  // it. Only the five label zooms can ever be in here, so nothing is evicted.
-  labels: Map<number, Map<string, PlacedLabel[]>>;
+  // Per zoom, the placed labels; filled on the first tile that needs it. Only the five label zooms
+  // can ever be in here, so nothing is evicted.
+  labels: Map<number, PlacedLabels>;
 }
 
 // Decode the shared point layout (magic LMRK / ARTW): the 40-byte header, then per-point
@@ -122,126 +106,38 @@ function dotRadius(zoom: number): number {
   return Math.min(7, BASE_RADIUS_PX + Math.max(0, zoom - 14) * 0.6);
 }
 
-// Greedy label placement over the whole point set at one zoom, in the blob's point order and in
-// world pixels: no part of it depends on which tile asked, so every tile agrees on which labels
-// survive and where. Each survivor is filed under every tile its box touches, which both indexes
-// the draw and supplies the collision candidates — two overlapping boxes always share a tile.
-function placeLabels(
-  context: OffscreenCanvasRenderingContext2D,
-  points: Points,
-  zoom: number,
-  above: boolean,
-): Map<string, PlacedLabel[]> {
-  const { lngs, lats, names } = points;
-  const radius = dotRadius(zoom);
-  context.font = LABEL_FONT;
-  const byTile = new Map<string, PlacedLabel[]>();
-  for (let point = 0; point < names.length; point++) {
-    const raw = names[point];
-    if (!raw) {
-      continue;
-    }
-    const text =
-      raw.length > LABEL_MAX_CHARS
-        ? `${raw.slice(0, LABEL_MAX_CHARS - 1)}…`
-        : raw;
-    const dotX = projectX(lngs[point], zoom);
-    const dotY = projectY(lats[point], zoom);
-    const x = dotX + radius + LABEL_GAP_PX;
-    const y = above ? dotY - radius : dotY + radius;
-    const width = context.measureText(text).width;
-    const label: PlacedLabel = {
-      text,
-      x,
-      y,
-      x0: x,
-      y0: above ? y - LABEL_LINE_HEIGHT : y,
-      x1: x + width,
-      y1: above ? y : y + LABEL_LINE_HEIGHT,
-    };
-    const tileX0 = Math.floor(label.x0 / TILE_SIZE);
-    const tileX1 = Math.floor(label.x1 / TILE_SIZE);
-    const tileY0 = Math.floor(label.y0 / TILE_SIZE);
-    const tileY1 = Math.floor(label.y1 / TILE_SIZE);
-    let clashes = false;
-    for (let tileX = tileX0; tileX <= tileX1 && !clashes; tileX++) {
-      for (let tileY = tileY0; tileY <= tileY1 && !clashes; tileY++) {
-        const bucket = byTile.get(`${tileX},${tileY}`);
-        clashes =
-          bucket?.some(
-            (other) =>
-              label.x0 < other.x1 &&
-              label.x1 > other.x0 &&
-              label.y0 < other.y1 &&
-              label.y1 > other.y0,
-          ) ?? false;
-      }
-    }
-    if (clashes) {
-      continue;
-    }
-    for (let tileX = tileX0; tileX <= tileX1; tileX++) {
-      for (let tileY = tileY0; tileY <= tileY1; tileY++) {
-        const key = `${tileX},${tileY}`;
-        const bucket = byTile.get(key);
-        if (bucket) {
-          bucket.push(label);
-        } else {
-          byTile.set(key, [label]);
-        }
-      }
-    }
-  }
-  return byTile;
-}
-
 // Not keyed on `above`: a blob is served to one layer, so its anchor never varies.
 function labelsAt(
   context: OffscreenCanvasRenderingContext2D,
   points: Points,
   zoom: number,
   above: boolean,
-): Map<string, PlacedLabel[]> {
+): PlacedLabels {
   const cached = points.labels.get(zoom);
   if (cached) {
     return cached;
   } else {
-    const placed = placeLabels(context, points, zoom, above);
+    const placed = placeLabels(context, points, zoom, dotRadius(zoom), above);
     points.labels.set(zoom, placed);
     return placed;
   }
 }
 
-// The labels this tile holds: a dark-outlined name in the layer's colour, drawn in tile coordinates
-// from the shared placement. A label reaching over a seam belongs to both tiles and is drawn at the
-// same world position by each, so the two clipped halves line up exactly. Landmarks anchor above
-// their dot and art below, so a co-located pair never collides.
-function drawLabels(
+// Landmarks anchor above their dot and art below, so a co-located pair never collides.
+function drawTileLabels(
   context: OffscreenCanvasRenderingContext2D,
   points: Points,
   coords: TileCoords,
   { color, labelAnchor }: PoiParams,
 ): void {
   const above = labelAnchor === "top";
-  const tile = labelsAt(context, points, coords.z, above).get(
-    `${coords.x},${coords.y}`,
+  drawLabels(
+    context,
+    labelsAt(context, points, coords.z, above),
+    coords,
+    color,
+    above,
   );
-  if (!tile) {
-    return;
-  }
-  const originX = coords.x * TILE_SIZE;
-  const originY = coords.y * TILE_SIZE;
-  context.font = LABEL_FONT;
-  context.textAlign = "left";
-  context.textBaseline = above ? "bottom" : "top";
-  context.lineWidth = 3;
-  context.lineJoin = "round";
-  context.strokeStyle = "rgba(0, 0, 0, 0.75)";
-  context.fillStyle = color;
-  for (const { text, x, y } of tile) {
-    context.strokeText(text, x - originX, y - originY);
-    context.fillText(text, x - originX, y - originY);
-  }
 }
 
 // Every point the tile overlaps, projected at the tile's own zoom and filled as a coloured disc
@@ -295,7 +191,7 @@ function draw(
   }
 
   if (zoom >= LABEL_MIN_ZOOM) {
-    drawLabels(context, points, coords, params);
+    drawTileLabels(context, points, coords, params);
   }
 }
 
