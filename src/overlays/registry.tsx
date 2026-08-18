@@ -89,7 +89,9 @@ export const OVERLAYS: readonly OverlayDef[] = [
   {
     id: "canopy",
     label: "Tree canopy",
-    icon: <PiTreeFill className="h-4 w-4" aria-hidden="true" />,
+    // teal-600, the ramp's own mid stop — the icon says what the layer paints rather than
+    // inheriting the menu's text colour, as every other overlay's does.
+    icon: <PiTreeFill className="h-4 w-4 text-teal-600" aria-hidden="true" />,
     render: () => (
       <>
         <CanopyLayer />
