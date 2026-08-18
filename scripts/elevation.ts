@@ -2,10 +2,11 @@
 //
 // Nothing in the model read ground height before this. New York is flat enough that ignoring terrain
 // costs almost nothing; San Francisco is not. Two things read the mosaic — the terrain overlay's
-// pyramid, and the graph's per-edge relief byte, which is what the hill weight steers by.
+// pyramid, and the graph's per-edge ascent and descent bytes, which is what the hill weight steers by.
 //
 // It also sets how long a walk takes: `walkSpeedOn` scales the flat 1.3 m/s by Tobler's hiking
-// function off the same per-edge grade, so a route over a hill is reported as the longer walk it is.
+// function off those two, so a route over a hill is reported as the longer walk it is and the same
+// route downhill as the quicker one.
 //
 // The tiles are a build input and never shipped — cached, sampled, and then not needed again, the
 // same contract `scripts/chm.ts` has with the canopy height model.

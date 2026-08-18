@@ -664,7 +664,7 @@ graph's commercial discount is baked from the lines that pass writes, and the ch
 a second time once the graph has said which walks its island drop stranded. `tiler build` runs all
 nine in **one process**, where each pass is a function over values, so the stranded set cannot
 reach the chunk pass before the graph that computes it has run. It also opens each city's DEM
-**once** and hands it to both readers — the terrain overlay and the graph's relief byte resample
+**once** and hands it to both readers — the terrain overlay and the graph's relief bytes resample
 different grids over different bounds, but San Francisco's 1.77 GB of tiles are then indexed once.
 
 The plan file carries what the nine argv lists carried, including the two things that have to come
@@ -1402,7 +1402,7 @@ The tint is hypsometric — greens through tans to browns — stretched over the
 rather than an absolute scale, because what the layer is for is showing which of *these* streets are
 the hills. The hillshade is lit from the north-west, the direction a printed relief map lights from.
 
-### `public/routing/{id}.bin` — the routing graph, magic `GRPH` (v8, derived, gitignored)
+### `public/routing/{id}.bin` — the routing graph, magic `GRPH` (v9, derived, gitignored)
 
 The graph pass contracts STRT into the graph the client routes on, then expands it into the edges a
 walker actually uses. For a city carrying a PATH layer it first **conflates** the OSM pedestrian/park
@@ -1603,7 +1603,7 @@ Header, 64 bytes:
 | offset | type | field |
 | --- | --- | --- |
 | 0 | u8[4] | magic `GRPH` |
-| 4 | u16 | format version = 8 |
+| 4 | u16 | format version = 9 |
 | 6 | u16 | header bytes = 64 |
 | 8 | u32 | node count N |
 | 12 | u32 | edge count E |
@@ -1626,7 +1626,7 @@ can view them as typed arrays without copying):
 4. **CSR offsets**: (N+1) × u32 — node n owns half-edges `[csr[n], csr[n+1])`.
 5. **Adjacency**: 2E × u32 — each entry an **edge id** (the neighbour is the edge's other
    endpoint, one indirection).
-6. **Edge records**: E × 34 bytes:
+6. **Edge records**: E × 36 bytes:
 
 | offset | type | field |
 | --- | --- | --- |
@@ -1647,10 +1647,11 @@ can view them as typed arrays without copying):
 | 28 | u8 | direct canopy, 0–254 (the shelter factor's input; 0 for a ferry) |
 | 29 | u32 | **source id**: the CSCL physicalid, or the OSM way id for a conflated path; `0xFFFFFFFF` = no durable identity |
 | 33 | u8 | **ordinal**: how many earlier edges share this edge's (source id, side) pair; 0 where there is no source id |
-| 34 | u8 | **relief**, 0-254: the average grade along this edge — the height it climbs and drops, added up along its polyline without regard to direction, divided by its length — as a fraction of 35%. That span clears the steepest street anyone walks (San Francisco's worst blocks reach about 31.5%), so nothing saturates; v7 spanned only 12%, which made every serious hill identical. Read both as a penalty attribute and as the input to the grade-adjusted walking speed. 0 for a ferry and for a city with no elevation source |
+| 34 | u8 | **ascent**, 0-254: the height this edge CLIMBS walking it a→b, summed along its polyline and divided by its length, as a fraction of 35%. That span clears the steepest street anyone walks (San Francisco's worst blocks reach about 31.5%), so nothing saturates; v7 spanned only 12%, which made every serious hill identical. 0 for a ferry and for a city with no elevation source |
+| 35 | u8 | **descent**, 0-254: the height it DROPS over the same walk, on the same scale. Walking the edge b→a swaps the two. Their SUM is the absolute grade the hill penalty reads — direction-free, because a route that avoids a hill avoids it both ways — and the two apart are what makes a descent quicker than the climb back (v9; v8 carried only the sum, in one byte). Because each clamps on its own, an edge that crests and drops can carry 70% of grade in total where the single byte pinned the pair at 35% |
 
-The record is 35 bytes, so the name table that follows it is zero-padded back to the 4-byte
-boundary every section starts on.
+The record is 36 bytes, a multiple of the 4-byte boundary every section starts on, so the name
+table that follows it needs no padding.
 
 Bytes 29–33 carry the **durable edge key** (v6). Node and edge ids are positional — nodes are
 renumbered by (component, latitude, longitude) and edges by (component, min node id) — so every id
@@ -2271,7 +2272,7 @@ goes back in:
 | `data/landuse`, `data/buildings`, `data/openstreets`, `data/dining` → `public/commercial-lines` | the commercial attribute byte | one more such byte, read at `graph.rs:3542`. the chunks and commercial passes are on this branch and nowhere else |
 | `data/canopy` | the direct-canopy byte, and the crowns of the SHDE bake | integrated along edge polylines that are already final |
 | `data/buildings` + the shade params (`shade-schedule.ts`, `src/shade/sun.ts`) | the per-edge SHDE bake | it runs *after* `fs::write(&args.out)`; it cannot move a key in the file it is written beside |
-| the DEM mosaic (`elevation.tiles`) | the per-edge relief byte | sampled at `graph.rs:3628`, over those same finished edges |
+| the DEM mosaic (`elevation.tiles`) | the per-edge ascent and descent bytes | sampled at `graph.rs:3627`, over those same finished edges |
 | `data/land`, `data/trees` | the canopy and genus pyramids | nothing on the graph's chain reads either |
 
 **Which of those three a city actually gets is in the stamp as well**, because a source withheld puts

@@ -18,7 +18,7 @@ import { FORMAT_VERSION as GRAPH_FORMAT_VERSION } from "./graph";
 
 const LAST_DAY = 3136;
 const HEADER_BYTES = 64;
-const EDGE_RECORD_BYTES = 35;
+const EDGE_RECORD_BYTES = 36;
 const NODE_COUNT = 2;
 const KIND_SIDEWALK = 0;
 const SIDE_SHIFT = 3;
@@ -37,7 +37,7 @@ const EDGES: readonly Edge[] = [
   { sourceId: 19, side: 4, ordinal: 0, length: 7.5 },
 ];
 
-// A v7 GRPH file carrying exactly these edges: two nodes, no geometry, no names, no ferries. Enough
+// A GRPH file carrying exactly these edges: two nodes, no geometry, no names, no ferries. Enough
 // for `decodeGraph`, which is all the gate reads.
 function graphBytes(edges: readonly Edge[]): Uint8Array {
   const nodes = HEADER_BYTES + NODE_COUNT * 10;

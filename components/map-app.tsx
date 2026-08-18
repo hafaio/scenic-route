@@ -913,7 +913,9 @@ export default function MapApp() {
             const moving = which === "dest" ? pair.dest : pair.start;
             const solved = solver.solveApprox(moving);
             const result =
-              which === "start" && solved ? reverseResult(solved) : solved;
+              which === "start" && solved
+                ? reverseResult(graph, solved)
+                : solved;
             if (result) {
               setRouteState({ kind: "ready", result, graph });
             } else {

@@ -1,5 +1,5 @@
 // The client's view of the routing graph baked by the graph pass. Layout: scripts/README.md
-// (magic GRPH, v6 — the sidewalk graph with inert ferry edges). Fixed sections are viewed in place
+// (magic GRPH, v9 — the sidewalk graph with inert ferry edges). Fixed sections are viewed in place
 // over the fetched buffer; the strided edge records are copied once into parallel typed arrays so
 // the search loop touches only flat arrays.
 
@@ -145,13 +145,16 @@ export interface RoutingGraph extends GraphIdentity {
   // The share of the edge that lies DIRECTLY under a crown, unblurred — what edgeCover, the smoothed
   // field the overlay is coloured from, cannot answer.
   edgeDirectCanopy: Uint8Array; // 0..254; 0 for a ferry
-  // 0..254: the average grade along this edge — the height it climbs and drops over its length,
-  // absolute, so it reads the same in either direction — as a fraction of 35%. That span clears the
-  // steepest street anyone walks, so nothing saturates. 0 for a ferry and for a city with no DEM.
-  edgeRelief: Uint8Array;
-  // The largest relief attribute present. NOT a heuristic bound — hill is a penalty, whose
-  // minimum factor is 1, so it never loosens the A* lower bound. This is read to tell a city with no
-  // elevation source (every edge 0) from one that has it, which is what greys the slider out.
+  // 0..254 each: the height this edge CLIMBS and the height it DROPS walking it a -> b, over its
+  // length, as a fraction of 35%. Reversing the edge swaps them; their sum is the absolute grade the
+  // hill penalty steers by, and the two apart are what makes a descent quicker than the climb back.
+  // 0 for a ferry and for a city with no DEM.
+  edgeAscent: Uint8Array;
+  edgeDescent: Uint8Array;
+  // The largest total grade present, as a fraction of 35% — up to 2, since the two bytes clamp
+  // separately. NOT a heuristic bound — hill is a penalty, whose minimum factor is 1, so it never
+  // loosens the A* lower bound. This is read to tell a city with no elevation source (every edge 0)
+  // from one that has it, which is what greys the slider out.
   maxRelief: number;
   maxDirectCanopy: number; // the greatest per-edge direct canopy, 0..1; that factor's clip-floor input
 
@@ -188,9 +191,9 @@ export interface RoutingGraph extends GraphIdentity {
 
 const MAGIC = "GRPH";
 // Exported so a fixture cannot drift from it: a test writing its own header must write this one.
-export const FORMAT_VERSION = 8;
+export const FORMAT_VERSION = 9;
 const HEADER_BYTES = 64;
-const EDGE_RECORD_BYTES = 35;
+const EDGE_RECORD_BYTES = 36;
 // relative, so both pick up the deploy basePath
 // Written by the same pass as the graph itself, and named after it: one directory holds
 // every city's, so a shared name would describe whichever built last.
@@ -259,7 +262,8 @@ export function decodeGraph(
   const edgeDirectCanopy = new Uint8Array(edgeCount);
   const edgeSourceId = new Uint32Array(edgeCount);
   const edgeOrdinal = new Uint8Array(edgeCount);
-  const edgeRelief = new Uint8Array(edgeCount);
+  const edgeAscent = new Uint8Array(edgeCount);
+  const edgeDescent = new Uint8Array(edgeCount);
   const ferryEdges: number[] = [];
   let maxCoverByte = 0;
   let maxLandmarkByte = 0;
@@ -303,8 +307,12 @@ export function decodeGraph(
     edgeDirectCanopy[edge] = bytes[record + 28];
     edgeSourceId[edge] = view.getUint32(record + 29, true);
     edgeOrdinal[edge] = bytes[record + 33];
-    edgeRelief[edge] = bytes[record + 34];
-    maxReliefByte = Math.max(maxReliefByte, edgeRelief[edge]);
+    edgeAscent[edge] = bytes[record + 34];
+    edgeDescent[edge] = bytes[record + 35];
+    maxReliefByte = Math.max(
+      maxReliefByte,
+      edgeAscent[edge] + edgeDescent[edge],
+    );
     maxLandmarkByte = Math.max(maxLandmarkByte, edgeLandmark[edge]);
     maxArtByte = Math.max(maxArtByte, edgeArt[edge]);
     maxCommercialByte = Math.max(maxCommercialByte, edgeCommercial[edge]);
@@ -365,7 +373,8 @@ export function decodeGraph(
     maxCommercial,
     edgeDirectCanopy,
     maxDirectCanopy,
-    edgeRelief,
+    edgeAscent,
+    edgeDescent,
     maxRelief,
     shade: null, // populated lazily once the SHDE artifact loads, keyed on the departure instant
     sheds: null, // populated lazily once the SHED artifact loads, keyed on the picked day
