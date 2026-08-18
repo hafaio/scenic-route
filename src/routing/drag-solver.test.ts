@@ -143,7 +143,8 @@ function buildGraph(nodes: NodeSpec[], edges: EdgeSpec[]): RoutingGraph {
     edgeLandmark: new Uint8Array(edgeCount),
     edgeArt: new Uint8Array(edgeCount),
     edgeHighway: new Uint8Array(edgeCount),
-    edgeRelief: new Uint8Array(edgeCount),
+    edgeAscent: new Uint8Array(edgeCount),
+    edgeDescent: new Uint8Array(edgeCount),
     maxRelief: 0,
     edgeCommercial: new Uint8Array(edgeCount),
     maxLandmark: 0,
@@ -587,12 +588,17 @@ test("reverseResult flips orientation and preserves the scalar totals", () => {
     weights(0.6, 0, false),
   ).solveApprox(dest);
   expect(forward).not.toBeNull();
-  const reversed = reverseResult(forward as RouteResult);
+  const reversed = reverseResult(grid.graph, forward as RouteResult);
 
   expect(reversed.lengthMeters).toBe((forward as RouteResult).lengthMeters);
   expect(reversed.walkMeters).toBe((forward as RouteResult).walkMeters);
   expect(reversed.factors).toBe((forward as RouteResult).factors);
-  expect(reversed.travelSeconds).toBe((forward as RouteResult).travelSeconds);
+  // The ETA is re-run over the flipped steps rather than copied, because walking a hill the other
+  // way climbs what it dropped. This grid is flat, so it comes back to the same number.
+  expect(reversed.travelSeconds).toBeCloseTo(
+    (forward as RouteResult).travelSeconds,
+    9,
+  );
   expect(reversed.start).toBe(dest);
   expect(reversed.dest).toBe(start);
 
@@ -612,6 +618,26 @@ test("reverseResult flips orientation and preserves the scalar totals", () => {
     expect(mirror.forward).toBe(!fwdSteps[index].forward);
     expect(mirror.side).toBe(fwdSteps[index].side);
   }
+});
+
+test("reverseResult re-times the walk, so the climb back is slower than the descent", () => {
+  clearEdgePathCache();
+  const hilly = buildGrid(false);
+  // Every edge climbs 8% of its length walked a -> b, which in this grid's numbering is the
+  // direction a 0 -> 15 route travels throughout.
+  hilly.graph.edgeAscent.fill(Math.round((0.08 / 0.35) * 254));
+  const start = snapAtNode(hilly.graph, 0, hilly.stubOf[0]);
+  const dest = snapAtNode(hilly.graph, 15, hilly.stubOf[15]);
+  const climb = findRoute(hilly.graph, start, dest, weights(0, 0, false));
+  expect(climb).not.toBeNull();
+  const descent = reverseResult(hilly.graph, climb as RouteResult);
+  expect(descent.travelSeconds).toBeLessThan(
+    (climb as RouteResult).travelSeconds,
+  );
+  expect(reverseResult(hilly.graph, descent).travelSeconds).toBeCloseTo(
+    (climb as RouteResult).travelSeconds,
+    9,
+  );
 });
 
 test("with ferries on solveApprox is connected and near-optimal", () => {

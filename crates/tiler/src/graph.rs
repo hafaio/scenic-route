@@ -98,15 +98,15 @@ pub const SIDE_SOUTH: u8 = 3;
 const SIDE_WEST: u8 = 4;
 const FLAG_GEOMETRY_RIGHT: u8 = 1 << 2; // this sidewalk lies right of its stored geometry direction
 
-const GRAPH_FORMAT: u16 = 8; // v8 spans the relief byte over 35% of grade, not 12%
+const GRAPH_FORMAT: u16 = 9; // v9 splits the relief byte into ascent and descent
 // The field the relief is sampled off is built at this zoom's pixel size — about 5 m at San
 // Francisco's latitude. Finer than the block a grade is measured over, coarser than the metre the
 // DEM is published at, and a whole city of it is tens of megabytes rather than gigabytes.
 const RELIEF_FIELD_ZOOM: u32 = 15;
 const GRAPH_HEADER_BYTES: usize = 64;
 // 24 + landmark(24), art(25), highway(26), commercial(27), directCanopy(28), sourceId(29..32),
-// ordinal(33), relief(34)
-const EDGE_RECORD_BYTES: usize = 35;
+// ordinal(33), ascent(34), descent(35)
+const EDGE_RECORD_BYTES: usize = 36;
 // Record bytes 29-33: the source record an edge was derived from (a CSCL physicalid, or an OSM way
 // id for a conflated path) and the how-many-th edge of that source, on that side, this is. With the
 // side label already in byte 22 the triple (source id, side, ordinal) survives a rebuild, where the
@@ -3624,9 +3624,10 @@ pub fn run(args: &Args, dem: Option<&mut crate::dem::Dem>) -> Fallible<Vec<u32>>
         })
         .collect();
 
-    // The relief byte (v7): the height climbed and dropped along each edge, sampled off the city's
-    // DEM resampled to a lat/lng field. A city with no elevation source leaves every edge flat.
-    let relief_bytes = match dem {
+    // The relief bytes (v9): the height climbed and the height dropped along each edge walked a->b,
+    // sampled off the city's DEM resampled to a lat/lng field. A city with no elevation source
+    // leaves every edge flat.
+    let (ascent_bytes, descent_bytes) = match dem {
         Some(dem) => {
             let bounds = args
                 .elevation_bounds
@@ -3640,9 +3641,9 @@ pub fn run(args: &Args, dem: Option<&mut crate::dem::Dem>) -> Fallible<Vec<u32>>
                 100.0 * baked.mean_grade,
                 100.0 * baked.max_grade
             );
-            baked.bytes
+            (baked.ascent, baked.descent)
         }
-        None => vec![0u8; v2_edges.len()],
+        None => (vec![0u8; v2_edges.len()], vec![0u8; v2_edges.len()]),
     };
 
     // The direct-canopy byte (v6): the fraction of the edge under a crown, integrated along that
@@ -3920,8 +3921,8 @@ pub fn run(args: &Args, dem: Option<&mut crate::dem::Dem>) -> Fallible<Vec<u32>>
     let csr_offset = node_component_offset + 2 * node_count + component_pad;
     let adjacency_offset = csr_offset + 4 * (node_count + 1);
     let edges_offset = adjacency_offset + 8 * edge_count;
-    // The 34-byte record leaves the edge section off a 4-byte boundary, so the name table is padded
-    // back onto one like every other section.
+    // Every section starts on a 4-byte boundary so the client can view it as a typed array; the
+    // record's own size is not part of the contract, so the name table is padded back onto one.
     let name_offset = align4(edges_offset + EDGE_RECORD_BYTES * edge_count);
     let geometry_offset = align4(name_offset + name_table_bytes);
 
@@ -4003,9 +4004,10 @@ pub fn run(args: &Args, dem: Option<&mut crate::dem::Dem>) -> Fallible<Vec<u32>>
             bytes[record + 26] = highway_bytes[edge_id];
             bytes[record + 27] = commercial_bytes[edge_id];
             bytes[record + 28] = direct_canopy_bytes[edge_id];
-            // The relief byte (v7): how much height this edge climbs and drops, absolute, so it
-            // costs the same in either direction. A ferry crosses water and has none.
-            bytes[record + 34] = relief_bytes[edge_id];
+            // The relief bytes (v9): how much height this edge climbs and how much it drops, walked
+            // a->b, so reversing it swaps the two. A ferry crosses water and has neither.
+            bytes[record + 34] = ascent_bytes[edge_id];
+            bytes[record + 35] = descent_bytes[edge_id];
         }
         // The durable key (v6): the source record's id, and the ordinal that — with the side already
         // in byte 22 — picks this edge out within it. A crossing, link or ferry has no source

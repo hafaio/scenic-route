@@ -54,7 +54,7 @@ export function stepSeconds(
     return rawSeconds(graph, step.edge, from, elapsedSeconds);
   } else {
     return (
-      step.lengthMeters / walkSpeedOn(graph, step.edge) +
+      step.lengthMeters / walkSpeedOn(graph, step.edge, step.forward) +
       crossingWait(graph, step.edge, from)
     );
   }
@@ -415,20 +415,26 @@ export function findRoute(
 
   // The snap edges are always walking edges (ferries are excluded from the snap index), so their
   // per-metre cost is the walking multiplier over speed — effective seconds, matching the interior.
+  // The two halves of the start edge are walked in OPPOSITE directions — the walk out to node a runs
+  // b -> a — so a hill on it takes them at different speeds.
   const startA = graph.edgeNodeA[start.edge];
   const startB = graph.edgeNodeB[start.edge];
-  const startPerMeter =
-    edgeMultiplier(graph, start.edge, weights) / walkSpeedOn(graph, start.edge);
+  const startMultiplier = edgeMultiplier(graph, start.edge, weights);
+  const startSpeedToA = walkSpeedOn(graph, start.edge, false);
+  const startSpeedToB = walkSpeedOn(graph, start.edge, true);
+  const startPerMeterToA = startMultiplier / startSpeedToA;
+  const startPerMeterToB = startMultiplier / startSpeedToB;
   const startLength = graph.edgeLength[start.edge];
 
   const destA = graph.edgeNodeA[dest.edge];
   const destB = graph.edgeNodeB[dest.edge];
   const destLength = graph.edgeLength[dest.edge];
   // The dest edge is a partial walked at the very end, so its shade is the sun at the arrival time —
-  // the elapsed raw seconds of the endpoint the route reaches it through.
+  // the elapsed raw seconds of the endpoint the route reaches it through. Arriving through node a
+  // walks it a -> b, through node b the other way.
   const destPerMeterAt = (node: number): number =>
     edgeMultiplier(graph, dest.edge, weights, elapsed[node]) /
-    walkSpeedOn(graph, dest.edge);
+    walkSpeedOn(graph, dest.edge, node === destA);
 
   let bestTotal = Number.POSITIVE_INFINITY;
   let bestDestNode = -1; // the edge endpoint the winning route reaches the dest edge through
@@ -444,20 +450,21 @@ export function findRoute(
   // Walking directly along the shared edge, never leaving it, is a candidate when both snaps sit
   // on the same edge.
   if (start.edge === dest.edge) {
+    const forward = dest.metersFromA > start.metersFromA;
     consider(
-      Math.abs(dest.metersFromA - start.metersFromA) * startPerMeter,
+      Math.abs(dest.metersFromA - start.metersFromA) *
+        (forward ? startPerMeterToB : startPerMeterToA),
       -1,
       true,
     );
   }
 
   const heap = new NodeHeap(1024);
-  distance[startA] = start.metersFromA * startPerMeter;
-  distance[startB] = (startLength - start.metersFromA) * startPerMeter;
+  distance[startA] = start.metersFromA * startPerMeterToA;
+  distance[startB] = (startLength - start.metersFromA) * startPerMeterToB;
   // Seed the elapsed clock with the raw time to walk each half of the start edge to its node.
-  const startSpeed = walkSpeedOn(graph, start.edge);
-  elapsed[startA] = start.metersFromA / startSpeed;
-  elapsed[startB] = (startLength - start.metersFromA) / startSpeed;
+  elapsed[startA] = start.metersFromA / startSpeedToA;
+  elapsed[startB] = (startLength - start.metersFromA) / startSpeedToB;
   heap.push(distance[startA] + heuristicOf(startA), startA);
   heap.push(distance[startB] + heuristicOf(startB), startB);
 
@@ -552,7 +559,10 @@ export class RouteSolver {
 
   private readonly sourceA: number;
   private readonly sourceB: number;
-  private readonly sourcePerMeter: number;
+  // The two halves of the source edge are walked in opposite directions, so a hill on it takes them
+  // at different speeds.
+  private readonly sourcePerMeterToA: number;
+  private readonly sourcePerMeterToB: number;
   private readonly sourceLength: number;
 
   constructor(
@@ -578,24 +588,26 @@ export class RouteSolver {
     this.sourceB = graph.edgeNodeB[source.edge];
     // The source edge is a partial walked at the source's wall-clock time (departure for a dest-drag,
     // arrival for a start-drag), so price it against the sun at the anchor.
-    this.sourcePerMeter =
-      edgeMultiplier(
-        graph,
-        source.edge,
-        weights,
-        Math.max(0, sunAnchorSeconds),
-      ) / walkSpeedOn(graph, source.edge);
+    const sourceMultiplier = edgeMultiplier(
+      graph,
+      source.edge,
+      weights,
+      Math.max(0, sunAnchorSeconds),
+    );
+    const sourceSpeedToA = walkSpeedOn(graph, source.edge, false);
+    const sourceSpeedToB = walkSpeedOn(graph, source.edge, true);
+    this.sourcePerMeterToA = sourceMultiplier / sourceSpeedToA;
+    this.sourcePerMeterToB = sourceMultiplier / sourceSpeedToB;
     this.sourceLength = graph.edgeLength[source.edge];
 
-    this.distance[this.sourceA] = source.metersFromA * this.sourcePerMeter;
+    this.distance[this.sourceA] = source.metersFromA * this.sourcePerMeterToA;
     this.distance[this.sourceB] =
-      (this.sourceLength - source.metersFromA) * this.sourcePerMeter;
+      (this.sourceLength - source.metersFromA) * this.sourcePerMeterToB;
     // The elapsed clock is anchored at the source, so it is stable across dest drags — every reused
     // node's raw time from the source is the same no matter where the moving endpoint goes.
-    const sourceSpeed = walkSpeedOn(graph, source.edge);
-    this.elapsed[this.sourceA] = source.metersFromA / sourceSpeed;
+    this.elapsed[this.sourceA] = source.metersFromA / sourceSpeedToA;
     this.elapsed[this.sourceB] =
-      (this.sourceLength - source.metersFromA) / sourceSpeed;
+      (this.sourceLength - source.metersFromA) / sourceSpeedToB;
     this.reached.push(this.sourceA, this.sourceB);
   }
 
@@ -616,7 +628,7 @@ export class RouteSolver {
     // forward wall-clock time.
     const destPerMeterAt = (node: number): number =>
       edgeMultiplier(graph, dest.edge, this.weights, this.sunElapsed(node)) /
-      walkSpeedOn(graph, dest.edge);
+      walkSpeedOn(graph, dest.edge, node === destA);
 
     let bestTotal = Number.POSITIVE_INFINITY;
     let bestDestNode = -1;
@@ -630,9 +642,10 @@ export class RouteSolver {
     };
 
     if (this.source.edge === dest.edge) {
+      const forward = dest.metersFromA > this.source.metersFromA;
       consider(
         Math.abs(dest.metersFromA - this.source.metersFromA) *
-          this.sourcePerMeter,
+          (forward ? this.sourcePerMeterToB : this.sourcePerMeterToA),
         -1,
         true,
       );
@@ -777,10 +790,26 @@ export class RouteSolver {
   }
 }
 
+// The ETA over an oriented step list: raw seconds, each step costed at the clock time it is reached,
+// because a ferry's cost is a step function of that clock.
+function routeSeconds(
+  graph: RoutingGraph,
+  steps: readonly RouteStep[],
+): number {
+  let elapsed = 0;
+  for (const step of steps) {
+    elapsed += stepSeconds(graph, step, elapsed);
+  }
+  return elapsed;
+}
 // The same route travelled the other way: swap the two snaps, reverse the step list and flip each
-// step's travel direction, and reverse the stitched path. Length, walk, ETA, and the factor means are
-// direction-independent and carry over unchanged.
-export function reverseResult(result: RouteResult): RouteResult {
+// step's travel direction, and reverse the stitched path. Length, walk and the factor means are
+// direction-independent and carry over unchanged; the ETA is NOT — walking a hill the other way
+// climbs what it dropped — so it is re-run over the flipped steps.
+export function reverseResult(
+  graph: RoutingGraph,
+  result: RouteResult,
+): RouteResult {
   const steps = result.steps
     .slice()
     .reverse()
@@ -792,7 +821,7 @@ export function reverseResult(result: RouteResult): RouteResult {
     steps,
     lengthMeters: result.lengthMeters,
     walkMeters: result.walkMeters,
-    travelSeconds: result.travelSeconds,
+    travelSeconds: routeSeconds(graph, steps),
     factors: result.factors,
     start: result.dest,
     dest: result.start,
