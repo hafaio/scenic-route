@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   FiCrosshair,
+  FiDownload,
   FiInfo,
   FiLoader,
   FiLogIn,
@@ -16,11 +17,13 @@ import { CITIES, type City } from "../src/cities";
 import type { OverlayId } from "../src/overlays/registry";
 import CityDialog from "./city-dialog";
 import ClockControl from "./clock-control";
+import InstallDialog from "./install-dialog";
 import LayersControl from "./layers-control";
 import type { AuthState } from "./map-app";
 import RouteToggle from "./route-toggle";
 import ShareControl from "./share-control";
 import ThemeToggle from "./theme-toggle";
+import { useInstall } from "./use-install";
 
 interface ToolbarProps {
   auth: AuthState;
@@ -81,7 +84,9 @@ export default function Toolbar({
 }: ToolbarProps) {
   const [menuOpen, setMenuOpen] = useState<boolean>(false);
   const [cityDialogOpen, setCityDialogOpen] = useState<boolean>(false);
+  const [installHelpOpen, setInstallHelpOpen] = useState<boolean>(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
+  const { installable, install } = useInstall();
 
   useEffect(() => {
     if (!menuOpen) {
@@ -118,6 +123,9 @@ export default function Toolbar({
           onSelect={onSelectCity}
           onClose={() => setCityDialogOpen(false)}
         />
+      ) : null}
+      {installHelpOpen ? (
+        <InstallDialog onClose={() => setInstallHelpOpen(false)} />
       ) : null}
       <RouteToggle active={routing} onToggle={onToggleRouting} />
       <LayersControl
@@ -266,6 +274,32 @@ export default function Toolbar({
                 />
               </span>
             </button>
+            {/* Chromium hands the page its own install flow and this runs it; every other browser
+                keeps it in a menu of its own, and the dialog says where. Gone once the app is
+                already running from the home screen, where there is nothing left to add. */}
+            {installable ? (
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  setMenuOpen(false);
+                  void install().then((prompted) => {
+                    if (!prompted) {
+                      setInstallHelpOpen(true);
+                    }
+                  });
+                }}
+                className={`${MENU_ITEM} ${MENU_DIVIDER}`}
+              >
+                <FiDownload />
+                <span className="flex min-w-0 flex-col">
+                  <span>Install app</span>
+                  <span className="mt-0.5 text-xs font-normal text-slate-400 dark:text-slate-500">
+                    Add it to your home screen
+                  </span>
+                </span>
+              </button>
+            ) : null}
             <button
               type="button"
               role="menuitem"
