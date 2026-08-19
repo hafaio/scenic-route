@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { unproject } from "./mercator";
+import { projectX, projectY, unproject } from "./mercator";
 import type { SubwayParams } from "./protocol";
 import { decodeSubwayTiles, subwayRenderer } from "./subway";
 
@@ -15,13 +15,25 @@ const SCALE = 1e-6;
 const TILE_X = 9650;
 const TILE_Y = 12317;
 
-type PathOp = { op: string; args: number[]; stroke: string };
+type PathOp = { op: string; args: number[]; stroke: string; fill: string };
+// One string the layer drew, and whether it was outlined first. Only ./labels outlines, so that
+// flag is what tells a station's name from the legend inside a route bullet.
+type TextOp = { text: string; fill: string; outlined: boolean };
 
-function recordingContext(ops: PathOp[]): OffscreenCanvasRenderingContext2D {
+function recordingContext(
+  ops: PathOp[],
+  texts: TextOp[] = [],
+): OffscreenCanvasRenderingContext2D {
   let pending: PathOp[] = [];
+  const outlined = new Set<string>();
   const record = (op: string) => {
     return (...args: number[]) => {
-      pending.push({ op, args, stroke: String(context.strokeStyle) });
+      pending.push({
+        op,
+        args,
+        stroke: String(context.strokeStyle),
+        fill: String(context.fillStyle),
+      });
     };
   };
   const context = {
@@ -38,15 +50,28 @@ function recordingContext(ops: PathOp[]): OffscreenCanvasRenderingContext2D {
     },
     moveTo: record("moveTo"),
     lineTo: record("lineTo"),
+    closePath: () => {},
     bezierCurveTo: record("bezierCurveTo"),
     arc: record("arc"),
     fill: () => {},
     stroke: () => {
       ops.push(...pending);
     },
+    save: () => {},
+    restore: () => {},
+    translate: () => {},
+    scale: () => {},
     measureText: (text: string) => ({ width: text.length * 6 }),
-    strokeText: () => {},
-    fillText: () => {},
+    strokeText: (text: string) => {
+      outlined.add(text);
+    },
+    fillText: (text: string) => {
+      texts.push({
+        text,
+        fill: String(context.fillStyle),
+        outlined: outlined.has(text),
+      });
+    },
   } as unknown as OffscreenCanvasRenderingContext2D;
   return context;
 }
@@ -71,6 +96,7 @@ interface Station {
   lat: number;
   name: string;
   routes: number;
+  complex?: number; // 0, the feed publishing no transfers, unless a test is about the complexes
 }
 
 // The SBWY layout of scripts/README.md: a 60-byte header, the route/line/station tables, then the
@@ -130,7 +156,7 @@ function encodeSbwy(
   const routeTable = HEADER_BYTES;
   const lineTable = routeTable + routeRecords.length * 16;
   const stationTable = lineTable + lineRecords.length * 8;
-  const geometryOffset = stationTable + stationRecords.length * 16;
+  const geometryOffset = stationTable + stationRecords.length * 20;
   const nameOffset = geometryOffset + Math.ceil(geometry.length / 4) * 4;
   const encoded = names.map((name) => encoder.encode(name));
   const nameBytes = encoded.reduce((total, name) => total + 2 + name.length, 4);
@@ -139,7 +165,7 @@ function encodeSbwy(
   const bytes = new Uint8Array(buffer);
   const view = new DataView(buffer);
   bytes.set(encoder.encode("SBWY"));
-  view.setUint16(4, 2, true);
+  view.setUint16(4, 3, true);
   view.setUint16(6, HEADER_BYTES, true);
   view.setUint32(8, routeRecords.length, true);
   view.setUint32(12, lineRecords.length, true);
@@ -173,13 +199,16 @@ function encodeSbwy(
     view.setUint16(record + 4, count, true);
     view.setUint16(record + 6, route, true);
   });
-  stationRecords.forEach(({ lng, lat, nameId: name, routes: mask }, index) => {
-    const record = stationTable + index * 16;
-    view.setInt32(record, quantize(lng, ORIGIN_LNG), true);
-    view.setInt32(record + 4, quantize(lat, ORIGIN_LAT), true);
-    view.setUint32(record + 8, name, true);
-    view.setUint32(record + 12, mask, true);
-  });
+  stationRecords.forEach(
+    ({ lng, lat, nameId: name, routes: mask, complex }, index) => {
+      const record = stationTable + index * 20;
+      view.setInt32(record, quantize(lng, ORIGIN_LNG), true);
+      view.setInt32(record + 4, quantize(lat, ORIGIN_LAT), true);
+      view.setUint32(record + 8, name, true);
+      view.setUint32(record + 12, mask, true);
+      view.setUint32(record + 16, complex ?? 0, true);
+    },
+  );
   bytes.set(geometry, geometryOffset);
   let cursor = nameOffset;
   view.setUint32(cursor, names.length, true);
@@ -210,24 +239,30 @@ function eastward(
 
 const params: SubwayParams = { kind: "subway", url: "test" };
 
+function bulletLegends(texts: readonly TextOp[]): string[] {
+  return texts.filter(({ outlined }) => !outlined).map(({ text }) => text);
+}
+
 function drawTile(
   data: ReturnType<typeof decodeSubwayTiles>,
   tileX: number,
   tileY: number,
   zoom: number,
+  texts: TextOp[] = [],
 ): PathOp[] {
   const ops: PathOp[] = [];
   subwayRenderer.draw(
-    recordingContext(ops),
+    recordingContext(ops, texts),
     data,
     { x: tileX, y: tileY, z: zoom },
     params,
     1,
   );
   // Back into world pixels, which is where two tiles' drawings are comparable.
-  return ops.map(({ op, args, stroke }) => ({
+  return ops.map(({ op, args, stroke, fill }) => ({
     op,
     stroke,
+    fill,
     args: args.map((value, index) =>
       index % 2 === 0 ? value + tileX * TILE_SIZE : value + tileY * TILE_SIZE,
     ),
@@ -324,4 +359,193 @@ test("stations are drawn as markers only once the map can separate them", () => 
     drawTile(data, TILE_X, TILE_Y, at).filter(({ op }) => op === "arc").length;
   expect(markers(zoom)).toBe(1);
   expect(markers(12)).toBe(0);
+});
+
+// The point of the bullets: a marker says which routes call, in each route's own colour, with the
+// name the rider reads on the train inside it.
+test("a station's marker becomes its routes' bullets once they fit", () => {
+  const zoom = 16;
+  const [stop] = eastward(zoom, 3, 3);
+  const data = decodeSubwayTiles(
+    encodeSbwy(
+      [
+        { color: "009952", shortName: "6", lines: [eastward(zoom, 0, 14)] },
+        { color: "9a38a1", shortName: "7", lines: [eastward(zoom, 0, 14)] },
+      ],
+      [{ lng: stop.lng, lat: stop.lat, name: "Grand Central", routes: 0b11 }],
+    ),
+  );
+  const texts: TextOp[] = [];
+  const bullets = drawTile(data, TILE_X, TILE_Y, zoom, texts).filter(
+    ({ op }) => op === "arc",
+  );
+  expect(bullets.map(({ fill }) => fill)).toEqual(["#009952", "#9a38a1"]);
+  expect(bulletLegends(texts)).toEqual(["6", "7"]);
+  // Below the bullet zoom it is one white dot for the station, whatever it serves.
+  const dotZoom = 14;
+  const dots = drawTile(
+    data,
+    Math.floor(projectX(stop.lng, dotZoom) / TILE_SIZE),
+    Math.floor(projectY(stop.lat, dotZoom) / TILE_SIZE),
+    dotZoom,
+  ).filter(({ op }) => op === "arc");
+  expect(dots.map(({ fill }) => fill)).toEqual(["#ffffff"]);
+});
+
+// A route named for another plus an X is that route's express, which the MTA signs as a diamond
+// around the plain letter — never as the two characters the feed spells it with.
+test("an express variant draws as a diamond around the local's name", () => {
+  const zoom = 16;
+  const [stop] = eastward(zoom, 3, 3);
+  const data = decodeSubwayTiles(
+    encodeSbwy(
+      [
+        { color: "009952", shortName: "6", lines: [eastward(zoom, 0, 14)] },
+        { color: "009952", shortName: "6X", lines: [eastward(zoom, 0, 14)] },
+      ],
+      [{ lng: stop.lng, lat: stop.lat, name: "Hunts Point Av", routes: 0b11 }],
+    ),
+  );
+  const texts: TextOp[] = [];
+  const drawn = drawTile(data, TILE_X, TILE_Y, zoom, texts);
+  // One bullet, not two: an express stop is always a local stop as well, so the diamond alone says
+  // both call here and the circle beside it would only repeat the name.
+  expect(bulletLegends(texts)).toEqual(["6"]);
+  expect(drawn.filter(({ op }) => op === "arc").length).toBe(0);
+  expect(drawn.filter(({ op }) => op === "lineTo").length).toBe(3);
+});
+
+// One marker per place: the two records Muni files for the two directions of a stop, and the
+// several New York files for one complex, are the same station and carry the union of the routes.
+test("records naming one place merge into a single marker", () => {
+  const zoom = 16;
+  const track = eastward(zoom, 0, 14);
+  // A step of eastward() is 40 px, about 30 m on the ground at this tile's latitude. Three of them
+  // is past SAME_PLACE_METERS, so the shared name is the only thing that joins the first two — and
+  // it is what keeps the third, the same distance again, a station of its own.
+  const [west, middle, east] = [track[0], track[3], track[6]];
+  const data = decodeSubwayTiles(
+    encodeSbwy(
+      [
+        { color: "009952", shortName: "6", lines: [track] },
+        { color: "9a38a1", shortName: "7", lines: [track] },
+      ],
+      [
+        { lng: west.lng, lat: west.lat, name: "Court Sq", routes: 0b01 },
+        { lng: middle.lng, lat: middle.lat, name: "Court Sq", routes: 0b10 },
+        { lng: east.lng, lat: east.lat, name: "21 St", routes: 0b01 },
+      ],
+    ),
+  );
+  expect(data.names).toEqual(["Court Sq", "21 St"]);
+  // The survivor carries both routes and sits between the records it swallowed.
+  expect(data.stationRoutes[0]).toEqual([0, 1]);
+  expect(data.lngs[0]).toBeCloseTo((west.lng + middle.lng) / 2, 6);
+
+  const texts: TextOp[] = [];
+  drawTile(data, TILE_X, TILE_Y, zoom, texts);
+  expect(bulletLegends(texts)).toEqual(["6", "7", "6"]);
+});
+
+// A shared complex is a passage between two stations, not a claim that they are one station. Times
+// Sq and 42 St-Port Authority are one complex 386 m apart and signed as two, so the transfer data
+// only ever VETOES a merge the distance and the name already proposed.
+test("a passage between two stations does not make them one marker", () => {
+  const zoom = 16;
+  const track = eastward(zoom, 0, 14);
+  // Six steps is about 180 m, past every distance the fallback would merge on, and the two records
+  // are not even named the same — Cortlandt St and Chambers St, 435 m apart and one complex.
+  const [west, east] = [track[0], track[6]];
+  const data = decodeSubwayTiles(
+    encodeSbwy(
+      [
+        { color: "009952", shortName: "6", lines: [track] },
+        { color: "9a38a1", shortName: "7", lines: [track] },
+      ],
+      [
+        {
+          lng: west.lng,
+          lat: west.lat,
+          name: "Cortlandt St",
+          routes: 0b01,
+          complex: 7,
+        },
+        {
+          lng: east.lng,
+          lat: east.lat,
+          name: "Chambers St",
+          routes: 0b10,
+          complex: 7,
+        },
+      ],
+    ),
+  );
+  expect(data.names).toEqual(["Cortlandt St", "Chambers St"]);
+});
+
+// The other direction, which is what the transfer data is for: one name, close enough for the
+// fallback to have merged them, and no passage between the two — Rector St.
+test("one name over two stations the agency does not connect stays two markers", () => {
+  const zoom = 16;
+  const track = eastward(zoom, 0, 14);
+  const [west, east] = [track[0], track[1]];
+  const data = decodeSubwayTiles(
+    encodeSbwy(
+      [
+        { color: "009952", shortName: "6", lines: [track] },
+        { color: "9a38a1", shortName: "7", lines: [track] },
+      ],
+      [
+        {
+          lng: west.lng,
+          lat: west.lat,
+          name: "Rector St",
+          routes: 0b01,
+          complex: 3,
+        },
+        {
+          lng: east.lng,
+          lat: east.lat,
+          name: "Rector St",
+          routes: 0b10,
+          complex: 8,
+        },
+      ],
+    ),
+  );
+  expect(data.names).toEqual(["Rector St", "Rector St"]);
+});
+
+// Rector St: the 1 and the N/R/W stand 49.5 m apart under one name with no passage between them,
+// and the agency's transfers are the only thing in the file that says so.
+test("records in different complexes stay apart however close", () => {
+  const zoom = 16;
+  const track = eastward(zoom, 0, 14);
+  const [west, east] = [track[0], track[1]]; // one step, about 30 m
+  const data = decodeSubwayTiles(
+    encodeSbwy(
+      [
+        { color: "009952", shortName: "6", lines: [track] },
+        { color: "9a38a1", shortName: "7", lines: [track] },
+      ],
+      [
+        {
+          lng: west.lng,
+          lat: west.lat,
+          name: "Rector St",
+          routes: 0b01,
+          complex: 7,
+        },
+        {
+          lng: east.lng,
+          lat: east.lat,
+          name: "Rector St",
+          routes: 0b10,
+          complex: 8,
+        },
+      ],
+    ),
+  );
+  expect(data.names).toEqual(["Rector St", "Rector St"]);
+  expect(data.stationRoutes).toEqual([[0], [1]]);
 });

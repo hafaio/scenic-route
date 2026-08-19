@@ -1,5 +1,5 @@
 import { activeCity } from "../cities";
-import { decodeSubway, type SubwayStation, stationRoutes } from "./format";
+import { decodeSubway, mergeStations, stationRoutes } from "./format";
 
 // The station list address search offers alongside the geocoder's results. A visitor typing
 // "Bedford Av" or "Union Sq" means the station at least as often as the street, and Photon has no
@@ -9,12 +9,6 @@ import { decodeSubway, type SubwayStation, stationRoutes } from "./format";
 // time someone types, cached for the session, and no network call per keystroke after that.
 
 const MAX_ROUTE_BULLETS = 4; // Times Sq serves ten; the rest are "…"
-// Two same-named stations within a chain of hops this short are one complex under several of its
-// lines — Times Sq-42 St is five records spread over 153 m. Only the first is offered, so the list
-// does not read as five different places. Two Manhattan short blocks, the same figure the overlay
-// suppresses a repeated label at; Wall St on the 2/3 and on the 4/5 are 247 m apart and stay two.
-const SAME_COMPLEX_METERS = 200;
-const METERS_PER_DEGREE_LAT = 111_320;
 
 export interface SubwayStationMatch {
   name: string;
@@ -25,15 +19,6 @@ export interface SubwayStationMatch {
 }
 
 const loaded = new Map<string, Promise<SubwayStationMatch[]>>();
-
-function metersApart(from: SubwayStation, to: SubwayStation): number {
-  const north = (from.lat - to.lat) * METERS_PER_DEGREE_LAT;
-  const east =
-    (from.lng - to.lng) *
-    METERS_PER_DEGREE_LAT *
-    Math.cos((from.lat * Math.PI) / 180);
-  return Math.hypot(north, east);
-}
 
 function load(cityId: string): Promise<SubwayStationMatch[]> {
   const pending = loaded.get(cityId);
@@ -48,29 +33,10 @@ function load(cityId: string): Promise<SubwayStationMatch[]> {
           throw new Error(`${url}: ${response.status} ${response.statusText}`);
         }
         const { routes, stations } = decodeSubway(await response.arrayBuffer());
-        // Every station is compared against every one already seen, not only the ones offered, so a
-        // complex strung out in a line collapses to a single offer rather than one per hop. The
-        // survivor carries the whole complex's routes, since a rider searching Times Sq means all
-        // ten of them.
-        const seen: SubwayStation[] = [];
-        const owners: number[] = []; // per seen station, which offer it belongs to
-        const kept: SubwayStation[] = [];
-        for (const station of stations) {
-          const complex = seen.findIndex(
-            (other) =>
-              other.name === station.name &&
-              metersApart(other, station) < SAME_COMPLEX_METERS,
-          );
-          if (complex < 0) {
-            owners.push(kept.length);
-            kept.push({ ...station });
-          } else {
-            owners.push(owners[complex]);
-            kept[owners[complex]].routes |= station.routes;
-          }
-          seen.push(station);
-        }
-        return kept.map((station, index) => ({
+        // The overlay's own merge (../subway/format), so a search hit is the same place the map
+        // draws — one offer per complex, carrying every route it serves, since a rider searching
+        // Times Sq means all ten of them.
+        return mergeStations(stations).map((station, index) => ({
           name: station.name,
           lat: station.lat,
           lng: station.lng,

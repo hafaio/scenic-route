@@ -8,23 +8,21 @@
 import { createHash } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { COORD_SCALE, writeVarint, zigzag } from "./geometry";
 import { fetchGtfsZipFile, type GtfsFeed, parseGtfs } from "./gtfs";
 import type { SourceFile } from "./manifest";
 import type { Coord } from "./socrata";
+import {
+  encodeSubway,
+  parseColor,
+  type Rgb,
+  SUBWAY_FORMAT,
+  type TransitRoute,
+  type TransitStation,
+  transferComplexes,
+} from "./subway-format";
 
 const DATA_DIR = join(import.meta.dirname, "..", "data");
 const SUBWAY_DIR = join(DATA_DIR, "subway");
-const SUBWAY_MAGIC = "SBWY";
-const SUBWAY_FORMAT = 2;
-const SUBWAY_HEADER_BYTES = 60;
-const SUBWAY_ROUTE_BYTES = 16;
-const SUBWAY_LINE_BYTES = 8;
-const SUBWAY_STATION_BYTES = 16;
-// A station names the routes calling there as one u32 bit per route index. 29 routes fit with room
-// to spare and the whole set reads in a single word; a 30th line would be a format change, so the
-// encoder refuses rather than dropping the routes that no longer fit.
-const MAX_ROUTES = 32;
 
 // The MTA's own subway feed, one zip carrying every service. 5.3 MiB at the last read.
 const FEED_URL = "https://rrgtfsfeeds.s3.amazonaws.com/gtfs_subway.zip";
@@ -88,33 +86,6 @@ const DEFAULT_TEXT_COLOR = "000000";
 // A route the feed gives no route_sort_order sorts after every route that has one.
 const NO_SORT_ORDER = 0xffff;
 
-interface Rgb {
-  red: number;
-  green: number;
-  blue: number;
-}
-
-// One route as it is drawn: the MTA's colours and names, and the representative polylines the
-// variant selection kept. `shortName` is what a rider says ("1", "A", "S"), `longName` the corridor
-// ("Broadway - 7 Avenue Local") — three different shuttles all call themselves "S", so the long
-// name is the only thing that tells them apart.
-interface SubwayRoute {
-  id: string;
-  shortName: string;
-  longName: string;
-  color: Rgb;
-  textColor: Rgb;
-  sortOrder: number;
-  lines: Coord[][];
-}
-
-// One station marker: where it is, what it is called, and which routes call there as a bit per
-// index into the route table.
-interface SubwayStation extends Coord {
-  name: string;
-  routeMask: number;
-}
-
 function cellKey(row: number, column: number): number {
   return row * CELL_STRIDE + column;
 }
@@ -157,15 +128,6 @@ function newTrackCells(points: readonly Coord[], covered: Set<number>): number {
     }
   }
   return fresh;
-}
-
-function parseColor(hex: string, fallback: string): Rgb {
-  const clean = /^[0-9a-fA-F]{6}$/.test(hex.trim()) ? hex.trim() : fallback;
-  return {
-    red: Number.parseInt(clean.slice(0, 2), 16),
-    green: Number.parseInt(clean.slice(2, 4), 16),
-    blue: Number.parseInt(clean.slice(4, 6), 16),
-  };
 }
 
 // shapes.txt as polylines, each ordered by shape_pt_sequence.
@@ -245,10 +207,10 @@ function shapeVariants(feed: GtfsFeed): Map<string, ShapeVariant[]> {
   return ranked;
 }
 
-function buildRoutes(feed: GtfsFeed): SubwayRoute[] {
+function buildRoutes(feed: GtfsFeed): TransitRoute[] {
   const shapes = readShapes(feed);
   const ranked = shapeVariants(feed);
-  const routes: SubwayRoute[] = [];
+  const routes: TransitRoute[] = [];
 
   for (const row of feed.routes) {
     if (!KEPT_ROUTE_TYPES.has(row.route_type)) {
@@ -311,11 +273,12 @@ function buildRoutes(feed: GtfsFeed): SubwayRoute[] {
 // A station's routes come from the trips of a kept route that stop there, both directions and every
 // shape variant — which routes call at a station is a fact about the schedule, not about what got
 // drawn — thinned by MIN_TRIP_SHARE, so a route that puts one rush-hour train through a station does
-// not label it as if it served the place.
+// not label it as if it served the place. Its complex is the MTA's own, out of transfers.txt.
 function buildStations(
   feed: GtfsFeed,
   routeIndex: ReadonlyMap<string, number>,
-): SubwayStation[] {
+  complexes: ReadonlyMap<string, number>,
+): TransitStation[] {
   const stopRow = new Map(feed.stops.map((stop) => [stop.stop_id, stop]));
   const routeOf = new Map(
     feed.trips.map((trip) => [trip.trip_id, trip.route_id]),
@@ -353,7 +316,7 @@ function buildStations(
     }
   }
 
-  const stations: SubwayStation[] = [];
+  const stations: TransitStation[] = [];
   let thinned = 0;
   for (const [stationId, perRoute] of calls) {
     let routeMask = 0;
@@ -381,7 +344,13 @@ function buildStations(
       );
       continue;
     }
-    stations.push({ lat, lng, name: row.stop_name?.trim() ?? "", routeMask });
+    stations.push({
+      lat,
+      lng,
+      name: row.stop_name?.trim() ?? "",
+      routeMask,
+      complex: complexes.get(stationId) ?? 0,
+    });
   }
   console.error(
     `  masks: ${thinned} station-route pairs below ${(MIN_TRIP_SHARE * 100).toFixed(1)}% of the` +
@@ -449,8 +418,8 @@ function lineMeters(point: Coord, lines: readonly Coord[][]): number {
 // Second Avenue being the case in this feed. A station beside a line, or far past its end, is
 // reported and left alone: track that bends towards a marker is invented track.
 function reachTerminals(
-  routes: readonly SubwayRoute[],
-  stations: readonly SubwayStation[],
+  routes: readonly TransitRoute[],
+  stations: readonly TransitStation[],
 ): void {
   for (let index = 0; index < routes.length; index++) {
     const route = routes[index];
@@ -516,175 +485,6 @@ function reachTerminals(
   }
 }
 
-// Writes the system as SBWY v2: a header, a route table (colours, name ids and the run of lines
-// each route owns), a line table (a geometry pointer, a vertex count and the owning route), a
-// station table (a position, a name id and the route mask), a varint geometry blob and a trailing
-// name blob. All little-endian, coordinates quantized to COORD_SCALE about the south-west origin,
-// exactly as the sibling sources. Layout: scripts/README.md.
-function encodeSubway(
-  routes: readonly SubwayRoute[],
-  stations: readonly SubwayStation[],
-): Uint8Array {
-  if (routes.length > MAX_ROUTES) {
-    throw new Error(
-      `${routes.length} routes will not fit the u32 station route mask: widen the mask (and the` +
-        " format) rather than dropping the routes past the 32nd",
-    );
-  }
-
-  let originLng = Number.POSITIVE_INFINITY;
-  let originLat = Number.POSITIVE_INFINITY;
-  const swallow = ({ lat, lng }: Coord): void => {
-    originLng = Math.min(originLng, lng);
-    originLat = Math.min(originLat, lat);
-  };
-  for (const route of routes) {
-    for (const line of route.lines) {
-      for (const point of line) {
-        swallow(point);
-      }
-    }
-  }
-  for (const station of stations) {
-    swallow(station);
-  }
-
-  // Route names and station names share one deduped, sorted table, as FERR pools its stop and route
-  // names.
-  const names = [
-    ...new Set([
-      ...routes.flatMap((route) => [route.shortName, route.longName]),
-      ...stations.map((station) => station.name),
-    ]),
-  ].sort();
-  const nameIndex = new Map(names.map((name, index) => [name, index]));
-
-  // The geometry blob: per line, its vertices as zigzag-LEB128 varint deltas, the first pair
-  // absolute (from the origin) and the rest from the previous vertex.
-  const geometryBytes: number[] = [];
-  const lineTable = new Uint8Array(
-    routes.reduce((total, route) => total + route.lines.length, 0) *
-      SUBWAY_LINE_BYTES,
-  );
-  const lineView = new DataView(lineTable.buffer);
-  const scratch = new Uint8Array(10);
-  let lineCursor = 0;
-  const routeSpans: { first: number; count: number }[] = [];
-  for (let index = 0; index < routes.length; index++) {
-    const first = lineCursor / SUBWAY_LINE_BYTES;
-    for (const line of routes[index].lines) {
-      lineView.setUint32(lineCursor, geometryBytes.length, true);
-      lineView.setUint16(lineCursor + 4, line.length, true);
-      lineView.setUint16(lineCursor + 6, index, true);
-      lineCursor += SUBWAY_LINE_BYTES;
-      let previousX = 0;
-      let previousY = 0;
-      for (const { lat, lng } of line) {
-        const x = Math.round((lng - originLng) / COORD_SCALE);
-        const y = Math.round((lat - originLat) / COORD_SCALE);
-        for (const delta of [x - previousX, y - previousY]) {
-          const end = writeVarint(scratch, 0, zigzag(delta));
-          for (let byte = 0; byte < end; byte++) {
-            geometryBytes.push(scratch[byte]);
-          }
-        }
-        previousX = x;
-        previousY = y;
-      }
-    }
-    routeSpans.push({ first, count: routes[index].lines.length });
-  }
-  while (geometryBytes.length % 4 !== 0) {
-    geometryBytes.push(0); // pad so the name blob starts 4-byte aligned
-  }
-  const geometryBlob = Uint8Array.from(geometryBytes);
-
-  const routeTable = new Uint8Array(routes.length * SUBWAY_ROUTE_BYTES);
-  const routeView = new DataView(routeTable.buffer);
-  for (let index = 0; index < routes.length; index++) {
-    const route = routes[index];
-    const record = index * SUBWAY_ROUTE_BYTES;
-    routeTable[record] = route.color.red;
-    routeTable[record + 1] = route.color.green;
-    routeTable[record + 2] = route.color.blue;
-    routeTable[record + 3] = route.textColor.red;
-    routeTable[record + 4] = route.textColor.green;
-    routeTable[record + 5] = route.textColor.blue;
-    routeView.setUint16(record + 6, nameIndex.get(route.shortName) ?? 0, true);
-    routeView.setUint16(record + 8, nameIndex.get(route.longName) ?? 0, true);
-    routeView.setUint16(record + 10, routeSpans[index].first, true);
-    routeView.setUint16(record + 12, routeSpans[index].count, true);
-    routeView.setUint16(record + 14, route.sortOrder, true);
-  }
-
-  const stationTable = new Uint8Array(stations.length * SUBWAY_STATION_BYTES);
-  const stationView = new DataView(stationTable.buffer);
-  for (let index = 0; index < stations.length; index++) {
-    const station = stations[index];
-    const record = index * SUBWAY_STATION_BYTES;
-    stationView.setInt32(
-      record,
-      Math.round((station.lng - originLng) / COORD_SCALE),
-      true,
-    );
-    stationView.setInt32(
-      record + 4,
-      Math.round((station.lat - originLat) / COORD_SCALE),
-      true,
-    );
-    stationView.setUint32(record + 8, nameIndex.get(station.name) ?? 0, true);
-    stationView.setUint32(record + 12, station.routeMask, true);
-  }
-
-  const encoder = new TextEncoder();
-  const nameBytes = names.map((name) => encoder.encode(name));
-  const nameBlob = new Uint8Array(
-    nameBytes.reduce((total, bytes) => total + 2 + bytes.length, 4),
-  );
-  const nameView = new DataView(nameBlob.buffer);
-  nameView.setUint32(0, names.length, true);
-  let nameCursor = 4;
-  for (const bytes of nameBytes) {
-    nameView.setUint16(nameCursor, bytes.length, true);
-    nameCursor += 2;
-    nameBlob.set(bytes, nameCursor);
-    nameCursor += bytes.length;
-  }
-
-  const geometryOffset =
-    SUBWAY_HEADER_BYTES +
-    routeTable.length +
-    lineTable.length +
-    stationTable.length;
-  const nameBlobOffset = geometryOffset + geometryBlob.length;
-  const bytes = new Uint8Array(nameBlobOffset + nameBlob.length);
-  const view = new DataView(bytes.buffer);
-  for (let index = 0; index < 4; index++) {
-    bytes[index] = SUBWAY_MAGIC.charCodeAt(index);
-  }
-  view.setUint16(4, SUBWAY_FORMAT, true);
-  view.setUint16(6, SUBWAY_HEADER_BYTES, true);
-  view.setUint32(8, routes.length, true);
-  view.setUint32(12, lineTable.length / SUBWAY_LINE_BYTES, true);
-  view.setFloat64(16, originLng, true);
-  view.setFloat64(24, originLat, true);
-  view.setFloat64(32, COORD_SCALE, true);
-  view.setUint32(40, stations.length, true);
-  view.setUint32(44, geometryOffset, true);
-  view.setUint32(48, geometryBlob.length, true);
-  view.setUint32(52, nameBlobOffset, true);
-  view.setUint32(56, nameBlob.length, true);
-  bytes.set(routeTable, SUBWAY_HEADER_BYTES);
-  bytes.set(lineTable, SUBWAY_HEADER_BYTES + routeTable.length);
-  bytes.set(
-    stationTable,
-    SUBWAY_HEADER_BYTES + routeTable.length + lineTable.length,
-  );
-  bytes.set(geometryBlob, geometryOffset);
-  bytes.set(nameBlob, nameBlobOffset);
-  return bytes;
-}
-
 export async function ingestSubway(cityId: string): Promise<SourceFile> {
   const started = performance.now();
   await mkdir(SUBWAY_DIR, { recursive: true });
@@ -692,7 +492,8 @@ export async function ingestSubway(cityId: string): Promise<SourceFile> {
   const feed = parseGtfs(await fetchGtfsZipFile(FEED_CACHE_KEY, FEED_URL));
   const routes = buildRoutes(feed);
   const routeIndex = new Map(routes.map((route, index) => [route.id, index]));
-  const stations = buildStations(feed, routeIndex);
+  const complexes = transferComplexes(feed, 1);
+  const stations = buildStations(feed, routeIndex, complexes);
   reachTerminals(routes, stations);
   const bytes = encodeSubway(routes, stations);
   const file = `${cityId}.bin`;
@@ -723,8 +524,18 @@ export async function ingestSubway(cityId: string): Promise<SourceFile> {
         `${counts.length} line(s), ${counts.join("+")} vertices, ${calling.length} stations`,
     );
   }
+  const members = new Map<number, number>();
+  for (const { complex } of stations) {
+    members.set(complex, (members.get(complex) ?? 0) + 1);
+  }
+  const joined = [...members.values()].filter((count) => count > 1);
   const seconds = ((performance.now() - started) / 1000).toFixed(1);
   const kib = (bytes.length / 1024).toFixed(1);
+  console.error(
+    `  complexes: ${members.size} over the ${stations.length} stations, ${joined.length} of them` +
+      ` holding more than one (the largest ${Math.max(0, ...joined)}), ` +
+      `${members.get(0) ?? 0} stations transfers.txt never names`,
+  );
   console.error(
     `subway: ${routes.length} routes, ${lines} lines, ${vertices} vertices, ` +
       `${stations.length} stations, ${pairs} station-route pairs, the furthest ` +

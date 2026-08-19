@@ -20,11 +20,13 @@ import type { Coord } from "./socrata";
 import {
   chooseLines,
   encodeSubway,
+  nextComplexId,
   parseColor,
   type Rgb,
   type ShapeVariant,
   type TransitRoute,
   type TransitStation,
+  transferComplexes,
 } from "./subway-format";
 
 const DATA_DIR = join(import.meta.dirname, "..", "data");
@@ -313,6 +315,7 @@ function bartRoutes(feed: GtfsFeed, land: LandContext): FeedRoute[] {
 function feedStations(
   feed: GtfsFeed,
   routeOfTrip: ReadonlyMap<string, number>,
+  complexes: ReadonlyMap<string, number>,
   onLand: (coord: Coord) => boolean,
 ): TransitStation[] {
   const stopRow = new Map(feed.stops.map((stop) => [stop.stop_id, stop]));
@@ -337,7 +340,13 @@ function feedStations(
       continue;
     }
     if (onLand({ lat, lng })) {
-      stations.push({ lat, lng, name: row.stop_name?.trim() ?? "", routeMask });
+      stations.push({
+        lat,
+        lng,
+        name: row.stop_name?.trim() ?? "",
+        routeMask,
+        complex: complexes.get(stationId) ?? 0,
+      });
     }
   }
   return stations;
@@ -380,11 +389,17 @@ function mergeStations(stations: readonly TransitStation[]): TransitStation[] {
           }
         }
       }
+      // The lowest complex any member is in, or 0 when none of them is in one — which is every
+      // marker in this city today, since neither feed names a transfer between two stations.
+      const ids = cluster
+        .map(({ complex }) => complex)
+        .filter((complex) => complex !== 0);
       merged.push({
         lat: cluster.reduce((sum, one) => sum + one.lat, 0) / cluster.length,
         lng: cluster.reduce((sum, one) => sum + one.lng, 0) / cluster.length,
         name: group[seed].name,
         routeMask: cluster.reduce((mask, one) => mask | one.routeMask, 0),
+        complex: ids.length === 0 ? 0 : Math.min(...ids),
       });
     }
   }
@@ -459,15 +474,21 @@ async function ingestSubwaySf(cityId: string): Promise<void> {
   }
 
   const indexOf = new Map(routes.map((route, index) => [route.id, index]));
+  // Two feeds in one file, so the second agency's complex ids start past the first's: a complex id
+  // means one place only within the feed that numbered it. Both maps are empty at these feeds.
+  const muniComplexes = transferComplexes(muni, 1);
+  const bartComplexes = transferComplexes(bart, nextComplexId(muniComplexes));
   const stations = mergeStations([
     ...feedStations(
       muni,
       tripRouteIndex(muni, muniFeedRoutes, indexOf),
+      muniComplexes,
       land.onLand,
     ),
     ...feedStations(
       bart,
       tripRouteIndex(bart, bartFeedRoutes, indexOf),
+      bartComplexes,
       land.onLand,
     ),
   ]);
