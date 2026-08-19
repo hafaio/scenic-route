@@ -1,8 +1,6 @@
 import { expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
 import { decodeLines, linesRenderer } from "./lines";
 import { projectX, projectY, unproject } from "./mercator";
-import { METERS_PER_DEGREE_LAT, metersPerLng } from "./polylines";
 import type { LinesParams } from "./protocol";
 
 // Ferry crossings are drawn per tile but shaped globally: the spline's control points, the lane
@@ -300,11 +298,16 @@ test("a crossing alone in its water draws on its own shape points", () => {
   const drawn = drawTile(data, 9650, 12317, zoom);
   expect(drawn[0].op).toBe("moveTo");
   const ends = drawn.map(({ args }) => args.slice(-2));
-  expect(ends).toHaveLength(points.length);
-  for (const [index, [x, y]] of ends.entries()) {
-    // Loose by a pixel hundredth: the artifact quantizes coordinates to 1e-6°.
-    expect(x).toBeCloseTo(projectX(points[index].lng, zoom), 1);
-    expect(y).toBeCloseTo(projectY(points[index].lat, zoom), 1);
+  // Every shape point has drawn geometry passing through it. Not one op per point: rounding leaves a
+  // straight as a lineTo and a corner as a curve, so a corner is two ops where a fit was one.
+  for (const point of points) {
+    const at = [projectX(point.lng, zoom), projectY(point.lat, zoom)];
+    const nearest = Math.min(
+      ...ends.map(([x, y]) => Math.hypot(x - at[0], y - at[1])),
+    );
+    // Within the trim, since a rounded corner cuts inside the vertex by design; the straights
+    // themselves stay on the published line.
+    expect(nearest).toBeLessThan(15);
   }
 });
 
@@ -320,18 +323,29 @@ test("a crossing takes a lane only over the water it shares", () => {
     ]),
     "ferr",
   );
-  const drawn = drawTile(data, 9650, 12317, zoom).filter(
-    ({ stroke }) => stroke === "#00839c",
-  );
-  const offAt = (step: number): number => {
-    const [x, y] = drawn[step].args.slice(-2);
-    return Math.hypot(
-      x - projectX(points[step].lng, zoom),
-      y - projectY(points[step].lat, zoom),
+  const drawn = drawTile(data, 9650, 12317, zoom);
+  // How far the drawn path passes from a shape point, found by taking the nearest drawn position
+  // rather than the nth op: rounding emits a lineTo and a curve per corner, so an op no longer
+  // stands for a vertex the way one bezier per span did.
+  const offAt = (stroke: string, step: number): number => {
+    const at = [
+      projectX(points[step].lng, zoom),
+      projectY(points[step].lat, zoom),
+    ];
+    return Math.min(
+      ...drawn
+        .filter((op) => op.stroke === stroke)
+        .map(({ args }) => {
+          const [x, y] = args.slice(-2);
+          return Math.hypot(x - at[0], y - at[1]);
+        }),
     );
   };
-  expect(offAt(0)).toBeGreaterThan(2); // the line width, so the two are not on top of another
-  expect(offAt(points.length - 1)).toBeLessThan(0.5);
+  // Over the shared water one of them holds the published line and the other is a lane off it, so
+  // the two are not drawn on top of another. Which of the two takes the lane is the lane order's to
+  // decide (see laneOrder in ./polylines), so this reads the gap and not the colour.
+  expect(Math.max(offAt("#00839c", 0), offAt("#ff6b00", 0))).toBeGreaterThan(2);
+  expect(offAt("#00839c", points.length - 1)).toBeLessThan(0.5);
 });
 
 test("a route takes its operator's colour, and an unknown one the layer's", () => {
@@ -370,7 +384,7 @@ test("highway lines keep their corners and the layer's own colour", () => {
 // own direction points the opposite way on the one beside it stored back to front; and a side
 // carried through a corner — which a ferry shape has wherever it follows the boat into its slip —
 // points the opposite way to one that was not. Three routes over one stretch of water, one of them
-// reversed and coming out of a hairpin, have to come out as three parallel lines in route order.
+// reversed and coming out of a hairpin, have to come out as three parallel lines a lane apart.
 test("routes over one stretch of water stack in order however each is stored", () => {
   const zoom = 15;
   const { points } = crossing("unused", zoom, 0);
@@ -394,34 +408,120 @@ test("routes over one stretch of water stack in order however each is stored", (
     const ends = drawn
       .filter((op) => op.stroke === stroke)
       .map(({ args }) => args.slice(-2));
-    // East River is stored from the slip end, so its drawing is read back into the stretch's own
-    // order, without the slip.
-    const ordered = stroke === "#00839c" ? ends.slice(1).reverse() : ends;
-    return ordered.map(([x, y], step) => ({
-      x: x - projectX(points[step].lng, zoom),
-      y: y - projectY(points[step].lat, zoom),
-    }));
+    // Matched to each shape point by proximity rather than by op index: rounding emits a straight
+    // and a corner separately, so the nth op is no longer the nth vertex.
+    return points.map((point) => {
+      const at = [projectX(point.lng, zoom), projectY(point.lat, zoom)];
+      const [x, y] = ends.reduce((best, end) =>
+        Math.hypot(end[0] - at[0], end[1] - at[1]) <
+        Math.hypot(best[0] - at[0], best[1] - at[1])
+          ? end
+          : best,
+      );
+      // Only the component across the line: rounding pulls a corner's drawing back ALONG the line,
+      // which is not a lane and must not read as one.
+      const step = points.indexOf(point);
+      const ahead = points[Math.min(step + 1, points.length - 1)];
+      const behind = points[Math.max(step - 1, 0)];
+      const runX = projectX(ahead.lng, zoom) - projectX(behind.lng, zoom);
+      const runY = projectY(ahead.lat, zoom) - projectY(behind.lat, zoom);
+      const run = Math.hypot(runX, runY) || 1;
+      const across = ((x - at[0]) * -runY + (y - at[1]) * runX) / run;
+      return { x: across * (-runY / run), y: across * (runX / run) };
+    });
   };
   const astoria = offsets("#ff6b00");
   const eastRiver = offsets("#00839c");
   const southBrooklyn = offsets("#ffd100");
 
-  for (const [step, near] of eastRiver.entries()) {
-    const far = southBrooklyn[step];
-    // Loose by a pixel twentieth: the artifact quantizes coordinates to 1e-6°.
-    expect(Math.hypot(astoria[step].x, astoria[step].y)).toBeLessThan(0.05);
-    // Both displaced the same way: one stack, not two half ones facing away from each other.
-    expect(near.x * far.x + near.y * far.y).toBeGreaterThan(0);
-    expect(Math.hypot(near.x, near.y)).toBeGreaterThan(2); // the line width, so they read as two
-    if (step + 1 < eastRiver.length) {
-      // And the later route by twice as much — except at the last vertex, where East River turns
-      // off into its slip and the mitre stretches its normal to hold the lane through the corner.
-      expect(Math.hypot(far.x, far.y)).toBeCloseTo(
-        2 * Math.hypot(near.x, near.y),
-        1,
+  // What is being tested is the ORDER, which is what stops the ribbons weaving. Read at the middle
+  // of the shared stretch rather than at every vertex: at the far end East River turns off into its
+  // slip, and around a reversal "the drawn point nearest this vertex" stops picking out the lane —
+  // it picks the trim point of whichever segment happens to be closer. The whole-city version of
+  // this property, over every pair of New York's routes that share water, is in
+  // tests/ferry-lanes.test.ts, which is where a real swap would be caught.
+  const middle = Math.floor(points.length / 2);
+  const across = (offset: { x: number; y: number }): number =>
+    Math.hypot(offset.x, offset.y) *
+    Math.sign(
+      offset.x * eastRiver[middle].x + offset.y * eastRiver[middle].y || 1,
+    );
+  // Which of the three holds which lane is the lane order's to decide (see laneOrder in
+  // ./polylines) and not this test's; what must hold is that all three are drawn on the side and at
+  // the distance their own lane says, whichever way round each is stored. So the drawn offsets are
+  // read against the lanes the decode assigned, at the vertex of each line that falls on this point.
+  const laneAt = (line: number): number => {
+    const { lngs, lats } = data.polylines[line];
+    let nearest = 0;
+    for (let vertex = 0; vertex < lngs.length; vertex++) {
+      const away = Math.hypot(
+        lngs[vertex] - points[middle].lng,
+        lats[vertex] - points[middle].lat,
       );
+      if (
+        away <
+        Math.hypot(
+          lngs[nearest] - points[middle].lng,
+          lats[nearest] - points[middle].lat,
+        )
+      ) {
+        nearest = vertex;
+      }
     }
-  }
+    return data.ribbons?.[line].lanes[nearest] ?? 0;
+  };
+  const stacked = [
+    { lane: laneAt(0), drawn: across(astoria[middle]) },
+    { lane: laneAt(1), drawn: across(eastRiver[middle]) },
+    { lane: laneAt(2), drawn: across(southBrooklyn[middle]) },
+  ].sort((left, right) => left.lane - right.lane);
+  expect(stacked.map(({ lane }) => lane)).toEqual([0, 1, 2]);
+  // Three parallel lines a lane apart in lane order, so none of them is mirrored onto the wrong
+  // side: a mirrored line would come back a lane the wrong way and break the spacing.
+  const lane = laneGap(zoom);
+  expect(stacked[1].drawn - stacked[0].drawn).toBeCloseTo(lane, 1);
+  expect(stacked[2].drawn - stacked[1].drawn).toBeCloseTo(lane, 1);
+});
+
+// Which lane each route takes is chosen, not arbitrary: a route that will peel off to the left of a
+// bundle is stacked on the left of it, so it leaves without crossing the ones it ran with. Three
+// routes up one stretch of water, one turning off to each side and one carrying straight on, have
+// to come out stacked in that order.
+test("a route stacks on the side of the bundle it leaves by", () => {
+  const zoom = 15;
+  const startX = 9650 * TILE_SIZE;
+  const startY = 12317 * TILE_SIZE;
+  // A straight shared stem of about 2 km, then a branch of about 1 km peeling off at `rise` pixels
+  // a step: north (negative, in projected pixels), straight on, or south.
+  const branching = (route: string, rise: number): Crossing => ({
+    route,
+    points: [
+      ...Array.from({ length: 8 }, (_, step) =>
+        unproject(startX + step * 120, startY, zoom),
+      ),
+      ...Array.from({ length: 4 }, (_, step) =>
+        unproject(startX + (8 + step) * 120, startY + (step + 1) * rise, zoom),
+      ),
+    ],
+  });
+  const data = decodeLines(
+    encodeFerr([
+      branching("East River", 0),
+      branching("Astoria", -60),
+      branching("South Brooklyn", 60),
+    ]),
+    "ferr",
+  );
+
+  // How far north of its own published line each is drawn, in the middle of the stem — the lane it
+  // holds there, along the perpendicular it is measured against, read northward.
+  const northAt = (line: number): number => {
+    const ribbon = data.ribbons?.[line];
+    const vertex = 4;
+    return -(ribbon?.lanes[vertex] ?? 0) * (ribbon?.normalY[vertex] ?? 0);
+  };
+  expect(northAt(1)).toBeGreaterThan(northAt(0));
+  expect(northAt(0)).toBeGreaterThan(northAt(2));
 });
 
 // And the same property over the file the layer actually draws: New York's eight ferry routes, in

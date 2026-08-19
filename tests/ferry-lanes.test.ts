@@ -10,7 +10,7 @@
 
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { decodeLines, drawTile } from "../src/tiles/lines";
+import { decodeLines } from "../src/tiles/lines";
 import { METERS_PER_DEGREE_LAT, metersPerLng } from "../src/tiles/polylines";
 
 test("no two of New York's ferry routes swap lanes over the water they share", () => {
@@ -57,8 +57,10 @@ test("no two of New York's ferry routes swap lanes over the water they share", (
         const pair = `${route} ${other}`;
         sides.set(pair, (sides.get(pair) ?? new Set()).add(Math.sign(gap)));
         // Not merely ordered: a route is fully present in a cell it runs through, so the two are a
-        // whole lane apart wherever they meet, and neither is drawn over the other.
-        expect(Math.abs(gap)).toBeGreaterThanOrEqual(1);
+        // whole lane apart wherever they meet, and neither is drawn over the other. To a rounding
+        // error, since a lane track is a mean over a window and a gap of exactly one comes back a
+        // last-bit under it.
+        expect(Math.abs(gap)).toBeGreaterThan(1 - 1e-9);
       }
     }
   }

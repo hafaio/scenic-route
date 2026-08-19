@@ -297,6 +297,223 @@ function presenceOf(
   );
 }
 
+// Metres of ground per unit of the projected space the normals and sample directions live in.
+// Mercator is conformal, so one factor covers both axes; over the half a degree a city spans it
+// moves under a percent, which is the same approximation `cellLng` already makes.
+function metersPerPixel(latitude: number): number {
+  return (metersPerLng(latitude) * 360) / (256 * 2 ** NORMAL_ZOOM);
+}
+
+// How far off the corridor a parting is worth counting, in cells. A parting says which SIDE the
+// leaver left on, not how fast it got there, and once it is a cell off the two are no longer
+// sharing anything — further metres only mean it left at a steeper angle, which is the case where
+// the order matters least, since a route cutting across a bundle crosses it whatever lane it holds.
+// Uncapped, those steep departures outvote the gentle ones: 1,031 introduced crossings across the
+// New York subway against 935 capped at a cell, and 360 against 318 in San Francisco.
+const VOTE_CAP_CELLS = 1;
+
+// Which way round a pair of routes wants to be stacked, and by how much: per pair of routes, in
+// metres, positive where the higher-numbered of the two wants the higher lane.
+//
+// A parting is a place one of them carries on and the other does not — the end of a stretch they
+// share, or the start of one. There the route that is leaving swings off to one side of the
+// corridor, and if its lane is on the other side it has to cross every ribbon in between to get
+// there. So each parting votes for the side it left on: the route is followed `blendMeters` further
+// (the distance its lane takes to slide, so the vote covers the stretch the sliding happens over)
+// and the vote is how far that took it across the corridor, measured along the perpendicular its
+// own lane offset is applied along, so the sign means what the drawing means.
+//
+// A route merely crossing a bundle votes for nothing: it arrives from one side and leaves by the
+// other, and the two votes cancel, which is right — it crosses the bundle whichever lane it is in.
+// A route that only clips the corner of a cell gains no separation and so votes for nothing much,
+// which is what keeps a cell boundary crossed mid-bundle from reading as a parting.
+function partingVotes(
+  lines: readonly RoutedPolyline[],
+  walked: readonly Walked[],
+  { routes, sampled }: Occupancy,
+  senses: Float64Array,
+  cellLng: number,
+  cellLat: number,
+  cellMeters: number,
+  blendMeters: number,
+  metersPerUnit: number,
+): Map<string, number> {
+  const votes = new Map<string, number>();
+  const cast = (route: number, other: number, lateral: number): void => {
+    const capped =
+      Math.sign(lateral) *
+      Math.min(Math.abs(lateral), VOTE_CAP_CELLS * cellMeters);
+    const key = route < other ? `${route},${other}` : `${other},${route}`;
+    votes.set(key, (votes.get(key) ?? 0) + (route < other ? -capped : capped));
+  };
+
+  // Every sample in projected space, which is the frame the corridor direction and the lane normal
+  // are both read in.
+  const projected = walked.map(({ sampleLngs, sampleLats }) => [
+    Float64Array.from(sampleLngs, (lng) => projectX(lng, NORMAL_ZOOM)),
+    Float64Array.from(sampleLats, (lat) => projectY(lat, NORMAL_ZOOM)),
+  ]);
+
+  // The sample `blendMeters` of line away from `sample`, walking `step`.
+  const reach = (index: number, sample: number, step: number): number => {
+    const { sampleLngs, sampleLats } = walked[index];
+    let at = sample;
+    for (let travelled = 0; travelled < blendMeters; ) {
+      const next = at + step;
+      if (next < 0 || next >= sampleLngs.length) {
+        break;
+      }
+      travelled +=
+        Math.hypot(
+          (sampleLngs[next] - sampleLngs[at]) / cellLng,
+          (sampleLats[next] - sampleLats[at]) / cellLat,
+        ) * cellMeters;
+      at = next;
+    }
+    return at;
+  };
+
+  // How far off the corridor the line at `sample` gets over the next `blendMeters` of itself,
+  // walking `step` (+1 off the end of a stretch it shared, -1 back off the start of one).
+  //
+  // The corridor is the chord of the `blendMeters` the line covered on the side it still had
+  // company — its own path, but read from far enough back that a route already into its turn is
+  // measured against the way it was going, not the way it has ended up going. Taken from the
+  // instantaneous direction instead, a route that turns off the moment the two stop sharing a cell
+  // measures nothing at all: it is running straight along its new heading by the time the parting
+  // is seen.
+  const lateralOf = (index: number, sample: number, step: number): number => {
+    const { sampleDirX, sampleDirY } = walked[index];
+    const [pixelX, pixelY] = projected[index];
+    const away = reach(index, sample, step);
+    const back = reach(index, sample, -step);
+    const alongX = (pixelX[sample] - pixelX[back]) * step;
+    const alongY = (pixelY[sample] - pixelY[back]) * step;
+    const length = Math.hypot(alongX, alongY);
+    const dirX = length > 0 ? alongX / length : sampleDirX[sample];
+    const dirY = length > 0 ? alongY / length : sampleDirY[sample];
+    return (
+      senses[index] *
+      ((pixelX[away] - pixelX[sample]) * dirY -
+        (pixelY[away] - pixelY[sample]) * dirX) *
+      metersPerUnit
+    );
+  };
+
+  for (const [index, { route }] of lines.entries()) {
+    const cells = sampled[index];
+    // Only where a sample crosses into another cell can the company have changed, which is what
+    // keeps this off the per-sample path: the subway file's 295,000 samples run through 10,763
+    // cells. Each of the two laterals is then read at most once per cell crossed and not once per
+    // route parting there, which is a quarter of what this pass costs on that file.
+    for (let sample = 0; sample + 1 < cells.length; sample++) {
+      if (cells[sample] !== cells[sample + 1]) {
+        const here = routes[cells[sample]];
+        const next = routes[cells[sample + 1]];
+        let leaving = Number.NaN;
+        let joining = Number.NaN;
+        for (const other of here) {
+          if (other !== route && !next.has(other)) {
+            if (Number.isNaN(leaving)) {
+              leaving = lateralOf(index, sample, 1);
+            }
+            cast(route, other, leaving);
+          }
+        }
+        for (const other of next) {
+          if (other !== route && !here.has(other)) {
+            if (Number.isNaN(joining)) {
+              joining = lateralOf(index, sample + 1, -1);
+            }
+            cast(route, other, joining);
+          }
+        }
+      }
+    }
+  }
+  return votes;
+}
+
+// The order the lanes are stacked in, as a rank per route.
+//
+// Any one order over the routes keeps the no-weaving guarantee below, so which order it is comes
+// free — and an arbitrary one (the ferries' route names sorted, the subway feed's own order) leaves
+// a route that peels off to the left of a bundle sitting on its right, crossing everything between
+// to get there. This takes the order that leaves the least of `partingVotes` unsatisfied, which is
+// the linear ordering problem: NP-hard in general, tiny here — New York has 8 ferry routes and 29
+// subway ones, San Francisco 14 — so routes are sorted by how much the rest of the file wants to be
+// after them and then moved one at a time while that pays.
+//
+// Measured on the committed artifacts, counting a crossing as one drawn ribbon properly crossing
+// another of a different route at z15, and counting as INTRODUCED one with no crossing of the same
+// two routes' published centrelines within 130 m of it: New York's ferries fall from 26 introduced
+// (63 crossings in all) to 14 (47), and its subway from 1,530 (6,143) to 935 (5,515). San
+// Francisco's subway goes the other way, 306 (506) to 318 (581), which is the honest cost of one
+// order for the whole file: its Muni and BART tracks are digitised as near-coincident lines that
+// cross each other constantly wherever two of them run down the same street, and the order its
+// partings ask for is not the order that noise happens to like. What is actually being minimised
+// falls in all three — the vote weight left unsatisfied goes from 1.7 km over 8 pairs to nothing
+// for the ferries, 40.8 km over 132 pairs to 6.5 km over 67 for the New York subway, and 15.5 km
+// over 44 pairs to 0.4 km over 7 for San Francisco's.
+function laneOrder(
+  routes: readonly number[],
+  votes: Map<string, number>,
+): Map<number, number> {
+  // The votes as a dense matrix over the routes, `wants[first * routes.length + second]` being what
+  // placing that first buys. Dense because the search below reads it a few hundred thousand times.
+  const wants = new Float64Array(routes.length * routes.length);
+  for (let first = 0; first < routes.length; first++) {
+    for (let second = 0; second < routes.length; second++) {
+      const left = routes[first];
+      const right = routes[second];
+      const vote =
+        votes.get(left < right ? `${left},${right}` : `${right},${left}`) ?? 0;
+      wants[first * routes.length + second] = left < right ? vote : -vote;
+    }
+  }
+
+  const pull = routes.map((_, route) => {
+    let total = 0;
+    for (let other = 0; other < routes.length; other++) {
+      total += wants[route * routes.length + other];
+    }
+    return total;
+  });
+  const order = routes.map((_, route) => route);
+  order.sort((left, right) => pull[right] - pull[left] || left - right);
+
+  // Moving one route through the ones between it and its new place flips its order with each of
+  // them and with nobody else, so what the move is worth is that sum and not a rescore of the whole
+  // order.
+  for (let pass = 0; pass < routes.length; pass++) {
+    let improved = false;
+    for (let from = 0; from < order.length; from++) {
+      for (let to = 0; to < order.length; to++) {
+        let gain = 0;
+        for (
+          let at = Math.min(from + 1, to);
+          at <= Math.max(from - 1, to);
+          at++
+        ) {
+          if (at !== from) {
+            gain +=
+              (at > from ? -2 : 2) *
+              wants[order[from] * routes.length + order[at]];
+          }
+        }
+        if (gain > 0) {
+          order.splice(to, 0, ...order.splice(from, 1));
+          improved = true;
+        }
+      }
+    }
+    if (!improved) {
+      break;
+    }
+  }
+  return new Map(order.map((route, rank) => [routes[route], rank]));
+}
+
 // Per line and per vertex, in lane widths, which lane of its corridor that line holds *there* —
 // which is what makes the offset local: a route displaces sideways only where it would otherwise
 // draw over another, and goes back onto its own published shape as soon as it is alone again.
@@ -305,11 +522,11 @@ function presenceOf(
 // River bundle for open water, and the 5 runs with the 2 in the Bronx and the 4 and 6 down
 // Lexington Av.
 //
-// A lane is how much of the route order sorts before this one *at that place*: the sum, over the
-// routes that sort earlier, of how present each of them is in the cell the vertex falls in. Which is
-// the whole of the no-weaving guarantee, because the sum is over a term per route that is never
-// negative and the place is the same for both — so wherever two routes are in one cell, the one
-// that sorts later holds the higher lane, and it holds it by a full lane, since a route is fully
+// A lane is how much of the route order (`laneOrder`) ranks before this one *at that place*: the sum,
+// over the routes that rank earlier, of how present each of them is in the cell the vertex falls in.
+// Which is the whole of the no-weaving guarantee, because the sum is over a term per route that is
+// never negative and the place is the same for both — so wherever two routes are in one cell, the
+// one that ranks later holds the higher lane, and it holds it by a full lane, since a route is fully
 // present in a cell it runs through. Their lanes cannot come level, let alone swap.
 //
 // It is a field over the cells rather than a mean taken along each line's own path for exactly that
@@ -320,17 +537,19 @@ function presenceOf(
 function laneTracks(
   lines: readonly RoutedPolyline[],
   occupancy: Occupancy,
+  ranks: Map<number, number>,
   cellLng: number,
   cellLat: number,
   cellMeters: number,
   blendMeters: number,
 ): Float64Array[] {
-  const presence = new Map<number, Float64Array>();
-  for (const route of new Set(lines.map((line) => line.route))) {
-    presence.set(route, presenceOf(occupancy, route, cellMeters, blendMeters));
-  }
-  return lines.map(({ lngs, lats, route }) =>
-    Float64Array.from(lngs, (lng, vertex) => {
+  const presence = [...ranks].map(([route, rank]) => ({
+    rank,
+    present: presenceOf(occupancy, route, cellMeters, blendMeters),
+  }));
+  return lines.map(({ lngs, lats, route }) => {
+    const own = ranks.get(route) ?? 0;
+    return Float64Array.from(lngs, (lng, vertex) => {
       const cell = occupancy.idOf.get(
         `${Math.floor(lng / cellLng)},${Math.floor(lats[vertex] / cellLat)}`,
       );
@@ -338,15 +557,15 @@ function laneTracks(
         return 0;
       } else {
         let lane = 0;
-        for (const [other, present] of presence) {
-          if (other < route) {
+        for (const { rank, present } of presence) {
+          if (rank < own) {
             lane += present[cell];
           }
         }
         return lane;
       }
-    }),
-  );
+    });
+  });
 }
 
 // How wide one lane is, in CSS pixels, at `zoom`. At and above `fullZoom` it is the full `spacingPx`
@@ -621,15 +840,35 @@ export function laneRibbons(
   const cellLng = cellMeters / metersPerLng(latitude);
   const walked = lines.map((line) => walk(line, cellLng, cellLat));
   const occupancy = occupancyOf(lines, walked, cellLng, cellLat);
+  // The senses come first because the lane order is read off the same axis the lanes are drawn
+  // along, and that axis is only meaningful once the bundle agrees which way round it faces.
+  const senses = orientations(lines, walked, occupancy);
+  const routeIds = [...new Set(lines.map((line) => line.route))].sort(
+    (left, right) => left - right,
+  );
+  const ranks = laneOrder(
+    routeIds,
+    partingVotes(
+      lines,
+      walked,
+      occupancy,
+      senses,
+      cellLng,
+      cellLat,
+      cellMeters,
+      blendMeters,
+      metersPerPixel(latitude),
+    ),
+  );
   const lanes = laneTracks(
     lines,
     occupancy,
+    ranks,
     cellLng,
     cellLat,
     cellMeters,
     blendMeters,
   );
-  const senses = orientations(lines, walked, occupancy);
   return lines.map(({ lngs, lats }, index) => ({
     lanes: lanes[index],
     ...offsetNormals(lngs, lats, senses[index]),

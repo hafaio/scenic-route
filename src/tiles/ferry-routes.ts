@@ -1,5 +1,5 @@
 // What a ferry route is drawn as: its operator's own colour, and which route of the file it is —
-// the order the lanes are stacked in where routes share a stretch of water.
+// the identity ./polylines stacks the lanes by where routes share a stretch of water.
 //
 // The colours are the `route_color` each feed publishes for the route, read straight off
 // `routes.txt` in the two frozen GTFS zips under `data/ferries/` — NYC Ferry (Hornblower, via
@@ -28,10 +28,11 @@ export interface RouteStyle {
 
 // The colour and route index of every segment in the file, index-aligned with it.
 //
-// The route order is the route names sorted, so a route keeps its place in a bundle whatever order
-// the segments happen to be decoded in, at every zoom and in every tile. Segments the feed does not
-// name share one index at the end: they are one route as far as a lane stack is concerned, which is
-// as much as the file says about them.
+// The index is the route names sorted, so a route is the same route whatever order the segments
+// happen to be decoded in, at every zoom and in every tile — which lane of a bundle that route takes
+// is settled from the geometry, in laneOrder. Segments the feed does not name share one index at the
+// end: they are one route as far as a lane stack is concerned, which is as much as the file says
+// about them.
 export function routeStyles(routes: readonly (string | null)[]): RouteStyle[] {
   const named = [...new Set(routes.filter((route) => route !== null))].sort();
   const indices = new Map(named.map((route, index) => [route, index]));
