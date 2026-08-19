@@ -31,6 +31,7 @@
 # deploy, so they are committed — the job reads the last one out of the checkout and the client reads
 # it off `main` through raw.githubusercontent.com. Never LFS-track either (data/README.md).
 # public/ferries/ above is a different thing entirely: the deploy's own drawn ferry lines.
+# Nor public/icons/ or public/sw.js: hand-made static assets that no build step writes.
 
 # raw source reads cached by `bun run build-tree-data`; --refresh to go back to the network
 /.cache/
