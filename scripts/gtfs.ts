@@ -33,6 +33,9 @@ export interface GtfsFeed {
   calendarDates: GtfsRow[];
   shapes: GtfsRow[];
   frequencies: GtfsRow[];
+  // The agency's own transfer table: which stops it says a rider can walk between. Absent from
+  // Muni's feed, which is why the station merge keeps a geometric fallback (../src/subway/format).
+  transfers: GtfsRow[];
 }
 
 async function download(url: string): Promise<Uint8Array> {
@@ -239,5 +242,6 @@ export function parseGtfs(zip: Uint8Array): GtfsFeed {
     calendarDates: readTable(files, "calendar_dates"),
     shapes: readTable(files, "shapes"),
     frequencies: readTable(files, "frequencies"),
+    transfers: readTable(files, "transfers"),
   };
 }

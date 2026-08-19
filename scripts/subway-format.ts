@@ -3,18 +3,19 @@
 // colours and names, one polyline per drawn variant, and a station table naming the routes calling
 // there as a bitmask. Layout: scripts/README.md.
 //
-// New York's ingest (scripts/subway.ts) predates this module and still carries its own copy of the
-// encoder; San Francisco's is the second city to write the format, and split the shared half out.
+// Both cities' ingests write through this: New York's (scripts/subway.ts) reads one feed, San
+// Francisco's (scripts/subway-sf.ts) two, and what they share is everything downstream of the feed.
 
 import { COORD_SCALE, writeVarint, zigzag } from "./geometry";
+import type { GtfsFeed } from "./gtfs";
 import type { Coord } from "./socrata";
 
 export const SUBWAY_MAGIC = "SBWY";
-export const SUBWAY_FORMAT = 2;
+export const SUBWAY_FORMAT = 3;
 const SUBWAY_HEADER_BYTES = 60;
 const SUBWAY_ROUTE_BYTES = 16;
 const SUBWAY_LINE_BYTES = 8;
-const SUBWAY_STATION_BYTES = 16;
+const SUBWAY_STATION_BYTES = 20;
 // A station names the routes calling there as one u32 bit per route index, so a 33rd route would be
 // a format change; the encoder refuses rather than dropping the routes that no longer fit.
 const MAX_ROUTES = 32;
@@ -58,11 +59,16 @@ export interface TransitRoute {
   lines: Coord[][];
 }
 
-// One station marker: where it is, what it is called, and which routes call there as a bit per index
-// into the route table.
+// One station marker: where it is, what it is called, which routes call there as a bit per index
+// into the route table, and which complex the agency puts it in.
 export interface TransitStation extends Coord {
   name: string;
   routeMask: number;
+  // The connected component of the feed's own transfers.txt this station falls in, from 1, or 0
+  // when the feed publishes no transfer between two different stations at all. Two stations sharing
+  // a non-zero id are one complex however far apart they are; two carrying 0 are a question the
+  // agency did not answer, and the client falls back to distance and name (../src/subway/format).
+  complex: number;
 }
 
 // One shape variant a route runs, as drawn: several polylines rather than one because clipping a
@@ -75,6 +81,82 @@ export interface ShapeVariant {
   primary: boolean;
   trips: number;
   lines: Coord[][];
+}
+
+// GTFS transfer_type 3: the agency saying a rider CANNOT cross between this pair. Neither feed here
+// publishes one, but joining on it would read a row as the opposite of what it says.
+const NO_TRANSFER = "3";
+
+// Which complex each of a feed's stations belongs to, from the agency's own transfers.txt: the
+// connected components of the stations it says a rider can walk between, numbered from `firstId` so
+// two feeds written into one file can be given disjoint ranges. Rows are keyed on stop ids that may
+// be platforms rather than stations, so both ends are resolved to their parent the way the station
+// table is.
+//
+// Empty when the feed names no transfer between two DIFFERENT stations — Muni publishes no
+// transfers.txt at all and BART's 40 rows are all platform-to-platform inside one station, so
+// neither says anything about which of its stations are one place. A feed that says nothing must
+// leave every station at 0 rather than claim each is a complex of its own, because 0 is what sends
+// the client back to the geometric rule that is all San Francisco has ever had.
+export function transferComplexes(
+  feed: GtfsFeed,
+  firstId: number,
+): Map<string, number> {
+  const parentOf = new Map(
+    feed.stops.map((stop) => [
+      stop.stop_id,
+      stop.parent_station?.trim() || stop.stop_id,
+    ]),
+  );
+  const parent = new Map<string, string>();
+  const find = (station: string): string => {
+    const seen = parent.get(station);
+    if (seen === undefined || seen === station) {
+      return station;
+    }
+    const root = find(seen);
+    parent.set(station, root);
+    return root;
+  };
+
+  let joins = 0;
+  for (const row of feed.transfers) {
+    if (row.transfer_type === NO_TRANSFER) {
+      continue;
+    }
+    const from = parentOf.get(row.from_stop_id) ?? row.from_stop_id;
+    const to = parentOf.get(row.to_stop_id) ?? row.to_stop_id;
+    if (from === to) {
+      continue;
+    }
+    // The lower id always wins the root, so a complex's root is the same whatever order the rows
+    // came in and the numbering below is the same across runs.
+    const roots = [find(from), find(to)].sort();
+    parent.set(roots[1], roots[0]);
+    joins += 1;
+  }
+  if (joins === 0) {
+    return new Map();
+  }
+
+  const ids = new Map<string, number>();
+  const complexes = new Map<string, number>();
+  for (const station of [...new Set(parentOf.values())].sort()) {
+    const root = find(station);
+    let id = ids.get(root);
+    if (id === undefined) {
+      id = firstId + ids.size;
+      ids.set(root, id);
+    }
+    complexes.set(station, id);
+  }
+  return complexes;
+}
+
+// The first complex id no station in `complexes` uses, so the next feed's ids do not collide with
+// this one's.
+export function nextComplexId(complexes: ReadonlyMap<string, number>): number {
+  return Math.max(0, ...complexes.values()) + 1;
 }
 
 export function parseColor(hex: string, fallback: string): Rgb {
@@ -175,9 +257,10 @@ export function chooseLines(variants: readonly ShapeVariant[]): Coord[][] {
   return lines;
 }
 
-// Writes the system as SBWY v2: a header, a route table (colours, name ids and the run of lines each
+// Writes the system as SBWY v3: a header, a route table (colours, name ids and the run of lines each
 // route owns), a line table (a geometry pointer, a vertex count and the owning route), a station
-// table (a position, a name id and the route mask), a varint geometry blob and a trailing name blob.
+// table (a position, a name id, the route mask and the complex id), a varint geometry blob and a
+// trailing name blob.
 // All little-endian, coordinates quantized to COORD_SCALE about the south-west origin, exactly as
 // the sibling sources. Layout: scripts/README.md.
 export function encodeSubway(
@@ -293,6 +376,7 @@ export function encodeSubway(
     );
     stationView.setUint32(record + 8, nameIndex.get(station.name) ?? 0, true);
     stationView.setUint32(record + 12, station.routeMask, true);
+    stationView.setUint32(record + 16, station.complex, true);
   }
 
   const encoder = new TextEncoder();

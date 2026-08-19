@@ -67,7 +67,7 @@ export default function LayersControl({
         aria-expanded={menuOpen}
         aria-label={
           activeEntries.length > 0
-            ? `Map layers (${activeEntries.map((entry) => entry.label).join(", ")})`
+            ? `Map layers (${activeEntries.map((entry) => overlayLabel(entry, city)).join(", ")})`
             : "Map layers"
         }
         title="Map layers"

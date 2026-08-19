@@ -1,7 +1,9 @@
 import {
   decodeSubway,
+  mergeStations,
   type SubwayRoute,
   type SubwayStation,
+  stationRouteIndices,
 } from "../subway/format";
 import { resolveUrl } from "./base-url";
 import { drawLabels, type PlacedLabels, placeLabels } from "./labels";
@@ -10,8 +12,6 @@ import {
   bucketize,
   laneRibbons,
   laneSpacingPx,
-  METERS_PER_DEGREE_LAT,
-  metersPerLng,
   type Polyline,
 } from "./polylines";
 import type { SubwayParams, TileCoords } from "./protocol";
@@ -19,7 +19,9 @@ import type { TileRenderer } from "./renderer";
 import { splinePath } from "./spline";
 
 // The subway overlay: the MTA's 93 drawn shape variants in the colours the feed publishes, and a
-// marker at each of the 496 stations. The machinery is the ferry layer's (./polylines, ./spline,
+// marker at each place they stop — 444 of them in New York, 217 in San Francisco, after the records
+// naming one place twice are merged (../subway/format). From z15 the marker is the bullets of the
+// routes calling there rather than a dot. The machinery is the ferry layer's (./polylines, ./spline,
 // ./labels), including the per-stretch lanes; what is different is that subway overlap is an order
 // heavier — 10 routes share the track through Atlantic Av-Barclays Ctr, 4 the Lexington Av trunk —
 // and that the trunks are narrow, so the grid the company is counted over is 40 m and not 60.
@@ -47,14 +49,6 @@ const TRUNK_CELL_M = 40;
 // times the 46.6 m mean spacing of the shapes' own vertices, so it is a diagonal and not a step.
 const LANE_BLEND_M = 250;
 
-// Two same-named stations linked by a chain of hops shorter than this are one complex under several
-// of its lines: Times Sq-42 St is five records spread over 153 m, one per trunk. Every marker is
-// drawn, since each sits on a line of its own, but only the first of a chain is named, so a complex
-// reads as one place. 200 m is about two Manhattan short blocks, which is where the city stops
-// repeating itself and starts genuinely reusing a name — Wall St on the 2/3 and Wall St on the 4/5
-// are two unconnected stations 247 m apart, and both deserve their label.
-const SAME_COMPLEX_METERS = 200;
-
 const STATION_MIN_ZOOM = 13;
 const STATION_LABEL_ZOOM = 15;
 const STATION_BASE_RADIUS_PX = 2.5;
@@ -62,6 +56,39 @@ const STATION_LABEL_COLOR = "#ffffff"; // over the dark outline ./labels strokes
 // What a station serving routes of more than one colour is ringed in — Times Sq is not any one
 // line — and what a line whose route the file does not name falls back to.
 const NEUTRAL_COLOR = "#334155"; // slate-700
+
+// The zoom the dot gives way to the routes' bullets. A bullet block is far more ink than a dot, and
+// the budget is what pays for it: counting how many markers' blocks overlap another's, z13 is 14%
+// in New York and 50% in San Francisco, z14 is 5% and 16%, and z15 is 1.7% and 4.1% — the first
+// zoom where under one marker in twenty collides. It is also where the names appear, so nothing new
+// is asked of a zoom that was previously quiet.
+const BULLET_ZOOM = 15;
+// Bullets past this many wrap onto another row, so the block stays about as wide as it is tall
+// instead of running along the street. Times Sq-42 St serves 10 routes and Powell 12, which is
+// three rows; both cities' next busiest are 9 and 10.
+const BULLETS_PER_ROW = 4;
+const BULLET_GAP_PX = 1.5;
+const BULLET_OUTLINE = "#ffffff"; // parts touching bullets, and lifts a dark one off a dark map
+// A bullet at BULLET_ZOOM, growing 2 px a zoom. 12 px is the smallest a two-letter name still reads
+// in, which is what San Francisco's cable cars need: CA, PH and PM publish the same colour as the F,
+// so a plain disc would leave four routes looking alike.
+const BULLET_BASE_DIAMETER_PX = 12;
+const BULLET_MAX_DIAMETER_PX = 16;
+// The name sits inside a box this fraction of the bullet across, at the size that fraction of it —
+// the proportions the MTA sets its own bullets at. A two-character name is set smaller so it has a
+// chance of fitting, and squeezed horizontally the rest of the way, which is what a real bullet does
+// with a two-character legend.
+const BULLET_TEXT_WIDTH = 0.82;
+const BULLET_TEXT_SIZE = 0.78;
+const BULLET_PAIR_TEXT_SIZE = 0.6;
+// A diamond is a narrower box than a circle of the same width, so its name gets less room.
+const DIAMOND_TEXT_WIDTH = 0.58;
+// Longer than this and the short name is a word rather than a legend, so the bullet is left plain
+// and its colour carries the route. That is what BART wants: its four routes are *named* "Yellow",
+// "Green", "Red" and "Blue" and published in exactly those colours, so the disc is the name. It also
+// leaves the Staten Island Railway ("SIR") a plain navy disc, the only route on the island. Every
+// other route in either city is one or two characters once the express diamonds are folded in.
+const BULLET_MAX_TEXT_CHARS = 2;
 
 interface DrawnLine extends Polyline {
   color: string;
@@ -72,13 +99,24 @@ interface DrawnLine extends Polyline {
   normalY: Float64Array;
 }
 
+// What one route's bullet says and what shape says it.
+interface RouteBullet {
+  color: string;
+  textColor: string;
+  text: string;
+  diamond: boolean;
+}
+
 interface Subway {
   lines: DrawnLine[];
   // Line indices filed by `${cellX},${cellY}`, so a tile draw gathers only the lines whose bounding
   // box reaches it rather than the whole system.
   buckets: Map<string, number[]>;
   stationBuckets: Map<string, number[]>;
-  // Per station, the colour of its marker's ring — see stationRing.
+  bullets: RouteBullet[];
+  // Per marker, the routes calling there, in the feed's own route order.
+  stationRoutes: number[][];
+  // Per marker, the colour of its dot's ring below BULLET_ZOOM — see stationRing.
   rings: string[];
   names: string[];
   lngs: Float64Array;
@@ -87,9 +125,50 @@ interface Subway {
   labels: Map<number, PlacedLabels>;
 }
 
+// The MTA files the express variant of a service as its own route, named for the local plus an X:
+// FX is the Brooklyn F express, 6X the Pelham Bay Park express, 7X the Flushing express. No sign in
+// the system says "6X" — the MTA draws those three in a diamond around the plain number, which is
+// what a rider is looking for, so that is what the bullet shows. A route is an express variant only
+// when the file also holds the route it is named after, which is what keeps a name that merely ends
+// in X from being mistaken for one. San Francisco has none.
+// At a station where both a service and its express variant call, the two bullets say one thing
+// twice — every express stop in the system is also a local stop, checked against the feed: of the 29
+// stations the 6X serves, the 39 the FX serves and the 18 the 7X serves, not one lacks the plain
+// route. So the diamond alone carries it: a diamond means the express stops here as well, a circle
+// means the local only, and nothing is lost by dropping the circle beside a diamond.
+function foldExpressPairs(
+  indices: readonly number[],
+  routes: readonly SubwayRoute[],
+): number[] {
+  const expressed = new Set(
+    indices
+      .map((index) => routes[index]?.shortName)
+      .filter((name): name is string => name?.endsWith("X") ?? false)
+      .map((name) => name.slice(0, -1)),
+  );
+  return indices.filter((index) => {
+    const name = routes[index]?.shortName;
+    return name === undefined || !expressed.has(name);
+  });
+}
+
+function routeBullets(routes: readonly SubwayRoute[]): RouteBullet[] {
+  const names = new Set(routes.map(({ shortName }) => shortName));
+  return routes.map(({ color, textColor, shortName }) => {
+    const diamond =
+      shortName.endsWith("X") && names.has(shortName.slice(0, -1));
+    return {
+      color,
+      textColor,
+      text: diamond ? shortName.slice(0, -1) : shortName,
+      diamond,
+    };
+  });
+}
+
 // A station's ring takes its routes' colour when they all publish the same one — which is what the
 // system's trunks look like, the 4/5/6 all green — and the neutral otherwise, because a station on
-// two trunks is not either of their colours. 171 of the 496 are served by one route alone.
+// two trunks is not either of their colours. 179 of New York's 444 markers serve one route alone.
 function stationRing(
   station: SubwayStation,
   routes: readonly SubwayRoute[],
@@ -102,35 +181,15 @@ function stationRing(
   return colors.size === 1 ? [...colors][0] : NEUTRAL_COLOR;
 }
 
-// The station names to label, with every repeat of a complex blanked — placeLabels skips an empty
-// name, so the marker stays and the second "Times Sq-42 St" does not. The comparison is against
-// every station seen and not only the named ones, so a complex strung out in a line collapses to one
-// name rather than to one per hop.
-function complexNames(
-  stations: readonly SubwayStation[],
-  lngMeters: number,
-): string[] {
-  const seen: SubwayStation[] = [];
-  return stations.map((station) => {
-    const repeat = seen.some(
-      (other) =>
-        other.name === station.name &&
-        Math.hypot(
-          (other.lng - station.lng) * lngMeters,
-          (other.lat - station.lat) * METERS_PER_DEGREE_LAT,
-        ) < SAME_COMPLEX_METERS,
-    );
-    seen.push(station);
-    return repeat ? "" : station.name;
-  });
-}
-
 export function decodeSubwayTiles(buffer: ArrayBuffer): Subway {
-  const { routes, lines, stations } = decodeSubway(buffer);
+  const { routes, lines, stations: records } = decodeSubway(buffer);
+  // One marker per place, not per record: New York spreads a complex over several records, and San
+  // Francisco's feeds file a stop once per kerb. Which records are one place is the MTA's own answer
+  // where the feed gives one and a geometric guess where it does not — see ../subway/format.
+  const stations = mergeStations(records);
   const midLat = stations.length
     ? stations[Math.floor(stations.length / 2)].lat
     : 0;
-  const lngMeters = metersPerLng(midLat);
   const ribbons = laneRibbons(lines, {
     cellMeters: TRUNK_CELL_M,
     blendMeters: LANE_BLEND_M,
@@ -154,8 +213,12 @@ export function decodeSubwayTiles(buffer: ArrayBuffer): Subway {
       })),
       CELL_DEG,
     ),
+    bullets: routeBullets(routes),
+    stationRoutes: stations.map((station) =>
+      foldExpressPairs(stationRouteIndices(station), routes),
+    ),
     rings: stations.map((station) => stationRing(station, routes)),
-    names: complexNames(stations, lngMeters),
+    names: stations.map(({ name }) => name),
     lngs: Float64Array.from(stations, ({ lng }) => lng),
     lats: Float64Array.from(stations, ({ lat }) => lat),
     labels: new Map(),
@@ -190,6 +253,147 @@ function loadSubway({ url }: SubwayParams): Promise<Subway> {
 
 function stationRadius(zoom: number): number {
   return Math.min(5, STATION_BASE_RADIUS_PX + Math.max(0, zoom - 13) * 0.4);
+}
+
+function bulletDiameter(zoom: number): number {
+  return Math.min(
+    BULLET_MAX_DIAMETER_PX,
+    BULLET_BASE_DIAMETER_PX + (zoom - BULLET_ZOOM) * 2,
+  );
+}
+
+interface BulletBlock {
+  diameter: number;
+  pitch: number; // one bullet's centre to the next
+  rows: number;
+  halfWidth: number;
+  halfHeight: number;
+}
+
+function bulletBlock(count: number, zoom: number): BulletBlock {
+  const diameter = bulletDiameter(zoom);
+  const pitch = diameter + BULLET_GAP_PX;
+  const rows = Math.ceil(count / BULLETS_PER_ROW);
+  return {
+    diameter,
+    pitch,
+    rows,
+    halfWidth: (Math.min(count, BULLETS_PER_ROW) * pitch - BULLET_GAP_PX) / 2,
+    halfHeight: (rows * pitch - BULLET_GAP_PX) / 2,
+  };
+}
+
+// Half the marker's size, whichever marker this zoom draws — what the tile cull tests against and
+// what ./labels sets the name beside.
+function markerExtent(
+  subway: Subway,
+  station: number,
+  zoom: number,
+): { halfWidth: number; halfHeight: number } {
+  if (zoom < BULLET_ZOOM) {
+    const radius = stationRadius(zoom);
+    return { halfWidth: radius, halfHeight: radius };
+  } else {
+    return bulletBlock(subway.stationRoutes[station].length, zoom);
+  }
+}
+
+const BULLET_FONT_FAMILY = "system-ui, sans-serif";
+const BULLET_REFERENCE_PX = 10;
+// A name's width scales with the font size, so one measurement per route solves for the size that
+// fits every bullet it is ever drawn in. Shared across tiles because the font is.
+const referenceWidths = new Map<string, number>();
+
+// How to set the route's name inside its bullet — the font size and how far it has to be squeezed
+// across to fit — or null for a bullet that carries no name.
+function bulletText(
+  context: OffscreenCanvasRenderingContext2D,
+  { text, diamond }: RouteBullet,
+  diameter: number,
+): { size: number; squeeze: number } | null {
+  if (!text || text.length > BULLET_MAX_TEXT_CHARS) {
+    return null;
+  }
+  let reference = referenceWidths.get(text);
+  if (reference === undefined) {
+    context.font = `700 ${BULLET_REFERENCE_PX}px ${BULLET_FONT_FAMILY}`;
+    reference = context.measureText(text).width;
+    referenceWidths.set(text, reference);
+  }
+  const size =
+    diameter * (text.length > 1 ? BULLET_PAIR_TEXT_SIZE : BULLET_TEXT_SIZE);
+  const room = diameter * (diamond ? DIAMOND_TEXT_WIDTH : BULLET_TEXT_WIDTH);
+  const width = (reference * size) / BULLET_REFERENCE_PX;
+  return { size, squeeze: Math.min(1, room / width) };
+}
+
+function bulletPath(
+  context: OffscreenCanvasRenderingContext2D,
+  centerX: number,
+  centerY: number,
+  radius: number,
+  diamond: boolean,
+): void {
+  context.beginPath();
+  if (diamond) {
+    context.moveTo(centerX, centerY - radius);
+    context.lineTo(centerX + radius, centerY);
+    context.lineTo(centerX, centerY + radius);
+    context.lineTo(centerX - radius, centerY);
+    context.closePath();
+  } else {
+    context.arc(centerX, centerY, radius, 0, 2 * Math.PI);
+  }
+}
+
+// The routes calling at one marker, as a block of bullets centred on it: the coloured disc with the
+// route's own name inside in its own text colour, which is what route_text_color is published for.
+function drawBullets(
+  context: OffscreenCanvasRenderingContext2D,
+  subway: Subway,
+  station: number,
+  markerX: number,
+  markerY: number,
+  zoom: number,
+): void {
+  const indices = subway.stationRoutes[station];
+  const { diameter, pitch, rows, halfHeight } = bulletBlock(
+    indices.length,
+    zoom,
+  );
+  const radius = diameter / 2;
+  context.lineWidth = 1;
+  context.strokeStyle = BULLET_OUTLINE;
+  context.textAlign = "center";
+  context.textBaseline = "middle";
+  for (let row = 0; row < rows; row++) {
+    const inRow = indices.slice(
+      row * BULLETS_PER_ROW,
+      (row + 1) * BULLETS_PER_ROW,
+    );
+    // Each row is centred in its own right, so a last row of one or two sits under the middle of
+    // the ones above rather than hanging off the left of the block.
+    const left = markerX - (inRow.length * pitch - BULLET_GAP_PX) / 2 + radius;
+    const centerY = markerY - halfHeight + radius + row * pitch;
+    for (const [column, index] of inRow.entries()) {
+      const bullet = subway.bullets[index];
+      const centerX = left + column * pitch;
+      context.fillStyle = bullet?.color ?? NEUTRAL_COLOR;
+      bulletPath(context, centerX, centerY, radius, bullet?.diamond ?? false);
+      context.fill();
+      context.stroke();
+      const legend = bullet && bulletText(context, bullet, diameter);
+      if (bullet && legend) {
+        context.font = `700 ${legend.size}px ${BULLET_FONT_FAMILY}`;
+        context.fillStyle = bullet.textColor;
+        context.save();
+        context.translate(centerX, centerY);
+        context.scale(legend.squeeze, 1);
+        context.fillText(bullet.text, 0, 0);
+        context.restore();
+      }
+    }
+  }
 }
 
 function drawLines(
@@ -241,12 +445,12 @@ function drawLines(
   }
 }
 
-// A white disc ringed in its routes' colour, the symbol the MTA's own map uses — and the one thing
-// on the layer that has to read the same over a dark map as a light one, since the pane escapes the
-// dark-mode invert. Below STATION_MIN_ZOOM there are no markers at all: at z12 91 of the 496
-// stations sit within 6 px of another and at z11 156 do, so the markers stop being 496 stations and
-// become a smear over the lines that already say where the system runs. At z13 that is down to 41,
-// all of them in Midtown and Downtown.
+// Below BULLET_ZOOM a station is a white disc ringed in its routes' colour, the symbol the MTA's own
+// map uses; from BULLET_ZOOM it is the routes themselves. Either way it is the one thing on the
+// layer that has to read the same over a dark map as a light one, since the pane escapes the
+// dark-mode invert. Below STATION_MIN_ZOOM there is no marker at all: at z12 91 of New York's
+// markers sit within 6 px of another and at z11 156 do, so they stop being stations and become a
+// smear over the lines that already say where the system runs. At z13 that is down to 4.
 function drawStations(
   context: OffscreenCanvasRenderingContext2D,
   subway: Subway,
@@ -259,28 +463,32 @@ function drawStations(
   const zoom = coords.z;
   const originX = coords.x * TILE_SIZE;
   const originY = coords.y * TILE_SIZE;
-  const radius = stationRadius(zoom);
-  context.lineWidth = 1.5;
-  context.fillStyle = "#ffffff";
   for (let cellX = cellX0; cellX <= cellX1; cellX++) {
     for (let cellY = cellY0; cellY <= cellY1; cellY++) {
       for (const station of subway.stationBuckets.get(`${cellX},${cellY}`) ??
         []) {
         const markerX = projectX(subway.lngs[station], zoom) - originX;
         const markerY = projectY(subway.lats[station], zoom) - originY;
+        const { halfWidth, halfHeight } = markerExtent(subway, station, zoom);
         if (
-          markerX < -radius ||
-          markerX > TILE_SIZE + radius ||
-          markerY < -radius ||
-          markerY > TILE_SIZE + radius
+          markerX < -halfWidth ||
+          markerX > TILE_SIZE + halfWidth ||
+          markerY < -halfHeight ||
+          markerY > TILE_SIZE + halfHeight
         ) {
           continue;
         }
-        context.beginPath();
-        context.arc(markerX, markerY, radius, 0, 2 * Math.PI);
-        context.fill();
-        context.strokeStyle = subway.rings[station];
-        context.stroke();
+        if (zoom >= BULLET_ZOOM) {
+          drawBullets(context, subway, station, markerX, markerY, zoom);
+        } else {
+          context.lineWidth = 1.5;
+          context.fillStyle = "#ffffff";
+          context.beginPath();
+          context.arc(markerX, markerY, halfWidth, 0, 2 * Math.PI);
+          context.fill();
+          context.strokeStyle = subway.rings[station];
+          context.stroke();
+        }
       }
     }
   }
@@ -295,9 +503,26 @@ function labelsAt(
   if (cached) {
     return cached;
   } else {
+    // Busiest first, because placement is greedy and the markers now take real room: whoever is
+    // offered a spot first keeps it, and at z15 in Midtown that decides between naming Times Sq-42
+    // St and naming a one-line stop two blocks away. Ties keep the file's order.
+    const order = subway.names
+      .map((_, station) => station)
+      .sort(
+        (left, right) =>
+          subway.stationRoutes[right].length -
+          subway.stationRoutes[left].length,
+      );
+    const extents = order.map((station) => markerExtent(subway, station, zoom));
     const placed = placeLabels(
       context,
-      subway,
+      {
+        lngs: order.map((station) => subway.lngs[station]),
+        lats: order.map((station) => subway.lats[station]),
+        names: order.map((station) => subway.names[station]),
+        halfWidths: extents.map(({ halfWidth }) => halfWidth),
+        halfHeights: extents.map(({ halfHeight }) => halfHeight),
+      },
       zoom,
       stationRadius(zoom),
       false,
@@ -324,7 +549,18 @@ function draw(
 
   drawLines(context, subway, coords, cellX0, cellX1, cellY0, cellY1);
   if (zoom >= STATION_MIN_ZOOM) {
-    drawStations(context, subway, coords, cellX0, cellX1, cellY0, cellY1);
+    // One cell wider than the tile, because a marker centred just outside it still reaches in: a
+    // twelve-route block is 47 px, 170 m at z15, where a cell is 1.1 km. Both halves of a block
+    // straddling a seam are then drawn at the same world position by each side and line up.
+    drawStations(
+      context,
+      subway,
+      coords,
+      cellX0 - 1,
+      cellX1 + 1,
+      cellY0 - 1,
+      cellY1 + 1,
+    );
   }
   if (zoom >= STATION_LABEL_ZOOM) {
     drawLabels(

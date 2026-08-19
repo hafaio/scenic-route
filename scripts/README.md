@@ -245,8 +245,8 @@ in its own band.
 | paths | OSM pedestrian/park ways (footway/path/pedestrian/steps/cycleway/bridleway/track) plus park drives (roads closed to through motor traffic), via Overpass | the park, greenway and car-free-drive network CSCL lacks; a separate committed source, magic `PATH` — see below and "Binary layouts" |
 | sidewalks | OSM `footway=sidewalk`/`crossing`/`traffic_island` ways via Overpass, plus the NYC planimetric SIDEWALK polygons, Socrata `52n9-sdep` (`sub_code` 380000 = street right-of-way) | the ways are a committed source, magic `SWLK`; both together settle the four per-side sidewalk bits of every offsetted `STRT` record, and the ways themselves are the walking network wherever they exist — see below and "Binary layouts" |
 | ferries | the two NYC ferry GTFS feeds — Staten Island Ferry (NYC DOT) and NYC Ferry (Hornblower, via Connexionz) | consolidated to a time-independent ferry graph, a committed source, magic `FERR` — OSM- and canopy-independent, read by a later phase's routing graph, not the cover pipeline; see below and "Binary layouts" |
-| subway | the MTA's subway GTFS feed, `https://rrgtfsfeeds.s3.amazonaws.com/gtfs_subway.zip` | the 29 routes as 93 polylines (every shape variant the feed runs that draws track nothing else does) and the 496 stations, with the colours and names the MTA publishes for each route and, per station, the set of routes that genuinely serve it; a committed source, magic `SBWY` — **display only**, it enters no routing input (this is a walking router and nobody walks the subway); see below and "Binary layouts" |
-| transit (San Francisco) | SFMTA's Muni GTFS, `https://muni-gtfs.apps.sfmta.com/data/muni_gtfs-current.zip`, and BART's, `https://www.bart.gov/dev/schedules/google_transit.zip` — both keyless | Muni's rail (the six Metro lines, the F streetcar, the three cable cars) and the four BART lines that run through the city, as 42 polylines clipped to the city's land, and the 268 stations, in the **same `SBWY`** blob New York's subway ships as; **display only**, it enters no routing input; see below |
+| subway | the MTA's subway GTFS feed, `https://rrgtfsfeeds.s3.amazonaws.com/gtfs_subway.zip` | the 29 routes as 93 polylines (every shape variant the feed runs that draws track nothing else does) and the 496 stations, with the colours and names the MTA publishes for each route and, per station, the set of routes that genuinely serve it and the complex `transfers.txt` puts it in; a committed source, magic `SBWY` — **display only**, it enters no routing input (this is a walking router and nobody walks the subway); see below and "Binary layouts" |
+| transit (San Francisco) | SFMTA's Muni GTFS, `https://muni-gtfs.apps.sfmta.com/data/muni_gtfs-current.zip`, and BART's, `https://www.bart.gov/dev/schedules/google_transit.zip` — both keyless | Muni's rail (the six Metro lines, the F streetcar, the three cable cars) and the four BART lines that run through the city, as 42 polylines clipped to the city's land, and the 268 stations (no complexes: neither feed publishes a transfer between two of its stations), in the **same `SBWY`** blob New York's subway ships as; **display only**, it enters no routing input; see below |
 | landmarks | NYC LPC Individual Landmark Sites, Socrata `buis-pvji` | ~1.5k designated historic/touristy sites, taken at their WGS84 centroid; a committed POI source, magic `LMRK` — fanned out into a per-edge routing discount, not the cover pipeline; see "Binary layouts" |
 | art | NYC PDC Outdoor Public Art Inventory (Socrata `2pg3-gcaa`) + OSM `tourism=artwork` via Overpass | public art and murals (OSM carries the murals the PDC set is thin on), deduped by proximity; a committed POI source, magic `ARTW` — its own routing discount, distinct scenery from landmarks; see "Binary layouts" |
 | highways | OSM limited-access highways (`motorway`/`trunk` + ramps) and above-ground rail (surface, open cut, or elevated — anything not `tunnel`), via Overpass | the lines walking near is unpleasant, as polylines; a committed source, magic `HWAY` — proximity to it is a per-edge routing *penalty*; never itself routed; see "Binary layouts" |
@@ -557,7 +557,7 @@ is projected to its nearest shape vertex (forced monotonic along the trip) and t
 between them is taken, capped by the two stop coordinates; a segment with no shape falls back to a
 straight line (no stored geometry). Stops stay in geographic lng/lat with their GTFS name.
 
-### The subway route lines and stations (`SBWY` v2)
+### The subway route lines and stations (`SBWY` v3)
 
 `scripts/subway.ts` (`bun run build-subway`) reads the MTA's one subway GTFS zip — 5.3 MiB, cached
 by `cachedFile` — and writes `data/subway/nyc.bin`, the route geometry and the station markers the
@@ -604,6 +604,36 @@ Lots Av (9); the R's 7, one trip apiece, four of them the Second Avenue stations
 Rockaway Park (10); the E's 4 out to 179 St (2–14); and the N's 4 up Second Avenue (12). No station
 loses every route, so the count stays at 496; the widest mask drops from six routes to five (DeKalb
 Av loses the W's five trips) and 199 stations are left with a single route.
+
+**Which stations are one place: the MTA's own answer, not ours.** The map draws one marker per
+*complex*, not per station record — Times Sq is one marker, not five — and which records make a
+complex comes from `transfers.txt`, the table the agency uses to say a rider may walk from one stop
+to another. The 2026-05-26 feed carries **613 rows: 463 of them a station to itself** (its in-station
+transfer time, which says nothing about complexes) and **150 between two different stations**, which
+after resolving both ends to their parent station — the rows are keyed on stop ids that may be
+platforms — are **75 distinct pairs**. Their connected components are the complexes: **444 over the
+496 stations**, 35 of them holding more than one station and the largest holding five (the four Times
+Sq records plus 42 St-Port Authority Bus Terminal). Each station record carries its component's id,
+numbered from 1; `0` means the feed published no station-to-station transfer at all.
+
+The client merges on that id and on nothing else where it is set (`src/subway/format.ts`), which
+changes 17 places against the distance-and-name rule it replaces:
+
+- **It splits Rector St.** The 1's station (`139`) and the N/R/W's (`R26`) are **49.5 m apart under
+  one name with no passage between them**, and no transfer row pairs them. Nothing else in the file
+  could tell that pair from Fulton St, and the old rule merged it.
+- **It joins sixteen complexes the geometry could not reach**, because a complex is a passage, not a
+  distance: Cortlandt St, World Trade Center, Park Place and Chambers St as one marker over **435 m**;
+  Times Sq-42 St to 42 St-Port Authority Bus Terminal (386 m); 59 St, Lexington Av/59 St and
+  Lexington Av/63 St; 14 St, 6 Av and the L's own 14 St; Court St to Borough Hall; Court Sq to Court
+  Sq-23 St; Broadway-Lafayette St to Bleecker St; Lorimer St to Metropolitan Av; 5 Av to 42
+  St-Bryant Pk; 51 St to Lexington Av/53 St; Brooklyn Bridge-City Hall to Chambers St; Botanic Garden
+  to Franklin Av-Medgar Evers College; New Utrecht Av to 62 St; Livonia Av to Junius St.
+
+That is **463 markers before and 444 after**, and it leaves Fulton St (four records), Times Sq, and
+Jackson Hts-Roosevelt Av with 74 St-Broadway one marker each, and the three Canal St stations — the
+J/N/Q/R/W/Z/6 complex, the 1 at Varick St and the A/C/E at Sixth Av — the three separate stations
+they were.
 
 **The floor is on the masks and nothing else.** Every shape a route runs is still drawn, so a line
 that passes through a station whose mask no longer names that route is correct and expected: the
@@ -652,10 +682,10 @@ run.
 
 #### San Francisco: Muni and BART (`SBWY` again, not a new format)
 
-`scripts/subway-sf.ts` (`bun run build-subway:sf`) writes `data/subway/sf.bin` in the **same SBWY v2
+`scripts/subway-sf.ts` (`bun run build-subway:sf`) writes `data/subway/sf.bin` in the **same SBWY v3
 layout** — same magic, same tables, no field added — from two feeds rather than one, because Muni and
-BART are two agencies. The encoder and the variant selection both files use live in
-`scripts/subway-format.ts`; New York's ingest predates that module and still carries its own copy.
+BART are two agencies. The encoder, the variant selection and the transfer reading all live in
+`scripts/subway-format.ts`, which both ingests write through.
 
 | feed | url | key |
 | --- | --- | --- |
@@ -710,6 +740,13 @@ over 245 m). The rule runs over both agencies together; BART's own `parent_stati
 first, and its entrances (`location_type` 2) never appear in `stop_times` and so never reach it.
 That is **268 stations** — 260 Muni, 8 BART (Embarcadero, Montgomery, Powell, Civic Center, 16th St,
 24th St, Glen Park, Balboa Park; Daly City is in San Mateo County and outside the city).
+
+**Neither feed publishes a complex.** Muni ships no `transfers.txt` at all, and BART's 40 rows are
+all platform-to-platform *inside* one station (`K10-1` to `K10-2` at MacArthur), so neither agency
+says anywhere that two of its stations are one place. Every San Francisco station record therefore
+carries complex id **0**, and the client falls back to the geometric rule for the whole city — the
+one New York no longer needs: records within 60 m, or within 160 m under the same canonical name.
+That is 268 records down to **217 markers**, unchanged by the transfer work.
 
 What the merge does *not* fold is a place the feed gives two different names — the Metro's
 underground stations are named per direction ("Metro Powell Station/Downtown" and
@@ -1246,7 +1283,7 @@ Header, 56 bytes:
 | offset | type | field |
 | --- | --- | --- |
 | 0 | u8[4] | magic `FERR` |
-| 4 | u16 | format version = 2 |
+| 4 | u16 | format version = 3 |
 | 6 | u16 | header bytes = 56 |
 | 8 | u32 | stop count S |
 | 12 | u32 | segment count E |
@@ -1292,7 +1329,7 @@ and that many UTF-8 bytes, back to back — the GRPH/STRT trailing-name-blob lay
 `stop_name`s **and** the route display names together, deduped and sorted; a stop record's name id
 and a segment's routeNameId both index it.
 
-### `data/subway/<id>.bin` — the subway route lines and stations, magic `SBWY` (v2)
+### `data/subway/<id>.bin` — the subway route lines and stations, magic `SBWY` (v3)
 
 The subway system's route geometry and its station markers, each route with its published colour and
 names and each station with the set of routes serving it, so a renderer can draw one route at a
@@ -1307,7 +1344,7 @@ Header, 60 bytes:
 | offset | type | field |
 | --- | --- | --- |
 | 0 | u8[4] | magic `SBWY` |
-| 4 | u16 | format version = 2 |
+| 4 | u16 | format version = 3 |
 | 6 | u16 | header bytes = 60 |
 | 8 | u32 | route count R |
 | 12 | u32 | line count L |
@@ -1321,7 +1358,7 @@ Header, 60 bytes:
 | 56 | u32 | name blob length |
 
 Then the **route table** (R × 16 bytes), the **line table** (L × 8 bytes) and the **station table**
-(S × 16 bytes), back to back after the header, so their offsets are implicit (`60`, `60 + 16·R` and
+(S × 20 bytes), back to back after the header, so their offsets are implicit (`60`, `60 + 16·R` and
 `60 + 16·R + 8·L`); the geometry and name blobs carry explicit offsets because they are
 variable-length.
 
@@ -1346,8 +1383,9 @@ Line record, 8 bytes — one polyline:
 | 4 | u16 | vertex count, at least 2 |
 | 6 | u16 | owning route index, so a line read on its own still knows its colour |
 
-Station record, 16 bytes — `FERR`'s stop record with a route mask on the end. Stations are sorted
-south to north, then west to east, then by name, so a renderer can rely on the order:
+Station record, 20 bytes — `FERR`'s stop record with a route mask and a complex id on the end.
+Stations are sorted south to north, then west to east, then by name, so a renderer can rely on the
+order:
 
 | offset | type | field |
 | --- | --- | --- |
@@ -1355,6 +1393,7 @@ south to north, then west to east, then by name, so a renderer can rely on the o
 | 4 | i32 | latitude, quantized |
 | 8 | u32 | station name id, an index into the name blob |
 | 12 | u32 | route mask — **bit *i* set means route *i* of the route table serves this station** |
+| 16 | u32 | complex id, from 1 — the component of the feed's own `transfers.txt` this station is in, or **0** where the feed publishes no station-to-station transfer |
 
 The mask is a bitmask rather than a per-station list because 29 routes fit one word with room to
 spare, which makes "does this route stop here" a single test and the whole set one read; the encoder
@@ -1374,8 +1413,15 @@ long names and station names share the one deduped, sorted table, so every name 
 indexes it. There is no unnamed sentinel: a name the feed leaves empty gets the index of the empty
 name.
 
-At the 2026-05-26 feed: **29 routes, 93 lines, 54,908 vertices, 496 stations, 956 station-route
-pairs, 429 distinct names, 169,683 bytes.**
+The complex id is what the client merges records into markers on: two records sharing a non-zero id
+are one place however far apart they lie, and a pair where either carries 0 falls back to distance
+and name. New York's 496 records make **444 markers**, San Francisco's 268 make **217**.
+
+At the 2026-05-26 feed: **29 routes, 93 lines, 54,908 vertices, 496 stations in 444 complexes, 956
+station-route pairs, 429 distinct names, 171,667 bytes.**
+
+v2 is the same file with a 16-byte station record and no complex id, which the client merged records
+by distance and name alone; nothing that reads it is deployed, so v2 is not accepted.
 
 ### `public/ferry-schedule/` — the ferry timetable, magic `FSCH` (v1, derived, **committed**)
 
