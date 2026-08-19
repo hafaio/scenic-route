@@ -557,6 +557,17 @@ is projected to its nearest shape vertex (forced monotonic along the trip) and t
 between them is taken, capped by the two stop coordinates; a segment with no shape falls back to a
 straight line (no stored geometry). Stops stay in geographic lng/lat with their GTFS name.
 
+One berthing manoeuvre is trimmed by hand. A published shape includes the boat's move into its
+berth, and at **Wall St/Pier 11** four of the seven shapes calling there run 186 m north-west past
+the slip, reverse (178.9-179.9 degrees) and come back the last 70 m into the pier — which draws as a
+spike over South Street. Those four vertices are dropped, so the line runs from its last approach
+vertex (115 m out) straight into the pier; the polyline still begins and ends at its two stop
+coordinates, which the graph pass depends on. This is one named place, not a rule: the sharpest
+genuine course change near a terminal anywhere in either feed is 127.5 degrees at 100 m out (the
+East River line swinging into Dumbo/Fulton Ferry), so a threshold would have little room and could
+trim a route that doubles back to serve two piers on one shore. The next pier that draws badly gets
+its own line.
+
 ### The subway route lines and stations (`SBWY` v3)
 
 `scripts/subway.ts` (`bun run build-subway`) reads the MTA's one subway GTFS zip — 5.3 MiB, cached

@@ -12,7 +12,7 @@
 import { createHash } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { COORD_SCALE, writeVarint, zigzag } from "./geometry";
+import { COORD_SCALE, haversineMeters, writeVarint, zigzag } from "./geometry";
 import { fetchGtfsZip, type GtfsFeed, parseGtfs } from "./gtfs";
 import type { Coord } from "./socrata";
 
@@ -184,6 +184,70 @@ function dropRepeats(points: Coord[]): Coord[] {
     }
   }
   return unique;
+}
+
+// The one berthing manoeuvre trimmed by hand. A published shape carries the boat's move into its
+// berth as well as the crossing, and at Wall St/Pier 11 four of the seven shapes that call there
+// run 186 m north-west past the slip, reverse (178.9-179.9 degrees), and come back the last 70 m
+// into the pier. Drawn, that is a spike over South Street, and it is the only berthing manoeuvre in
+// the two feeds anyone has minded.
+//
+// Named rather than generalized on purpose: the sharpest genuine course change near a terminal
+// anywhere in either feed is 127.5 degrees at 100 m out (the East River line swinging into
+// Dumbo/Fulton Ferry), so a threshold that spared it would have little room, and a route doubling
+// back to serve two piers on one shore would look the same to it. The next pier that draws badly
+// gets its own line here, deliberately.
+const SLIP_STOP_NAME = "Wall St/Pier 11";
+const SLIP_REVERSAL_DEGREES = 170; // the four shapes reverse by 178.9-179.9 here
+const SLIP_REACH_METERS = 100; // the whole manoeuvre lies within 71 m of the stop
+
+// How far the course turns at `at`: 0 straight on, 180 straight back.
+function turnDegrees(before: Coord, at: Coord, after: Coord): number {
+  const shrink = Math.cos((at.lat * Math.PI) / 180); // a degree of longitude is this much shorter here
+  const inX = (at.lng - before.lng) * shrink;
+  const inY = at.lat - before.lat;
+  const outX = (after.lng - at.lng) * shrink;
+  const outY = after.lat - at.lat;
+  const cross = inX * outY - inY * outX;
+  const dot = inX * outX + inY * outY;
+  return Math.abs((Math.atan2(cross, dot) * 180) / Math.PI);
+}
+
+// Drops the manoeuvre's vertices off the `stopName` end, so the line runs from its last approach
+// vertex straight into the pier; a no-op at every other stop. The polyline still begins and ends at
+// its two stop coordinates, which the graph pass relies on — it substitutes the snapped walking
+// node for each end vertex, so an end that was not the stop would cost a real point.
+function trimSlipAtEnd(points: Coord[], stopName: string): Coord[] {
+  if (stopName !== SLIP_STOP_NAME) {
+    return points;
+  } else {
+    const terminus = points[points.length - 1];
+    let cut = points.length - 1;
+    for (let vertex = points.length - 2; vertex > 0; vertex--) {
+      if (haversineMeters(points[vertex], terminus) > SLIP_REACH_METERS) {
+        break;
+      } else if (
+        turnDegrees(points[vertex - 1], points[vertex], points[vertex + 1]) >=
+        SLIP_REVERSAL_DEGREES
+      ) {
+        cut = vertex;
+      }
+    }
+    if (cut === points.length - 1) {
+      return points;
+    } else {
+      return [...points.slice(0, cut), terminus];
+    }
+  }
+}
+
+function trimSlips(
+  points: Coord[],
+  startStop: string,
+  endStop: string,
+): Coord[] {
+  const tail = trimSlipAtEnd(points, endStop);
+  return trimSlipAtEnd([...tail].reverse(), startStop).reverse();
 }
 
 // The shared accumulators the two feeds fold into: the stops seen, the segment records, and the raw
@@ -368,8 +432,13 @@ function consolidate(
           const toCoord = stops.get(toKey);
           if (fromCoord && toCoord) {
             const walk = [fromCoord, ...between, toCoord];
-            const oriented = fromKey === stopA ? walk : [...walk].reverse();
-            geometry = dropRepeats(oriented);
+            const forward = fromKey === stopA;
+            const oriented = forward ? walk : [...walk].reverse();
+            geometry = trimSlips(
+              dropRepeats(oriented),
+              forward ? fromCoord.name : toCoord.name,
+              forward ? toCoord.name : fromCoord.name,
+            );
             if (geometry.length < 2) {
               geometry = null;
             }

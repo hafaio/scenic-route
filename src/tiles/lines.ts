@@ -1,4 +1,5 @@
 import { resolveUrl } from "./base-url";
+import { roundedPath } from "./ferry-curve";
 import { routeStyles } from "./ferry-routes";
 import { projectX, projectY, unproject } from "./mercator";
 import {
@@ -11,7 +12,6 @@ import {
 } from "./polylines";
 import type { LinesParams, TileCoords } from "./protocol";
 import type { TileRenderer } from "./renderer";
-import { splinePath } from "./spline";
 import type { Cursor } from "./varint";
 
 // A line overlay: the committed highway/rail nuisance lines (magic HWAY) or the ferry route segments
@@ -276,7 +276,7 @@ function draw(
         context.strokeStyle = ribbon?.color ?? color;
         context.beginPath();
         if (ribbon) {
-          splinePath(context, pixelX, pixelY);
+          roundedPath(context, pixelX, pixelY);
         } else {
           for (let vertex = 0; vertex < pixelX.length; vertex++) {
             if (vertex === 0) {
