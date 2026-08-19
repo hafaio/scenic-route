@@ -1,4 +1,5 @@
 import type { Metadata, Viewport } from "next";
+import ServiceWorker from "../components/service-worker";
 import ThemeProvider from "../components/theme-provider";
 import "./globals.css";
 
@@ -27,6 +28,7 @@ export default function RootLayout({
         >
           {children}
         </ThemeProvider>
+        <ServiceWorker />
       </body>
     </html>
   );
