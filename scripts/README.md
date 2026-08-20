@@ -252,7 +252,7 @@ in its own band.
 | highways | OSM limited-access highways (`motorway`/`trunk` + ramps) and above-ground rail (surface, open cut, or elevated — anything not `tunnel`), via Overpass | the lines walking near is unpleasant, as polylines; a committed source, magic `HWAY` — proximity to it is a per-edge routing *penalty*; never itself routed; see "Binary layouts" |
 | buildings | NYC Building Footprints, Socrata `5zhs-2jue` (`feature_code=2100` with a positive `height_roof`, feet→metres) | 867,920 footprints with their roof heights; a committed source, magic `BLDG` — the walls the **building-shade** factor raises to cast shadows, for both the shade overlay pyramid and the signed per-edge shade routing bake; see "Binary layouts" |
 | landuse | NYC PLUTO, Socrata `64uk-42ks` (lots with `landuse` 1..5) | 788,591 tax lots, each with a land-use class byte; a committed source, magic `PLUT` — the commercial-vs-residential signal for the **commercial-area** overlay; see "Binary layouts" |
-| industrial | NYC PLUTO's tax-lot polygons, DCP's MAPPLUTO ArcGIS FeatureServer (`services5.arcgis.com/.../MAPPLUTO/FeatureServer/0`), `LandUse = '06'` | 9,295 industrial & manufacturing lots as **polygons**; a committed source, magic `INDL` — drawn as an overlay so the city's industrial land can be seen, and sampled per edge into the graph's industrial-frontage penalty (GRPH byte 36). The geometry has to come from ArcGIS: the Socrata copy of PLUTO is lot centroids and its `geom` column is null on every row. See "Binary layouts" |
+| industrial | **NYC**: PLUTO's tax-lot polygons, DCP's MAPPLUTO ArcGIS FeatureServer (`services5.arcgis.com/.../MAPPLUTO/FeatureServer/0`), `LandUse = '06'`. **SF**: DataSF Land Use `c5ge-t6pj` + Zoning `3i4a-hu95`, the rule in `scripts/sf.ts` | industrial land as **polygons** — 9,295 lots in New York, 2,574 parcels in San Francisco; a committed source, magic `INDL` — drawn as an overlay so the city's industrial land can be seen, and sampled per edge into the graph's industrial-frontage penalty (GRPH byte 36). New York's geometry has to come from ArcGIS: the Socrata copy of PLUTO is lot centroids and its `geom` column is null on every row. See "Binary layouts" |
 | dining | NYC Dining Out `fpeh-f7ci` + OSM `outdoor_seating` via Overpass | outdoor-dining points; a committed source, magic `DINE` — a "cute" signal for the commercial overlay |
 | openstreets | NYC DOT Open Streets `uiay-nctu` (non-school), sampled every ~10 m | Open Streets corridor points; a committed source, magic `OSTR` — a "cute" signal for the commercial overlay |
 
@@ -1120,12 +1120,33 @@ The **`LAND` polygon layout** exactly, under its own magic: the same 40-byte hea
 even-odd polygons of varint-delta rings, and nothing after them. Written by the shared
 `encodePolygons`, read by `src/tiles/industrial.ts`.
 
-The lots are PLUTO's `LandUse = '06'` (industrial & manufacturing) and nothing else. A lot whose
-footprint is a multi-part MultiPolygon expands to several polygon records, as `BLDG` splits a
-multi-part building; at the 2026-08-19 read 9,295 lots are 9,310 records, 0.31 MiB. Lots are clipped
-to the coastline by whether **any vertex** is on land rather than by their centroid — the borough
-boundaries cut the water away, and a waterfront lot reaching past the bulkhead tests as land only
-where it meets the shore (no lot missed entirely at that read).
+A lot whose footprint is a multi-part MultiPolygon expands to several polygon records, as `BLDG`
+splits a multi-part building. Lots are clipped to the coastline by whether **any vertex** is on land
+rather than by their centroid — the city boundaries cut the water away, and a waterfront lot reaching
+past the bulkhead tests as land only where it meets the shore. Neither city lost a lot entirely at
+the last read.
+
+The two cities do not share a source, because no two cities record land use the same way, and the
+file is the whole of what they have in common: the graph pass reads polygons and never asks where
+they came from.
+
+**New York** is PLUTO's `LandUse = '06'` (industrial & manufacturing) and nothing else: at the
+2026-08-19 read, 9,295 lots are 9,310 records, 0.31 MiB.
+
+**San Francisco** publishes no per-parcel land-use code, so its industry is assembled from two
+DataSF datasets (`scripts/sf.ts`, `fetchSfIndustrial`). Land Use `c5ge-t6pj` carries floor area per
+category rather than a class, and **PDR** — Production, Distribution & Repair — is the city's own
+name for industry, so a parcel whose PDR floor area beats every other category is industrial by use.
+That only sees buildings, though: a truck yard or a vacant industrial block has no floor area at all.
+Zoning `3i4a-hu95` (`gen = 'Industrial'` — PDR-1-G, PDR-2, M-1, SALI …) does see those, and is the
+**fallback, not the filter** — only about half the PDR-dominant parcels sit inside industrial zoning,
+so requiring it would discard the other half. A parcel is therefore industrial if it is
+**PDR-dominant**, OR it has **no recorded use of any kind and its centroid is inside industrial
+zoning**. The parcel table's `geography_type = 'analytical'` rows are dropped first: they are named
+analysis districts (the whole Presidio, all of Treasure Island, the blocks of Mission Bay South)
+carrying modelled floor areas over polygons up to 2.1 km², and the real industrial land under them is
+in the table as ordinary parcels anyway. At the 2026-08-20 read, 2,085 parcels qualify by use and 489
+by zoning: 2,574 parcels, 2,577 records, 0.12 MiB.
 
 Two things read it. The client, served verbatim as `public/industrial/<id>.bin` by
 `serve-sources.ts`, fills every lot in one colour for the overlay. And the **graph pass** samples it

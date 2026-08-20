@@ -1,8 +1,8 @@
 // San Francisco's half of the ingest: the DataSF datasets that stand in for the NYC ones, and the
-// two places where the shapes genuinely differ rather than just the column names.
+// places where the shapes genuinely differ rather than just the column names.
 //
 // DataSF is a Socrata deployment like NYC Open Data, so the reading is shared (scripts/socrata.ts)
-// and most of what is here is a field remap. The two that are not:
+// and most of what is here is a field remap. The ones that are not:
 //
 //   - **The walkability filter.** CSCL has `rw_type`, one code per kind of way. SF's centreline has
 //     `classcode`, which is only a road hierarchy (freeway down to local street) and says nothing
@@ -14,8 +14,14 @@
 //   - **The sidewalk offset.** NYC publishes a kerb-to-kerb `streetwidth` and the pavement is
 //     offset half of it. SF publishes the opposite — the width of the *sidewalk* — so the roadway
 //     is derived from the right-of-way polygons instead. See `roadwayFeet`.
+//
+//   - **Industrial land.** NYC reads one land-use code off a tax lot. SF records no such code, so
+//     `fetchSfIndustrial` reconstructs it: parcels whose recorded floor area is mostly production,
+//     distribution and repair, plus unbuilt parcels inside industrial zoning, which is the only way
+//     a truck yard with no building on it registers at all.
 
 import { densify } from "./geometry";
+import { buildLandTest } from "./land-filter";
 import type { Polygon } from "./overpass";
 import { type Coord, DATA_SF, type Tree } from "./socrata";
 import {
@@ -511,4 +517,172 @@ export async function fetchSfBuildings(
     }
   }
   return buildings;
+}
+
+// The industrial land the INDL overlay draws and the graph's frontage byte is baked from. There is
+// no San Francisco column matching New York's PLUTO `LandUse = '06'`; what stands in for it is two
+// datasets, because neither alone is the city's industry:
+//
+//   - **Land use (`c5ge-t6pj`)**, one row per parcel, carries floor area per category rather than a
+//     class code. PDR — Production, Distribution & Repair — is the city's own name for industry, so
+//     a parcel whose PDR floor area beats every other category is industrial by use, which is as
+//     close as this city comes to New York's signal. But floor area only sees BUILDINGS: a truck
+//     yard, a container lot or a vacant industrial block has none and is invisible here.
+//
+//   - **Zoning (`3i4a-hu95`)**, `gen = 'Industrial'` (PDR-1-G, PDR-2, M-1, SALI …), which does see
+//     those. It is the fallback and not the filter: only about half the PDR-dominant parcels sit
+//     inside industrial zoning, so requiring it would discard the other half, and taking zoning
+//     alone would draw the housing and offices that fill an up-zoned PDR district.
+//
+// So: PDR-dominant, OR no recorded use of any kind and inside industrial zoning.
+//
+// Three rollups in the parcel table defeat that rule and are thrown out by name below.
+const SF_PARCEL_COUNT = 8_500;
+const SF_INDUSTRIAL_ZONE_COUNT = 370;
+// The 62 `analytical` rows are not parcels: they are named analysis districts — the whole Presidio,
+// all of Treasure Island, the blocks of Mission Bay South — carrying modelled round-number floor
+// areas over polygons up to 2.1 km², six of which read PDR-dominant. The industrial land under them
+// is in the table as ordinary parcels anyway (208 inside Hunters Point Shipyard alone). A
+// `multiple_parcels` row, by contrast, is real adjacent parcels recorded together, and lists its own
+// block-lots, none of which is separately a row, so it neither invents geometry nor double-counts.
+const SF_PARCEL_GEOGRAPHIES = "('parcel', 'multiple_parcels')";
+// 36.4M sq ft of PDR, 43% of the citywide total, on a 25 m x 19 m rectangle in the Financial
+// District. Dominance happens to exclude it — its own biggest category is offices — but a rule that
+// only accidentally rejects a number that wrong is not a rule.
+const PDR_ROLLUP_PARCEL = "0253021";
+// Fort Mason: 66 hectares of federal parkland — the Marina Green, the yacht harbour and the lawns
+// above them — recorded as one parcel whose only floor area is the 30k sq ft of pier sheds at Fort
+// Mason Center. Those really are warehouses, so the rule reads it correctly and still gets the place
+// wrong. Excluded by hand rather than by a threshold: every measure that separates it from a genuine
+// yard (barely built, very large, outside the zoning map) is a measure a genuine yard also trips, and
+// the yards along Islais Creek and in Hunters Point are the land this feature most wants to keep.
+const FORT_MASON_PARCEL = "0900003";
+// Six parcels record exactly one square foot of PDR and nothing else, a placeholder rather than a
+// use, which wins dominance outright for being the only category on the row. Four are big: Ocean
+// Beach and the western end of Golden Gate Park. The next parcel up records 500 sq ft.
+const PDR_PLACEHOLDER_SQUARE_FEET = 1;
+
+interface LandUseRow {
+  the_geom?: { type: string; coordinates: number[][][][] };
+  mapblklot?: string;
+  centroid_l?: string; // latitude; `centroid_1` is the longitude, truncated column names
+  centroid_1?: string;
+  pdr?: string;
+  retail?: string;
+  mips?: string;
+  cie?: string;
+  med?: string;
+  visitor?: string;
+  total_comm?: string; // the published sum of the six categories above
+  resunits?: string;
+}
+
+const PDR_RIVALS = ["retail", "mips", "cie", "med", "visitor"] as const;
+
+function squareFeet(value: string | undefined): number {
+  const feet = Number.parseFloat(value ?? "");
+  return Number.isFinite(feet) ? feet : 0;
+}
+
+export interface SfIndustrial {
+  polygons: Polygon[];
+  parcels: number;
+  dominant: number; // kept because PDR is the parcel's own biggest use
+  zoned: number; // kept because nothing is built on it and it is zoned industrial
+  offLand: number;
+}
+
+export async function fetchSfIndustrial(
+  onLand: (coord: Coord) => boolean,
+): Promise<SfIndustrial> {
+  // `resunits` counts homes; there is no residential floor area to weigh PDR against, and the
+  // `residentia` column names a housing SUBTYPE ("sro", "senior living") rather than an area.
+  const unused =
+    "(total_comm IS NULL OR total_comm = 0) AND (resunits IS NULL OR resunits = 0)";
+  const [rows, zones] = await Promise.all([
+    DATA_SF.dataset<LandUseRow>(
+      "c5ge-t6pj",
+      {
+        $select: "*",
+        $where: `geography_type in ${SF_PARCEL_GEOGRAPHIES} AND (pdr > 0 OR (${unused}))`,
+      },
+      SF_PARCEL_COUNT,
+    ),
+    DATA_SF.dataset<{ the_geom?: { coordinates: number[][][][] } }>(
+      "3i4a-hu95",
+      { $select: "the_geom", $where: "gen = 'Industrial'" },
+      SF_INDUSTRIAL_ZONE_COUNT,
+    ),
+  ]);
+
+  // The zoning polygons as a point-in-set test — `buildLandTest` is the even-odd bands, indifferent
+  // to what the polygons mean.
+  const zonePolygons: Polygon[] = [];
+  for (const zone of zones) {
+    for (const parts of zone.the_geom?.coordinates ?? []) {
+      zonePolygons.push(
+        parts.map((ring) => ring.map(([lng, lat]) => ({ lat, lng }))),
+      );
+    }
+  }
+  const inIndustrialZone = buildLandTest(zonePolygons);
+
+  const polygons: Polygon[] = [];
+  let parcels = 0;
+  let dominant = 0;
+  let zoned = 0;
+  let offLand = 0;
+  for (const row of rows) {
+    if (
+      row.mapblklot === PDR_ROLLUP_PARCEL ||
+      row.mapblklot === FORT_MASON_PARCEL
+    ) {
+      continue;
+    }
+    const pdr = squareFeet(row.pdr);
+    const lat = Number.parseFloat(row.centroid_l ?? "");
+    const lng = Number.parseFloat(row.centroid_1 ?? "");
+    let branch: "dominant" | "zoned" | null = null;
+    if (
+      pdr > PDR_PLACEHOLDER_SQUARE_FEET &&
+      PDR_RIVALS.every((rival) => pdr >= squareFeet(row[rival]))
+    ) {
+      branch = "dominant";
+    } else if (
+      squareFeet(row.total_comm) === 0 &&
+      squareFeet(row.resunits) === 0 &&
+      Number.isFinite(lat) &&
+      Number.isFinite(lng) &&
+      inIndustrialZone({ lat, lng })
+    ) {
+      branch = "zoned";
+    }
+    if (branch === null) {
+      continue;
+    }
+    // Any vertex on land, not the centroid: this is the waterfront, and a pier or a bulkhead lot
+    // reaching past the shoreline the neighbourhood polygons draw tests as land only where it meets
+    // it — the same rule the New York lots are clipped by.
+    const parts = (row.the_geom?.coordinates ?? [])
+      .map((part) =>
+        part
+          .map((ring) => ring.map(([lng, lat]) => ({ lat, lng })))
+          .filter((ring) => ring.length >= 4),
+      )
+      .filter(
+        (part) => part.length > 0 && part.some((ring) => ring.some(onLand)),
+      );
+    if (parts.length === 0) {
+      offLand += 1;
+      continue;
+    }
+    parcels += 1;
+    if (branch === "dominant") {
+      dominant += 1;
+    } else {
+      zoned += 1;
+    }
+    polygons.push(...parts);
+  }
+  return { polygons, parcels, dominant, zoned, offLand };
 }
