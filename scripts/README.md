@@ -252,6 +252,7 @@ in its own band.
 | highways | OSM limited-access highways (`motorway`/`trunk` + ramps) and above-ground rail (surface, open cut, or elevated — anything not `tunnel`), via Overpass | the lines walking near is unpleasant, as polylines; a committed source, magic `HWAY` — proximity to it is a per-edge routing *penalty*; never itself routed; see "Binary layouts" |
 | buildings | NYC Building Footprints, Socrata `5zhs-2jue` (`feature_code=2100` with a positive `height_roof`, feet→metres) | 867,920 footprints with their roof heights; a committed source, magic `BLDG` — the walls the **building-shade** factor raises to cast shadows, for both the shade overlay pyramid and the signed per-edge shade routing bake; see "Binary layouts" |
 | landuse | NYC PLUTO, Socrata `64uk-42ks` (lots with `landuse` 1..5) | 788,591 tax lots, each with a land-use class byte; a committed source, magic `PLUT` — the commercial-vs-residential signal for the **commercial-area** overlay; see "Binary layouts" |
+| industrial | NYC PLUTO's tax-lot polygons, DCP's MAPPLUTO ArcGIS FeatureServer (`services5.arcgis.com/.../MAPPLUTO/FeatureServer/0`), `LandUse = '06'` | 9,295 industrial & manufacturing lots as **polygons**; a committed source, magic `INDL` — an **inspection overlay only**, drawn so the city's industrial land can be seen; it enters no routing input. The geometry has to come from ArcGIS: the Socrata copy of PLUTO is lot centroids and its `geom` column is null on every row. See "Binary layouts" |
 | dining | NYC Dining Out `fpeh-f7ci` + OSM `outdoor_seating` via Overpass | outdoor-dining points; a committed source, magic `DINE` — a "cute" signal for the commercial overlay |
 | openstreets | NYC DOT Open Streets `uiay-nctu` (non-school), sampled every ~10 m | Open Streets corridor points; a committed source, magic `OSTR` — a "cute" signal for the commercial overlay |
 
@@ -1112,6 +1113,23 @@ the generic polygon reader carry it with no new format. Unlike the walking netwo
 routed — a later phase rasterizes them into an areal proximity field and turns nearness into a
 per-edge routing *penalty* (the mirror of the POI discount). Nuisance is areal, not path-bound, so
 the geometry is raw (undensified); the field's kernel does the smoothing.
+
+### `data/industrial/<id>.bin` — the industrial tax lots, magic `INDL` (v1)
+
+The **`LAND` polygon layout** exactly, under its own magic: the same 40-byte header, then `count`
+even-odd polygons of varint-delta rings, and nothing after them. Written by the shared
+`encodePolygons`, read by `src/tiles/industrial.ts`.
+
+The lots are PLUTO's `LandUse = '06'` (industrial & manufacturing) and nothing else. A lot whose
+footprint is a multi-part MultiPolygon expands to several polygon records, as `BLDG` splits a
+multi-part building; at the 2026-08-19 read 9,295 lots are 9,310 records, 0.31 MiB. Lots are clipped
+to the coastline by whether **any vertex** is on land rather than by their centroid — the borough
+boundaries cut the water away, and a waterfront lot reaching past the bulkhead tests as land only
+where it meets the shore (no lot missed entirely at that read).
+
+Nothing but the client reads this: it is served verbatim to `public/industrial/<id>.bin` by
+`serve-sources.ts`, the overlay fills every lot in one colour, and neither the tiler nor the graph
+opens it.
 
 ### `data/buildings/<id>.bin` — the footprints and their heights, magic `BLDG` (v1)
 
