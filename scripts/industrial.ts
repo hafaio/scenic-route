@@ -1,11 +1,15 @@
-// `bun run scripts/industrial.ts`: fetches New York's manufacturing and industrial tax lots and
-// writes them as data/industrial/nyc.bin (magic INDL) — the lot POLYGONS, drawn by the industrial
-// overlay. This is an inspection layer: it exists so the industrial land can be looked at on the
-// map. Nothing routes off it.
+// `bun run scripts/industrial.ts [city]`: fetches a city's industrial land and writes it as
+// data/industrial/<id>.bin (magic INDL) — the lot POLYGONS, drawn by the industrial overlay and
+// sampled per edge into the graph's industrial-frontage penalty. Layout: scripts/README.md.
 //
-// The geometry comes from DCP's MAPPLUTO ArcGIS FeatureServer, not from Socrata: the Socrata copy of
-// PLUTO (`64uk-42ks`, which scripts/landuse.ts reads) carries lot CENTROIDS and its `geom` column is
-// null on all 858,602 rows. Layout: scripts/README.md.
+// The two cities do not share a source, because the thing being asked for is land USE and no two
+// cities record it the same way. New York publishes a per-lot class and the whole ingest is one
+// `where`; San Francisco publishes floor area per category and a separate zoning map, and the rule
+// that reads them lives in scripts/sf.ts.
+//
+// New York's geometry comes from DCP's MAPPLUTO ArcGIS FeatureServer, not from Socrata: the Socrata
+// copy of PLUTO (`64uk-42ks`, which scripts/landuse.ts reads) carries lot CENTROIDS and its `geom`
+// column is null on all 858,602 rows.
 
 import { createHash } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
@@ -16,6 +20,7 @@ import { encodePolygons } from "./geometry";
 import { type LandContext, loadLandContext } from "./land";
 import type { SourceFile } from "./manifest";
 import type { Polygon } from "./overpass";
+import { fetchSfIndustrial } from "./sf";
 
 const DATA_DIR = join(import.meta.dirname, "..", "data");
 const INDUSTRIAL_DIR = join(DATA_DIR, "industrial");
@@ -175,20 +180,33 @@ async function fetchLots(land: LandContext): Promise<Lots> {
   return { polygons, lots, offLand };
 }
 
+// Each city's own read of its own sources, down to the one shape the encoder takes: the lots kept,
+// as polygon parts already clipped to that city's coastline. A city with no source at all throws
+// rather than defaulting to another's, which would clip New York's lots against a foreign shoreline
+// and write a silently empty artifact.
+async function fetchCityLots(cityId: string, land: LandContext): Promise<Lots> {
+  if (cityId === "nyc") {
+    return await fetchLots(land);
+  } else if (cityId === "sf") {
+    const { polygons, parcels, dominant, zoned, offLand } =
+      await fetchSfIndustrial(land.onLand);
+    console.error(
+      `  industrial: ${dominant} PDR-dominant parcels, ${zoned} unbuilt in industrial zoning`,
+    );
+    return { polygons, lots: parcels, offLand };
+  } else {
+    throw new Error(`no industrial land-use source for ${cityId}`);
+  }
+}
+
 export async function ingestIndustrial(
   cityId: string,
   land: LandContext,
 ): Promise<SourceFile> {
-  // New York only: MAPPLUTO is a New York layer, and another city would clip its lots against its
-  // own coastline, drop every one of them and write a silently empty artifact.
-  if (cityId !== "nyc") {
-    throw new Error(`no industrial land-use source for ${cityId}`);
-  }
-
   const started = performance.now();
   await mkdir(INDUSTRIAL_DIR, { recursive: true });
 
-  const { polygons, lots, offLand } = await fetchLots(land);
+  const { polygons, lots, offLand } = await fetchCityLots(cityId, land);
   const bytes = encodePolygons(INDUSTRIAL_MAGIC, INDUSTRIAL_FORMAT, polygons);
   const file = `${cityId}.bin`;
   await writeFile(join(INDUSTRIAL_DIR, file), bytes);

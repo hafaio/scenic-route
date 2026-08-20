@@ -53,6 +53,7 @@ const OVERLAYS_BY_CITY: Record<string, readonly OverlayId[]> = {
     "art",
     "subway",
     "highways",
+    "industrial",
     "shade",
   ],
 };
