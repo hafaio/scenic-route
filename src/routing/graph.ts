@@ -138,9 +138,11 @@ export interface RoutingGraph extends GraphIdentity {
   edgeArt: Uint8Array; // 0..254, this edge's public-art discount attribute; 0 for a ferry
   edgeHighway: Uint8Array; // 0..254, this edge's highway/rail nuisance penalty attribute; 0 for a ferry
   edgeCommercial: Uint8Array; // 0..254, this edge's nice-commercial-frontage discount attribute; 0 for a ferry
+  edgeIndustrial: Uint8Array; // 0..254, this edge's industrial-frontage penalty attribute; 0 for a ferry
   maxLandmark: number; // the greatest per-edge landmark amenity, 0..1; sets that discount's clip floor
   maxArt: number; // the greatest per-edge art amenity, 0..1; sets that discount's clip floor
   maxCommercial: number; // the greatest per-edge commercial amenity, 0..1; sets that discount's clip floor
+  maxIndustrial: number; // the greatest per-edge industrial frontage, 0..1; gates the slider, never the heuristic
 
   // The share of the edge that lies DIRECTLY under a crown, unblurred — what edgeCover, the smoothed
   // field the overlay is coloured from, cannot answer.
@@ -190,10 +192,11 @@ export interface RoutingGraph extends GraphIdentity {
 }
 
 const MAGIC = "GRPH";
-// Exported so a fixture cannot drift from it: a test writing its own header must write this one.
-export const FORMAT_VERSION = 9;
+// Exported so a fixture cannot drift from them: a test writing its own header must write these.
+export const FORMAT_VERSION = 10;
 const HEADER_BYTES = 64;
-const EDGE_RECORD_BYTES = 36;
+// v10 grew the record by 4: byte 36 the industrial attribute, 37-39 reserved zeros for the next one.
+export const EDGE_RECORD_BYTES = 40;
 // relative, so both pick up the deploy basePath
 // Written by the same pass as the graph itself, and named after it: one directory holds
 // every city's, so a shared name would describe whichever built last.
@@ -259,6 +262,7 @@ export function decodeGraph(
   const edgeArt = new Uint8Array(edgeCount);
   const edgeHighway = new Uint8Array(edgeCount);
   const edgeCommercial = new Uint8Array(edgeCount);
+  const edgeIndustrial = new Uint8Array(edgeCount);
   const edgeDirectCanopy = new Uint8Array(edgeCount);
   const edgeSourceId = new Uint32Array(edgeCount);
   const edgeOrdinal = new Uint8Array(edgeCount);
@@ -269,6 +273,7 @@ export function decodeGraph(
   let maxLandmarkByte = 0;
   let maxArtByte = 0;
   let maxCommercialByte = 0;
+  let maxIndustrialByte = 0;
   let maxDirectCanopyByte = 0;
   let maxReliefByte = 0;
   let minFerrySecPerMetre = Number.POSITIVE_INFINITY;
@@ -309,6 +314,7 @@ export function decodeGraph(
     edgeOrdinal[edge] = bytes[record + 33];
     edgeAscent[edge] = bytes[record + 34];
     edgeDescent[edge] = bytes[record + 35];
+    edgeIndustrial[edge] = bytes[record + 36];
     maxReliefByte = Math.max(
       maxReliefByte,
       edgeAscent[edge] + edgeDescent[edge],
@@ -316,6 +322,7 @@ export function decodeGraph(
     maxLandmarkByte = Math.max(maxLandmarkByte, edgeLandmark[edge]);
     maxArtByte = Math.max(maxArtByte, edgeArt[edge]);
     maxCommercialByte = Math.max(maxCommercialByte, edgeCommercial[edge]);
+    maxIndustrialByte = Math.max(maxIndustrialByte, edgeIndustrial[edge]);
     maxDirectCanopyByte = Math.max(maxDirectCanopyByte, edgeDirectCanopy[edge]);
   }
   const maxRelief = maxReliefByte / 255;
@@ -323,6 +330,7 @@ export function decodeGraph(
   const maxLandmark = maxLandmarkByte / 255;
   const maxArt = maxArtByte / 255;
   const maxCommercial = maxCommercialByte / 255;
+  const maxIndustrial = maxIndustrialByte / 255;
   const maxDirectCanopy = maxDirectCanopyByte / 255;
 
   const names = decodeNames(buffer, nameTableOffset);
@@ -368,9 +376,11 @@ export function decodeGraph(
     edgeArt,
     edgeHighway,
     edgeCommercial,
+    edgeIndustrial,
     maxLandmark,
     maxArt,
     maxCommercial,
+    maxIndustrial,
     edgeDirectCanopy,
     maxDirectCanopy,
     edgeAscent,

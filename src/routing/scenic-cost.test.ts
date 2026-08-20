@@ -26,6 +26,7 @@ const noScenic = (over: Partial<RouteWeights> = {}): RouteWeights => ({
   highway: 0,
   hill: 0,
   commercial: 0,
+  industrial: 0,
   shade: 0,
   shelter: 0,
   allowFerries: false,
@@ -38,7 +39,7 @@ interface NodeSpec {
   lng: number;
 }
 
-// A walking edge with its five scenic attribute fractions (0..1); the ingest bytes are these × 255.
+// A walking edge with its scenic attribute fractions (0..1); the ingest bytes are these × 255.
 interface EdgeSpec {
   a: number;
   b: number;
@@ -47,6 +48,7 @@ interface EdgeSpec {
   art?: number;
   highway?: number;
   commercial?: number;
+  industrial?: number;
 }
 
 function buildGraph(nodes: NodeSpec[], edges: EdgeSpec[]): RoutingGraph {
@@ -69,6 +71,7 @@ function buildGraph(nodes: NodeSpec[], edges: EdgeSpec[]): RoutingGraph {
   const edgeArt = new Uint8Array(edgeCount);
   const edgeHighway = new Uint8Array(edgeCount);
   const edgeCommercial = new Uint8Array(edgeCount);
+  const edgeIndustrial = new Uint8Array(edgeCount);
   const edgeKindSide = new Uint8Array(edgeCount);
   const edgeDurationSeconds = new Float32Array(edgeCount);
   const edgeNameId = new Uint16Array(edgeCount).fill(NAME_NONE);
@@ -81,6 +84,7 @@ function buildGraph(nodes: NodeSpec[], edges: EdgeSpec[]): RoutingGraph {
   let maxLandmark = 0;
   let maxArt = 0;
   let maxCommercial = 0;
+  let maxIndustrial = 0;
   for (let edge = 0; edge < edgeCount; edge++) {
     const spec = edges[edge];
     edgeNodeA[edge] = spec.a;
@@ -97,10 +101,12 @@ function buildGraph(nodes: NodeSpec[], edges: EdgeSpec[]): RoutingGraph {
     edgeArt[edge] = byte(spec.art);
     edgeHighway[edge] = byte(spec.highway);
     edgeCommercial[edge] = byte(spec.commercial);
+    edgeIndustrial[edge] = byte(spec.industrial);
     maxCover = Math.max(maxCover, edgeCover[edge]);
     maxLandmark = Math.max(maxLandmark, edgeLandmark[edge]);
     maxArt = Math.max(maxArt, edgeArt[edge]);
     maxCommercial = Math.max(maxCommercial, edgeCommercial[edge]);
+    maxIndustrial = Math.max(maxIndustrial, edgeIndustrial[edge]);
     adjacency[spec.a].push(edge);
     adjacency[spec.b].push(edge);
   }
@@ -143,9 +149,11 @@ function buildGraph(nodes: NodeSpec[], edges: EdgeSpec[]): RoutingGraph {
     edgeDescent: new Uint8Array(edgeCount),
     maxRelief: 0,
     edgeCommercial,
+    edgeIndustrial,
     maxLandmark: maxLandmark / 255,
     maxArt: maxArt / 255,
     maxCommercial: maxCommercial / 255,
+    maxIndustrial: maxIndustrial / 255,
     shade: null,
     edgeDurationSeconds,
     ferryEdges: new Uint32Array(0),
@@ -390,6 +398,39 @@ test("a strong commercial weight steers the route onto a nicer commercial street
   expect(
     upperTaken(findRoute(graph, start, dest, noScenic({ commercial: 1 }))),
   ).toBe(true);
+});
+
+test("edgeMultiplier prices industrial frontage as a penalty beside the highway one", () => {
+  const { graph } = diamond({ highway: 0.6, industrial: 0.4 }, {});
+  const weights = noScenic({ highway: 0.7, industrial: 0.5 });
+  const edge = 1; // the upper 0->1 edge, which carries both penalties
+  const expected =
+    (1 + 0.7 * (graph.edgeHighway[edge] / 255)) *
+    (1 + 0.5 * (graph.edgeIndustrial[edge] / 255));
+
+  expect(edgeMultiplier(graph, edge, weights)).toBeCloseTo(expected, 12);
+  // A penalty's minimum factor is 1, so it must not enter the heuristic's lower bound — an
+  // industrial weight cannot loosen it, however much industry the graph carries.
+  expect(minMultiplier(graph, weights)).toBeCloseTo(
+    minMultiplier(graph, noScenic()),
+    12,
+  );
+});
+
+test("an industrial weight steers the route away from a shorter walk past the yards", () => {
+  // The upper path is the short way but runs between industrial lots; the lower is a longer plain
+  // detour. Both sides industrial, so the byte is near its ceiling — the warehouse-canyon case.
+  const { graph, start, dest } = diamond(
+    { industrial: 0.9 },
+    {},
+    0.0002, // upper is the shorter path...
+    0.001, // ...the lower a modestly longer detour the penalty can tip
+  );
+
+  expect(upperTaken(findRoute(graph, start, dest, noScenic()))).toBe(true);
+  expect(
+    upperTaken(findRoute(graph, start, dest, noScenic({ industrial: 1 }))),
+  ).toBe(false);
 });
 
 test("a highway weight steers the route away from a shorter nuisance path", () => {

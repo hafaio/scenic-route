@@ -252,7 +252,7 @@ in its own band.
 | highways | OSM limited-access highways (`motorway`/`trunk` + ramps) and above-ground rail (surface, open cut, or elevated — anything not `tunnel`), via Overpass | the lines walking near is unpleasant, as polylines; a committed source, magic `HWAY` — proximity to it is a per-edge routing *penalty*; never itself routed; see "Binary layouts" |
 | buildings | NYC Building Footprints, Socrata `5zhs-2jue` (`feature_code=2100` with a positive `height_roof`, feet→metres) | 867,920 footprints with their roof heights; a committed source, magic `BLDG` — the walls the **building-shade** factor raises to cast shadows, for both the shade overlay pyramid and the signed per-edge shade routing bake; see "Binary layouts" |
 | landuse | NYC PLUTO, Socrata `64uk-42ks` (lots with `landuse` 1..5) | 788,591 tax lots, each with a land-use class byte; a committed source, magic `PLUT` — the commercial-vs-residential signal for the **commercial-area** overlay; see "Binary layouts" |
-| industrial | NYC PLUTO's tax-lot polygons, DCP's MAPPLUTO ArcGIS FeatureServer (`services5.arcgis.com/.../MAPPLUTO/FeatureServer/0`), `LandUse = '06'` | 9,295 industrial & manufacturing lots as **polygons**; a committed source, magic `INDL` — an **inspection overlay only**, drawn so the city's industrial land can be seen; it enters no routing input. The geometry has to come from ArcGIS: the Socrata copy of PLUTO is lot centroids and its `geom` column is null on every row. See "Binary layouts" |
+| industrial | NYC PLUTO's tax-lot polygons, DCP's MAPPLUTO ArcGIS FeatureServer (`services5.arcgis.com/.../MAPPLUTO/FeatureServer/0`), `LandUse = '06'` | 9,295 industrial & manufacturing lots as **polygons**; a committed source, magic `INDL` — drawn as an overlay so the city's industrial land can be seen, and sampled per edge into the graph's industrial-frontage penalty (GRPH byte 36). The geometry has to come from ArcGIS: the Socrata copy of PLUTO is lot centroids and its `geom` column is null on every row. See "Binary layouts" |
 | dining | NYC Dining Out `fpeh-f7ci` + OSM `outdoor_seating` via Overpass | outdoor-dining points; a committed source, magic `DINE` — a "cute" signal for the commercial overlay |
 | openstreets | NYC DOT Open Streets `uiay-nctu` (non-school), sampled every ~10 m | Open Streets corridor points; a committed source, magic `OSTR` — a "cute" signal for the commercial overlay |
 
@@ -921,7 +921,7 @@ serves and report success.
     {
       "id": "sf",             // must name a manifest city; every manifest city needs an entry
       "alleys": false,        // does the centreline classify alleys? (default true — New York's meaning)
-      "sources": ["sidewalks", "ferries", "landmarks", "art", "highways", "buildings"],
+      "sources": ["sidewalks", "ferries", "landmarks", "art", "highways", "industrial", "buildings"],
       "shade": {              // omit for a city whose year yields no above-horizon bin
         "maxZoom": 14,
         "maxShadowMeters": 500,
@@ -1127,9 +1127,15 @@ to the coastline by whether **any vertex** is on land rather than by their centr
 boundaries cut the water away, and a waterfront lot reaching past the bulkhead tests as land only
 where it meets the shore (no lot missed entirely at that read).
 
-Nothing but the client reads this: it is served verbatim to `public/industrial/<id>.bin` by
-`serve-sources.ts`, the overlay fills every lot in one colour, and neither the tiler nor the graph
-opens it.
+Two things read it. The client, served verbatim as `public/industrial/<id>.bin` by
+`serve-sources.ts`, fills every lot in one colour for the overlay. And the **graph pass** samples it
+into the per-edge industrial byte (GRPH byte 36, `crates/tiler/src/industrial.rs`): every edge's own
+polyline is walked a metre at a time and each sample probes 15 m to either side, a side scoring half
+where its probe lands in a lot or within 12 m of one, so the byte is the length-fraction of the walk
+fronting industrial land and a street with yards on both sides reads exactly twice one with yards on
+one. A bridge or tunnel deck reads 0 whatever is under it. Deliberately not the commercial pipeline's
+gate-then-`line_proximity` route: a Gaussian's tail reaches the residential street T-ing into a yard,
+and its peak is a distance where what a walker minds is an amount.
 
 ### `data/buildings/<id>.bin` — the footprints and their heights, magic `BLDG` (v1)
 
@@ -1743,7 +1749,7 @@ The tint is hypsometric — greens through tans to browns — stretched over the
 rather than an absolute scale, because what the layer is for is showing which of *these* streets are
 the hills. The hillshade is lit from the north-west, the direction a printed relief map lights from.
 
-### `public/routing/{id}.bin` — the routing graph, magic `GRPH` (v9, derived, gitignored)
+### `public/routing/{id}.bin` — the routing graph, magic `GRPH` (v10, derived, gitignored)
 
 The graph pass contracts STRT into the graph the client routes on, then expands it into the edges a
 walker actually uses. For a city carrying a PATH layer it first **conflates** the OSM pedestrian/park
@@ -1944,7 +1950,7 @@ Header, 64 bytes:
 | offset | type | field |
 | --- | --- | --- |
 | 0 | u8[4] | magic `GRPH` |
-| 4 | u16 | format version = 9 |
+| 4 | u16 | format version = 10 |
 | 6 | u16 | header bytes = 64 |
 | 8 | u32 | node count N |
 | 12 | u32 | edge count E |
@@ -1967,7 +1973,7 @@ can view them as typed arrays without copying):
 4. **CSR offsets**: (N+1) × u32 — node n owns half-edges `[csr[n], csr[n+1])`.
 5. **Adjacency**: 2E × u32 — each entry an **edge id** (the neighbour is the edge's other
    endpoint, one indirection).
-6. **Edge records**: E × 36 bytes:
+6. **Edge records**: E × 40 bytes:
 
 | offset | type | field |
 | --- | --- | --- |
@@ -1991,7 +1997,10 @@ can view them as typed arrays without copying):
 | 34 | u8 | **ascent**, 0-254: the height this edge CLIMBS walking it a→b, summed along its polyline and divided by its length, as a fraction of 35%. That span clears the steepest street anyone walks (San Francisco's worst blocks reach about 31.5%), so nothing saturates; v7 spanned only 12%, which made every serious hill identical. 0 for a ferry and for a city with no elevation source |
 | 35 | u8 | **descent**, 0-254: the height it DROPS over the same walk, on the same scale. Walking the edge b→a swaps the two. Their SUM is the absolute grade the hill penalty reads — direction-free, because a route that avoids a hill avoids it both ways — and the two apart are what makes a descent quicker than the climb back (v9; v8 carried only the sum, in one byte). Because each clamps on its own, an edge that crests and drops can carry 70% of grade in total where the single byte pinned the pair at 35% |
 
-The record is 36 bytes, a multiple of the 4-byte boundary every section starts on, so the name
+| 36 | u8 | **industrial frontage**, 0–254 (a penalty attribute; 0 for a ferry and for an edge on a bridge or tunnel deck): the share of the edge's length running past industrial land, each side of the walk counted for half, so both sides reads twice one side. Baked from `INDL` by `crates/tiler/src/industrial.rs`; 0 across a city with no industrial source, which is what drops that city's slider |
+| 37 | u8[3] | reserved, zero. The record grew to 40 for byte 36 and the next per-edge attribute rides here without a v11 |
+
+The record is 40 bytes, a multiple of the 4-byte boundary every section starts on, so the name
 table that follows it needs no padding.
 
 Bytes 29–33 carry the **durable edge key** (v6). Node and edge ids are positional — nodes are
@@ -2610,6 +2619,7 @@ goes back in:
 | --- | --- | --- |
 | `data/ferries` | the KIND_FERRY edges | they carry `NO_SOURCE_ID`, and are appended after the walking sort and the node renumber onto nodes that already exist — `assign_ordinals` skips them and an append moves no earlier edge |
 | `data/landmarks`, `data/art`, `data/highways` | one scenic attribute byte each | read at `graph.rs:3501-3535`, after the last `v2_edges.push`, over a `scenic::Network` built from the finished edges |
+| `data/industrial` | one scenic attribute byte | read after the last `v2_edges.push` like the three above, but probed per metre against the lot polygons in `industrial.rs` rather than through a `scenic::Network` |
 | `data/landuse`, `data/buildings`, `data/openstreets`, `data/dining` → `public/commercial-lines` | the commercial attribute byte | one more such byte, read at `graph.rs:3542`. the chunks and commercial passes are on this branch and nowhere else |
 | `data/canopy` | the direct-canopy byte, and the crowns of the SHDE bake | integrated along edge polylines that are already final |
 | `data/buildings` + the shade params (`shade-schedule.ts`, `src/shade/sun.ts`) | the per-edge SHDE bake | it runs *after* `fs::write(&args.out)`; it cannot move a key in the file it is written beside |

@@ -17,6 +17,7 @@ const weights = (
   highway: 0,
   hill: 0,
   commercial: 0,
+  industrial: 0,
   shade: 0,
   shelter: 0,
   allowFerries,
@@ -146,6 +147,7 @@ test("every weight a slider moves invalidates the cache", () => {
     "highway",
     "hill",
     "commercial",
+    "industrial",
     "shade",
     "shelter",
   ] as const) {

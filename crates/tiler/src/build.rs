@@ -50,18 +50,20 @@ enum Source {
     Landmarks,
     Art,
     Highways,
+    Industrial,
     Buildings,
 }
 
 impl Source {
     /// Every variant, so `key_space_files` can decide about each one by name and a new source
     /// cannot slip past it.
-    const ALL: [Source; 6] = [
+    const ALL: [Source; 7] = [
         Source::Sidewalks,
         Source::Ferries,
         Source::Landmarks,
         Source::Art,
         Source::Highways,
+        Source::Industrial,
         Source::Buildings,
     ];
 
@@ -72,6 +74,7 @@ impl Source {
             Source::Landmarks => "landmarks",
             Source::Art => "art",
             Source::Highways => "highways",
+            Source::Industrial => "industrial",
             Source::Buildings => "buildings",
         }
     }
@@ -458,6 +461,7 @@ pub fn run(plan_file: &Path, jobs: Option<usize>) -> Fallible<()> {
                 // Derived by the commercial pass rather than committed, so it is the value that pass
                 // returned and not a path assembled here.
                 commercial: lines.get(&city.id).map(Path::to_path_buf),
+                industrial: planned.source(&plan.data, Source::Industrial),
                 out: plan.routing.join(format!("{}.bin", city.id)),
                 // Written for the record — public/routing/<city>.stranded.bin is a documented
                 // artifact — while the re-chunk below reads the same ids straight out of memory.
@@ -564,8 +568,8 @@ impl Plan {
     ///
     /// - ferries carry `NO_SOURCE_ID` and are appended after the walking sort and the node renumber,
     ///   so `assign_ordinals` skips them and no earlier edge moves;
-    /// - landmarks, art, highways and the commercial lines are each one per-edge attribute byte,
-    ///   read after the last edge is pushed;
+    /// - landmarks, art, highways, the commercial lines and the industrial lots are each one
+    ///   per-edge attribute byte, read after the last edge is pushed;
     /// - the buildings and the sun grid drive the SHDE bake, which runs after the graph blob is
     ///   written, and the DEM the relief byte, baked over the same finished edges.
     ///
@@ -589,6 +593,7 @@ impl Plan {
                 | Source::Landmarks
                 | Source::Art
                 | Source::Highways
+                | Source::Industrial
                 | Source::Buildings => None,
             });
         }

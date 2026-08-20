@@ -207,6 +207,71 @@ impl PolygonSet {
             }
         })
     }
+
+    /// Whether a point lands on any of `candidates` OR within `meters` of one's outline. The
+    /// containment half is `contains_point` exactly, so a hole stays a hole — a point well inside
+    /// one is outside the polygon, and only reads near where the hole is narrower than the
+    /// tolerance. `meters_per_degree_lng` is the local east-west scale the distance is measured in.
+    pub fn contains_or_near(
+        &self,
+        candidates: &[u32],
+        lng: f64,
+        lat: f64,
+        meters: f64,
+        meters_per_degree_lng: f64,
+    ) -> bool {
+        if self.contains_point(candidates, lng, lat) {
+            return true;
+        }
+        let lng_pad = meters / meters_per_degree_lng;
+        let lat_pad = meters / METERS_PER_DEGREE_LAT;
+        let limit2 = meters * meters;
+        candidates.iter().any(|candidate| {
+            let index = *candidate as usize;
+            let box_ = &self.boxes[index];
+            if lng < box_.west - lng_pad
+                || lng > box_.east + lng_pad
+                || lat < box_.south - lat_pad
+                || lat > box_.north + lat_pad
+            {
+                false
+            } else {
+                self.rings[index].iter().any(|ring| {
+                    let metres = |vertex: usize| {
+                        (
+                            (ring.lngs[vertex] - lng) * meters_per_degree_lng,
+                            (ring.lats[vertex] - lat) * METERS_PER_DEGREE_LAT,
+                        )
+                    };
+                    // Closed by wrap-around, as the even-odd test above reads it.
+                    (0..ring.lngs.len()).any(|point| {
+                        let previous = if point == 0 {
+                            ring.lngs.len() - 1
+                        } else {
+                            point - 1
+                        };
+                        let (ax, ay) = metres(previous);
+                        let (bx, by) = metres(point);
+                        point_segment_dist2(0.0, 0.0, ax, ay, bx, by) <= limit2
+                    })
+                })
+            }
+        })
+    }
+}
+
+/// The squared distance from a point to a segment, all in one flat metre frame.
+pub fn point_segment_dist2(px: f64, py: f64, ax: f64, ay: f64, bx: f64, by: f64) -> f64 {
+    let (dx, dy) = (bx - ax, by - ay);
+    let length2 = dx * dx + dy * dy;
+    let t = if length2 > 0.0 {
+        ((px - ax) * dx + (py - ay) * dy) / length2
+    } else {
+        0.0
+    }
+    .clamp(0.0, 1.0);
+    let (cx, cy) = (ax + t * dx, ay + t * dy);
+    (px - cx).powi(2) + (py - cy).powi(2)
 }
 
 /// Even-odd scanline fill of the polygons at `indices` into a `width` by `height` mask,

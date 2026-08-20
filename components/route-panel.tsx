@@ -22,6 +22,7 @@ import {
   MdConstruction,
   MdDirectionsBoat,
   MdDirectionsCar,
+  MdFactory,
   MdFlag,
   MdOutlineDirectionsWalk,
   MdPalette,
@@ -44,6 +45,7 @@ import {
   MAX_FERRY_WEIGHT,
   MAX_HIGHWAY_WEIGHT,
   MAX_HILL_WEIGHT,
+  MAX_INDUSTRIAL_WEIGHT,
   MAX_LANDMARK_WEIGHT,
   MAX_SHADE_WEIGHT,
   MAX_SHELTER_WEIGHT,
@@ -97,11 +99,13 @@ interface RoutePanelProps {
     relief: boolean; // an elevation source, so "avoid hills" can move something
     ferries: boolean; // ferry edges in the graph, so the slider and its gate mean something
     commercial: boolean;
+    industrial: boolean; // industrial land in this city's graph, so "avoid" has something to avoid
     landmarks: boolean;
     art: boolean;
     sheds: boolean; // a sidewalk-shed feed, so the scaffolding gate means something
   };
   commercialWeight: number;
+  industrialWeight: number;
   shadeWeight: number; // signed: −1 = prefer shade, +1 = prefer sun, 0 = off
   shelterWeight: number;
   allowSheds: boolean;
@@ -117,6 +121,7 @@ interface RoutePanelProps {
   onHighwayWeight: (weight: number) => void;
   onHillWeight: (weight: number) => void;
   onCommercialWeight: (weight: number) => void;
+  onIndustrialWeight: (weight: number) => void;
   onShadeWeight: (weight: number) => void;
   onShelterWeight: (weight: number) => void;
   onAllowSheds: (allow: boolean) => void;
@@ -239,6 +244,7 @@ export default function RoutePanel({
   hillWeight,
   capabilities,
   commercialWeight,
+  industrialWeight,
   shadeWeight,
   shelterWeight,
   allowSheds,
@@ -254,6 +260,7 @@ export default function RoutePanel({
   onHighwayWeight,
   onHillWeight,
   onCommercialWeight,
+  onIndustrialWeight,
   onShadeWeight,
   onShelterWeight,
   onAllowSheds,
@@ -357,6 +364,17 @@ export default function RoutePanel({
       onChange: onHighwayWeight,
       tint: "text-rose-600 dark:text-rose-400",
       color: "#ef4444",
+    },
+    {
+      key: "industrial",
+      label: "Avoid industrial areas",
+      Icon: MdFactory,
+      weight: industrialWeight,
+      max: MAX_INDUSTRIAL_WEIGHT,
+      onChange: onIndustrialWeight,
+      tint: "text-pink-600 dark:text-pink-400",
+      color: "#db2777",
+      available: capabilities.industrial,
     },
     {
       key: "hill",

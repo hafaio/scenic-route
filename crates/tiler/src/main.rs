@@ -29,6 +29,7 @@ mod genus_field;
 mod geometry;
 mod graph;
 mod heights;
+mod industrial;
 mod ingest;
 mod invariants;
 mod manifest;
@@ -157,6 +158,7 @@ fn run() -> Fallible<()> {
                 art: None,
                 highways: None,
                 commercial: None,
+                industrial: None,
                 out,
                 stranded_out: None,
                 buildings: None,
