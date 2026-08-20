@@ -7,6 +7,7 @@ import {
   MdAccountBalance,
   MdConstruction,
   MdDirectionsCar,
+  MdFactory,
   MdPalette,
   MdTerrain,
   MdStorefront,
@@ -52,6 +53,10 @@ const SubwayLayer = dynamic(() => import("../../components/subway-layer"), {
 const ShedLayer = dynamic(() => import("../../components/shed-layer"), {
   ssr: false,
 });
+const IndustrialLayer = dynamic(
+  () => import("../../components/industrial-layer"),
+  { ssr: false },
+);
 const ElevationLayer = dynamic(
   () => import("../../components/elevation-layer"),
   { ssr: false },
@@ -66,6 +71,7 @@ export type OverlayId =
   | "subway"
   | "highways"
   | "commercial"
+  | "industrial"
   | "shade"
   | "scaffolding"
   | "elevation";
@@ -96,6 +102,9 @@ const FERRY_COLOR = "#2563eb"; // blue-600, the route layer's ferry-leg colour
 // The subway draws each route in the MTA's own published colour (in subway.ts); only its menu glyph
 // is tinted here, to the A/C/E blue the feed publishes, so the switcher still reads as a colour code.
 const HIGHWAY_COLOR = "#ef4444"; // red-500
+// The industrial overlay fills its lots in pink-600 (in src/tiles/industrial.ts, at the alpha the
+// wash needs); only its menu glyph is tinted here, so the switcher still reads as the layer's
+// colour code.
 // Scaffolding draws its own orange-600 bands (in shed-layer.tsx); only its menu glyph is tinted
 // here, so the switcher still reads as the layer's colour code.
 // The "cute commercial" overlay is a heat field with its own violet ramp (in dining-layer.tsx); only
@@ -195,6 +204,12 @@ export const OVERLAYS: readonly OverlayDef[] = [
     label: "Highways",
     icon: <MdDirectionsCar className="h-4 w-4 text-red-500" aria-hidden="true" />,
     render: () => <LinesLayer dir="highways" format="hway" color={HIGHWAY_COLOR} />,
+  },
+  {
+    id: "industrial",
+    label: "Industrial",
+    icon: <MdFactory className="h-4 w-4 text-pink-600" aria-hidden="true" />,
+    render: () => <IndustrialLayer />,
   },
   // Tree genus recolours every tree, so it sits last and is exclusive — it does not compose with the
   // additive dot/line layers.
