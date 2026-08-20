@@ -1,8 +1,8 @@
 // Cost is effective seconds: an edge's raw travel time times a product of scenic factors. Each
 // walked metre is discounted toward a floor by the tree cover, the landmarks and public art it
 // passes, the nice commercial frontage it runs along, and the shelter overhead (a factor 1 - w*attr
-// per element) and made dearer by a nearby highway or elevated rail (a penalty factor 1 + w*attr); a
-// ferry's crossing time is discounted by the ferry weight. The sun/shade axis is a single signed
+// per element) and made dearer by a nearby highway or elevated rail and by the industrial land it
+// runs past (penalty factors 1 + w*attr); a ferry's crossing time is discounted by the ferry weight. The sun/shade axis is a single signed
 // factor `1 - w*attr` whose weight `w in [-1, 1]` and edge attribute `attr in (-1, 1)` are both
 // signed (attr positive = net sunlit, negative = net shaded, for the sun at the moment the edge is
 // reached): w > 0 discounts sun and penalizes shade, w < 0 flips it, w = 0 is neutral. Every
@@ -56,8 +56,8 @@ export const DEFAULT_LANDMARK_WEIGHT = 0.1;
 export const MAX_ART_WEIGHT = 1;
 export const DEFAULT_ART_WEIGHT = 0.1;
 export const MAX_HIGHWAY_WEIGHT = 1;
-// The one weight whose maximum is not 1, because at 1 the slider ran out of authority before it ran
-// out of hill. Measured across Potrero Hill: at full strength the chosen route still climbed a block
+// One of the two weights whose maximum is not 1 (industrial is the other), because at 1 the slider
+// ran out of authority before it ran out of hill. Measured across Potrero Hill: at full strength the chosen route still climbed a block
 // at or past 12% grade, and only at 2 did it stop using one at all (relief 614 m -> 431 m for 9%
 // more walking). Past about 5 the routes stop changing much and start going a long way round, so
 // that is where the top of the slider sits.
@@ -215,6 +215,20 @@ export const DEFAULT_HILL_WEIGHT = 0;
 // A discount for edges fronting a nice commercial block. Modest default, tunable by eye.
 export const MAX_COMMERCIAL_WEIGHT = 1;
 export const DEFAULT_COMMERCIAL_WEIGHT = 0.1;
+// A penalty for edges running past industrial land, in the highway family. The top of the slider sits
+// where hill's does, and for the same reason: measured over 234 trips seeded on industrial streets, a
+// ceiling of 1 left a third of them on exactly the route they took with the slider off and removed
+// only 40% of the industrial frontage walked (17.2% -> 10.4%). The saturated districts moved
+// dramatically at that setting, which is what made it look sufficient; the middle of the distribution
+// did not. At 5 it reaches 5.1% for 14.5% more walking, and past that routes go a long way round.
+//
+// The slider still reads 0-100% of this maximum, so raising it changes what the far end means, not
+// how it is shown. Admissibility is untouched — a penalty's minimum factor is 1, and `minMultiplier`
+// never sees it.
+export const MAX_INDUSTRIAL_WEIGHT = 5;
+// 1 rather than highway's 0.5: it moves 63% of those trips for 3.6% more walking, where 0.5 moves
+// under half. Reads as 20% on the slider.
+export const DEFAULT_INDUSTRIAL_WEIGHT = 1;
 // The signed sun/shade axis spans [-1, 1] (0 = no preference): positive prefers sun, negative prefers
 // shade. |w| <= 1 keeps the shade factor's floor (1 - |w|*maxAbsAttr) positive since maxAbsAttr < 1.
 export const MAX_SHADE_WEIGHT = 1;
@@ -247,6 +261,9 @@ export interface RouteWeights {
   // down — a route that avoids a hill avoids it in both directions.
   hill: number;
   commercial: number;
+  // Penalty for walking past industrial land: the share of the edge's length with a yard or a
+  // warehouse beside it, counted per side, so both sides cost twice one.
+  industrial: number;
   shade: number; // signed sun/shade preference in [-1, 1]; positive prefers sun, negative shade
   shelter: number; // preference for cover overhead in the rain: decks and canopy
   allowFerries: boolean;
@@ -355,13 +372,23 @@ export function edgeMultiplier(
   const hill = 1 + weights.hill * gradeShare * gradeShare;
   const commercial =
     1 - weights.commercial * (graph.edgeCommercial[edge] / 255);
+  const industrial =
+    1 + weights.industrial * (graph.edgeIndustrial[edge] / 255);
   // The signed shade attribute for the sun at this point in the walk; 0 when no artifact is loaded or at
   // night. The field ignores elapsed time for a fixed sun position (constant field, tests).
   const shade =
     1 - weights.shade * shadeAttrOf(graph, edge, elapsedSeconds, shaded);
   const shelter = 1 - weights.shelter * shelterAttrOf(graph, edge, shed);
   const scenic =
-    tree * landmark * art * highway * hill * commercial * shade * shelter;
+    tree *
+    landmark *
+    art *
+    highway *
+    hill *
+    commercial *
+    industrial *
+    shade *
+    shelter;
   if (weights.allowSheds) {
     return scenic;
   } else {

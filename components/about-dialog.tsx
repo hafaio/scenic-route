@@ -88,8 +88,9 @@ export default function AboutDialog({ onClose }: AboutDialogProps) {
             Scenic Route finds nicer ways to walk across New York. Use
             Directions to plan a path — weighting it toward tree cover, sun or
             shade, shelter from the rain, landmarks, public art, nice commercial
-            streets and ferries, and away from highways and scaffolding — or
-            switch between the map overlays to explore what's around you.
+            streets and ferries, and away from highways, industrial areas and
+            scaffolding — or switch between the map overlays to explore what's
+            around you.
           </p>
           <p>
             To use it, tap the layers button to toggle overlays like tree canopy

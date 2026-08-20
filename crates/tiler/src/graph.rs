@@ -12,7 +12,8 @@
 //! indicator integrated along each sidewalk, which the smoothed cover byte cannot stand in for. And
 //! the durable edge key: a source record id (a CSCL physicalid, or an OSM way id for a conflated
 //! path) plus an ordinal that, with the side label already in the record, picks it out within that
-//! source.
+//! source. v10 grows the record to 40 bytes for the industrial-frontage penalty (`industrial.rs`)
+//! and leaves three reserved zeros for the next per-edge attribute.
 //!
 //! DESIGN.md, "The walking network", is why the pavement is placed the way it is — which source
 //! answers which question, what the seam rules are, and what the alternatives cost when they were
@@ -31,6 +32,7 @@ use crate::conflate::{self, ProtoEdge, SIDEWALK_LEFT, SIDEWALK_RIGHT, swap_sidew
 use crate::corners::{self, EdgeEnd};
 use crate::direct_canopy;
 use crate::geometry::{METERS_PER_DEGREE_LAT, round_half_up};
+use crate::industrial;
 use crate::invariants;
 use crate::relief;
 use crate::scenic;
@@ -98,15 +100,15 @@ pub const SIDE_SOUTH: u8 = 3;
 const SIDE_WEST: u8 = 4;
 const FLAG_GEOMETRY_RIGHT: u8 = 1 << 2; // this sidewalk lies right of its stored geometry direction
 
-const GRAPH_FORMAT: u16 = 9; // v9 splits the relief byte into ascent and descent
+const GRAPH_FORMAT: u16 = 10; // v10 adds the industrial-frontage byte and three reserved bytes
 // The field the relief is sampled off is built at this zoom's pixel size — about 5 m at San
 // Francisco's latitude. Finer than the block a grade is measured over, coarser than the metre the
 // DEM is published at, and a whole city of it is tens of megabytes rather than gigabytes.
 const RELIEF_FIELD_ZOOM: u32 = 15;
 const GRAPH_HEADER_BYTES: usize = 64;
 // 24 + landmark(24), art(25), highway(26), commercial(27), directCanopy(28), sourceId(29..32),
-// ordinal(33), ascent(34), descent(35)
-const EDGE_RECORD_BYTES: usize = 36;
+// ordinal(33), ascent(34), descent(35), industrial(36), reserved(37..39)
+const EDGE_RECORD_BYTES: usize = 40;
 // Record bytes 29-33: the source record an edge was derived from (a CSCL physicalid, or an OSM way
 // id for a conflated path) and the how-many-th edge of that source, on that side, this is. With the
 // side label already in byte 22 the triple (source id, side, ordinal) survives a rebuild, where the
@@ -263,6 +265,9 @@ pub struct Args {
     pub art: Option<PathBuf>,
     pub highways: Option<PathBuf>,
     pub commercial: Option<PathBuf>,
+    // The city's industrial tax lots (INDL), sampled per edge for the frontage penalty. A city with
+    // no such source bakes zeros, which is what makes its slider vanish rather than move nothing.
+    pub industrial: Option<PathBuf>,
     pub out: PathBuf,
     /// Where to WRITE this city's dropped ways, as the documented STRD artifact. Nothing reads it
     /// back: the re-chunk that clears those walks off the overlay takes the ids `run` returns.
@@ -3660,6 +3665,25 @@ pub fn run(args: &Args, dem: Option<&mut crate::dem::Dem>) -> Fallible<Vec<u32>>
         None => vec![0u8; edge_count],
     };
 
+    // The industrial byte (v10): how much of the edge runs past an industrial lot, both sides
+    // probed. A deck over a yard fronts nothing, so the structure flag is handed over with the
+    // polylines rather than being masked out afterwards, which would flatter the reported mean.
+    let industrial_bytes = match &args.industrial {
+        Some(path) => {
+            let on_structure: Vec<bool> = v2_edges
+                .iter()
+                .map(|edge| edge.flags & GRPH_STRUCTURE != 0)
+                .collect();
+            let baked = industrial::industrial(&edge_polys, &on_structure, path, origin_lat)?;
+            eprintln!(
+                "industrial: {} lots, {} edges fronting one, mean frontage {:.4}, max byte {}",
+                baked.polygons, baked.fronting, baked.mean, baked.max_byte
+            );
+            baked.bytes
+        }
+        None => vec![0u8; edge_count],
+    };
+
     // Pre-write invariants: a stored-geometry edge begins and ends exactly on its node coordinates
     // (a sidewalk is baked corner-to-corner, a path keeps its pinned endpoints), so no geometry
     // overshoots the intersection; every edge is at least as long as its straight-line node
@@ -4008,6 +4032,9 @@ pub fn run(args: &Args, dem: Option<&mut crate::dem::Dem>) -> Fallible<Vec<u32>>
             // a->b, so reversing it swaps the two. A ferry crosses water and has neither.
             bytes[record + 34] = ascent_bytes[edge_id];
             bytes[record + 35] = descent_bytes[edge_id];
+            // The industrial frontage byte (v10), read as a `1 + w*attr` penalty. Bytes 37-39 are
+            // the reserved zeros the 40-byte record leaves for the next attribute.
+            bytes[record + 36] = industrial_bytes[edge_id];
         }
         // The durable key (v6): the source record's id, and the ordinal that — with the side already
         // in byte 22 — picks this edge out within it. A crossing, link or ferry has no source

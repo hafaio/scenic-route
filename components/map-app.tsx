@@ -45,11 +45,14 @@ import {
   DEFAULT_FERRY_WEIGHT,
   DEFAULT_HIGHWAY_WEIGHT,
   DEFAULT_HILL_WEIGHT,
+  DEFAULT_INDUSTRIAL_WEIGHT,
   DEFAULT_LANDMARK_WEIGHT,
   DEFAULT_SHADE_WEIGHT,
   DEFAULT_SHELTER_WEIGHT,
   DEFAULT_TREE_WEIGHT,
   MAX_FERRY_WEIGHT,
+  MAX_HILL_WEIGHT,
+  MAX_INDUSTRIAL_WEIGHT,
   MAX_SHADE_WEIGHT,
   MAX_SHELTER_WEIGHT,
   MAX_TREE_WEIGHT,
@@ -127,6 +130,7 @@ const ART_WEIGHT_KEY = "scenic-route:art-weight";
 const HIGHWAY_WEIGHT_KEY = "scenic-route:highway-weight";
 const HILL_WEIGHT_KEY = "scenic-route:hill-weight";
 const COMMERCIAL_WEIGHT_KEY = "scenic-route:commercial-weight";
+const INDUSTRIAL_WEIGHT_KEY = "scenic-route:industrial-weight";
 const OVERLAY_KEY = "scenic-route:overlay";
 const SEARCH_BIAS_KEY = "scenic-route:search-bias"; // "false" opts out of biasing search to the user
 const RESNAP_METERS = 25; // a followed location must drift this far before the route recomputes
@@ -176,8 +180,14 @@ function storedWeights(): RouteWeights {
     landmark: read(LANDMARK_WEIGHT_KEY, DEFAULT_LANDMARK_WEIGHT, 0, 1),
     art: read(ART_WEIGHT_KEY, DEFAULT_ART_WEIGHT, 0, 1),
     highway: read(HIGHWAY_WEIGHT_KEY, DEFAULT_HIGHWAY_WEIGHT, 0, 1),
-    hill: read(HILL_WEIGHT_KEY, DEFAULT_HILL_WEIGHT, 0, 1),
+    hill: read(HILL_WEIGHT_KEY, DEFAULT_HILL_WEIGHT, 0, MAX_HILL_WEIGHT),
     commercial: read(COMMERCIAL_WEIGHT_KEY, DEFAULT_COMMERCIAL_WEIGHT, 0, 1),
+    industrial: read(
+      INDUSTRIAL_WEIGHT_KEY,
+      DEFAULT_INDUSTRIAL_WEIGHT,
+      0,
+      MAX_INDUSTRIAL_WEIGHT,
+    ),
     shade: read(
       SHADE_WEIGHT_KEY,
       DEFAULT_SHADE_WEIGHT,
@@ -299,6 +309,9 @@ export default function MapApp() {
   const [hillWeight, setHillWeight] = useState<number>(DEFAULT_HILL_WEIGHT);
   const [commercialWeight, setCommercialWeight] = useState<number>(
     DEFAULT_COMMERCIAL_WEIGHT,
+  );
+  const [industrialWeight, setIndustrialWeight] = useState<number>(
+    DEFAULT_INDUSTRIAL_WEIGHT,
   );
   // The signed sun/shade preference (−1 = prefer shade, +1 = prefer sun, 0 = off). `routeTimeTick` fires
   // as the resolved time (the global clock) moves, so the route re-costs against the sun's new
@@ -708,6 +721,10 @@ export default function MapApp() {
       relief: (routingGraph?.maxRelief ?? 0) > 0,
       ferries: (routingGraph?.ferryEdges.length ?? 0) > 0,
       commercial: (routingGraph?.maxCommercial ?? 0) > 0,
+      // Gated like relief above, and for the same reason: a city with no industrial source bakes
+      // every edge 0, and the slider would sit there moving nothing. The max is computed for this
+      // and nothing else — a penalty's minimum factor is 1, so it never enters the A* lower bound.
+      industrial: (routingGraph?.maxIndustrial ?? 0) > 0,
       landmarks: (routingGraph?.maxLandmark ?? 0) > 0,
       art: (routingGraph?.maxArt ?? 0) > 0,
       sheds: city.overlays.includes("scaffolding"),
@@ -725,6 +742,7 @@ export default function MapApp() {
       highway: highwayWeight,
       hill: hillWeight,
       commercial: commercialWeight,
+      industrial: industrialWeight,
       shade: shadeWeight,
       shelter: shelterWeight,
       allowFerries,
@@ -738,6 +756,7 @@ export default function MapApp() {
       highwayWeight,
       hillWeight,
       commercialWeight,
+      industrialWeight,
       shadeWeight,
       shelterWeight,
       allowFerries,
@@ -1043,6 +1062,11 @@ export default function MapApp() {
     window.localStorage.setItem(COMMERCIAL_WEIGHT_KEY, String(weight));
   }, []);
 
+  const handleIndustrialWeight = useCallback((weight: number) => {
+    setIndustrialWeight(weight);
+    window.localStorage.setItem(INDUSTRIAL_WEIGHT_KEY, String(weight));
+  }, []);
+
   const handleShadeWeight = useCallback((weight: number) => {
     setShadeWeight(weight);
     window.localStorage.setItem(SHADE_WEIGHT_KEY, String(weight));
@@ -1214,6 +1238,7 @@ export default function MapApp() {
     setHighwayWeight(route.weights.highway);
     setHillWeight(route.weights.hill);
     setCommercialWeight(route.weights.commercial);
+    setIndustrialWeight(route.weights.industrial);
     setShadeWeight(route.weights.shade);
     setShelterWeight(route.weights.shelter);
     setAllowFerries(route.weights.allowFerries);
@@ -1644,6 +1669,7 @@ export default function MapApp() {
             hillWeight={hillWeight}
             capabilities={capabilities}
             commercialWeight={commercialWeight}
+            industrialWeight={industrialWeight}
             shadeWeight={shadeWeight}
             shelterWeight={shelterWeight}
             allowSheds={allowSheds}
@@ -1659,6 +1685,7 @@ export default function MapApp() {
             onHighwayWeight={handleHighwayWeight}
             onHillWeight={handleHillWeight}
             onCommercialWeight={handleCommercialWeight}
+            onIndustrialWeight={handleIndustrialWeight}
             onShadeWeight={handleShadeWeight}
             onShelterWeight={handleShelterWeight}
             onAllowSheds={handleAllowSheds}

@@ -19,6 +19,7 @@ pub const LANDMARK_FORMAT: u16 = 1; // scenic POI points, the shared point layou
 pub const ART_FORMAT: u16 = 1; // public-art POI points, the shared point layout, magic "ARTW"
 pub const HIGHWAY_FORMAT: u16 = 1; // highway/elevated-rail nuisance lines, the LAND polygon layout, magic "HWAY"
 pub const COMMERCIAL_FORMAT: u16 = 1; // qualifying commercial-block lines, the LAND polygon layout, magic "CMLN"
+pub const INDUSTRIAL_FORMAT: u16 = 1; // industrial & manufacturing tax lots, the LAND polygon layout, magic "INDL"
 pub const LANDUSE_FORMAT: u16 = 1; // tax lots carrying a land-use class byte, magic "PLUT"
 pub const DINING_FORMAT: u16 = 1; // outdoor-dining points, the shared point layout, magic "DINE"
 pub const OPENSTREET_FORMAT: u16 = 1; // Open Streets corridor samples, the shared point layout, magic "OSTR"

@@ -20,7 +20,7 @@ use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
 
 use crate::binfmt::{Coord, Polygon};
-use crate::geometry::round_half_up;
+use crate::geometry::{point_segment_dist2, round_half_up};
 
 const BYTE_CEILING: f64 = 254.0; // a discount edge is never free: keeps maxAttr < 1, as cover does
 const FANOUT_SIGMAS: f64 = 3.0; // the Gaussian is negligible past 3σ; searches and fan-outs stop there
@@ -228,19 +228,6 @@ pub fn poi_amenity(net: &Network, params: &PoiParams, pois: &[Coord]) -> (Vec<u8
         max_byte = max_byte.max(*byte);
     }
     (bytes, PoiStats { snapped, max_byte })
-}
-
-fn point_segment_dist2(px: f64, py: f64, ax: f64, ay: f64, bx: f64, by: f64) -> f64 {
-    let (dx, dy) = (bx - ax, by - ay);
-    let length2 = dx * dx + dy * dy;
-    let t = if length2 > 0.0 {
-        ((px - ax) * dx + (py - ay) * dy) / length2
-    } else {
-        0.0
-    }
-    .clamp(0.0, 1.0);
-    let (cx, cy) = (ax + t * dx, ay + t * dy);
-    (px - cx).powi(2) + (py - cy).powi(2)
 }
 
 /// The per-edge nuisance-penalty byte: `e^{-(d/σ)²/2}` of the metre distance `d` from the edge to

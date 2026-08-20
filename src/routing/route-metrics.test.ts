@@ -109,9 +109,11 @@ function buildGraph(nodes: NodeSpec[], edges: EdgeSpec[]): RoutingGraph {
     edgeArt: new Uint8Array(edgeCount),
     edgeHighway: new Uint8Array(edgeCount),
     edgeCommercial: new Uint8Array(edgeCount),
+    edgeIndustrial: new Uint8Array(edgeCount),
     maxLandmark: 0,
     maxArt: 0,
     maxCommercial: 0,
+    maxIndustrial: 0,
     edgeDirectCanopy: new Uint8Array(edgeCount),
     edgeAscent: new Uint8Array(edgeCount),
     edgeDescent: new Uint8Array(edgeCount),
@@ -174,6 +176,7 @@ function routeOver(
       art: 0,
       highway: 0,
       commercial: 0,
+      industrial: 0,
     },
     start: snap(
       pointOf(
