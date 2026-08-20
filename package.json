@@ -22,6 +22,7 @@
     "build-dining": "bun run scripts/dining.ts",
     "build-openstreets": "bun run scripts/openstreets.ts",
     "build-landuse": "bun run scripts/landuse.ts",
+    "build-industrial": "bun run scripts/industrial.ts",
     "build-subway": "bun run scripts/subway.ts",
     "build-subway:sf": "bun run scripts/subway-sf.ts",
     "shed-mirror": "dir=${SHED_SNAPSHOTS:-.cache/ActiveShedPermits}; test -d $dir || git clone --bare https://github.com/NYCDOB/ActiveShedPermits.git $dir",

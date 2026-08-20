@@ -27,6 +27,11 @@ export interface LinesParams {
   color: string;
 }
 
+export interface IndustrialParams {
+  kind: "industrial";
+  url: string;
+}
+
 export interface SubwayParams {
   kind: "subway";
   url: string;
@@ -72,6 +77,7 @@ export type TileParams =
   | StreetScoreParams
   | CommercialParams
   | LinesParams
+  | IndustrialParams
   | SubwayParams
   | PoiParams
   | TreeDotsParams
