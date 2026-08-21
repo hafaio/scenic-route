@@ -1,0 +1,9 @@
+# Pinned rather than tracking `stable`, because a lint that ships with a new compiler fails the build
+# on code nobody touched. CI installs whatever `stable` resolves to that day and a laptop installs it
+# whenever someone last ran `rustup update`, so the two drift apart silently and the disagreement only
+# surfaces as a red PR — clippy 1.98 rejected three `chunks_exact(2)` calls that 1.97 accepted here.
+# Bumping is a deliberate change: raise the channel, run `bun run lint`, fix what the new lints find.
+# .github/workflows/build.yml pins the same version; move both together.
+[toolchain]
+channel = "1.98.0"
+components = ["clippy", "rustfmt"]
