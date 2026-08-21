@@ -342,7 +342,7 @@ fn fill_indices(
                 }
             }
             crossings.sort_by(|left, right| left.total_cmp(right));
-            for pair in crossings.chunks_exact(2) {
+            for pair in crossings.as_chunks::<2>().0 {
                 let from = (pair[0] - 0.5).ceil().max(0.0) as usize;
                 let to = (pair[1] - 0.5).floor().min((width as f64) - 1.0);
                 if to < from as f64 {
@@ -650,7 +650,7 @@ pub fn blurred_cover(
             scratch
                 .crossings
                 .sort_by(|left, right| left.total_cmp(right));
-            for pair in scratch.crossings.chunks_exact(2) {
+            for pair in scratch.crossings.as_chunks::<2>().0 {
                 let from = (pair[0] - 0.5).ceil().max(0.0) as usize;
                 let to = (pair[1] - 0.5).floor().min((width as f64) - 1.0);
                 if to < from as f64 {

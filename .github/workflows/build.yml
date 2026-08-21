@@ -27,7 +27,8 @@ jobs:
         with:
           lfs: ${{ inputs.upload-pages == true }}
       - uses: oven-sh/setup-bun@v2
-      - uses: dtolnay/rust-toolchain@stable
+      # Pinned to match rust-toolchain.toml — see the comment there. Move both together.
+      - uses: dtolnay/rust-toolchain@1.98.0
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
