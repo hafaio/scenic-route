@@ -556,7 +556,7 @@ fn sample_band(
                 }
             }
             crossings.sort_by(f64::total_cmp);
-            for pair in crossings.chunks_exact(2) {
+            for pair in crossings.as_chunks::<2>().0 {
                 let from = (pair[0] - 0.5).ceil().max(0.0) as usize;
                 let to = ((pair[1] - 0.5).ceil().max(0.0) as usize).min(grid.width);
                 for column in from..to {
