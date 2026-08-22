@@ -25,6 +25,7 @@ const AXES = [
   "hill",
   "commercial",
   "industrial",
+  "historic",
   "shade",
   "shelter",
 ] as const;
@@ -49,6 +50,7 @@ function quantizeWeights(weights: RouteWeights): RouteWeights {
     hill: quantize(weights.hill),
     commercial: quantize(weights.commercial),
     industrial: quantize(weights.industrial),
+    historic: quantize(weights.historic),
     shade: quantize(weights.shade),
     shelter: quantize(weights.shelter),
     allowFerries: weights.allowFerries,

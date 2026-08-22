@@ -55,19 +55,21 @@ enum Source {
     Art,
     Highways,
     Industrial,
+    Historic,
     Buildings,
 }
 
 impl Source {
     /// Every variant, so `key_space_files` can decide about each one by name and a new source
     /// cannot slip past it.
-    const ALL: [Source; 7] = [
+    const ALL: [Source; 8] = [
         Source::Sidewalks,
         Source::Ferries,
         Source::Landmarks,
         Source::Art,
         Source::Highways,
         Source::Industrial,
+        Source::Historic,
         Source::Buildings,
     ];
 
@@ -79,6 +81,7 @@ impl Source {
             Source::Art => "art",
             Source::Highways => "highways",
             Source::Industrial => "industrial",
+            Source::Historic => "historic",
             Source::Buildings => "buildings",
         }
     }
@@ -106,7 +109,7 @@ const SHADE_CODE: [&str; 6] = [
 /// no scope is a function of, and the one edit that leaves a stale pyramid standing. Nothing but
 /// that test reads it, since the epoch these belong to is every file the plan carries.
 #[cfg(test)]
-const OUTSIDE_SHADE: [&str; 23] = [
+const OUTSIDE_SHADE: [&str; 25] = [
     "association.rs",
     "build.rs",
     "canopy.rs",
@@ -123,11 +126,13 @@ const OUTSIDE_SHADE: [&str; 23] = [
     "graph.rs",
     "graph_cache.rs",
     "heights.rs",
+    "historic.rs",
     "industrial.rs",
     "ingest.rs",
     "invariants.rs",
     "main.rs",
     "relief.rs",
+    "sampling.rs",
     "scenic.rs",
     "sidewalks.rs",
 ];
@@ -903,6 +908,7 @@ impl<'a> Stamps<'a> {
                 | Source::Art
                 | Source::Highways
                 | Source::Industrial
+                | Source::Historic
                 | Source::Buildings => false,
             };
             if topology {
@@ -965,6 +971,11 @@ impl<'a> Stamps<'a> {
                 "graph-industrial",
                 planned.source(&self.plan.data, Source::Industrial).as_ref(),
             )?,
+            historic: self.graph_column(
+                &base,
+                "graph-historic",
+                planned.source(&self.plan.data, Source::Historic).as_ref(),
+            )?,
             canopy: self.graph_column(&base, "graph-canopy", canopy_file.as_ref())?,
             commercial: hex(&commercial_key.finalize()),
             relief: hex(&relief.finalize()),
@@ -1003,6 +1014,9 @@ impl<'a> Stamps<'a> {
             &keys.relief,
             &keys.canopy,
             &keys.industrial,
+            // Nothing but this line makes a re-ingested district file rerun the pass: the cache is
+            // asked what to recompute only once the STAMP has said the pass is stale at all.
+            &keys.historic,
         ] {
             field(&mut digest, key.as_bytes());
         }
@@ -1751,6 +1765,7 @@ pub fn run(plan_file: &Path, jobs: Option<usize>, selection: &Selection) -> Fall
                 // returned and not a path assembled here.
                 commercial: lines.get(&city.id).map(Path::to_path_buf),
                 industrial: planned.source(&plan.data, Source::Industrial),
+                historic: planned.source(&plan.data, Source::Historic),
                 out: plan.routing.join(format!("{}.bin", city.id)),
                 // Written for the record — public/routing/<city>.stranded.bin is a documented
                 // artifact — while the re-chunk below reads the same ids straight out of memory.
@@ -1876,8 +1891,8 @@ impl Plan {
     ///
     /// - ferries carry `NO_SOURCE_ID` and are appended after the walking sort and the node renumber,
     ///   so `assign_ordinals` skips them and no earlier edge moves;
-    /// - landmarks, art, highways, the commercial lines and the industrial lots are each one
-    ///   per-edge attribute byte, read after the last edge is pushed;
+    /// - landmarks, art, highways, the commercial lines, the industrial lots and the historic
+    ///   districts are each one per-edge attribute byte, read after the last edge is pushed;
     /// - the buildings and the sun grid drive the SHDE bake, which runs after the graph blob is
     ///   written, and the DEM the relief byte, baked over the same finished edges.
     ///
@@ -1902,6 +1917,7 @@ impl Plan {
                 | Source::Art
                 | Source::Highways
                 | Source::Industrial
+                | Source::Historic
                 | Source::Buildings => None,
             });
         }
@@ -2038,7 +2054,7 @@ mod tests {
     /// New York with a two-bin sun grid and the footprints to cast it, since the shade pass is now
     /// stamped one bin at a time and has nothing to say about a city with no grid.
     const SUNNY: &str = r#"[
-      {"id": "nyc", "sources": ["buildings", "landmarks", "industrial"],
+      {"id": "nyc", "sources": ["buildings", "landmarks", "industrial", "historic"],
        "shade": {"maxZoom": 14, "maxShadowMeters": 500,
                  "buckets": [
                    {"season": 0, "hourAngle": -30.0, "elevation": 20.0, "azimuth": 120.0,
@@ -2679,7 +2695,7 @@ mod tests {
     /// over both sidewalk extracts, each with its own path as its contents so a file read in
     /// another's place is caught. What is missing is deliberate: the commercial pass's dining and
     /// open-streets sources are read only if they exist, and the stamps have to say so.
-    const INPUTS: [(&str, &str); 14] = [
+    const INPUTS: [(&str, &str); 15] = [
         ("streets", "nyc.bin"),
         ("streets", "sf.bin"),
         ("paths", "nyc.bin"),
@@ -2694,6 +2710,7 @@ mod tests {
         ("buildings", "nyc.bin"),
         ("landmarks", "nyc.bin"),
         ("industrial", "nyc.bin"),
+        ("historic", "nyc.bin"),
     ];
 
     /// A plan whose data root and manifest are a scratch tree of this test's own, so the per-pass
@@ -2925,8 +2942,33 @@ mod tests {
         assert_ne!(after.graph, before.graph, "so the pass reruns at all");
         assert_eq!(after.keys.base, before.keys.base, "the sequential half");
         assert_eq!(after.keys.landmarks, before.keys.landmarks);
+        assert_eq!(after.keys.historic, before.keys.historic);
         assert_eq!(after.keys.canopy, before.keys.canopy);
         assert_eq!(after.keys.relief, before.keys.relief, "the DEM decode");
+        assert_eq!(
+            after.keys.shade, before.keys.shade,
+            "the twenty-minute bake"
+        );
+    }
+
+    /// The one touchpoint of a new column that nothing else enforces. The struct literal, the
+    /// exhaustive matches and the args list all stop compiling until a column is wired in, but the
+    /// key reaching pass 8's own STAMP is enforced by this test alone — and it is the stamp, not the
+    /// cache, that decides whether the pass runs at all. Leave it out and a re-ingested district
+    /// file keys a cache entry no build ever asks for: the bake simply never reruns.
+    #[test]
+    fn a_re_ingested_historic_source_moves_the_graph_stamp() {
+        let plan = stamping_plan("keys-historic");
+        let before = stamped_passes(&plan);
+
+        fs::write(plan.data.join("historic").join("nyc.bin"), b"re-ingested").expect("a source");
+        let after = stamped_passes(&plan);
+
+        assert_ne!(after.keys.historic, before.keys.historic);
+        assert_ne!(after.graph, before.graph, "so the pass reruns at all");
+        assert_eq!(after.keys.base, before.keys.base, "the sequential half");
+        assert_eq!(after.keys.industrial, before.keys.industrial);
+        assert_eq!(after.keys.canopy, before.keys.canopy);
         assert_eq!(
             after.keys.shade, before.keys.shade,
             "the twenty-minute bake"
@@ -2953,6 +2995,7 @@ mod tests {
             (&after.keys.relief, &before.keys.relief),
             (&after.keys.canopy, &before.keys.canopy),
             (&after.keys.industrial, &before.keys.industrial),
+            (&after.keys.historic, &before.keys.historic),
         ] {
             assert_ne!(moved, held);
         }

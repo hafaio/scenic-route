@@ -24,6 +24,7 @@ import {
   MdDirectionsCar,
   MdFactory,
   MdFlag,
+  MdMapsHomeWork,
   MdOutlineDirectionsWalk,
   MdPalette,
   MdStorefront,
@@ -45,6 +46,7 @@ import {
   MAX_FERRY_WEIGHT,
   MAX_HIGHWAY_WEIGHT,
   MAX_HILL_WEIGHT,
+  MAX_HISTORIC_WEIGHT,
   MAX_INDUSTRIAL_WEIGHT,
   MAX_LANDMARK_WEIGHT,
   MAX_SHADE_WEIGHT,
@@ -100,12 +102,14 @@ interface RoutePanelProps {
     ferries: boolean; // ferry edges in the graph, so the slider and its gate mean something
     commercial: boolean;
     industrial: boolean; // industrial land in this city's graph, so "avoid" has something to avoid
+    historic: boolean; // designated districts in this city's graph, so "prefer" has somewhere to go
     landmarks: boolean;
     art: boolean;
     sheds: boolean; // a sidewalk-shed feed, so the scaffolding gate means something
   };
   commercialWeight: number;
   industrialWeight: number;
+  historicWeight: number;
   shadeWeight: number; // signed: −1 = prefer shade, +1 = prefer sun, 0 = off
   shelterWeight: number;
   allowSheds: boolean;
@@ -122,6 +126,7 @@ interface RoutePanelProps {
   onHillWeight: (weight: number) => void;
   onCommercialWeight: (weight: number) => void;
   onIndustrialWeight: (weight: number) => void;
+  onHistoricWeight: (weight: number) => void;
   onShadeWeight: (weight: number) => void;
   onShelterWeight: (weight: number) => void;
   onAllowSheds: (allow: boolean) => void;
@@ -245,6 +250,7 @@ export default function RoutePanel({
   capabilities,
   commercialWeight,
   industrialWeight,
+  historicWeight,
   shadeWeight,
   shelterWeight,
   allowSheds,
@@ -261,6 +267,7 @@ export default function RoutePanel({
   onHillWeight,
   onCommercialWeight,
   onIndustrialWeight,
+  onHistoricWeight,
   onShadeWeight,
   onShelterWeight,
   onAllowSheds,
@@ -354,6 +361,20 @@ export default function RoutePanel({
       tint: "text-fuchsia-600 dark:text-fuchsia-400",
       color: "#d946ef",
       available: capabilities.art,
+    },
+    {
+      key: "historic",
+      label: "Prefer historic areas",
+      // The overlay's own glyph and indigo — deliberately not the landmarks amber, which prices a
+      // different thing: passing one designated building, rather than walking inside a designated
+      // neighbourhood.
+      Icon: MdMapsHomeWork,
+      weight: historicWeight,
+      max: MAX_HISTORIC_WEIGHT,
+      onChange: onHistoricWeight,
+      tint: "text-indigo-600 dark:text-indigo-400",
+      color: "#4338ca",
+      available: capabilities.historic,
     },
     {
       key: "highway",
