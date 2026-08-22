@@ -96,6 +96,16 @@ enum Command {
         plan: PathBuf,
         #[arg(long, value_parser = jobs)]
         jobs: Option<usize>,
+        /// Which passes may run, comma-separated and each optionally narrowed to one city:
+        /// `--only graph,shade`, `--only graph:nyc`. Absent, all nine run. A pass left out neither
+        /// runs nor records a stamp nor clears anything, so what it would have rebuilt stays stale
+        /// for the next full build to catch — which is what a hand-edited plan could not promise.
+        #[arg(long, value_delimiter = ',')]
+        only: Vec<String>,
+        /// Rerun the passes `--only` selected whether or not their stamps hold. With no `--only`
+        /// that is all nine, which is a build from scratch.
+        #[arg(long)]
+        force: bool,
     },
     /// Fill the canopy file's crown heights and the street and path density blobs, in place, and
     /// report the cover distribution the manifest records.
@@ -132,7 +142,12 @@ enum Command {
 
 fn run() -> Fallible<()> {
     match Cli::parse().command {
-        Command::Build { plan, jobs } => build::run(&plan, jobs),
+        Command::Build {
+            plan,
+            jobs,
+            only,
+            force,
+        } => build::run(&plan, jobs, &build::Selection::new(&only, force)?),
         Command::Ingest { params, report } => ingest::run(&params, &report),
         Command::GraphInputs { plan, report } => build::graph_inputs(&plan, &report),
         // The durable-key probe: the graph pipeline over a committed fixture, reported as the

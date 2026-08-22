@@ -9,17 +9,25 @@ Two scripts, run in order:
 bun run build-tree-data   # sources -> data/**/*.bin + src/tree-cover/manifest.json
 bun run build-tiles       # those -> public/tiles/ + public/streets/
 bun run build-tiles:half  # the same, on half the cores
+bun run build-tiles:graph # half the cores, and only the graph pass
+bun run build-tiles:shade # half the cores, and only the shade pyramid
 ```
 
 `build-tree-data` is the slow one (a few minutes of paging, mostly network) and only
 needs re-running when the sources are refreshed; its binaries are committed. `build-tiles`
 is the expensive one in CPU, its output is gitignored, and `bun dev` / `bun export` run it
-automatically — it does nothing when no input's bytes have moved since the last run.
+automatically. **It does only the work its inputs imply**: freshness is decided a pass at a time
+(and, inside the two most expensive passes, a sun bin at a time) over what that pass actually reads,
+so a re-run with nothing moved is seconds and a re-ingested source costs the passes that read it and
+no others. Only a first build, or one after an edit to the tiler, pays for everything — see *The
+build plan* for what that is and *Where the tile build spends its time* for what it costs.
 
-It renders on every core it can find, which leaves the machine it is running on unusable for
-the twenty minutes that takes. `build-tiles:half` passes `--jobs half` to size rayon's pool at
-half the cores instead; `--jobs <n>` takes a count, and the tiler reports which it settled on
-before the first stage. Nothing about the output moves with the thread count.
+It renders on every core it can find, which leaves the machine it is running on unusable for as long
+as that takes. `build-tiles:half` passes `--jobs half` to size rayon's pool at half the cores
+instead; `--jobs <n>` takes a count, and the tiler reports which it settled on before the first
+stage. Nothing about the output moves with the thread count. `build-tiles:{graph,shade}` are the two
+passes worth naming on their own, each on half the cores — see *Building one pass:* `--only` *and*
+`--force`.
 
 ## Who does what: TypeScript fetches, Rust computes
 
@@ -35,6 +43,7 @@ scripts either side of one hand their work over as files.
 
 ```sh
 tiler build --plan <file.json> [--jobs <count|half>]          # the nine passes that make a tile build, in one process
+            [--only <pass>[:<city>],…] [--force]              # …or only some of them, stamps ignored or not
 tiler ingest --params <file.json> --report <file.json>        # fills the canopy crown heights and the street & path density blobs, in place
 tiler key-probe --report <file.json>                          # the graph pipeline over a fixture, for the durable key hash the shed gate stamps
 tiler graph-inputs --plan <file.json> --report <file.json>    # the other half of that gate: the plan's sources decision, and the bytes it names
@@ -43,7 +52,8 @@ tiler graph-inputs --plan <file.json> --report <file.json>    # the other half o
 There were ten. Seven of them were argv wrappers over the module function `tiler build` already
 calls directly, so they are gone: what this document calls the chunks, caster-chunks, shade,
 elevation, canopy, genus-field and graph **passes** are those functions, called in order inside
-`build`, and nothing runs one on its own. The commercial pass is not among them — it was a script
+`build`. Running one on its own is `build --only <pass>`, so it is still the driver that decides
+what a pass reads and what it records. The commercial pass is not among them — it was a script
 run by hand, which no build invoked, and it became a pass rather than losing a subcommand. `heights` and `densities` merged into `ingest`,
 which is the order they always ran in over one city. `key-probe`'s fixture paths and its throwaway
 `--out` default, so the package.json line carries only where to leave the report.
@@ -887,8 +897,8 @@ the plan carries them as the `code` map, which is what lets a pass name a scope 
 shade pass does, below. Content, not mtime — a fresh checkout (CI) or a `touch` rewrites mtimes
 without moving a byte.
 
-**The shade pass is stamped finer than a pass: one key per sun bin.** It is most of the build's
-twenty minutes, and a bin's tiles are a pure function of that city's buildings and canopy, of *that*
+**The shade pass is stamped finer than a pass: one key per sun bin.** A cold one is twenty minutes,
+and a bin's tiles are a pure function of that city's buildings and canopy, of *that*
 bin's samples and intensity, of `maxZoom`/`maxShadowMeters` and of the shade code — not of the other
 bins, and not of the schedule's shape. The key lives at `public/tiles/shade/<city>/<bin>/.stamp` and
 claims the `tree-shade` twin beside it, which comes out of the same render over the same casters.
@@ -1053,7 +1063,69 @@ pyramid and a per-edge shade bake only with both `shade` and a `buildings` sourc
 genus-field pyramids run when any manifest city carries that layer; and the second chunk pass runs
 only when some city has paths.
 
+### Building one pass: `--only` and `--force`
+
+```sh
+bun run build-tiles:graph                          # --jobs half --only graph
+bun run build-tiles:shade                          # --jobs half --only shade
+bun run build-tiles:half -- --only commercial,graph # anything else, appended to the tiler
+bun run build-tiles:half -- --only graph:nyc --force
+```
+
+`--only` names the passes this build may run, comma-separated, each optionally narrowed to one city
+as `<pass>:<city>`. The nine names are `chunks`, `commercial`, `caster-chunks`, `shade`,
+`elevation`, `canopy`, `genus-field`, `graph` and `chunks-stranded`; the three that are stamped one
+city at a time — `shade`, `elevation`, `graph` — are the three a city can be named for, and a city
+on any of the others is rejected rather than quietly ignored, as is a pass name or a city id nothing
+answers to. `--force` runs the selected passes whether or not their stamps hold. With no `--only`
+that is all nine, which is a build from scratch.
+
+What it is for is the one thing the stamps are deliberately coarse about: the **code epoch** is the
+whole crate, so an edit anywhere in the tiler invalidates all eight passes that name no scope of
+their own, and iterating on one pass's code would otherwise re-render everything each time. `--only graph` then reruns the pass being worked on
+and leaves the rest of the last build standing. The two named scripts are the two passes that are
+worth minutes rather than seconds and so the two anyone iterates on; anything else is cheap enough
+to reach through `build-tiles:half -- --only …`, which appends to the tiler because it is the last
+command in that chain.
+
+**This is what supersedes hand-editing `.build/plan.json`** — copying the plan, deleting the `shade`
+block and running the tiler against the mutilated copy, which is what people did under the
+whole-build stamp. The two are not the same power. Deleting a block took that pass's inputs out of
+what the build hashed, so the build then recorded a stamp claiming everything was current over
+inputs it had never read, and the staleness was invisible from then on. `--only` cannot forge
+freshness that way, because it restricts which passes may run **and nothing else**:
+
+- a pass it leaves out does not run, **records no stamp**, and **clears no directory** — whatever
+  claim that pass already held stands, stale if it was stale, and the next full build reruns it;
+- no stamp is ever written that a full build would not have written the same;
+- a selected pass whose upstream output is **missing** is an error naming the pass to run first —
+  `--only graph` with no `public/commercial-lines` says so before the first pass rather than baking
+  a graph with no commercial discount and stamping it as though it had one. Output that is merely
+  *stale* is fine and is the point;
+- a selected pass whose upstream is not running folds the stamp that upstream **actually recorded**,
+  not the one it would record if it ran. So `--only graph` over stale commercial lines records a
+  graph stamp describing the lines it really read, and the next full build — which reruns the
+  commercial pass and so moves that stamp — reruns the graph with it. Fold the computed stamp
+  instead and the partial build would claim to have been built over output nobody had produced yet,
+  and the full build afterwards would find the graph current and leave it standing on stale bytes
+  for good;
+- `--force` reaches only the selected passes: a stamp set aside for one is not a stamp set aside for
+  all of them. A forced pass recomputes rather than reading back what it cached, so a forced `shade`
+  re-renders every bin and a forced `graph` discards that city's `.build/graph-cache/<city>` entries;
+- a partial build sweeps nothing. The reconcile that takes away output for a city the manifest
+  dropped reaches into directories belonging to passes `--only` may not have selected, so it is left
+  to the next full build.
+
+CI never passes either flag.
+
 ### Where the tile build spends its time
+
+**These are the costs of computing each thing once.** Every one of them is now behind a stamp, so
+what a given build actually pays is whichever of them its inputs moved: a build with nothing changed
+reaches the shade pass in 0.7 s where a cold one took 278 s, a graph assembled wholly out of its
+cache is 0.4 s for both cities against 255 s from scratch, and adding a source only the commercial
+pass reads left the 262 s of caster chunks untouched. Read the figures below as what a first build,
+or an edit to the tiler, has to pay for — not as what a re-run costs.
 
 The pyramid is a few thousand webp tiles across z9–z15, rendered across the rayon pool a tile
 at a time. Two rasterizers dominate, and both lean on a spatial index so a tile touches only the
@@ -1070,22 +1142,26 @@ blank webp:
   CSR-style: a tile scans only the buckets a dot can reach, and a tile with no tree whose disc
   spills into it goes straight to the blank webp. Each tree is a single anti-aliased disc, so this
   pass is cheap next to the polygon fill.
-- **The shadows (the shade pass).** By far the longest pass, because it runs the whole plan once per
-  sun-position bin (58 of them): the buildings' six sun-disk samples measure 17.5 s a bin over a
-  3616-tile plan, and the crowns' single sample adds 6.2 s and ~0.5 GB of peak memory on top. The
-  tree pyramid comes out at ~88% of the building pyramid's bytes and paints about the
-  same fraction of the plan (43.7% against 42.5%), so it roughly doubles what the shade tiles cost
-  the deploy.
+- **The shadows (the shade pass).** A cold one runs the whole plan once per sun-position bin (58 of
+  them), around twenty minutes: 25–31 s a bin over New York's 3616-tile plan for the buildings' six
+  sun-disk samples and the crowns' single one together, plus a one-time 20–23 s to slice every crown
+  — the per-bin figures are measured in DESIGN.md, *Shade* → *Known gaps* → *The stretched crown
+  shadow*, which is where to look rather than here. The tree pyramid comes out at ~88% of the building pyramid's bytes and
+  paints about the same fraction of the plan (43.7% against 42.5%), so it roughly doubles what the
+  shade tiles cost the deploy. It is stamped a bin at a time, so a schedule tweak costs one bin and
+  unmoved footprints cost nothing.
 
-- **The per-edge shade bake (the graph pass).** The same sweep once per sun bin against every edge's
-  polyline rather than against a tile: 58 bins over New York's 629k edges is around 25 minutes, most
-  of that pass and comparable to the pyramid itself. It is cached one bin at a time for that reason,
-  beside the direct-canopy integration next to it, which is 140 s of the same pass.
+- **The graph (pass 8) is the longest pass**, ~28 minutes for New York, and almost all of it is the
+  per-edge shade bake: the same sweep once per sun bin against every edge's polyline rather than
+  against a tile, 58 bins over 628k edges for around 25 minutes. The sequential topology under it —
+  everything through the name compaction — is **16.7 s**, and the direct-canopy integration beside
+  the bake is **139.8 s**. That ratio is why the pass caches a base and a column per attribute, and
+  keys the shade column one bin at a time.
 
-`tiler ingest` is the third heavy pass: it convolves the same canopy indicator at both
-sidewalks of every street and path vertex, and draws a seeded million-point land sample for the
-reported distribution (below). Each pass prints its own tile, painted-tile and byte counts as it
-finishes.
+`tiler ingest` is heavy in the same way, though it is not one of the nine passes: it convolves the
+same canopy indicator at both sidewalks of every street and path vertex, and draws a seeded
+million-point land sample for the reported distribution (below). Each pass prints its own tile,
+painted-tile and byte counts as it finishes.
 
 ## Committing the binaries: `sl` will silently corrupt them
 
@@ -1579,8 +1655,9 @@ by distance and name alone; nothing that reads it is deployed, so v2 is not acce
 FERR above flattens the whole timetable into one crossing-plus-average-wait figure per stop pair,
 because a time-independent cost has nowhere to put anything else, and the graph pass bakes that
 figure into the routing graph. This is the timetable itself, kept out of the graph so it can be
-refreshed without one: a deploy rebuilds `public/routing/<id>.bin` in ~20 minutes and pushes it
-through LFS, which no daily job can do. `scripts/ferry-schedule.ts` writes it,
+refreshed without one. Baking it in would mean rebuilding `public/routing/<id>.bin`, which is the
+graph pass — 28 minutes for New York from cold, and a deploy only reruns it at all when that city's
+graph stamp fails. `scripts/ferry-schedule.ts` writes it,
 `src/routing/ferry-schedule.ts` reads it, and the router falls back to the baked figure whenever it
 is missing.
 
@@ -1856,10 +1933,12 @@ slope, aspect), CC0, enumerated from a STAC collection and cached whole (1.7 GB)
 longitude/latitude field, which is what the pyramid and the graph's relief bake each read rather than
 the mosaic itself. Within one resample every tile is decoded exactly once — the cells are visited
 grouped by tile, and visiting them in grid order instead re-decodes every tile on every row, which
-measured 37,204 decodes of 651 tiles against 616. A build resamples twice, though, once in the
-elevation pass at z14 and once in the graph pass at z15: the two want different grids over different
-bounds and neither field is written down. What the one process buys is the open — `build` indexes
-the 1.77 GB of tiles once and hands the same `Dem` to both passes.
+measured 37,204 decodes of 651 tiles against 616. Two readers want it, though, and neither field is
+written down: the elevation pass at z14 and the graph pass at z15, over different grids and different
+bounds. So a build resamples it twice, once, or not at all — a city's mosaic is opened only for the
+readers that are actually going to run, and the graph's relief column is cached, so a build whose
+terrain and graph are both current opens nothing. What the one process buys is the open: when both
+do run, `build` indexes the 1.77 GB of tiles once and hands the same `Dem` to both.
 
 The tint is hypsometric — greens through tans to browns — stretched over the city's own height range
 rather than an absolute scale, because what the layer is for is showing which of *these* streets are
@@ -2045,7 +2124,7 @@ Two more are recorded and left unbounded, because each is dominated by a shape t
 crossings whose far end has nothing on it (`crossingsToNowhere`, 5,784 — mostly crossing stubs OSM
 drew short), and the degree-2 derived-to-mapped hand-offs that turn past a right angle
 (`seamHairpins`, 113 — about half of them cul-de-sacs wrapping round their own head). The whole pass
-costs ~200 ms of a ~10 s graph build.
+costs ~200 ms, against the 16.7 s of sequential topology it checks.
 
 When the city hands over its ferries (`data/ferries/<id>.bin`, magic `FERR`, referenced by
 convention — not the manifest), a final stage adds the ferry network **after** that walking
@@ -2173,8 +2252,9 @@ averages 0.222 over the edges against cover's 0.257 (0.291 against 0.262 weighte
 and **47.3% of edges have nothing overhead at all** where only 4.9% read zero cover: a sidewalk in
 the gap between two crowns is 0 here and still green there. Its length-weighted 0.291 sits above the
 city's ~22% canopy over land, as it should — street trees are planted in the sidewalk, and the
-walking network runs through the parks. The pass costs ~48 s and ~1.8 GB over NYC's 1.08 M polygons
-and 531,520 edges.
+walking network runs through the parks. The integration costs **139.8 s** and ~1.8 GB over NYC's
+1.08 M polygons and 628k edges, which is why it is a cached column of its own
+(`.build/graph-cache/<city>/canopy-<key>.bin`): nothing but a re-ingested canopy pays for it twice.
 
 A **ferry edge** (kind 4) has no tree cover and no sidewalk half-offset, so bytes 20–21 instead carry
 a little-endian **u16 of crossing-plus-wait seconds** (`rawTimeSeconds`, ≤ ~2200). Its **name id**
@@ -2270,9 +2350,11 @@ the bin's ~867k hulls. The city's `CNPY` layer supplies the crowns; without one,
 carries the 0 unknown-height sentinel, the tree fractions are simply 0 and the router costs buildings
 alone.
 
-The bins run in parallel, one grid alive per thread. NYC's 58 bins over 531,520 edges take ~48 s from
-the buildings alone and ~105 s with the crowns as well, and the artifact is 59 MB either way — twice
-what the single signed row cost, since the tree row ships whether or not a crown covers anything.
+The bins run in parallel, one grid alive per thread. NYC's 58 bins over 628k edges are around **25
+minutes**, almost all of the graph pass, and the artifact is 59 MB — twice what the single signed row
+cost, since the tree row ships whether or not a crown covers anything. Each bin is cached under its
+own key (`.build/graph-cache/<city>/shade-<key>.bin`), keyed on that bin alone, so a schedule that
+gained a bin bakes the one bin.
 
 `bins.json` holds `edgeCount` and the bins — `index`, `season`, `hourAngle`, `elevation`, `azimuth`,
 the same (declination, hourAngle) keys `buckets.json` carries, so the router lands on the bin the
@@ -2297,8 +2379,10 @@ edge has no polyline and reads 0 in both rows — its cost never consults the at
 Every scaffolding permit New York has issued since **2017-12-28**, placed on the GRPH edges it stands
 over. Not baked by `tiler`: `bun run build-sheds` (`scripts/build-sheds.ts`) does the whole pipeline
 and writes these three files; `bun run update-sheds` keeps them current without ever running it
-again. It reads `public/routing/nyc.bin`, so it runs **after** `bun run build-tiles` — which bakes
-that graph and clears `public/routing` on its way, and never touches this directory. All dates are
+again. It reads `public/routing/nyc.bin`, so it runs **after** `bun run build-tiles`, which bakes
+that graph and never touches this directory. Nothing empties `public/routing` any more either: the
+graph pass removes exactly its own per-city pieces when that city's stamp fails, and the driver's
+sweep only takes away names belonging to a city the manifest dropped. All dates are
 **day numbers from 2017-12-28**, which a u16 holds until 2197.
 
 Derived but committed, which nothing else under `public/` is: this is the one artifact rebuilt by a

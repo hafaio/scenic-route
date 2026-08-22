@@ -1045,12 +1045,295 @@ fn stage(number: usize, name: &str, started: &Instant) {
     );
 }
 
-/// What a pass prints instead of running: its stamp matched and its output is still there. Named
-/// for a city on the passes that are stamped one city at a time.
-fn current(city: Option<&str>) {
-    match city {
-        Some(city) => eprintln!("{city}: up to date"),
-        None => eprintln!("up to date"),
+/// One pass, as `--only` names it on the command line, in the order the build runs them.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum PassName {
+    Chunks,
+    Commercial,
+    CasterChunks,
+    Shade,
+    Elevation,
+    Canopy,
+    GenusField,
+    Graph,
+    ChunksStranded,
+}
+
+impl PassName {
+    const ALL: [PassName; STAGES] = [
+        PassName::Chunks,
+        PassName::Commercial,
+        PassName::CasterChunks,
+        PassName::Shade,
+        PassName::Elevation,
+        PassName::Canopy,
+        PassName::GenusField,
+        PassName::Graph,
+        PassName::ChunksStranded,
+    ];
+
+    fn name(self) -> &'static str {
+        match self {
+            PassName::Chunks => "chunks",
+            PassName::Commercial => "commercial",
+            PassName::CasterChunks => "caster-chunks",
+            PassName::Shade => "shade",
+            PassName::Elevation => "elevation",
+            PassName::Canopy => "canopy",
+            PassName::GenusField => "genus-field",
+            PassName::Graph => "graph",
+            PassName::ChunksStranded => "chunks-stranded",
+        }
+    }
+
+    /// Whether the pass is stamped one city at a time, and so can be narrowed to one. The rest are
+    /// cut or rendered over every city at once, so a `chunks:nyc` would name work that does not
+    /// exist.
+    fn per_city(self) -> bool {
+        matches!(
+            self,
+            PassName::Shade | PassName::Elevation | PassName::Graph
+        )
+    }
+}
+
+/// Which cities one `--only` term left in for its pass.
+enum Cities {
+    All,
+    Named(HashSet<String>),
+}
+
+/// Which passes this build may run, and whether it believes their stamps.
+///
+/// `--only` is what supersedes hand-editing the plan to delete a pass's block. It restricts which
+/// passes may run and nothing else: a pass it leaves out does not run, records no stamp and clears
+/// no directory, so whatever claim that pass already held stands — stale if it was stale — and the
+/// next full build reruns it. Deleting a block could not do that. It took the pass's inputs out of
+/// what the build hashed, so the build recorded a stamp saying everything was current over inputs
+/// it had never looked at, and the staleness was then invisible for good. Nothing here writes a
+/// stamp a full build would not have written, which is why this cannot forge freshness the same way.
+pub struct Selection {
+    /// `None` for every pass, which is what a build with no `--only` is.
+    only: Option<HashMap<PassName, Cities>>,
+    force: bool,
+}
+
+impl Selection {
+    /// `--only` as it was typed: pass names, each optionally narrowed to one city as `<pass>:<city>`.
+    /// An empty list is a build of all nine.
+    pub fn new(only: &[String], force: bool) -> Fallible<Selection> {
+        if only.is_empty() {
+            Ok(Selection { only: None, force })
+        } else {
+            let mut passes: HashMap<PassName, Cities> = HashMap::new();
+            for term in only {
+                let (name, city) = match term.split_once(':') {
+                    Some((name, city)) => (name, Some(city)),
+                    None => (term.as_str(), None),
+                };
+                let pass = PassName::ALL
+                    .into_iter()
+                    .find(|pass| pass.name() == name)
+                    .ok_or_else(|| {
+                        let names: Vec<&str> =
+                            PassName::ALL.iter().map(|pass| pass.name()).collect();
+                        format!("--only {term}: no pass is called {name}; they are {names:?}")
+                    })?;
+                match city {
+                    Some(_) if !pass.per_city() => {
+                        return Err(format!(
+                            "--only {term}: the {name} pass is run over every city at once, so it takes no city"
+                        )
+                        .into());
+                    }
+                    Some(city) => match passes
+                        .entry(pass)
+                        .or_insert_with(|| Cities::Named(HashSet::new()))
+                    {
+                        Cities::All => (),
+                        Cities::Named(named) => {
+                            named.insert(city.to_owned());
+                        }
+                    },
+                    None => {
+                        passes.insert(pass, Cities::All);
+                    }
+                }
+            }
+            Ok(Selection {
+                only: Some(passes),
+                force,
+            })
+        }
+    }
+
+    fn partial(&self) -> bool {
+        self.only.is_some()
+    }
+
+    /// Every city a term narrowed a pass to, checked against the manifest: a typo would otherwise
+    /// select no work at all and report the build that did none as a success.
+    fn check(&self, manifest: &Manifest) -> Fallible<()> {
+        let known: HashSet<&str> = manifest
+            .cities
+            .iter()
+            .map(|city| city.id.as_str())
+            .collect();
+        for (pass, cities) in self.only.iter().flatten() {
+            if let Cities::Named(named) = cities {
+                for city in named {
+                    if !known.contains(city.as_str()) {
+                        return Err(format!(
+                            "--only {}:{city}: the manifest has no city called {city}",
+                            pass.name()
+                        )
+                        .into());
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether `--only` left this pass in. Asked without a city of a per-city pass, whether it left
+    /// the pass in for any city at all.
+    fn selected(&self, pass: PassName, city: Option<&str>) -> bool {
+        match &self.only {
+            None => true,
+            Some(only) => match only.get(&pass) {
+                None => false,
+                Some(Cities::All) => true,
+                Some(Cities::Named(named)) => city.is_none_or(|city| named.contains(city)),
+            },
+        }
+    }
+
+    /// Whether this pass is one whose stamp `--force` set aside. Only ever the selected ones: the
+    /// flag is about the passes this build is running, and cannot reach across to the others.
+    fn forces(&self, pass: PassName, city: Option<&str>) -> bool {
+        self.force && self.selected(pass, city)
+    }
+
+    /// Whether a selected pass would run over output whose writer this build is not running. The
+    /// city is the consumer's and the producer's alike, so a graph narrowed to New York is not taken
+    /// for one that is going to write San Francisco's stranded set.
+    fn handoff(&self, consumer: PassName, producer: PassName, city: Option<&str>) -> bool {
+        self.selected(consumer, city) && !self.selected(producer, city)
+    }
+
+    fn verdict(&self, pass: PassName, city: Option<&str>, fresh: bool) -> Verdict {
+        if !self.selected(pass, city) {
+            Verdict::Excluded
+        } else if fresh && !self.force {
+            Verdict::Current
+        } else {
+            Verdict::Run
+        }
+    }
+}
+
+/// What this build does about one pass.
+#[derive(Clone, Copy)]
+enum Verdict {
+    /// `--only` left it out. It does not run, and neither what it wrote last build nor what it would
+    /// have swept away is touched.
+    Excluded,
+    /// Its stamp matched and its output is still there.
+    Current,
+    Run,
+}
+
+impl Verdict {
+    fn runs(self) -> bool {
+        matches!(self, Verdict::Run)
+    }
+
+    /// What a pass prints instead of running. Named for a city on the passes that are stamped one
+    /// city at a time; silent for a pass that is running, which does its own talking.
+    fn announce(self, city: Option<&str>) {
+        let why = match self {
+            Verdict::Excluded => Some("not selected"),
+            Verdict::Current => Some("up to date"),
+            Verdict::Run => None,
+        };
+        if let Some(why) = why {
+            match city {
+                Some(city) => eprintln!("{city}: {why}"),
+                None => eprintln!("{why}"),
+            }
+        }
+    }
+}
+
+/// The stamp a pass downstream of this one has to fold: the one this build will leave behind.
+///
+/// A pass `--only` selected leaves the stamp just computed, since it is going to run if that stamp
+/// does not already hold. A pass it left out leaves whatever it recorded last time — which is the
+/// claim over the output the selected pass is actually about to read — or, if it has recorded
+/// nothing at all, `UNRECORDED`. Folding the computed stamp regardless is the hole this closes: a
+/// partial build would then record a downstream claim saying it had been built over output nobody
+/// has produced yet, and the next full build, having reran the upstream onto exactly that stamp,
+/// would find the downstream current and leave it standing over the stale bytes for good.
+fn upstream(selection: &Selection, name: PassName, pass: &Pass) -> Fallible<String> {
+    if selection.selected(name, None) {
+        Ok(pass.stamp.clone())
+    } else {
+        match fs::read_to_string(&pass.stamp_file) {
+            Ok(recorded) => Ok(recorded.trim().to_owned()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(UNRECORDED.to_owned()),
+            Err(error) => Err(format!("{}: {error}", pass.stamp_file.display()).into()),
+        }
+    }
+}
+
+/// What an upstream pass that has claimed nothing enters a downstream stamp as. Not a stamp any pass
+/// could compute — those are 64 hex digits — so a downstream keyed on it is rerun by the first build
+/// that records a real one.
+const UNRECORDED: &str = "unrecorded";
+
+/// What a pass `--only` selected needs an earlier pass to have written, checked before the first of
+/// them runs rather than when the read fails.
+///
+/// A partial build deliberately runs over output that is STALE — that is what it is for — but never
+/// over output that is not there at all. The graph would otherwise be baked from commercial lines
+/// nobody has written, carry no commercial discount, and then record a stamp saying it had one.
+fn handoffs(plan: &Plan, cities: &[(&City, &PlanCity)], selection: &Selection) -> Fallible<()> {
+    let mut wanted: Vec<(PassName, PassName, PathBuf)> = Vec::new();
+    if selection.handoff(PassName::Commercial, PassName::Chunks, None) {
+        wanted.push((PassName::Commercial, PassName::Chunks, plan.chunks.clone()));
+    }
+    if selection.handoff(PassName::ChunksStranded, PassName::Chunks, None) {
+        wanted.push((
+            PassName::ChunksStranded,
+            PassName::Chunks,
+            plan.chunks.clone(),
+        ));
+    }
+    if selection.handoff(PassName::Graph, PassName::Commercial, None) {
+        wanted.push((
+            PassName::Graph,
+            PassName::Commercial,
+            plan.commercial_lines.clone(),
+        ));
+    }
+    for (city, _) in cities {
+        if selection.handoff(PassName::ChunksStranded, PassName::Graph, Some(&city.id)) {
+            wanted.push((
+                PassName::ChunksStranded,
+                PassName::Graph,
+                plan.routing.join(format!("{}.stranded.bin", city.id)),
+            ));
+        }
+    }
+    match wanted.into_iter().find(|(_, _, path)| !path.exists()) {
+        Some((consumer, producer, path)) => Err(format!(
+            "the {} pass reads {}, which is not there; run --only {} first",
+            consumer.name(),
+            path.display(),
+            producer.name()
+        )
+        .into()),
+        None => Ok(()),
     }
 }
 
@@ -1058,7 +1341,7 @@ fn current(city: Option<&str>) {
 /// Every pass parallelises through the global pool and none builds one of its own, so sizing it here
 /// — before the first parallel iterator, which would otherwise build the default pool and leave
 /// `build_global` with nothing left to size — sizes the whole build.
-pub fn run(plan_file: &Path, jobs: Option<usize>) -> Fallible<()> {
+pub fn run(plan_file: &Path, jobs: Option<usize>, selection: &Selection) -> Fallible<()> {
     let started = Instant::now();
     if let Some(threads) = jobs {
         rayon::ThreadPoolBuilder::new()
@@ -1074,7 +1357,14 @@ pub fn run(plan_file: &Path, jobs: Option<usize>) -> Fallible<()> {
     let manifest: Manifest = serde_json::from_slice(&fs::read(&plan.manifest)?)?;
     let cities = plan.pair(&manifest)?;
     plan.check_ramp()?;
-    plan.reconcile(&manifest)?;
+    selection.check(&manifest)?;
+    handoffs(&plan, &cities, selection)?;
+    // A partial build sweeps nothing. What the reconcile takes away is output for a city the
+    // manifest dropped, and every directory it reaches for belongs to some pass — which `--only` may
+    // not have selected, and which owns the lifecycle of its own output.
+    if !selection.partial() {
+        plan.reconcile(&manifest)?;
+    }
 
     // The caster chunks are geometry on a shared x/y grid and carry no sun position, so they are cut
     // once over every city; any city's grid carries the halo the client gathers them over.
@@ -1099,8 +1389,11 @@ pub fn run(plan_file: &Path, jobs: Option<usize>) -> Fallible<()> {
     // decision cannot wait until pass five.
     let mut stamps = Stamps::new(&plan)?;
     let chunk_pass = Pass::whole(stamps.chunks(&cities)?, &plan.chunks);
+    // The two handovers between passes enter the downstream stamp as what THIS build will leave, so
+    // a partial build never claims to have been built over output it has not produced.
+    let chunks_upstream = upstream(selection, PassName::Chunks, &chunk_pass)?;
     let commercial_pass = Pass {
-        stamp: stamps.commercial(&cities, &chunk_pass.stamp)?,
+        stamp: stamps.commercial(&cities, &chunks_upstream)?,
         stamp_file: plan.commercial_signals.join(STAMP),
         // That pass empties both of its own directories, since it is the one that knows a city with
         // no served chunk writes no file at all.
@@ -1148,11 +1441,12 @@ pub fn run(plan_file: &Path, jobs: Option<usize>) -> Fallible<()> {
     let genus_pass = Pass::whole(stamps.genus_field(&cities)?, &plan.genus_field_tiles);
     // The graph's keys before its stamp, because the stamp IS its keys: the base's, and one per
     // attribute column over it. What the pass rebuilds when it reruns is decided by the same set.
+    let commercial_upstream = upstream(selection, PassName::Commercial, &commercial_pass)?;
     let graph_keys: Vec<graph_cache::Keys> = cities
         .iter()
         .zip(&baked)
         .map(|((city, planned), bake)| {
-            stamps.graph_keys(city, planned, &commercial_pass.stamp, bake.is_some())
+            stamps.graph_keys(city, planned, &commercial_upstream, bake.is_some())
         })
         .collect::<Fallible<Vec<graph_cache::Keys>>>()?;
     let graph_passes: Vec<Pass> = cities
@@ -1189,10 +1483,23 @@ pub fn run(plan_file: &Path, jobs: Option<usize>) -> Fallible<()> {
         // A stale graph that already holds its relief column reads no DEM: the bake is what wants
         // the pixels, and its column is keyed on the mosaic's identity.
         let keys = &graph_keys[index];
-        let graph_reads_dem = !graph_passes[index].is_fresh()
-            && !graph_cache::holds(&keys.dir, graph_cache::RELIEF, &keys.relief);
+        let city = cities[index].0.id.as_str();
+        // A forced graph recomputes the columns it would otherwise have read back, the relief among
+        // them, so it opens the mosaic a cached one leaves alone.
+        let graph_reads_dem = selection
+            .verdict(PassName::Graph, Some(city), graph_passes[index].is_fresh())
+            .runs()
+            && (selection.forces(PassName::Graph, Some(city))
+                || !graph_cache::holds(&keys.dir, graph_cache::RELIEF, &keys.relief));
+        let terrain_runs = selection
+            .verdict(
+                PassName::Elevation,
+                Some(city),
+                elevation_passes[index].is_fresh(),
+            )
+            .runs();
         if let Some(elevation) = &planned.elevation
-            && (!elevation_passes[index].is_fresh() || graph_reads_dem)
+            && (terrain_runs || graph_reads_dem)
         {
             let dem = Dem::open(
                 &elevation.tiles,
@@ -1212,23 +1519,26 @@ pub fn run(plan_file: &Path, jobs: Option<usize>) -> Fallible<()> {
     stage(1, "chunks", &started);
     // Nothing of the first pass's answer but the directory it filled, which the commercial pass
     // reads back file by file — so a skipped pass 1 hands over the same value a run of it would.
-    let chunk_files = if chunk_pass.is_fresh() {
-        current(None);
-        chunks::Chunks {
-            dir: plan.chunks.clone(),
-        }
-    } else {
+    let chunks_verdict = selection.verdict(PassName::Chunks, None, chunk_pass.is_fresh());
+    let chunk_files = if chunks_verdict.runs() {
         chunk_pass.restart()?;
         let cut = chunks::run(&chunk_args, &chunks::Stranded::default())?;
         chunk_pass.record()?;
         cut
+    } else {
+        chunks_verdict.announce(None);
+        chunks::Chunks {
+            dir: plan.chunks.clone(),
+        }
     };
 
     // The commercial overlay's per-segment signals are snapped onto the chunks just written and
     // keyed on their segment index, which is why this takes the chunks themselves.
     stage(2, "commercial", &started);
-    let lines = if commercial_pass.is_fresh() {
-        current(None);
+    let commercial_verdict =
+        selection.verdict(PassName::Commercial, None, commercial_pass.is_fresh());
+    let lines = if !commercial_verdict.runs() {
+        commercial_verdict.announce(None);
         commercial::Lines::written(&plan.commercial_lines, &manifest)
     } else {
         commercial_pass.restart()?;
@@ -1246,11 +1556,10 @@ pub fn run(plan_file: &Path, jobs: Option<usize>) -> Fallible<()> {
     };
 
     stage(3, "caster-chunks", &started);
+    let casters_verdict = selection.verdict(PassName::CasterChunks, None, caster_pass.is_fresh());
     match sun {
         Some(params) if any_casters => {
-            if caster_pass.is_fresh() {
-                current(None);
-            } else {
+            if casters_verdict.runs() {
                 caster_pass.restart()?;
                 caster_chunks::run(&caster_chunks::Args {
                     manifest: plan.manifest.clone(),
@@ -1259,8 +1568,11 @@ pub fn run(plan_file: &Path, jobs: Option<usize>) -> Fallible<()> {
                     params: params.clone(),
                 })?;
                 caster_pass.record()?;
+            } else {
+                casters_verdict.announce(None);
             }
         }
+        _ if !selection.selected(PassName::CasterChunks, None) => casters_verdict.announce(None),
         _ => {
             caster_pass.clear()?;
             eprintln!("no sun grid or nothing to cast a shadow; no caster chunks");
@@ -1272,8 +1584,14 @@ pub fn run(plan_file: &Path, jobs: Option<usize>) -> Fallible<()> {
     stage(4, "shade", &started);
     for ((city, planned), pyramid) in cities.iter().zip(&shade_pyramids) {
         let footprints = planned.source(&plan.data, Source::Buildings).is_some();
+        let selected = selection.selected(PassName::Shade, Some(&city.id));
         match &planned.shade {
-            Some(params) if footprints => {
+            Some(params) if footprints && selected => {
+                // A forced pyramid comes down before it is reconciled, so every key the schedule
+                // wants is one nothing on disk claims and every bin is rendered again.
+                if selection.forces(PassName::Shade, Some(&city.id)) {
+                    pyramid.clear()?;
+                }
                 let render = pyramid.reconcile()?;
                 // Written before a tile is rendered rather than after: the reconcile has already
                 // moved the kept buckets into their new indices, and a schedule naming the old ones
@@ -1281,7 +1599,7 @@ pub fn run(plan_file: &Path, jobs: Option<usize>) -> Fallible<()> {
                 // yet is a directory of 404s, which it reads as no shade at all.
                 shade::write_schedule(&pyramid.buildings, params)?;
                 if render.is_empty() {
-                    current(Some(&city.id));
+                    Verdict::Current.announce(Some(&city.id));
                 } else {
                     eprintln!(
                         "{}: {} of {} buckets to render",
@@ -1299,16 +1617,20 @@ pub fn run(plan_file: &Path, jobs: Option<usize>) -> Fallible<()> {
                     })?;
                 }
             }
+            _ if !selected => Verdict::Excluded.announce(Some(&city.id)),
             _ => pyramid.clear()?,
         }
     }
 
     stage(5, "elevation", &started);
     for ((city, planned), pass) in cities.iter().zip(&elevation_passes) {
-        if planned.elevation.is_none() {
+        let verdict = selection.verdict(PassName::Elevation, Some(&city.id), pass.is_fresh());
+        if !selection.selected(PassName::Elevation, Some(&city.id)) {
+            verdict.announce(Some(&city.id));
+        } else if planned.elevation.is_none() {
             pass.clear()?;
-        } else if pass.is_fresh() {
-            current(Some(&city.id));
+        } else if !verdict.runs() {
+            verdict.announce(Some(&city.id));
         } else {
             let dem = dems
                 .get_mut(city.id.as_str())
@@ -1332,13 +1654,16 @@ pub fn run(plan_file: &Path, jobs: Option<usize>) -> Fallible<()> {
     // Both pyramid passes render every manifest city that carries the layer, so each runs once when
     // any city does.
     stage(6, "canopy", &started);
-    if manifest
+    let canopy_verdict = selection.verdict(PassName::Canopy, None, canopy_pass.is_fresh());
+    if !selection.selected(PassName::Canopy, None) {
+        canopy_verdict.announce(None);
+    } else if manifest
         .cities
         .iter()
         .any(|city| city.field.canopy.is_some())
     {
-        if canopy_pass.is_fresh() {
-            current(None);
+        if !canopy_verdict.runs() {
+            canopy_verdict.announce(None);
         } else {
             canopy_pass.restart()?;
             canopy::run(&canopy::Args {
@@ -1354,13 +1679,16 @@ pub fn run(plan_file: &Path, jobs: Option<usize>) -> Fallible<()> {
     }
 
     stage(7, "genus-field", &started);
-    if manifest
+    let genus_verdict = selection.verdict(PassName::GenusField, None, genus_pass.is_fresh());
+    if !selection.selected(PassName::GenusField, None) {
+        genus_verdict.announce(None);
+    } else if manifest
         .cities
         .iter()
         .any(|city| city.field.genus.is_some())
     {
-        if genus_pass.is_fresh() {
-            current(None);
+        if !genus_verdict.runs() {
+            genus_verdict.announce(None);
         } else {
             genus_pass.restart()?;
             genus_field::run(&genus_field::Args {
@@ -1379,12 +1707,23 @@ pub fn run(plan_file: &Path, jobs: Option<usize>) -> Fallible<()> {
     for (index, (city, planned)) in cities.iter().enumerate() {
         let pass = &graph_passes[index];
         let stranded_file = plan.routing.join(format!("{}.stranded.bin", city.id));
-        if pass.is_fresh() {
-            current(Some(&city.id));
+        let verdict = selection.verdict(PassName::Graph, Some(&city.id), pass.is_fresh());
+        if !verdict.runs() {
+            verdict.announce(Some(&city.id));
             // The re-chunk below wants this city's stranded ways whether or not the graph that
-            // computed them ran, and the artifact beside the graph is where they were written.
-            stranded.insert(&city.id, graph::read_stranded(&stranded_file)?);
+            // computed them ran, and the artifact beside the graph is where they were written. Read
+            // only when that pass is going to run: `--only graph:nyc` has no business opening San
+            // Francisco's.
+            if selection.selected(PassName::ChunksStranded, None) {
+                stranded.insert(&city.id, graph::read_stranded(&stranded_file)?);
+            }
             continue;
+        }
+        // A forced graph recomputes what it cached rather than reading it back, so the entries go
+        // the way the stamp does. Only this city's: the cache directory is per city, and a pass
+        // narrowed to one has no business in another's.
+        if selection.forces(PassName::Graph, Some(&city.id)) {
+            discard(&graph_keys[index].dir)?;
         }
         let (buildings, shade_params, shade_dir) = match &baked[index] {
             Some(dir) => (
@@ -1447,15 +1786,19 @@ pub fn run(plan_file: &Path, jobs: Option<usize>) -> Fallible<()> {
     // It rewrites what pass 1 wrote, in place, so it clears nothing: its stamp sits beside that
     // pass's own inside the same directory.
     let stranded_pass = Pass {
-        stamp: stamps.stranded_chunks(&cities, &chunk_pass.stamp, &stranded)?,
+        stamp: stamps.stranded_chunks(&cities, &chunks_upstream, &stranded)?,
         stamp_file: plan.chunks.join(".stamp-stranded"),
         root: None,
         pieces: Vec::new(),
         witnesses: vec![plan.chunks.clone()],
     };
-    if manifest.cities.iter().any(|city| city.paths.is_some()) {
-        if stranded_pass.is_fresh() {
-            current(None);
+    let stranded_verdict =
+        selection.verdict(PassName::ChunksStranded, None, stranded_pass.is_fresh());
+    if !selection.selected(PassName::ChunksStranded, None) {
+        stranded_verdict.announce(None);
+    } else if manifest.cities.iter().any(|city| city.paths.is_some()) {
+        if !stranded_verdict.runs() {
+            stranded_verdict.announce(None);
         } else {
             chunks::run(&chunk_args, &stranded)?;
             stranded_pass.record()?;
@@ -1950,6 +2293,232 @@ mod tests {
         assert!(!plan.routing.join("shade").join("boston").exists());
         assert!(plan.graph_cache.join("nyc").is_dir());
         assert!(!plan.graph_cache.join("boston").exists(), "its cache too");
+    }
+
+    /// `--only` as the command line hands it over.
+    fn only(terms: &[&str]) -> Selection {
+        let terms: Vec<String> = terms.iter().map(|term| (*term).to_owned()).collect();
+        Selection::new(&terms, false).expect("a selection")
+    }
+
+    #[test]
+    fn a_pass_only_named_runs_and_one_it_left_out_does_not() {
+        let selection = only(&["graph", "shade"]);
+
+        assert!(
+            selection
+                .verdict(PassName::Graph, Some("nyc"), false)
+                .runs()
+        );
+        assert!(selection.verdict(PassName::Shade, Some("sf"), false).runs());
+        assert!(matches!(
+            selection.verdict(PassName::Canopy, None, false),
+            Verdict::Excluded
+        ));
+    }
+
+    /// A term narrowed to a city selects that city's share of the pass and no other's.
+    #[test]
+    fn a_pass_narrowed_to_a_city_leaves_the_other_cities_out() {
+        let selection = only(&["graph:nyc"]);
+
+        assert!(
+            selection
+                .verdict(PassName::Graph, Some("nyc"), false)
+                .runs()
+        );
+        assert!(matches!(
+            selection.verdict(PassName::Graph, Some("sf"), false),
+            Verdict::Excluded
+        ));
+    }
+
+    /// The whole-build passes are cut or rendered over every city at once, so a city named for one
+    /// would name work that does not exist.
+    #[test]
+    fn a_city_on_a_pass_that_has_no_cities_is_rejected() {
+        let error = Selection::new(&["chunks:nyc".to_owned()], false)
+            .err()
+            .expect("a pass with no cities to narrow to");
+
+        assert!(error.to_string().contains("every city"), "{error}");
+    }
+
+    #[test]
+    fn a_pass_name_no_stage_answers_to_is_rejected() {
+        let error = Selection::new(&["pyramid".to_owned()], false)
+            .err()
+            .expect("a name no pass answers to");
+
+        assert!(error.to_string().contains("pyramid"), "{error}");
+    }
+
+    /// A misspelled city would otherwise select no work at all and report the build that did none
+    /// as a success.
+    #[test]
+    fn a_city_the_manifest_does_not_carry_is_rejected() {
+        let error = only(&["graph:bosotn"])
+            .check(&manifest())
+            .err()
+            .expect("a city the manifest has never heard of");
+
+        assert!(error.to_string().contains("bosotn"), "{error}");
+    }
+
+    /// The property that makes `--only` safe where a hand-edited plan was not: a pass it left out is
+    /// not run, records nothing, and clears nothing — so the claim it already held stands, stale, and
+    /// the next full build reruns it.
+    #[test]
+    fn a_pass_left_out_keeps_its_stale_stamp_for_the_next_full_build() {
+        let root = scratch("only-untouched");
+        let last = Pass::whole("what the last build read".to_owned(), &root.join("casters"));
+        last.restart().expect("a directory");
+        fs::write(last.stamp_file.with_file_name("chunk.bin"), b"last build").expect("a chunk");
+        last.record().expect("a stamp");
+        // The same pass this build, over an input that moved.
+        let now = Pass::whole("what this one reads".to_owned(), &root.join("casters"));
+        assert!(!now.is_fresh(), "its inputs moved");
+
+        let partial = only(&["graph"]);
+        assert!(matches!(
+            partial.verdict(PassName::CasterChunks, None, now.is_fresh()),
+            Verdict::Excluded
+        ));
+
+        assert_eq!(
+            fs::read_to_string(&now.stamp_file).expect("the stamp"),
+            "what the last build read",
+            "nothing of this build was recorded for it"
+        );
+        assert!(root.join("casters").join("chunk.bin").is_file());
+        assert!(
+            only(&[])
+                .verdict(PassName::CasterChunks, None, now.is_fresh())
+                .runs(),
+            "and the next full build catches it"
+        );
+    }
+
+    #[test]
+    fn force_reruns_a_selected_pass_whose_stamp_holds() {
+        let forced = Selection::new(&["shade".to_owned()], true).expect("a selection");
+
+        assert!(forced.verdict(PassName::Shade, Some("nyc"), true).runs());
+        assert!(forced.forces(PassName::Shade, Some("nyc")));
+    }
+
+    /// `--force` is about the passes this build is running and cannot reach across to the others: a
+    /// stamp it set aside for one pass is not a stamp set aside for all of them.
+    #[test]
+    fn force_does_not_reach_a_pass_only_left_out() {
+        let forced = Selection::new(&["shade".to_owned()], true).expect("a selection");
+
+        assert!(matches!(
+            forced.verdict(PassName::Graph, Some("nyc"), true),
+            Verdict::Excluded
+        ));
+        assert!(!forced.forces(PassName::Graph, Some("nyc")));
+    }
+
+    /// A selected pass runs over output that is STALE — that is what `--only` is for — but not over
+    /// output that is not there at all: a graph baked from commercial lines nobody has written would
+    /// carry no commercial discount and then stamp itself as though it had.
+    #[test]
+    fn a_selected_pass_whose_upstream_output_is_missing_says_which_pass_to_run_first() {
+        let plan = planted("handoff-graph");
+        let manifest = manifest();
+        let cities = plan.pair(&manifest).expect("a pairing");
+        let partial = only(&["graph"]);
+
+        let error = handoffs(&plan, &cities, &partial)
+            .err()
+            .expect("lines no pass has written");
+        assert!(error.to_string().contains("commercial"), "{error}");
+
+        fs::create_dir_all(&plan.commercial_lines).expect("the lines");
+        handoffs(&plan, &cities, &partial).expect("lines that are there, however old");
+    }
+
+    #[test]
+    fn the_re_chunk_will_not_run_over_a_stranded_set_no_graph_has_written() {
+        let plan = planted("handoff-stranded");
+        let manifest = manifest();
+        let cities = plan.pair(&manifest).expect("a pairing");
+        let partial = only(&["chunks-stranded"]);
+        fs::create_dir_all(&plan.chunks).expect("the chunks");
+
+        let error = handoffs(&plan, &cities, &partial)
+            .err()
+            .expect("a stranded set no graph has written");
+
+        assert!(error.to_string().contains("nyc.stranded.bin"), "{error}");
+        assert!(error.to_string().contains("--only graph"), "{error}");
+    }
+
+    /// A partial build never claims to have been built over output nobody has produced: a pass keyed
+    /// on an upstream stamp this build is not going to write folds the one recorded on disk, so the
+    /// full build that later reruns that upstream reruns this pass with it.
+    #[test]
+    fn a_selected_pass_folds_the_upstream_stamp_that_is_actually_on_disk() {
+        let root = scratch("upstream");
+        let chunks = Pass::whole("what the chunks will be".to_owned(), &root.join("streets"));
+        chunks.restart().expect("a directory");
+        fs::write(&chunks.stamp_file, "what the chunks are").expect("a stamp");
+
+        assert_eq!(
+            upstream(&only(&["commercial"]), PassName::Chunks, &chunks).expect("a stamp"),
+            "what the chunks are",
+            "the claim over the chunks the commercial pass is about to read"
+        );
+        assert_eq!(
+            upstream(&only(&["chunks", "commercial"]), PassName::Chunks, &chunks).expect("a stamp"),
+            "what the chunks will be",
+            "a pass this build is running leaves the stamp it just computed"
+        );
+        assert_eq!(
+            upstream(&only(&[]), PassName::Chunks, &chunks).expect("a stamp"),
+            "what the chunks will be",
+            "and so does every pass of a full build"
+        );
+
+        fs::remove_file(&chunks.stamp_file).expect("a removal");
+        assert_eq!(
+            upstream(&only(&["commercial"]), PassName::Chunks, &chunks).expect("a stamp"),
+            UNRECORDED
+        );
+    }
+
+    /// A pass narrowed to one city writes only that city's share, so it does not stand in for the
+    /// cities it left out.
+    #[test]
+    fn a_graph_narrowed_to_one_city_does_not_answer_for_the_others() {
+        let plan = planted("handoff-narrowed");
+        let manifest = manifest();
+        let cities = plan.pair(&manifest).expect("a pairing");
+        fs::create_dir_all(&plan.chunks).expect("the chunks");
+        // The graph reads these too, and that handoff is checked first, so without them the error
+        // would be about the commercial lines rather than the city this test is narrowing to.
+        fs::create_dir_all(&plan.commercial_lines).expect("the commercial lines");
+        fs::create_dir_all(&plan.routing).expect("the routing directory");
+        fs::write(plan.routing.join("nyc.stranded.bin"), b"a stranded set")
+            .expect("new york's stranded set");
+
+        let error = handoffs(&plan, &cities, &only(&["chunks-stranded", "graph:nyc"]))
+            .err()
+            .expect("san francisco's stranded set");
+
+        assert!(error.to_string().contains("sf.stranded.bin"), "{error}");
+    }
+
+    /// A full build asks nothing of the disk up front: every pass it consumes is a pass it is also
+    /// running, and one that has nothing to read simply reruns.
+    #[test]
+    fn a_full_build_needs_no_handoff() {
+        let plan = planted("handoff-full");
+        let manifest = manifest();
+        let cities = plan.pair(&manifest).expect("a pairing");
+
+        handoffs(&plan, &cities, &only(&[])).expect("nothing to ask for");
     }
 
     /// A pyramid over a scratch tree, wanting the buckets these keys stand for.
@@ -2496,6 +3065,43 @@ mod tests {
         claimed.sort();
 
         assert_eq!(found, claimed);
+    }
+
+    /// SHADE_CODE has to be CLOSED under what those modules import, not merely a list someone
+    /// believed was closed. It is the one scope narrower than the whole crate, so a module that
+    /// slipped into it unnamed — `crown.rs` reaching for the DEM to sample terrain under a canopy,
+    /// say — would be a module the pyramid is a function of and its stamp cannot see, and the
+    /// pyramid would stand stale with nothing to catch it.
+    #[test]
+    fn the_shade_scope_is_closed_under_its_own_imports() {
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut reached: Vec<String> = vec![SHADE_CODE[0].to_owned()];
+        let mut pending = vec![SHADE_CODE[0].to_owned()];
+        while let Some(module) = pending.pop() {
+            let body = fs::read_to_string(src.join(&module)).expect("a module of the crate");
+            for line in body.lines() {
+                let Some(rest) = line.trim().strip_prefix("use crate::") else {
+                    continue;
+                };
+                let imported = rest
+                    .trim_start_matches("{")
+                    .split(|character: char| !character.is_alphanumeric() && character != '_')
+                    .find(|name| !name.is_empty())
+                    .unwrap_or_default();
+                let file = format!("{imported}.rs");
+                // `use crate::Fallible` and friends name an item of lib.rs, not a module of its own.
+                if !src.join(&file).is_file() || reached.contains(&file) {
+                    continue;
+                }
+                reached.push(file.clone());
+                pending.push(file);
+            }
+        }
+        reached.sort();
+        let mut declared: Vec<String> = SHADE_CODE.iter().map(|m| (*m).to_owned()).collect();
+        declared.sort();
+
+        assert_eq!(reached, declared);
     }
 
     /// The second chunks pass is stamped on what the graph STRANDED rather than on the graph's own

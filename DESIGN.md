@@ -249,9 +249,14 @@ see `t > 1`. τ is still applied once to the finished crown layer, so the pyrami
   - The adaptive slice count is a divisor of 4 — 1, 2 or 4, not the design's `clamp(⌈smearPx/2⌉,1,4)`.
     The slices ship at fixed inset levels, so taking every stride-th of them is the only way both
     halves can cut the same rings; 3 has no stride.
-  - **The pyramid and SHDB must ship from the same build.** Both read crown geometry through
-    `crown.rs`, so a pyramid baked before this change and a SHDB baked after would disagree about
-    sunset tree shade — the overlay would show a smear the router does not cost. The routing delta
+  - **The pyramid and SHDB must be stamped on `crown.rs`.** Both read crown geometry through it, so a
+    pyramid baked before this change and a SHDB baked after would disagree about sunset tree shade —
+    the overlay would show a smear the router does not cost. They no longer ship from the same run —
+    every pass is independently fresh now, and a deploy routinely serves a pyramid an earlier build
+    rendered beside a shade column this one baked — so what holds the two together is that
+    `crown.rs` is inside both stamps: the shade pass names it in its six-module scope, and the
+    graph's per-bin shade keys fold the whole-crate code epoch, which contains it. Editing it moves
+    both. The routing delta
     itself is unmeasured: `|attr| < 1` still holds by construction (`attr = intensity·(1−2·shaded)`
     with `intensity = sin(elevation) < 1`), and tree fractions can only grow, but the per-bin
     distribution of edges whose tree fraction moves by more than 10/255 has not been computed.
