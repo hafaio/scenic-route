@@ -948,6 +948,7 @@ fn pavement_within(
 /// the original STRT id here and is remapped to the compact table at write time. `source_id` is the
 /// contracted street or path edge this was derived from, `NO_SOURCE_ID` for the derived kinds.
 #[derive(Clone)]
+#[cfg_attr(test, derive(PartialEq, Debug))]
 struct V2Edge {
     a: u32,
     b: u32,
@@ -1795,6 +1796,7 @@ pub fn read_stranded(path: &std::path::Path) -> Fallible<Vec<u32>> {
 /// This is the thing every attribute column is a byte per edge OF, and the reason a column can be
 /// merged back in by position: a column entry's key folds this base's, so a base that moved cannot
 /// be handed one baked over another.
+#[cfg_attr(test, derive(PartialEq, Debug))]
 struct Base {
     origin_lng: f64,
     origin_lat: f64,
@@ -5462,5 +5464,69 @@ mod tests {
             cut_fixture(&[(-200, 4), (200, 4)], false, true),
             (0, vec![])
         );
+    }
+
+    /// `encode`/`decode` is the one path where cached bytes could assemble a WRONG graph rather than
+    /// failing to assemble one: `Reader::finish` catches a length that drifted, but two same-typed
+    /// fields written in one order and read back in the other cost no bytes at all. So every field
+    /// below holds a value no field it could be confused with holds.
+    #[test]
+    fn a_base_survives_the_encoding_its_cache_entry_is() {
+        let edges = vec![
+            V2Edge {
+                a: 0,
+                b: 1,
+                length: 41.5,
+                geom: 5,
+                cover: 3,
+                half_offset: 4,
+                name_id: 2,
+                kind: 6,
+                side: 7,
+                flags: 9,
+                source_id: 88,
+            },
+            V2Edge {
+                a: 2,
+                b: 1,
+                length: 12.25,
+                geom: 13,
+                cover: 15,
+                half_offset: 16,
+                name_id: 14,
+                kind: 17,
+                side: 18,
+                flags: 19,
+                source_id: 99,
+            },
+        ];
+        let (csr, adjacency) = adjacency_of(3, &edges);
+        let base = Base {
+            origin_lng: -73.5,
+            origin_lat: 40.25,
+            scale: 0.000_012_5,
+            node_lng: vec![11, 12, 13],
+            node_lat: vec![21, 22, 23],
+            node_component: vec![31, 32, 33],
+            component_count: 7,
+            edges,
+            ordinals: vec![10, 20],
+            key_hash: 0xfeed_face_dead_beef,
+            geometry_polys: vec![(vec![1, 2], vec![3, 4]), (vec![5], vec![6])],
+            names: vec![
+                String::new(),
+                "Main Street".to_owned(),
+                "Broadway".to_owned(),
+            ],
+            ferry_side_table: vec![(7, 2, 3)],
+            stranded_ways: vec![41, 42],
+            stats: serde_json::json!({"edges": 2, "nodes": 3}),
+            csr,
+            adjacency,
+        };
+
+        let decoded = Base::decode(&base.encode().expect("the bytes")).expect("a base");
+
+        assert_eq!(decoded, base);
     }
 }

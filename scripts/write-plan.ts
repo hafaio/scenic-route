@@ -139,13 +139,14 @@ async function fileExists(path: string): Promise<boolean> {
   }
 }
 
-// The tiler crate file by file: repo-relative path -> the sha256 of its bytes. The tiler folds the
-// whole map into every pass's stamp bar one, so an edit to the kernel invalidates the pyramid the
-// old one rendered — including an output whose FORMAT changed, which no input file would have moved.
-// Content, NOT mtime: a fresh checkout (CI) rewrites mtimes without changing a byte, which would
-// otherwise force a needless twenty-minute render and leave CI's cache of the tiles unusable. The
-// path is repo-relative and the map is keyed on it, so the hashes are the same on a laptop and on a
-// CI runner.
+// The tiler crate file by file: repo-relative path -> the sha256 of its bytes — which the tiler
+// replaces with a hash of the token stream for every .rs file, so that a comment moves nothing. It
+// folds the whole map into every pass's stamp bar one, so an edit to the kernel invalidates the
+// pyramid the old one rendered — including an output whose FORMAT changed, which no input file
+// would have moved. Content, NOT mtime: a fresh checkout (CI) rewrites mtimes without changing a
+// byte, which would otherwise force a needless twenty-minute render and leave CI's cache of the
+// tiles unusable. The path is repo-relative and the map is keyed on it, so the hashes are the same
+// on a laptop and on a CI runner.
 //
 // A MAP rather than the one digest this used to be, because the shade pass names the modules it is
 // a function of — the pyramid is most of the build, and an edit to the graph is no reason to render
