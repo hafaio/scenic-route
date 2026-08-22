@@ -61,8 +61,8 @@ jobs:
       # The LFS objects for data/**, 168 MB, restored rather than downloaded. An LFS pointer's text
       # carries the object's own sha256, and the checkout above leaves the pointers in place, so
       # hashing them here keys this on the content itself. `git lfs pull` then smudges the working
-      # tree, fetching only what the cache missed. It runs after check-shed-inputs, which wants the
-      # pointer text, and before the tile cache, whose key has always hashed the real bytes.
+      # tree, fetching only what the cache missed. It runs after check-shed-inputs, which reads the
+      # pointer text and needs it left alone.
       - if: inputs.upload-pages
         uses: actions/cache@v6
         with:
@@ -86,14 +86,18 @@ jobs:
           key: ${{ runner.os }}-nextjs-${{ hashFiles('bun.lock') }}-${{ hashFiles('**.[jt]s', '**.[jt]sx') }}
           restore-keys: |
             ${{ runner.os }}-nextjs-${{ hashFiles('bun.lock') }}-
-      # The derived tiles/graph (public/**), keyed on the tiler's inputs. On a hit, `tiler build`'s
-      # content-hash freshness check recognizes them as current and skips the ~20-min render; on a miss
-      # (any data/tiler/script change) it rebuilds and this saves the new set. The freshness check is the
-      # correctness net, so the key only needs to be a good hit heuristic, not exhaustive.
+      # The derived tiles/graph (public/**). The key is deliberately unique per run with a bare prefix
+      # to fall back on, so a deploy always restores the NEWEST previous set rather than only an
+      # exactly-matching one — the old exact-hash key could only hit when every tiler input was
+      # byte-identical, which is precisely when there was nothing to build, so it never helped a real
+      # deploy. Correctness does not live in the key at all: each pass's stamp inside the restored
+      # tree decides what is still current and what re-renders, so a stale restore costs a rebuild of
+      # the passes that moved and nothing else.
       - if: inputs.upload-pages
-        uses: actions/cache@v6
+        uses: actions/cache/restore@v6
+        id: tiles
         with:
-          path: |
+          path: &tiles |
             public/tiles
             public/casters
             public/routing
@@ -108,9 +112,19 @@ jobs:
             public/dining
             public/openstreets
             public/landuse
-          key: tiles-${{ hashFiles('data/**', 'crates/tiler/**', 'scripts/*.ts', 'src/tree-cover/manifest.json', 'src/tree-cover/ramp.ts', 'src/tree-cover/genus.ts', 'src/shade/sun.ts', 'Cargo.toml', 'Cargo.lock') }}
+          key: tiles-${{ github.run_id }}
+          restore-keys: |
+            tiles-
       - if: inputs.upload-pages
         run: bun export
+      # Saved right after the render rather than at the end of the job, and on failure too: the
+      # pyramid is the expensive thing here, and a deploy that dies in `next build` or in one of the
+      # checks below should still bank the passes that finished.
+      - if: inputs.upload-pages && always()
+        uses: actions/cache/save@v6
+        with:
+          path: *tiles
+          key: tiles-${{ github.run_id }}
       # The committed shed artifact names the graph it was placed against and the client resolves
       # nothing against any other one, so a deploy whose graph inputs moved without a `build-sheds`
       # re-place in the same push makes every shed on the map vanish rather than misplacing one —
