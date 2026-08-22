@@ -32,6 +32,11 @@ export interface IndustrialParams {
   url: string;
 }
 
+export interface HistoricParams {
+  kind: "historic";
+  url: string;
+}
+
 export interface SubwayParams {
   kind: "subway";
   url: string;
@@ -78,6 +83,7 @@ export type TileParams =
   | CommercialParams
   | LinesParams
   | IndustrialParams
+  | HistoricParams
   | SubwayParams
   | PoiParams
   | TreeDotsParams

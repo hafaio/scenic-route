@@ -8,6 +8,7 @@ import {
   MdConstruction,
   MdDirectionsCar,
   MdFactory,
+  MdMapsHomeWork,
   MdPalette,
   MdTerrain,
   MdStorefront,
@@ -57,6 +58,9 @@ const IndustrialLayer = dynamic(
   () => import("../../components/industrial-layer"),
   { ssr: false },
 );
+const HistoricLayer = dynamic(() => import("../../components/historic-layer"), {
+  ssr: false,
+});
 const ElevationLayer = dynamic(
   () => import("../../components/elevation-layer"),
   { ssr: false },
@@ -72,6 +76,7 @@ export type OverlayId =
   | "highways"
   | "commercial"
   | "industrial"
+  | "historic"
   | "shade"
   | "scaffolding"
   | "elevation";
@@ -105,6 +110,9 @@ const HIGHWAY_COLOR = "#ef4444"; // red-500
 // The industrial overlay fills its lots in pink-600 (in src/tiles/industrial.ts, at the alpha the
 // wash needs); only its menu glyph is tinted here, so the switcher still reads as the layer's
 // colour code.
+// The historic-districts overlay fills each district in indigo-700 (in src/tiles/historic.ts, at
+// the same alpha the industrial wash uses); only its menu glyph is tinted here, so the switcher still
+// reads as the layer's colour code.
 // Scaffolding draws its own orange-600 bands (in shed-layer.tsx); only its menu glyph is tinted
 // here, so the switcher still reads as the layer's colour code.
 // The "cute commercial" overlay is a heat field with its own violet ramp (in dining-layer.tsx); only
@@ -149,12 +157,14 @@ export const OVERLAYS: readonly OverlayDef[] = [
     legend: <ElevationLegend />,
   },
   {
-    id: "scaffolding",
-    label: "Scaffolding",
+    id: "historic",
+    // Whole landmarked neighbourhoods, not the individually landmarked buildings the "Landmarks"
+    // overlay dots.
+    label: "Historic",
     icon: (
-      <MdConstruction className="h-4 w-4 text-orange-600" aria-hidden="true" />
+      <MdMapsHomeWork className="h-4 w-4 text-indigo-700" aria-hidden="true" />
     ),
-    render: () => <ShedLayer />,
+    render: () => <HistoricLayer />,
   },
   {
     id: "landmarks",
@@ -210,6 +220,14 @@ export const OVERLAYS: readonly OverlayDef[] = [
     label: "Industrial",
     icon: <MdFactory className="h-4 w-4 text-pink-600" aria-hidden="true" />,
     render: () => <IndustrialLayer />,
+  },
+  {
+    id: "scaffolding",
+    label: "Scaffolding",
+    icon: (
+      <MdConstruction className="h-4 w-4 text-orange-600" aria-hidden="true" />
+    ),
+    render: () => <ShedLayer />,
   },
   // Tree genus recolours every tree, so it sits last and is exclusive — it does not compose with the
   // additive dot/line layers.
