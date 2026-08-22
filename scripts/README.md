@@ -877,15 +877,32 @@ directory of the machine's, so the handoff lands at the repo root. `write-plan.t
 the same plan without the elevation block, to `.build/key-space-plan.json`, which is what the shed
 gate stamps its inputs off — see *What the stamp covers*.
 
-**The freshness check** is `plan.stamp` against `public/tiles/canopy/.stamp`. The stamp is the
-content hash — not the mtime — of every input a pass reads: the manifest, the ramp, the sun grid,
-the whole of `scripts/*.ts`, the tiler's own sources and `Cargo.lock`, and every `.bin` under
-`data/`. Content, because a fresh checkout or a `touch` rewrites mtimes without moving a byte, which
-would force a needless twenty-minute render and leave CI's cache of the derived tiles useless across
-runs. Hashing all of `scripts/` is over-inclusive (an unrelated ingest forces a rebuild) but never
-false-fresh: the ingests share helpers whose output the tiles depend on. A match plus the output
-directories still being there skips the build in milliseconds; the stamp is written **last**, only
-after all nine passes succeed, so a run killed halfway through leaves no claim to be current.
+**The freshness check is per pass.** Each of the nine computes a SHA-256 over what *it* reads: the
+plan values it acts on, the content of every input file it opens, and the stamps of the passes whose
+output it consumes — a hash DAG, sound because the passes are deterministic. Folded into all of them
+are the manifest and a **code epoch**, the hash of `crates/tiler/src/**`, both `Cargo.toml`s and
+`Cargo.lock`, which `write-plan.ts` computes and the plan carries as `codeEpoch`; so any edit to the
+tiler invalidates every pass, including one whose output *format* changed, which no input file would
+have moved. Content, not mtime — a fresh checkout (CI) or a `touch` rewrites mtimes without moving a
+byte.
+
+Each stamp is written **inside that pass's own output** — `public/streets/.stamp` and
+`.stamp-stranded`, `public/commercial/.stamp`, `public/casters/.stamp`,
+`public/tiles/canopy/.stamp`, `public/tiles/genus-field/.stamp`,
+`public/tiles/{shade,elevation}/<city>/.stamp`, `public/routing/.stamp-<city>` — and only once that
+pass succeeds, so a run killed halfway keeps every pass that finished and claims nothing for the one
+that did not. A pass is skipped when its stamp matches **and** its own output is still there: the
+stamp says the inputs have not moved, not that the output is on disk, and a hand-deleted directory
+or a CI cache that restored only part of the tree has to rebuild. Existence, not completeness — an
+empty directory still passes.
+
+`scripts/*.ts` is no longer hashed at all: everything the scripts contribute reaches the stamps as
+plan values (the ramp bytes, the sun grid, the resolved DEM) or as `data/**` bytes, so an
+ingest-script edit alone is correctly not a rebuild until it changes what it ingests. The DEM mosaic
+enters as its sorted tile names and byte sizes rather than 1.77 GB of pixels, the 3DEP tiles being
+immutable upstream products in content-named cache entries. Measured: a build with nothing changed
+reaches the shade pass in 0.7 s where a cold one took 278 s, and adding one source only the
+commercial pass reads reran that pass alone, leaving the 262 s of caster chunks untouched.
 
 A tile build is nine passes — chunks, commercial, caster-chunks, shade, elevation, canopy,
 genus-field, graph, and the chunks again — and three of the orderings between them are
@@ -905,7 +922,7 @@ serves and report success.
 
 ```jsonc
 {
-  "stamp": "9f2c…",                           // the content hash of every input; see the freshness check below
+  "codeEpoch": "9f2c…",                       // the tiler's own sources, hashed; folded into every pass's stamp
   "manifest": "src/tree-cover/manifest.json", // every pass reads the city list from here
   "data": "data",                             // the committed sources; each pass resolves its own files under it
   "chunks": "public/streets",                 // STCK street chunks
@@ -948,14 +965,19 @@ so the driver states which of them it actually has on disk. Everything else per 
 paths, land and canopy files, the bounds, whether a genus layer exists — is read from the manifest.
 A kind no pass reads is rejected.
 
-The plan carries the directory lifecycle too, because everything after the inputs are on disk is
-`tiler build`'s: `public/{tiles/canopy,tiles/genus-field,streets,casters,routing}` are emptied and
-recreated before the first pass, so a layer that stops rendering leaves nothing of its last build
-behind to be served, and `public/tiles/{shade,tree-shade,elevation}` are cleared wholesale, since
-each is written one `<name>/<city>` at a time and no pass ever sees enough of one to clear it — a
-shrunk sun schedule or a dropped city would otherwise keep serving its old bins. `public/commercial`
-and `public/commercial-lines` are missing from both lists because that pass clears its own, and
-`public/trees` because `serve-sources.ts` owns it. The
+**Each pass owns the lifecycle of its own output.** Nothing is emptied before the first pass any
+more: a pass clears its own directories immediately before it reruns, so a fresh pass's output
+survives a neighbour rebuilding — which is the whole point. `public/{streets,casters,tiles/canopy,
+tiles/genus-field}` are emptied and recreated by the pass that owns them, and
+`public/commercial{,-lines}` by the commercial pass, which has always cleared its own two.
+`public/tiles/{shade,tree-shade,elevation}/<city>`,
+`public/routing/<city>.{bin,stranded.bin,version.json}` and `public/routing/shade/<city>` are
+removed and left for their pass to remake, since a city that renders nothing must leave no directory
+at all — a shrunk sun schedule or a city that lost its buildings would otherwise keep serving the
+old bins. A pass that renders nothing this build clears its root and records no stamp, which is how
+a layer that stops being produced stops being served and costs nothing to decide again. Before the
+passes, the driver sweeps what no city claims: a pyramid or a routing artifact for a city the
+manifest dropped. `public/trees` is nobody's here — `serve-sources.ts` owns it. The
 gates are the same as they were under the nine subcommands, and follow from the plan: caster chunks
 are cut once over every city (any
 city's `shade` carries the halo) when something can cast a shadow at all; a city gets a shade

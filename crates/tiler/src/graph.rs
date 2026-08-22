@@ -1736,6 +1736,37 @@ fn write_stranded(out: &std::path::Path, ways: &[u32]) -> Fallible<()> {
     Ok(())
 }
 
+/// The STRD file back as the ids it holds, for a build that found this city's graph already fresh:
+/// the second chunks pass needs the stranded set whether or not the pass that computed it ran.
+pub fn read_stranded(path: &std::path::Path) -> Fallible<Vec<u32>> {
+    let bytes = fs::read(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    if bytes.len() < STRANDED_HEADER_BYTES || &bytes[0..4] != b"STRD" {
+        return Err(format!("{} is not a STRD file", path.display()).into());
+    }
+    let format = u16::from_le_bytes([bytes[4], bytes[5]]);
+    if format != STRANDED_FORMAT {
+        return Err(format!("{} is STRD format {format}", path.display()).into());
+    }
+    let header = usize::from(u16::from_le_bytes([bytes[6], bytes[7]]));
+    let count = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]) as usize;
+    if bytes.len() != header + 4 * count {
+        return Err(format!(
+            "{} is {} bytes, not the {} its header claims",
+            path.display(),
+            bytes.len(),
+            header + 4 * count
+        )
+        .into());
+    }
+    Ok(bytes[header..]
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .copied()
+        .map(u32::from_le_bytes)
+        .collect())
+}
+
 /// Returns the OSM way ids the island drop stranded, sorted — what the second chunks pass folds
 /// into each chunk's trailing bitmap so the overlay stops painting a walk no route can follow.
 ///
