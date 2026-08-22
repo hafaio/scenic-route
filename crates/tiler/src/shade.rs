@@ -52,6 +52,19 @@ pub struct Args {
     /// Which city to render. One invocation is one city because a bin's sun position depends on the
     /// latitude it was synthesised at, so two cities cannot share a bin index or a pyramid.
     pub city: String,
+    /// Which of the grid's bins to render: the ones whose tiles the driver does not already have,
+    /// which is most often none of them and after a schedule tweak exactly one. The whole grid still
+    /// comes with it, since a bin is named by its index into it and its tiles are laid out under it.
+    pub render: Vec<Render>,
+}
+
+/// One bin to render, and the claim to leave behind once its tiles are written. The claim is the
+/// driver's, and this pass only records it — HERE, a bin at a time, so a build killed halfway
+/// through a twenty-minute pyramid keeps every bin that finished.
+pub struct Render {
+    pub index: usize,   // which bin of `Params::buckets`
+    pub stamp: PathBuf, // the file the claim goes in
+    pub key: String,    // what the driver hashed this bin's tiles out of
 }
 
 /// One sun-disk sample of the area light: a ground unit vector pointing down the shadow (anti-sun)
@@ -877,6 +890,30 @@ impl BucketRender<'_> {
     }
 }
 
+/// The client's bin table, `<tiles>/shade/<city>/buckets.json`. Written by the driver rather than
+/// by the render, and on every build: what it names is which directory holds which sun position, and
+/// the directories are moved into their indices before a tile is rendered — so it has to be right
+/// even for a build that renders nothing.
+pub fn write_schedule(shade_dir: &Path, params: &Params) -> Fallible<()> {
+    let schedule: Vec<BucketEntry> = params
+        .buckets
+        .iter()
+        .enumerate()
+        .map(|(index, bucket)| BucketEntry {
+            index,
+            season: bucket.season,
+            hour_angle: bucket.hour_angle,
+            elevation: bucket.elevation,
+            azimuth: bucket.azimuth,
+        })
+        .collect();
+    fs::create_dir_all(shade_dir)?;
+    Ok(fs::write(
+        shade_dir.join("buckets.json"),
+        serde_json::to_vec(&schedule)?,
+    )?)
+}
+
 pub fn run(args: &Args) -> Fallible<()> {
     let started = Instant::now();
     let mut manifest: Manifest = serde_json::from_slice(&fs::read(&args.manifest)?)?;
@@ -921,7 +958,12 @@ pub fn run(args: &Args) -> Fallible<()> {
     }
 
     let mut total = Stats::default();
-    for (index, bucket) in params.buckets.iter().enumerate() {
+    for job in &args.render {
+        let index = job.index;
+        let bucket = params
+            .buckets
+            .get(index)
+            .ok_or_else(|| format!("bin {index} is not in a grid of {}", params.buckets.len()))?;
         let building_dir = shade_dir.join(index.to_string());
         let tree_dir = tree_root.as_ref().map(|root| root.join(index.to_string()));
         for tile in &plan {
@@ -969,6 +1011,7 @@ pub fn run(args: &Args) -> Fallible<()> {
             .par_iter()
             .map(|tile| render.render(tile))
             .try_reduce(Stats::default, |left, right| Ok(left + right))?;
+        fs::write(&job.stamp, &job.key)?;
         eprintln!(
             "  wrote {} tiles ({} building painted, {:.1} MiB; {} tree painted, {:.1} MiB)",
             stats.tiles,
@@ -980,27 +1023,10 @@ pub fn run(args: &Args) -> Fallible<()> {
         total = total + stats;
     }
 
-    let schedule: Vec<BucketEntry> = params
-        .buckets
-        .iter()
-        .enumerate()
-        .map(|(index, bucket)| BucketEntry {
-            index,
-            season: bucket.season,
-            hour_angle: bucket.hour_angle,
-            elevation: bucket.elevation,
-            azimuth: bucket.azimuth,
-        })
-        .collect();
-    fs::write(
-        shade_dir.join("buckets.json"),
-        serde_json::to_vec(&schedule)?,
-    )?;
-
     eprintln!(
         "wrote {} shade tiles across {} buckets ({} building painted, {:.1} MiB; {} tree painted, {:.1} MiB) in {:.1}s",
         total.tiles,
-        params.buckets.len(),
+        args.render.len(),
         total.painted,
         total.bytes as f64 / 1024.0 / 1024.0,
         total.tree_painted,

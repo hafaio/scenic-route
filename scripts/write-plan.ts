@@ -87,7 +87,7 @@ interface PlanCity {
 // What the nine argv lists carried, in one document. Its schema is documented in scripts/README.md
 // and deserialized by crates/tiler/src/build.rs, which rejects unknown keys at every level.
 interface Plan {
-  codeEpoch: string;
+  code: Record<string, string>;
   manifest: string;
   data: string;
   chunks: string;
@@ -133,25 +133,29 @@ async function fileExists(path: string): Promise<boolean> {
   }
 }
 
-// The tiler crate as one hash: its sources, its Cargo.toml and the workspace lockfile. The tiler
-// folds this into every pass's stamp, so an edit to the kernel invalidates the pyramid the old one
-// rendered — including an output whose FORMAT changed, which no input file would have moved.
+// The tiler crate file by file: repo-relative path -> the sha256 of its bytes. The tiler folds the
+// whole map into every pass's stamp bar one, so an edit to the kernel invalidates the pyramid the
+// old one rendered — including an output whose FORMAT changed, which no input file would have moved.
 // Content, NOT mtime: a fresh checkout (CI) rewrites mtimes without changing a byte, which would
-// otherwise force a needless twenty-minute render and leave CI's cache of the tiles unusable.
+// otherwise force a needless twenty-minute render and leave CI's cache of the tiles unusable. The
+// path is repo-relative and the map is keyed on it, so the hashes are the same on a laptop and on a
+// CI runner.
+//
+// A MAP rather than the one digest this used to be, because the shade pass names the modules it is
+// a function of — the pyramid is most of the build, and an edit to the graph is no reason to render
+// it again — and it can only hash those if the plan carries them apart.
 //
 // The `data/**` bytes used to be hashed here too, into one whole-build stamp. They are not any
 // more: the tiler hashes the inputs of each pass for itself, which is what lets one changed source
 // rerun one pass, and it does not read 168 MB through bun to find out.
-async function codeEpoch(): Promise<string> {
-  const hash = createHash("sha256");
-  // Repo-relative path + a separator + the bytes, in a stable order, so the digest is deterministic
-  // and location-independent (the same on a laptop and a CI runner).
-  for (const path of (await tilerSources()).sort()) {
-    hash.update(relative(ROOT, path));
-    hash.update("\0");
-    hash.update(await readFile(path));
+async function codeFiles(): Promise<Record<string, string>> {
+  const files: Record<string, string> = {};
+  for (const path of await tilerSources()) {
+    files[relative(ROOT, path)] = createHash("sha256")
+      .update(await readFile(path))
+      .digest("hex");
   }
-  return hash.digest("hex");
+  return files;
 }
 
 // The two things the tiler cannot work out for itself, plus which committed sources this city has.
@@ -198,7 +202,7 @@ async function planCity(city: City): Promise<PlanCity> {
 async function writePlan(): Promise<void> {
   const cities: City[] = manifest.cities;
   const plan: Plan = {
-    codeEpoch: await codeEpoch(),
+    code: await codeFiles(),
     manifest: MANIFEST_PATH,
     data: DATA_DIR,
     chunks: CHUNK_DIR,
