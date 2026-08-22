@@ -20,12 +20,12 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      # LFS checkout is off except on the deploy path: the large blobs under data/ are only needed to
-      # build the map, and downloads are the sole draw on the account's monthly LFS bandwidth. lint
-      # and tests read nothing under data/, so they take the pointers.
+      # Pointers on every path, the deploy included: the objects under data/ are the sole draw on the
+      # account's monthly LFS bandwidth, and the deploy gets them from the cache below instead. lint
+      # and tests read nothing under data/ at all.
       - uses: actions/checkout@v7
         with:
-          lfs: ${{ inputs.upload-pages == true }}
+          lfs: false
       - uses: oven-sh/setup-bun@v2
       # Pinned to match rust-toolchain.toml — see the comment there. Move both together.
       - uses: dtolnay/rust-toolchain@1.98.0
@@ -47,6 +47,30 @@ jobs:
       # codegen build; rust-cache keeps it) and under a second to run.
       # scripts/graph-inputs.ts reads their reports, scripts/README.md has why the set is that set.
       - run: bun run check-shed-inputs
+      # The DEM the elevation pass and the relief bake sample: 651 tiles, 1.6 GB, fetched inside
+      # `bun export` (write-plan resolves the mosaic, so this is not an ingest-time cost) and kept
+      # under .cache/ by name. Upstream publishes a collection once and leaves it, so the key only has
+      # to move when the collection does — which is the URL in scripts/elevation.ts.
+      - if: inputs.upload-pages
+        uses: actions/cache@v6
+        with:
+          path: .cache/werk-*.bin
+          key: dem-${{ hashFiles('scripts/elevation.ts', 'src/tree-cover/manifest.json') }}
+          restore-keys: |
+            dem-
+      # The LFS objects for data/**, 168 MB, restored rather than downloaded. An LFS pointer's text
+      # carries the object's own sha256, and the checkout above leaves the pointers in place, so
+      # hashing them here keys this on the content itself. `git lfs pull` then smudges the working
+      # tree, fetching only what the cache missed. It runs after check-shed-inputs, which wants the
+      # pointer text, and before the tile cache, whose key has always hashed the real bytes.
+      - if: inputs.upload-pages
+        uses: actions/cache@v6
+        with:
+          path: .git/lfs
+          key: lfs-${{ hashFiles('data/**') }}
+      - if: inputs.upload-pages
+        run: git lfs pull
+
       # The tile render + static export is expensive (the shade pyramid alone is ~20 min) and its
       # output is only consumed by the Pages deploy, so it runs only on that path. A push or PR stops
       # at lint + tests.
