@@ -86,6 +86,20 @@ impl Lines {
     pub fn get(&self, city: &str) -> Option<&Path> {
         self.by_city.get(city).map(PathBuf::as_path)
     }
+
+    /// What a run of this pass left in `dir` last time, for a build that found the pass already
+    /// fresh and skipped it. Read off the disk rather than assumed, so a city that wrote no file
+    /// hands the graph the same `None` a run of the pass would have.
+    pub fn written(dir: &Path, manifest: &Manifest) -> Lines {
+        let mut lines = Lines::default();
+        for city in &manifest.cities {
+            let file = dir.join(format!("{}.bin", city.id));
+            if file.is_file() {
+                lines.by_city.insert(city.id.clone(), file);
+            }
+        }
+        lines
+    }
 }
 
 type Segment = Vec<Coord>;

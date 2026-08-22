@@ -49,7 +49,7 @@ impl Stranded {
         self.by_city.insert(city.to_owned(), ways);
     }
 
-    fn ways(&self, city: &str) -> &[u32] {
+    pub fn ways(&self, city: &str) -> &[u32] {
         self.by_city.get(city).map_or(&[], Vec::as_slice)
     }
 }
