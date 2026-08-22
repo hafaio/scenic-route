@@ -56,7 +56,7 @@ pub struct Args {
 
 /// One sun-disk sample of the area light: a ground unit vector pointing down the shadow (anti-sun)
 /// and the shadow length per unit of roof height, `1/tan(sunElevation)`. Precomputed by suncalc.
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Sample {
     east: f64,  // east component of the anti-sun ground direction
@@ -67,7 +67,7 @@ struct Sample {
 /// One bin of the (declination, hourAngle) grid: its season/hour keys (echoed to the client so it can
 /// map "now" to a bin), the representative sun position, and the sun-disk samples whose shadows
 /// accumulate into its penumbra.
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Bucket {
     season: usize,   // the declination band this bin sits in — its season key
@@ -78,7 +78,10 @@ pub struct Bucket {
     samples: Vec<Sample>,
 }
 
-#[derive(Clone, Deserialize)]
+/// `Serialize`, here and on the two types this is made of, is for the build's freshness stamps: the grid
+/// is a plan value rather than a file, so what a pass depends on is the whole of it written back
+/// out — a bin that gained a sample cannot then slip past a field-by-field walk.
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Params {
     pub max_zoom: u32,

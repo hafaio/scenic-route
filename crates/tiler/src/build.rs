@@ -1,5 +1,5 @@
-//! `tiler build`: a tile build end to end in ONE process — whether to render at all, the output
-//! directories, every pass, and the stamp that records the result — driven by a plan file.
+//! `tiler build`: a tile build end to end in ONE process — which passes to run at all, the output
+//! directories, every pass, and the stamp each one records for itself — driven by a plan file.
 //!
 //! The TypeScript half spawns nothing: scripts/serve-sources.ts puts the verbatim sources where the
 //! client can fetch them, scripts/write-plan.ts emits the plan, and package.json sequences the three.
@@ -128,10 +128,12 @@ impl PlanCity {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Plan {
-    /// The content hash of every input a pass reads, computed by scripts/write-plan.ts. Recorded in
-    /// `canopy_tiles/.stamp` after a build succeeds and compared against it before the next one, so
-    /// a run whose inputs are all byte-identical to the last does nothing.
-    stamp: String,
+    /// The tiler crate as one hash — its sources, its Cargo.toml and the workspace lockfile —
+    /// computed by scripts/write-plan.ts over the same file list this binary is compiled from. It
+    /// enters every pass's stamp, so any edit to the tiler invalidates every pass: no pass declares
+    /// which modules it is a function of, and an output whose format changed would otherwise go on
+    /// being served from the last build's bytes.
+    code_epoch: String,
     manifest: PathBuf,
     /// The committed sources, `data/`: every pass resolves its own files under it.
     data: PathBuf,
@@ -195,70 +197,130 @@ impl Plan {
         }
     }
 
-    /// Written only once a build has succeeded, so a run killed halfway through leaves no claim that
-    /// its half-written directories are current.
-    fn stamp_file(&self) -> PathBuf {
-        self.canopy_tiles.join(".stamp")
-    }
+    /// The pyramids written one `<name>/<city>` at a time under `public/tiles`, so no pass ever
+    /// sees the whole directory.
+    const PYRAMIDS: [&'static str; 3] = ["shade", "tree-shade", "elevation"];
 
-    /// Whether the last build's output is still what this plan describes. The stamp alone is not
-    /// enough: it says the inputs have not moved, not that the output is still on disk, and a
-    /// hand-deleted directory or a CI cache that restored only some of them has to rebuild.
+    /// Output no pass of this build claims: a city the manifest dropped, a pyramid a city stopped
+    /// rendering. Every pass now clears only its own roots, so a directory belonging to a city the
+    /// plan no longer names is a directory nothing would ever look at again — it used to be swept
+    /// away by emptying every root before the first pass, and that sweep is what this replaces.
     ///
-    /// Every directory a build always writes, which is `rebuilt()` plus the two the commercial pass
-    /// clears for itself — the earlier list left out the canopy tiles and the commercial lines, so a
-    /// restore that dropped either read as complete. The per-city pyramids under `tiles` are NOT
-    /// here: a city with no buildings bakes no shade and one with no DEM bakes no terrain, so their
-    /// absence is not evidence of anything. Existence, not completeness — an empty directory still
-    /// passes, which is the limit of doing this without hashing the output.
-    fn is_fresh(&self) -> bool {
-        let Ok(recorded) = fs::read_to_string(self.stamp_file()) else {
-            return false;
-        };
-        recorded.trim() == self.stamp
-            && self
-                .rebuilt()
-                .into_iter()
-                .chain([
-                    self.commercial_signals.as_path(),
-                    self.commercial_lines.as_path(),
-                ])
-                .all(Path::is_dir)
-    }
-
-    /// Emptied and recreated before the first pass: no pass carries a directory lifecycle, so a
-    /// layer that stops rendering — a dropped city, a source that is no longer ingested — leaves
-    /// nothing of its last build behind to be served. The commercial directories are absent because
-    /// that pass clears its own, and `public/trees` because scripts/serve-sources.ts owns it.
-    fn rebuilt(&self) -> [&Path; 5] {
-        [
-            &self.canopy_tiles,
-            &self.genus_field_tiles,
-            &self.chunks,
-            &self.casters,
-            &self.routing,
-        ]
-    }
-
-    /// The pyramids written per city under `public/tiles`, so the pass that writes one never sees
-    /// the whole directory and cannot clear it: a shrunk sun schedule or a dropped city would
-    /// otherwise keep serving the bins of the last build. Cleared wholesale here, not recreated —
-    /// each pass makes its own `<name>/<city>`.
-    fn cleared(&self) -> [PathBuf; 3] {
-        ["shade", "tree-shade", "elevation"].map(|pyramid| self.tiles.join(pyramid))
-    }
-
-    fn prepare(&self) -> Fallible<()> {
-        for dir in self.rebuilt() {
-            fs::remove_dir_all(dir).or_else(absent)?;
+    /// Only what a pass would have written is considered. An unrecognised name under `routing` is
+    /// left alone rather than guessed about: `public/routing` is a directory this build shares with
+    /// whatever a later one decides to put there.
+    fn reconcile(&self, manifest: &Manifest) -> Fallible<()> {
+        let claimed: HashSet<&str> = manifest
+            .cities
+            .iter()
+            .map(|city| city.id.as_str())
+            .collect();
+        for pyramid in Self::PYRAMIDS {
+            for entry in listing(&self.tiles.join(pyramid))? {
+                if !claimed.contains(city_of(&entry).as_str()) {
+                    discard(&entry)?;
+                }
+            }
         }
-        for dir in self.cleared() {
-            fs::remove_dir_all(&dir).or_else(absent)?;
+        for entry in listing(&self.routing.join("shade"))? {
+            if !claimed.contains(city_of(&entry).as_str()) {
+                discard(&entry)?;
+            }
         }
-        for dir in self.rebuilt() {
-            fs::create_dir_all(dir)?;
+        for entry in listing(&self.routing)? {
+            let name = file_name(&entry);
+            // <id>.bin, <id>.stranded.bin, <id>.version.json and the pass's own .stamp-<id>; the
+            // shade bake is a directory of its own, swept above.
+            let named = name
+                .strip_prefix(".stamp-")
+                .map(str::to_owned)
+                .or_else(|| name.ends_with(".bin").then(|| city_of(&entry)))
+                .or_else(|| name.ends_with(".version.json").then(|| city_of(&entry)));
+            if let Some(city) = named
+                && !claimed.contains(city.as_str())
+            {
+                discard(&entry)?;
+            }
         }
         Ok(())
+    }
+}
+
+/// One pass's freshness, and the output it owns the lifecycle of.
+///
+/// The stamp covers everything the pass reads — the plan values it acts on, the content of every
+/// input file, and the stamps of the passes whose output it consumes — and it lives INSIDE that
+/// pass's own output, so a directory restored from a cache carries the claim that describes it and
+/// a directory that was never restored carries none.
+struct Pass {
+    stamp: String,
+    /// Written only once the pass has succeeded, so a run killed halfway through leaves no claim
+    /// that its half-written directory is current — and leaves every earlier pass's claim intact.
+    stamp_file: PathBuf,
+    /// A whole-build directory this pass owns outright: emptied and recreated before it reruns, so
+    /// a bin, a chunk or a tile the new run does not write cannot survive from the last one. Absent
+    /// for a pass that writes into a directory other cities also write into.
+    root: Option<PathBuf>,
+    /// One city's share of such a directory, or one city's graph blob. Removed before the pass
+    /// reruns and NOT recreated: a city with no buildings bakes no shade and one with no DEM bakes
+    /// no terrain, so absence is how the client tells "no such layer here" from "an empty layer".
+    pieces: Vec<PathBuf>,
+    /// What must be on disk for the stamp to be believed. The stamp says the inputs have not moved,
+    /// not that the output is still there, and a hand-deleted directory or a cache that restored
+    /// only some of them has to rebuild. Existence, not completeness — an empty directory still
+    /// passes, which is the limit of doing this without hashing the output.
+    witnesses: Vec<PathBuf>,
+}
+
+impl Pass {
+    /// A pass that owns one whole-build directory, whose being there is what says it ran.
+    fn whole(stamp: String, root: &Path) -> Pass {
+        Pass {
+            stamp,
+            stamp_file: root.join(".stamp"),
+            root: Some(root.to_path_buf()),
+            pieces: Vec::new(),
+            witnesses: vec![root.to_path_buf()],
+        }
+    }
+
+    fn is_fresh(&self) -> bool {
+        let Ok(recorded) = fs::read_to_string(&self.stamp_file) else {
+            return false;
+        };
+        recorded.trim() == self.stamp && self.witnesses.iter().all(|path| path.exists())
+    }
+
+    /// Clear this pass's output and make the directory its stamp will land in: a pass that writes
+    /// only row directories under its root still has a manifest to put at the top of it, so the
+    /// root has to be there before the pass runs and not only when it records.
+    fn restart(&self) -> Fallible<()> {
+        self.clear()?;
+        if let Some(parent) = self.stamp_file.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        Ok(())
+    }
+
+    /// Take away what the last build left without claiming anything for this one: a whole-build root
+    /// goes back to the empty directory it was before its first render, a per-city piece goes away
+    /// outright. Also what a pass that renders nothing this time does INSTEAD of `restart` — it then
+    /// records no stamp, and reaching the same decision again next build costs nothing.
+    fn clear(&self) -> Fallible<()> {
+        for path in self.root.iter().chain(&self.pieces) {
+            discard(path)?;
+        }
+        if let Some(root) = &self.root {
+            fs::create_dir_all(root)?;
+        }
+        Ok(())
+    }
+
+    fn record(&self) -> Fallible<()> {
+        if let Some(parent) = self.stamp_file.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        Ok(fs::write(&self.stamp_file, &self.stamp)?)
     }
 }
 
@@ -270,6 +332,333 @@ fn absent(error: std::io::Error) -> std::io::Result<()> {
     }
 }
 
+/// Remove a path whether it is a directory or a file, and say nothing about one that is not there.
+fn discard(path: &Path) -> Fallible<()> {
+    if path.is_dir() {
+        fs::remove_dir_all(path).or_else(absent)?;
+    } else {
+        fs::remove_file(path).or_else(absent)?;
+    }
+    Ok(())
+}
+
+fn file_name(path: &Path) -> String {
+    path.file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Which city an output path belongs to: the pyramids name a directory after the city, and the
+/// routing artifacts prefix theirs with it.
+fn city_of(path: &Path) -> String {
+    let name = file_name(path);
+    name.split_once('.')
+        .map_or(name.clone(), |(id, _)| id.to_owned())
+}
+
+/// A directory's entries, or none at all when the directory has never been made.
+fn listing(dir: &Path) -> Fallible<Vec<PathBuf>> {
+    match fs::read_dir(dir) {
+        Ok(entries) => {
+            let mut paths: Vec<PathBuf> = entries
+                .map(|entry| Ok(entry?.path()))
+                .collect::<Fallible<Vec<PathBuf>>>()?;
+            paths.sort();
+            Ok(paths)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// One field of a stamp, NUL-terminated so two values that abut cannot read as the same digest
+/// under a different split between them.
+fn field(digest: &mut Sha256, bytes: &[u8]) {
+    digest.update(bytes);
+    digest.update([0]);
+}
+
+/// The sun grid as the pass will act on it, serialized rather than walked field by field so a bin
+/// that gained a sample cannot slip past.
+fn sun_bytes(params: Option<&shade::Params>) -> Fallible<Vec<u8>> {
+    match params {
+        Some(params) => Ok(serde_json::to_vec(params)?),
+        None => Ok(Vec::new()),
+    }
+}
+
+/// A mosaic's identity: which tiles, how big, and how they are georeferenced — not 1.77 GB of
+/// pixels. The 3DEP tiles are immutable upstream products fetched into content-named cache entries,
+/// so hashing them every build would buy nothing for the ten seconds of reading.
+fn dem_identity(digest: &mut Sha256, elevation: Option<&Elevation>) -> Fallible<()> {
+    let Some(elevation) = elevation else {
+        field(digest, b"no elevation");
+        return Ok(());
+    };
+    field(digest, elevation.crs.as_bytes());
+    field(digest, &elevation.band.to_le_bytes());
+    let mut tiles: Vec<(String, u64)> = elevation
+        .tiles
+        .iter()
+        .map(|tile| {
+            let bytes = fs::metadata(tile)
+                .map_err(|error| format!("{}: {error}", tile.display()))?
+                .len();
+            Ok((file_name(tile), bytes))
+        })
+        .collect::<Fallible<Vec<(String, u64)>>>()?;
+    tiles.sort();
+    for (name, bytes) in tiles {
+        field(digest, name.as_bytes());
+        field(digest, &bytes.to_le_bytes());
+    }
+    Ok(())
+}
+
+/// The per-pass stamps, computed from the plan and the inputs on disk.
+///
+/// Each is a SHA-256 over which pass it is, the tiler's own code, the manifest, the plan values
+/// that pass acts on, the content of every file it reads, and the stamps of the passes whose output
+/// it consumes. That last part makes the set a hash DAG, which is sound because the passes are
+/// deterministic — the same property the commercial signals already rest on, keyed as they are on
+/// the segment order inside the chunks.
+///
+/// Deliberately NOT the plan verbatim, for `key_space_stamp`'s reason: the data root, the
+/// manifest's location and the DEM's `.cache` tiles are all where this checkout happens to keep
+/// things, and a stamp that moved with them could never be compared against one CI recorded. So a
+/// file enters as its path relative to the data root, and the cities in `pair`'s manifest order.
+struct Stamps<'a> {
+    plan: &'a Plan,
+    manifest_oid: String,
+    /// Each input hashed once: the commercial pass, the shade pass and the graph all read the same
+    /// buildings, and `data/` is 168 MB.
+    oids: HashMap<PathBuf, String>,
+}
+
+impl<'a> Stamps<'a> {
+    fn new(plan: &'a Plan) -> Fallible<Stamps<'a>> {
+        Ok(Stamps {
+            plan,
+            manifest_oid: input_oid(&plan.manifest)?,
+            oids: HashMap::new(),
+        })
+    }
+
+    /// A digest seeded with what every pass shares. Folding the whole manifest into all of them is
+    /// coarse — one city's bounds moving re-renders another city's pyramid — and cheap, because the
+    /// manifest changes about as often as the code epoch beside it does.
+    fn open(&self, pass: &str) -> Sha256 {
+        let mut digest = Sha256::new();
+        field(&mut digest, pass.as_bytes());
+        field(&mut digest, self.plan.code_epoch.as_bytes());
+        field(&mut digest, self.manifest_oid.as_bytes());
+        digest
+    }
+
+    /// One input as the pass will find it: its path relative to the data root, then its content —
+    /// or the fact that it is not there, since most of these are read only if they exist and a
+    /// source appearing has to rebuild as surely as one changing.
+    fn file(&mut self, digest: &mut Sha256, path: &Path) -> Fallible<()> {
+        let name = path
+            .strip_prefix(&self.plan.data)
+            .map_err(|_| format!("{} is not under the plan's data root", path.display()))?;
+        field(digest, name.to_string_lossy().as_bytes());
+        if path.is_file() {
+            if !self.oids.contains_key(path) {
+                let oid = input_oid(path)?;
+                self.oids.insert(path.to_path_buf(), oid);
+            }
+            field(digest, self.oids[path].as_bytes());
+        } else {
+            field(digest, b"absent");
+        }
+        Ok(())
+    }
+
+    fn files(&mut self, digest: &mut Sha256, paths: &[PathBuf]) -> Fallible<()> {
+        for path in paths {
+            self.file(digest, path)?;
+        }
+        Ok(())
+    }
+
+    /// Pass 1. The densities the overlay draws are baked into these files by the ingest, so nothing
+    /// about the tree model reaches this pass except through their bytes.
+    fn chunks(&mut self, cities: &[(&City, &PlanCity)]) -> Fallible<String> {
+        let mut digest = self.open("chunks");
+        for (city, _) in cities {
+            let mut inputs = vec![self.plan.data.join("streets").join(&city.streets.file)];
+            inputs.extend(
+                city.paths
+                    .as_ref()
+                    .map(|layer| self.plan.data.join("paths").join(&layer.file)),
+            );
+            self.files(&mut digest, &inputs)?;
+        }
+        Ok(hex(&digest.finalize()))
+    }
+
+    /// Pass 2, over pass 1's stamp because its signals are keyed on the segment order inside the
+    /// chunks. It reads whichever of its four sources are on disk rather than what the plan's
+    /// `sources` decision names, so presence is asked of the disk here too.
+    fn commercial(&mut self, cities: &[(&City, &PlanCity)], chunks: &str) -> Fallible<String> {
+        let mut digest = self.open("commercial");
+        field(&mut digest, chunks.as_bytes());
+        for (city, _) in cities {
+            let inputs: Vec<PathBuf> = ["landuse", "buildings", "openstreets", "dining"]
+                .iter()
+                .map(|kind| self.plan.data.join(kind).join(format!("{}.bin", city.id)))
+                .collect();
+            self.files(&mut digest, &inputs)?;
+        }
+        Ok(hex(&digest.finalize()))
+    }
+
+    /// Pass 3. The chunks carry no sun position, so they are cut over every city from whichever
+    /// grid the driver found first — that grid, not the city it came from, is what they depend on.
+    fn casters(
+        &mut self,
+        cities: &[(&City, &PlanCity)],
+        sun: Option<&shade::Params>,
+    ) -> Fallible<String> {
+        let mut digest = self.open("caster-chunks");
+        field(&mut digest, &sun_bytes(sun)?);
+        for (city, _) in cities {
+            let mut inputs = vec![
+                self.plan
+                    .data
+                    .join("buildings")
+                    .join(format!("{}.bin", city.id)),
+                self.plan.data.join("trees").join(&city.field.trees.file),
+            ];
+            inputs.extend(
+                city.field
+                    .canopy
+                    .as_ref()
+                    .map(|layer| self.plan.data.join("canopy").join(&layer.file)),
+            );
+            self.files(&mut digest, &inputs)?;
+        }
+        Ok(hex(&digest.finalize()))
+    }
+
+    /// Pass 4, one city: what casts a shadow there and where its sun stands. Both pyramids it
+    /// writes, the buildings' and the trees', come out of this.
+    fn shade(&mut self, city: &City, planned: &PlanCity) -> Fallible<String> {
+        let mut digest = self.open("shade");
+        field(&mut digest, city.id.as_bytes());
+        field(&mut digest, &sun_bytes(planned.shade.as_ref())?);
+        let mut inputs = vec![
+            self.plan
+                .data
+                .join("buildings")
+                .join(format!("{}.bin", city.id)),
+        ];
+        inputs.extend(
+            city.field
+                .canopy
+                .as_ref()
+                .map(|layer| self.plan.data.join("canopy").join(&layer.file)),
+        );
+        self.files(&mut digest, &inputs)?;
+        Ok(hex(&digest.finalize()))
+    }
+
+    /// Pass 5, one city: the mosaic, and the land the overlay is clipped to.
+    fn elevation(&mut self, city: &City, planned: &PlanCity) -> Fallible<String> {
+        let mut digest = self.open("elevation");
+        field(&mut digest, city.id.as_bytes());
+        dem_identity(&mut digest, planned.elevation.as_ref())?;
+        let land = self.plan.data.join("land").join(&city.field.land.file);
+        self.file(&mut digest, &land)?;
+        Ok(hex(&digest.finalize()))
+    }
+
+    /// Pass 6. The colour ramp is a TypeScript module the client imports, so it reaches the tiler
+    /// as the 1024 bytes the plan carries and reaches this stamp the same way.
+    fn canopy(&mut self, cities: &[(&City, &PlanCity)]) -> Fallible<String> {
+        let mut digest = self.open("canopy");
+        field(&mut digest, &self.plan.ramp);
+        for (city, _) in cities {
+            if let Some(layer) = &city.field.canopy {
+                let inputs = vec![
+                    self.plan.data.join("canopy").join(&layer.file),
+                    self.plan.data.join("land").join(&city.field.land.file),
+                ];
+                self.files(&mut digest, &inputs)?;
+            }
+        }
+        Ok(hex(&digest.finalize()))
+    }
+
+    /// Pass 7.
+    fn genus_field(&mut self, cities: &[(&City, &PlanCity)]) -> Fallible<String> {
+        let mut digest = self.open("genus-field");
+        for (city, _) in cities {
+            if city.field.genus.is_some() {
+                let trees = self.plan.data.join("trees").join(&city.field.trees.file);
+                self.file(&mut digest, &trees)?;
+            }
+        }
+        Ok(hex(&digest.finalize()))
+    }
+
+    /// Pass 8, one city. The match over `Source` is exhaustive for `key_space_files`'s reason: a
+    /// source wired into the graph later must reach this stamp without anyone remembering to add
+    /// it, and every one of them is genuinely read by `graph::run`. The commercial lines are not
+    /// among the files because they are pass 2's output rather than a committed source, so that
+    /// pass's whole stamp stands in for them.
+    fn graph(&mut self, city: &City, planned: &PlanCity, commercial: &str) -> Fallible<String> {
+        let mut digest = self.open("graph");
+        field(&mut digest, commercial.as_bytes());
+        field(&mut digest, city.id.as_bytes());
+        field(
+            &mut digest,
+            if planned.alleys { b"alleys" } else { b"none" },
+        );
+        field(&mut digest, &sun_bytes(planned.shade.as_ref())?);
+        dem_identity(&mut digest, planned.elevation.as_ref())?;
+        let mut inputs = vec![self.plan.data.join("streets").join(&city.streets.file)];
+        inputs.extend(
+            city.paths
+                .as_ref()
+                .map(|layer| self.plan.data.join("paths").join(&layer.file)),
+        );
+        inputs.extend(
+            city.field
+                .canopy
+                .as_ref()
+                .map(|layer| self.plan.data.join("canopy").join(&layer.file)),
+        );
+        for source in Source::ALL {
+            inputs.extend(planned.source(&self.plan.data, source));
+        }
+        self.files(&mut digest, &inputs)?;
+        Ok(hex(&digest.finalize()))
+    }
+
+    /// Pass 9: pass 1's answer, plus what the graph decided to strand. The stranded set rather than
+    /// the graph's stamp, so a graph that reran and landed on the same islands leaves the chunks
+    /// alone — which is most of what a graph rerun does.
+    fn stranded_chunks(
+        &mut self,
+        cities: &[(&City, &PlanCity)],
+        chunks: &str,
+        stranded: &chunks::Stranded,
+    ) -> Fallible<String> {
+        let mut digest = self.open("chunks-stranded");
+        field(&mut digest, chunks.as_bytes());
+        for (city, _) in cities {
+            field(&mut digest, city.id.as_bytes());
+            for way in stranded.ways(&city.id) {
+                digest.update(way.to_le_bytes());
+            }
+        }
+        Ok(hex(&digest.finalize()))
+    }
+}
+
 /// The nine passes, in the order the build has always run them.
 const STAGES: usize = 9;
 
@@ -278,6 +667,15 @@ fn stage(number: usize, name: &str, started: &Instant) {
         "[{number}/{STAGES}] {name} ({:.1}s in)",
         started.elapsed().as_secs_f64()
     );
+}
+
+/// What a pass prints instead of running: its stamp matched and its output is still there. Named
+/// for a city on the passes that are stamped one city at a time.
+fn current(city: Option<&str>) {
+    match city {
+        Some(city) => eprintln!("{city}: up to date"),
+        None => eprintln!("up to date"),
+    }
 }
 
 /// A build, on `jobs` rayon threads or on rayon's own default of one per core when that is `None`.
@@ -297,24 +695,112 @@ pub fn run(plan_file: &Path, jobs: Option<usize>) -> Fallible<()> {
         if threads == 1 { "" } else { "s" }
     );
     let plan: Plan = serde_json::from_slice(&fs::read(plan_file)?)?;
-    if plan.is_fresh() {
-        eprintln!("street overlays are up to date");
-        return Ok(());
-    }
     let manifest: Manifest = serde_json::from_slice(&fs::read(&plan.manifest)?)?;
     let cities = plan.pair(&manifest)?;
     plan.check_ramp()?;
-    plan.prepare()?;
+    plan.reconcile(&manifest)?;
 
-    // Every mosaic is opened here, before the first pass: the tiles are read for their
-    // georeferencing alone, so this is seconds, and a mistyped projection or a missing DEM tile then
-    // fails in those seconds rather than twenty minutes later when the graph reaches its relief
-    // bake. One `Dem` per city, shared by the terrain overlay and that bake — they resample
-    // different grids over different bounds and decode their own pixels, but San Francisco's
-    // 1.77 GB of tiles are georeferenced and indexed once rather than twice.
+    // The caster chunks are geometry on a shared x/y grid and carry no sun position, so they are cut
+    // once over every city; any city's grid carries the halo the client gathers them over.
+    let sun = cities
+        .iter()
+        .find_map(|(_, planned)| planned.shade.as_ref());
+    let any_casters = cities.iter().any(|(city, planned)| {
+        planned.source(&plan.data, Source::Buildings).is_some() || city.field.canopy.is_some()
+    });
+    // The per-edge shade bake rides on the same invocation as the graph and needs both the
+    // footprints and the sun grid, so a city gets all of it or none of it.
+    let baked: Vec<Option<PathBuf>> = cities
+        .iter()
+        .map(|(city, planned)| {
+            (planned.source(&plan.data, Source::Buildings).is_some() && planned.shade.is_some())
+                .then(|| plan.routing.join("shade").join(&city.id))
+        })
+        .collect();
+
+    // Every stamp before the first pass runs, because what the build does next depends on which of
+    // them are stale — the mosaics below are opened for the passes that will read them, and that
+    // decision cannot wait until pass five.
+    let mut stamps = Stamps::new(&plan)?;
+    let chunk_pass = Pass::whole(stamps.chunks(&cities)?, &plan.chunks);
+    let commercial_pass = Pass {
+        stamp: stamps.commercial(&cities, &chunk_pass.stamp)?,
+        stamp_file: plan.commercial_signals.join(".stamp"),
+        // That pass empties both of its own directories, since it is the one that knows a city with
+        // no served chunk writes no file at all.
+        root: None,
+        pieces: Vec::new(),
+        witnesses: vec![
+            plan.commercial_signals.clone(),
+            plan.commercial_lines.clone(),
+        ],
+    };
+    let caster_pass = Pass::whole(stamps.casters(&cities, sun)?, &plan.casters);
+    let shade_passes: Vec<Pass> = cities
+        .iter()
+        .map(|(city, planned)| {
+            Ok(Pass {
+                stamp: stamps.shade(city, planned)?,
+                stamp_file: plan.tiles.join("shade").join(&city.id).join(".stamp"),
+                root: None,
+                pieces: vec![
+                    plan.tiles.join("shade").join(&city.id),
+                    plan.tiles.join("tree-shade").join(&city.id),
+                ],
+                // Only the buildings' pyramid: whether the trees' twin is produced at all turns on
+                // the canopy carrying a measured height, which only the pass finds out.
+                witnesses: vec![plan.tiles.join("shade").join(&city.id)],
+            })
+        })
+        .collect::<Fallible<Vec<Pass>>>()?;
+    let elevation_passes: Vec<Pass> = cities
+        .iter()
+        .map(|(city, planned)| {
+            let root = plan.tiles.join("elevation").join(&city.id);
+            Ok(Pass {
+                stamp: stamps.elevation(city, planned)?,
+                stamp_file: root.join(".stamp"),
+                root: None,
+                pieces: vec![root.clone()],
+                witnesses: vec![root],
+            })
+        })
+        .collect::<Fallible<Vec<Pass>>>()?;
+    let canopy_pass = Pass::whole(stamps.canopy(&cities)?, &plan.canopy_tiles);
+    let genus_pass = Pass::whole(stamps.genus_field(&cities)?, &plan.genus_field_tiles);
+    let graph_passes: Vec<Pass> = cities
+        .iter()
+        .zip(&baked)
+        .map(|((city, planned), bake)| {
+            let blob = plan.routing.join(format!("{}.bin", city.id));
+            let stranded = plan.routing.join(format!("{}.stranded.bin", city.id));
+            Ok(Pass {
+                stamp: stamps.graph(city, planned, &commercial_pass.stamp)?,
+                stamp_file: plan.routing.join(format!(".stamp-{}", city.id)),
+                root: None,
+                pieces: vec![
+                    blob.clone(),
+                    plan.routing.join(format!("{}.version.json", city.id)),
+                    stranded.clone(),
+                    plan.routing.join("shade").join(&city.id),
+                ],
+                witnesses: [blob, stranded].into_iter().chain(bake.clone()).collect(),
+            })
+        })
+        .collect::<Fallible<Vec<Pass>>>()?;
+
+    // Every mosaic a stale pass will read is opened here, before the first pass: the tiles are read
+    // for their georeferencing alone, so this is seconds, and a mistyped projection or a missing DEM
+    // tile then fails in those seconds rather than twenty minutes later when the graph reaches its
+    // relief bake. One `Dem` per city, shared by the terrain overlay and that bake — they resample
+    // different grids over different bounds and decode their own pixels, but San Francisco's 1.77 GB
+    // of tiles are georeferenced and indexed once rather than twice. A build whose terrain and graph
+    // are both current opens nothing, which is what makes a no-op build a matter of milliseconds.
     let mut dems: HashMap<&str, Dem> = HashMap::new();
-    for (_, planned) in &cities {
-        if let Some(elevation) = &planned.elevation {
+    for (index, (_, planned)) in cities.iter().enumerate() {
+        if let Some(elevation) = &planned.elevation
+            && (!elevation_passes[index].is_fresh() || !graph_passes[index].is_fresh())
+        {
             let dem = Dem::open(
                 &elevation.tiles,
                 heights::projection(&elevation.crs)?,
@@ -331,61 +817,99 @@ pub fn run(plan_file: &Path, jobs: Option<usize>) -> Fallible<()> {
         chunks: plan.chunks.clone(),
     };
     stage(1, "chunks", &started);
-    let chunk_files = chunks::run(&chunk_args, &chunks::Stranded::default())?;
+    // Nothing of the first pass's answer but the directory it filled, which the commercial pass
+    // reads back file by file — so a skipped pass 1 hands over the same value a run of it would.
+    let chunk_files = if chunk_pass.is_fresh() {
+        current(None);
+        chunks::Chunks {
+            dir: plan.chunks.clone(),
+        }
+    } else {
+        chunk_pass.restart()?;
+        let cut = chunks::run(&chunk_args, &chunks::Stranded::default())?;
+        chunk_pass.record()?;
+        cut
+    };
 
     // The commercial overlay's per-segment signals are snapped onto the chunks just written and
     // keyed on their segment index, which is why this takes the chunks themselves.
     stage(2, "commercial", &started);
-    let lines = commercial::run(
-        &commercial::Args {
-            manifest: plan.manifest.clone(),
-            data: plan.data.clone(),
-            signals: plan.commercial_signals.clone(),
-            lines: plan.commercial_lines.clone(),
-        },
-        &chunk_files,
-    )?;
+    let lines = if commercial_pass.is_fresh() {
+        current(None);
+        commercial::Lines::written(&plan.commercial_lines, &manifest)
+    } else {
+        commercial_pass.restart()?;
+        let written = commercial::run(
+            &commercial::Args {
+                manifest: plan.manifest.clone(),
+                data: plan.data.clone(),
+                signals: plan.commercial_signals.clone(),
+                lines: plan.commercial_lines.clone(),
+            },
+            &chunk_files,
+        )?;
+        commercial_pass.record()?;
+        written
+    };
 
-    // The caster chunks are geometry on a shared x/y grid and carry no sun position, so they are cut
-    // once over every city; any city's grid carries the halo the client gathers them over.
-    let sun = cities
-        .iter()
-        .find_map(|(_, planned)| planned.shade.as_ref());
-    let any_casters = cities.iter().any(|(city, planned)| {
-        planned.source(&plan.data, Source::Buildings).is_some() || city.field.canopy.is_some()
-    });
     stage(3, "caster-chunks", &started);
     match sun {
-        Some(params) if any_casters => caster_chunks::run(&caster_chunks::Args {
-            manifest: plan.manifest.clone(),
-            data: plan.data.clone(),
-            chunks: plan.casters.clone(),
-            params: params.clone(),
-        })?,
-        _ => eprintln!("no sun grid or nothing to cast a shadow; no caster chunks"),
+        Some(params) if any_casters => {
+            if caster_pass.is_fresh() {
+                current(None);
+            } else {
+                caster_pass.restart()?;
+                caster_chunks::run(&caster_chunks::Args {
+                    manifest: plan.manifest.clone(),
+                    data: plan.data.clone(),
+                    chunks: plan.casters.clone(),
+                    params: params.clone(),
+                })?;
+                caster_pass.record()?;
+            }
+        }
+        _ => {
+            caster_pass.clear()?;
+            eprintln!("no sun grid or nothing to cast a shadow; no caster chunks");
+        }
     }
 
     // One shade pyramid per city, because a bin's sun position is synthesised at the city's own
     // latitude: two cities share neither a bin index nor a pyramid.
     stage(4, "shade", &started);
-    for (city, planned) in &cities {
+    for ((city, planned), pass) in cities.iter().zip(&shade_passes) {
         let footprints = planned.source(&plan.data, Source::Buildings).is_some();
-        if let Some(params) = &planned.shade
-            && footprints
-        {
-            shade::run(&shade::Args {
-                manifest: plan.manifest.clone(),
-                data: plan.data.clone(),
-                tiles: plan.tiles.clone(),
-                params: params.clone(),
-                city: city.id.clone(),
-            })?;
+        match &planned.shade {
+            Some(params) if footprints => {
+                if pass.is_fresh() {
+                    current(Some(&city.id));
+                } else {
+                    pass.restart()?;
+                    shade::run(&shade::Args {
+                        manifest: plan.manifest.clone(),
+                        data: plan.data.clone(),
+                        tiles: plan.tiles.clone(),
+                        params: params.clone(),
+                        city: city.id.clone(),
+                    })?;
+                    pass.record()?;
+                }
+            }
+            _ => pass.clear()?,
         }
     }
 
     stage(5, "elevation", &started);
-    for (city, _) in &cities {
-        if let Some(dem) = dems.get_mut(city.id.as_str()) {
+    for ((city, planned), pass) in cities.iter().zip(&elevation_passes) {
+        if planned.elevation.is_none() {
+            pass.clear()?;
+        } else if pass.is_fresh() {
+            current(Some(&city.id));
+        } else {
+            let dem = dems
+                .get_mut(city.id.as_str())
+                .ok_or_else(|| format!("{}'s DEM was never opened", city.id))?;
+            pass.restart()?;
             elevation::run(
                 &elevation::Args {
                     manifest: plan.manifest.clone(),
@@ -397,6 +921,7 @@ pub fn run(plan_file: &Path, jobs: Option<usize>) -> Fallible<()> {
                 },
                 dem,
             )?;
+            pass.record()?;
         }
     }
 
@@ -408,12 +933,20 @@ pub fn run(plan_file: &Path, jobs: Option<usize>) -> Fallible<()> {
         .iter()
         .any(|city| city.field.canopy.is_some())
     {
-        canopy::run(&canopy::Args {
-            manifest: plan.manifest.clone(),
-            ramp: plan.ramp.clone(),
-            data: plan.data.clone(),
-            tiles: plan.canopy_tiles.clone(),
-        })?;
+        if canopy_pass.is_fresh() {
+            current(None);
+        } else {
+            canopy_pass.restart()?;
+            canopy::run(&canopy::Args {
+                manifest: plan.manifest.clone(),
+                ramp: plan.ramp.clone(),
+                data: plan.data.clone(),
+                tiles: plan.canopy_tiles.clone(),
+            })?;
+            canopy_pass.record()?;
+        }
+    } else {
+        canopy_pass.clear()?;
     }
 
     stage(7, "genus-field", &started);
@@ -422,30 +955,43 @@ pub fn run(plan_file: &Path, jobs: Option<usize>) -> Fallible<()> {
         .iter()
         .any(|city| city.field.genus.is_some())
     {
-        genus_field::run(&genus_field::Args {
-            manifest: plan.manifest.clone(),
-            data: plan.data.clone(),
-            tiles: plan.genus_field_tiles.clone(),
-        })?;
+        if genus_pass.is_fresh() {
+            current(None);
+        } else {
+            genus_pass.restart()?;
+            genus_field::run(&genus_field::Args {
+                manifest: plan.manifest.clone(),
+                data: plan.data.clone(),
+                tiles: plan.genus_field_tiles.clone(),
+            })?;
+            genus_pass.record()?;
+        }
+    } else {
+        genus_pass.clear()?;
     }
 
     stage(8, "graph", &started);
     let mut stranded = chunks::Stranded::default();
-    for (city, planned) in &cities {
-        // The per-edge shade bake rides on the same invocation as the graph and needs both the
-        // footprints and the sun grid: all three of these or none of them.
-        let (buildings, shade_params, shade_dir) = match (
-            planned.source(&plan.data, Source::Buildings),
-            &planned.shade,
-        ) {
-            (Some(buildings), Some(params)) => (
-                Some(buildings),
-                Some(params.clone()),
-                Some(plan.routing.join("shade").join(&city.id)),
+    for (index, (city, planned)) in cities.iter().enumerate() {
+        let pass = &graph_passes[index];
+        let stranded_file = plan.routing.join(format!("{}.stranded.bin", city.id));
+        if pass.is_fresh() {
+            current(Some(&city.id));
+            // The re-chunk below wants this city's stranded ways whether or not the graph that
+            // computed them ran, and the artifact beside the graph is where they were written.
+            stranded.insert(&city.id, graph::read_stranded(&stranded_file)?);
+            continue;
+        }
+        let (buildings, shade_params, shade_dir) = match &baked[index] {
+            Some(dir) => (
+                planned.source(&plan.data, Source::Buildings),
+                planned.shade.clone(),
+                Some(dir.clone()),
             ),
-            _ => (None, None, None),
+            None => (None, None, None),
         };
         let dem = dems.get_mut(city.id.as_str());
+        pass.restart()?;
         let ways = graph::run(
             &graph::Args {
                 streets: plan.data.join("streets").join(&city.streets.file),
@@ -465,7 +1011,7 @@ pub fn run(plan_file: &Path, jobs: Option<usize>) -> Fallible<()> {
                 out: plan.routing.join(format!("{}.bin", city.id)),
                 // Written for the record — public/routing/<city>.stranded.bin is a documented
                 // artifact — while the re-chunk below reads the same ids straight out of memory.
-                stranded_out: Some(plan.routing.join(format!("{}.stranded.bin", city.id))),
+                stranded_out: Some(stranded_file),
                 buildings,
                 shade_params,
                 shade_dir,
@@ -483,6 +1029,7 @@ pub fn run(plan_file: &Path, jobs: Option<usize>) -> Fallible<()> {
             },
             dem,
         )?;
+        pass.record()?;
         stranded.insert(&city.id, ways);
     }
 
@@ -492,11 +1039,24 @@ pub fn run(plan_file: &Path, jobs: Option<usize>) -> Fallible<()> {
     // answer: only the trailing stranded bitmap changes, so the commercial signals keyed on the
     // segment index stay aligned and need no rebuild.
     stage(9, "chunks (stranded)", &started);
+    // It rewrites what pass 1 wrote, in place, so it clears nothing: its stamp sits beside that
+    // pass's own inside the same directory.
+    let stranded_pass = Pass {
+        stamp: stamps.stranded_chunks(&cities, &chunk_pass.stamp, &stranded)?,
+        stamp_file: plan.chunks.join(".stamp-stranded"),
+        root: None,
+        pieces: Vec::new(),
+        witnesses: vec![plan.chunks.clone()],
+    };
     if manifest.cities.iter().any(|city| city.paths.is_some()) {
-        chunks::run(&chunk_args, &stranded)?;
+        if stranded_pass.is_fresh() {
+            current(None);
+        } else {
+            chunks::run(&chunk_args, &stranded)?;
+            stranded_pass.record()?;
+        }
     }
 
-    fs::write(plan.stamp_file(), &plan.stamp)?;
     eprintln!(
         "build: {STAGES} passes in {:.1}s",
         started.elapsed().as_secs_f64()
@@ -690,7 +1250,7 @@ mod tests {
     fn plan_json(cities: &str) -> String {
         format!(
             r#"{{
-              "stamp": "5eaf00d",
+              "codeEpoch": "5eaf00d",
               "manifest": "src/tree-cover/manifest.json",
               "data": "data",
               "chunks": "public/streets",
@@ -844,59 +1404,309 @@ mod tests {
     }
 
     #[test]
-    fn a_build_whose_inputs_have_not_moved_is_fresh() {
-        let plan = planted("fresh");
-        plan.prepare().expect("the output directories");
-        // The commercial pass makes its own, so `prepare` does not.
-        for dir in [&plan.commercial_signals, &plan.commercial_lines] {
-            fs::create_dir_all(dir).expect("the commercial directories");
-        }
-        assert!(!plan.is_fresh(), "nothing has recorded a stamp yet");
+    fn a_pass_is_fresh_only_when_its_stamp_and_its_output_both_hold() {
+        let root = scratch("fresh");
+        let pass = Pass::whole("5eaf00d".to_owned(), &root.join("streets"));
+        assert!(!pass.is_fresh(), "nothing has recorded a stamp yet");
 
-        fs::write(plan.stamp_file(), &plan.stamp).expect("the stamp");
+        pass.restart().expect("the output directory");
+        pass.record().expect("the stamp");
+        assert!(pass.is_fresh());
 
-        assert!(plan.is_fresh());
+        // The stamp says only that the inputs held, never that the output is still there — a
+        // hand-deleted directory or a cache that restored only some of them has to rebuild.
+        fs::remove_dir_all(root.join("streets")).expect("a removal");
+        assert!(!pass.is_fresh());
     }
 
     #[test]
-    fn a_moved_input_or_a_missing_directory_rebuilds() {
-        let mut plan = planted("stale");
-        plan.prepare().expect("the output directories");
-        for dir in [&plan.commercial_signals, &plan.commercial_lines] {
-            fs::create_dir_all(dir).expect("the commercial directories");
+    fn a_pass_that_reruns_clears_its_own_output_and_leaves_its_neighbours_alone() {
+        let root = scratch("clearing");
+        let mine = Pass::whole("a".to_owned(), &root.join("streets"));
+        let theirs = Pass::whole("b".to_owned(), &root.join("casters"));
+        for pass in [&mine, &theirs] {
+            pass.restart().expect("a directory");
+            fs::write(pass.stamp_file.with_file_name("last-build.bin"), b"stale")
+                .expect("a stale file");
+            pass.record().expect("a stamp");
         }
-        fs::write(plan.stamp_file(), &plan.stamp).expect("the stamp");
 
-        // The stamp digests the inputs, so any of them moving lands on another hex string.
-        let stamp = std::mem::replace(&mut plan.stamp, "deadbeef".to_owned());
-        assert!(!plan.is_fresh());
+        mine.restart().expect("a clearing");
 
-        // And the stamp says only that the inputs held, never that the output is still there.
-        plan.stamp = stamp;
-        fs::remove_dir_all(&plan.casters).expect("a removal");
-        assert!(!plan.is_fresh());
+        assert!(root.join("streets").is_dir(), "the root is recreated");
+        assert!(!root.join("streets").join("last-build.bin").exists());
+        assert!(!mine.is_fresh(), "its own stamp went with its output");
+        assert!(root.join("casters").join("last-build.bin").is_file());
+        assert!(
+            theirs.is_fresh(),
+            "a neighbour rerunning is not this pass's business"
+        );
+    }
+
+    /// A pyramid or a graph blob is removed and NOT recreated: a city that renders nothing must
+    /// leave no directory at all, since absence is how the client tells "no such layer here" from
+    /// "an empty layer".
+    #[test]
+    fn a_city_that_stops_rendering_leaves_no_directory_behind() {
+        let root = scratch("pieces");
+        let pyramid = root.join("tiles/shade/nyc");
+        let pass = Pass {
+            stamp: "a".to_owned(),
+            stamp_file: pyramid.join(".stamp"),
+            root: None,
+            pieces: vec![pyramid.clone(), root.join("tiles/tree-shade/nyc")],
+            witnesses: vec![pyramid.clone()],
+        };
+        pass.restart().expect("the pyramid");
+        fs::create_dir_all(root.join("tiles/tree-shade/nyc")).expect("the tree pyramid");
+        pass.record().expect("a stamp");
+        assert!(pass.is_fresh());
+
+        pass.clear().expect("a clearing");
+
+        assert!(!pyramid.exists());
+        assert!(!root.join("tiles/tree-shade/nyc").exists());
     }
 
     #[test]
-    fn preparing_empties_the_directories_a_dropped_layer_would_leave_behind() {
-        let plan = planted("prepare");
-        for dir in plan.rebuilt() {
-            fs::create_dir_all(dir).expect("a directory");
-            fs::write(dir.join("last-build.bin"), b"stale").expect("a stale file");
+    fn output_a_dropped_city_left_behind_is_deleted() {
+        let plan = planted("reconcile");
+        for pyramid in Plan::PYRAMIDS {
+            for city in ["nyc", "sf", "boston"] {
+                fs::create_dir_all(plan.tiles.join(pyramid).join(city)).expect("a pyramid");
+            }
         }
-        for dir in plan.cleared() {
-            fs::create_dir_all(dir.join("boston")).expect("a dropped city's pyramid");
+        for city in ["nyc", "sf", "boston"] {
+            fs::create_dir_all(plan.routing.join("shade").join(city)).expect("a per-edge bake");
+            for suffix in ["bin", "stranded.bin", "version.json"] {
+                fs::write(plan.routing.join(format!("{city}.{suffix}")), b"stale")
+                    .expect("a routing artifact");
+            }
+            fs::write(plan.routing.join(format!(".stamp-{city}")), b"stale").expect("a stamp");
         }
 
-        plan.prepare().expect("the output directories");
+        plan.reconcile(&manifest()).expect("a reconciliation");
 
-        for dir in plan.rebuilt() {
-            assert!(dir.is_dir(), "{dir:?} is recreated");
-            assert_eq!(fs::read_dir(dir).expect("a listing").count(), 0, "{dir:?}");
+        for pyramid in Plan::PYRAMIDS {
+            assert!(plan.tiles.join(pyramid).join("nyc").is_dir(), "{pyramid}");
+            assert!(
+                !plan.tiles.join(pyramid).join("boston").exists(),
+                "{pyramid}"
+            );
         }
-        for dir in plan.cleared() {
-            assert!(!dir.exists(), "{dir:?} is left for its pass to make");
+        for kept in [
+            "nyc.bin",
+            "nyc.stranded.bin",
+            "nyc.version.json",
+            ".stamp-nyc",
+        ] {
+            assert!(plan.routing.join(kept).is_file(), "{kept}");
         }
+        for dropped in [
+            "boston.bin",
+            "boston.stranded.bin",
+            "boston.version.json",
+            ".stamp-boston",
+        ] {
+            assert!(!plan.routing.join(dropped).exists(), "{dropped}");
+        }
+        assert!(plan.routing.join("shade").join("nyc").is_dir());
+        assert!(!plan.routing.join("shade").join("boston").exists());
+    }
+
+    /// Every file a pass of this build could name, given the manifest above and a plan that hands
+    /// over both sidewalk extracts, each with its own path as its contents so a file read in
+    /// another's place is caught. What is missing is deliberate: the commercial pass's dining and
+    /// open-streets sources are read only if they exist, and the stamps have to say so.
+    const INPUTS: [(&str, &str); 12] = [
+        ("streets", "nyc.bin"),
+        ("streets", "sf.bin"),
+        ("paths", "nyc.bin"),
+        ("sidewalks", "nyc.bin"),
+        ("sidewalks", "sf.bin"),
+        ("land", "nyc.bin"),
+        ("land", "sf.bin"),
+        ("trees", "nyc.bin"),
+        ("trees", "sf.bin"),
+        ("canopy", "nyc.bin"),
+        ("landuse", "nyc.bin"),
+        ("buildings", "nyc.bin"),
+    ];
+
+    /// A plan whose data root and manifest are a scratch tree of this test's own, so the per-pass
+    /// stamps answer about inputs it controls.
+    fn stamping_plan(name: &str) -> Plan {
+        let root = scratch(name);
+        let data = root.join("data");
+        for (kind, file) in INPUTS {
+            fs::create_dir_all(data.join(kind)).expect("a source directory");
+            fs::write(data.join(kind).join(file), format!("{kind}/{file}")).expect("a source");
+        }
+        fs::write(root.join("manifest.json"), MANIFEST).expect("a manifest");
+        let mut plan = plan(BOTH);
+        plan.data = data;
+        plan.manifest = root.join("manifest.json");
+        plan
+    }
+
+    /// One stamp per pass, so a test can say which passes a change would rerun. The per-city ones
+    /// are New York's, the city the manifest above gives every layer to.
+    struct Stamped {
+        chunks: String,
+        commercial: String,
+        casters: String,
+        shade: String,
+        elevation: String,
+        canopy: String,
+        genus_field: String,
+        graph: String,
+    }
+
+    fn stamped_passes(plan: &Plan) -> Stamped {
+        let manifest = manifest();
+        let cities = plan.pair(&manifest).expect("a pairing");
+        let mut stamps = Stamps::new(plan).expect("the stamps");
+        let chunks = stamps.chunks(&cities).expect("the chunks stamp");
+        let commercial = stamps
+            .commercial(&cities, &chunks)
+            .expect("the commercial stamp");
+        let (city, planned) = cities[0];
+        Stamped {
+            casters: stamps
+                .casters(&cities, planned.shade.as_ref())
+                .expect("the caster-chunks stamp"),
+            shade: stamps.shade(city, planned).expect("the shade stamp"),
+            elevation: stamps
+                .elevation(city, planned)
+                .expect("the elevation stamp"),
+            canopy: stamps.canopy(&cities).expect("the canopy stamp"),
+            genus_field: stamps.genus_field(&cities).expect("the genus-field stamp"),
+            graph: stamps
+                .graph(city, planned, &commercial)
+                .expect("the graph stamp"),
+            chunks,
+            commercial,
+        }
+    }
+
+    #[test]
+    fn a_build_over_inputs_that_have_not_moved_stamps_every_pass_the_same() {
+        let plan = stamping_plan("stamps-still");
+        let before = stamped_passes(&plan);
+        let again = stamped_passes(&plan);
+
+        assert_eq!(again.chunks, before.chunks);
+        assert_eq!(again.commercial, before.commercial);
+        assert_eq!(again.casters, before.casters);
+        assert_eq!(again.shade, before.shade);
+        assert_eq!(again.elevation, before.elevation);
+        assert_eq!(again.canopy, before.canopy);
+        assert_eq!(again.genus_field, before.genus_field);
+        assert_eq!(again.graph, before.graph);
+    }
+
+    /// The whole point: one re-ingested source reruns the passes that read it and nothing else. The
+    /// lots are read by the commercial pass alone, and the graph follows only because it bakes its
+    /// commercial discount from the lines that pass writes.
+    #[test]
+    fn a_re_ingested_source_moves_only_the_stamps_of_the_passes_that_read_it() {
+        let plan = stamping_plan("stamps-moved");
+        let before = stamped_passes(&plan);
+
+        fs::write(plan.data.join("landuse").join("nyc.bin"), b"re-ingested").expect("a source");
+        let after = stamped_passes(&plan);
+
+        assert_ne!(after.commercial, before.commercial);
+        assert_ne!(after.graph, before.graph);
+        assert_eq!(after.chunks, before.chunks);
+        assert_eq!(after.casters, before.casters);
+        assert_eq!(after.shade, before.shade, "the twenty-minute pass");
+        assert_eq!(after.elevation, before.elevation);
+        assert_eq!(after.canopy, before.canopy);
+        assert_eq!(after.genus_field, before.genus_field);
+    }
+
+    /// A pass reruns when the pass it consumes reruns, even though nothing it reads for itself
+    /// moved: the commercial signals are keyed on the segment order inside the chunks.
+    #[test]
+    fn a_pass_reruns_when_the_pass_it_consumes_does() {
+        let plan = stamping_plan("stamps-upstream");
+        let before = stamped_passes(&plan);
+
+        fs::write(plan.data.join("streets").join("nyc.bin"), b"re-ingested").expect("a source");
+        let after = stamped_passes(&plan);
+
+        assert_ne!(after.chunks, before.chunks);
+        assert_ne!(after.commercial, before.commercial);
+        assert_ne!(after.graph, before.graph);
+        assert_eq!(after.shade, before.shade);
+        assert_eq!(after.canopy, before.canopy);
+    }
+
+    /// A source appearing has to rebuild as surely as one changing, which is why absence is stamped
+    /// rather than left out of the digest.
+    #[test]
+    fn a_source_that_was_not_there_last_build_moves_the_stamp_by_appearing() {
+        let plan = stamping_plan("stamps-appeared");
+        let before = stamped_passes(&plan);
+
+        fs::create_dir_all(plan.data.join("dining")).expect("a source directory");
+        fs::write(plan.data.join("dining").join("nyc.bin"), b"ingested").expect("a source");
+
+        assert_ne!(stamped_passes(&plan).commercial, before.commercial);
+    }
+
+    /// No pass declares which modules it is a function of, so any edit to the tiler invalidates all
+    /// of them — an output whose FORMAT changed moves no input file.
+    #[test]
+    fn a_new_tiler_reruns_every_pass() {
+        let mut plan = stamping_plan("stamps-epoch");
+        let before = stamped_passes(&plan);
+        plan.code_epoch = "a different tiler".to_owned();
+        let after = stamped_passes(&plan);
+
+        assert_ne!(after.chunks, before.chunks);
+        assert_ne!(after.commercial, before.commercial);
+        assert_ne!(after.casters, before.casters);
+        assert_ne!(after.shade, before.shade);
+        assert_ne!(after.elevation, before.elevation);
+        assert_ne!(after.canopy, before.canopy);
+        assert_ne!(after.genus_field, before.genus_field);
+        assert_ne!(after.graph, before.graph);
+    }
+
+    /// The second chunks pass is stamped on what the graph STRANDED rather than on the graph's own
+    /// stamp, so a graph that reran and landed on the same islands leaves the chunks alone.
+    #[test]
+    fn the_second_chunks_pass_follows_the_stranded_set_and_not_the_graph() {
+        let plan = stamping_plan("stamps-stranded");
+        let manifest = manifest();
+        let cities = plan.pair(&manifest).expect("a pairing");
+        let mut stamps = Stamps::new(&plan).expect("the stamps");
+        let chunks = stamps.chunks(&cities).expect("the chunks stamp");
+        let mut islands = chunks::Stranded::default();
+        islands.insert("nyc", vec![30, 31]);
+        let before = stamps
+            .stranded_chunks(&cities, &chunks, &islands)
+            .expect("a stamp");
+
+        let mut same = chunks::Stranded::default();
+        same.insert("nyc", vec![30, 31]);
+        assert_eq!(
+            stamps
+                .stranded_chunks(&cities, &chunks, &same)
+                .expect("a stamp"),
+            before
+        );
+
+        let mut moved = chunks::Stranded::default();
+        moved.insert("nyc", vec![30]);
+        assert_ne!(
+            stamps
+                .stranded_chunks(&cities, &chunks, &moved)
+                .expect("a stamp"),
+            before
+        );
     }
 
     #[test]

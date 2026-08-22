@@ -1,11 +1,14 @@
 // `bun run build-tiles`, second step: writes the plan `tiler build` renders from — .build/plan.json,
-// build glue rather than an artifact, handed over fresh on every run. It emits and nothing else. The
-// decision to render at all is the tiler's, made from the `stamp` below; the passes themselves, the
-// directories they own and the pyramids at public/tiles/canopy/{z}/{x}/{y}.webp and the vector chunks
-// at public/streets/{x}/{y}.bin are all its side of the line. See scripts/README.md.
+// build glue rather than an artifact, handed over fresh on every run. It emits and nothing else.
+// Which passes run at all is the tiler's decision, made pass by pass from stamps it computes over
+// the inputs each one reads; the passes themselves, the directories they own and the pyramids at
+// public/tiles/canopy/{z}/{x}/{y}.webp and the vector chunks at public/streets/{x}/{y}.bin are all
+// its side of the line. What is left here is what only TypeScript knows: the colour ramp, the sun
+// grid, the resolved DEM, which committed sources each city has, and the hash of the tiler's own
+// sources below. See scripts/README.md.
 
 import { createHash } from "node:crypto";
-import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 import manifest from "../src/tree-cover/manifest.json";
 import { rampAlpha, rampColor } from "../src/tree-cover/ramp";
@@ -55,11 +58,6 @@ const CONVENTION_SOURCES = [
 ] as const;
 type ConventionSource = (typeof CONVENTION_SOURCES)[number];
 const MANIFEST_PATH = join(ROOT, "src", "tree-cover", "manifest.json");
-const RAMP_PATH = join(ROOT, "src", "tree-cover", "ramp.ts");
-// The sun-position grid scripts/shade-schedule.ts synthesises every bin from. It sits in src/ because
-// the client inverts the same grid, so the scripts/ glob below does not see it — and a bin boundary
-// moving there re-cuts both the shade pyramid and the graph's own per-edge bake.
-const SUN_PATH = join(ROOT, "src", "shade", "sun.ts");
 // The shed guard's plan (`bun run graph-inputs`): the same decisions, minus the DEM. It runs on
 // every push, where resolving San Francisco's mosaic would be a 1.77 GB download to describe a
 // block no durable key can depend on — the relief byte is baked over edges that are already final.
@@ -89,7 +87,7 @@ interface PlanCity {
 // What the nine argv lists carried, in one document. Its schema is documented in scripts/README.md
 // and deserialized by crates/tiler/src/build.rs, which rejects unknown keys at every level.
 interface Plan {
-  stamp: string;
+  codeEpoch: string;
   manifest: string;
   data: string;
   chunks: string;
@@ -135,61 +133,20 @@ async function fileExists(path: string): Promise<boolean> {
   }
 }
 
-// The content hash of every input the tiler reads, carried in the plan so the tiler can compare it
-// against what it recorded last time and skip a build whose inputs are all byte-identical. Content,
-// NOT mtime — a fresh checkout (CI) or a `touch` rewrites mtimes without changing the bytes, which
-// would otherwise force a needless full rebuild and, worse, leave a cache of the derived tiles
-// unusable across CI runs.
-async function inputsHash(cities: City[]): Promise<string> {
-  // Every build script, not just this one and the ones it imports: the ingests share helpers
-  // (geometry.ts, land.ts, …) whose output the tiles depend on, so hashing the whole scripts/ dir
-  // is what actually closes the "edit a helper, stay falsely fresh" hole. Over-inclusive (an
-  // unrelated script forces a rebuild) but never false-fresh, and it matches the CI cache key's
-  // `scripts/*.ts` glob.
-  const scripts = (await readdir(import.meta.dirname))
-    .filter((file) => file.endsWith(".ts"))
-    .map((file) => join(import.meta.dirname, file));
-  const paths = [
-    MANIFEST_PATH,
-    RAMP_PATH,
-    SUN_PATH,
-    ...scripts,
-    ...(await tilerSources()),
-    ...cities.flatMap((city) => [
-      sourcePath("streets", city.streets.file),
-      sourcePath("land", city.field.land.file),
-      sourcePath("trees", city.field.trees.file),
-      ...(city.field.canopy
-        ? [sourcePath("canopy", city.field.canopy.file)]
-        : []),
-      ...(city.paths ? [sourcePath("paths", city.paths.file)] : []),
-    ]),
-  ];
-  // The by-convention graph inputs (ferries + the scenic factors) are not in the manifest, so a
-  // change to one must still refresh the build: include each that exists on disk.
-  const convention = cities.flatMap((city) =>
-    [
-      // The graph's existence gate reads the per-side sidewalk bits, and `scripts/sidewalks.ts`
-      // stamps those from the sidewalk extract in the same run that writes it — so a sidewalk
-      // re-ingest that does not move a bit must still be seen here, or a later reader of the extract
-      // itself would stay falsely fresh.
-      ...CONVENTION_SOURCES,
-      // The commercial overlay's precomputed signals are snapped from these; a re-ingest of any must
-      // refresh the build so the commercial pass re-runs.
-      "landuse",
-      "dining",
-      "openstreets",
-    ].map((kind) => sourcePath(kind, `${city.id}.bin`)),
-  );
-  const present = await Promise.all(
-    convention.map(async (path) => ((await fileExists(path)) ? path : null)),
-  );
-  paths.push(...present.filter((path): path is string => path !== null));
-
-  // Repo-relative path + a separator + the bytes of each input, in a stable order, so the digest is
-  // deterministic and location-independent (the same on a laptop and a CI runner).
+// The tiler crate as one hash: its sources, its Cargo.toml and the workspace lockfile. The tiler
+// folds this into every pass's stamp, so an edit to the kernel invalidates the pyramid the old one
+// rendered — including an output whose FORMAT changed, which no input file would have moved.
+// Content, NOT mtime: a fresh checkout (CI) rewrites mtimes without changing a byte, which would
+// otherwise force a needless twenty-minute render and leave CI's cache of the tiles unusable.
+//
+// The `data/**` bytes used to be hashed here too, into one whole-build stamp. They are not any
+// more: the tiler hashes the inputs of each pass for itself, which is what lets one changed source
+// rerun one pass, and it does not read 168 MB through bun to find out.
+async function codeEpoch(): Promise<string> {
   const hash = createHash("sha256");
-  for (const path of paths.sort()) {
+  // Repo-relative path + a separator + the bytes, in a stable order, so the digest is deterministic
+  // and location-independent (the same on a laptop and a CI runner).
+  for (const path of (await tilerSources()).sort()) {
     hash.update(relative(ROOT, path));
     hash.update("\0");
     hash.update(await readFile(path));
@@ -241,7 +198,7 @@ async function planCity(city: City): Promise<PlanCity> {
 async function writePlan(): Promise<void> {
   const cities: City[] = manifest.cities;
   const plan: Plan = {
-    stamp: await inputsHash(cities),
+    codeEpoch: await codeEpoch(),
     manifest: MANIFEST_PATH,
     data: DATA_DIR,
     chunks: CHUNK_DIR,
