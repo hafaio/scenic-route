@@ -36,6 +36,8 @@
     "test-routes": "bun test tests",
     "build-tiles": "bun run scripts/serve-sources.ts && bun run scripts/write-plan.ts && cargo run --release --bin tiler -- build --plan .build/plan.json",
     "build-tiles:half": "bun run scripts/serve-sources.ts && bun run scripts/write-plan.ts && cargo run --release --bin tiler -- build --plan .build/plan.json --jobs half",
+    "build-tiles:graph": "bun run scripts/serve-sources.ts && bun run scripts/write-plan.ts && cargo run --release --bin tiler -- build --plan .build/plan.json --jobs half --only graph",
+    "build-tiles:shade": "bun run scripts/serve-sources.ts && bun run scripts/write-plan.ts && cargo run --release --bin tiler -- build --plan .build/plan.json --jobs half --only shade",
     "update-sheds": "set -eo pipefail; from=$(bun run scripts/shed-window.ts); dir=${SHED_SNAPSHOTS:-.cache/ActiveShedPermits}; test -d $dir || git clone --bare --shallow-since=$from https://github.com/NYCDOB/ActiveShedPermits.git $dir; git -C $dir fetch --all --tags --force; bun run shed-index; bun run shed-blobs --from $from | git -C $dir cat-file --batch | bun run scripts/update-sheds.ts .build/shed-index.txt",
     "update-ferry-schedule": "bun run scripts/ferry-schedule.ts"
   },
