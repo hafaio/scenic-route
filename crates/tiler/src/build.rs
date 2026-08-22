@@ -30,6 +30,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
@@ -138,8 +139,14 @@ const OUTSIDE_SHADE: [&str; 25] = [
 ];
 
 /// In every scope beside the modules: a dependency's bytes can move the geometry without a line of
-/// this crate changing, and a feature flag can move what the compiler does with it.
-const BUILD_FILES: [&str; 3] = ["Cargo.toml", "Cargo.lock", "crates/tiler/Cargo.toml"];
+/// this crate changing, a feature flag can move what the compiler does with it, and a compiler bump
+/// can move a low bit of `sin` through std or libm — which is a shadow in a different place.
+const BUILD_FILES: [&str; 4] = [
+    "Cargo.toml",
+    "Cargo.lock",
+    "crates/tiler/Cargo.toml",
+    "rust-toolchain.toml",
+];
 
 /// One city's DEM. The mosaic is several hundred tiles, so the plan lists them; the projection is
 /// named because a GeoTIFF carries an EPSG code and not the parameters, so something has to know
@@ -184,6 +191,17 @@ impl PlanCity {
     }
 }
 
+/// One module hashed by its token stream: `proc_macro2` drops ordinary `//` and `/* */` comments and
+/// normalizes whitespace, so what is left is what the compiler is handed. `None` for a file that
+/// cannot be read or lexed, whose caller keeps the hash of its bytes.
+fn token_oid(path: &Path) -> Option<String> {
+    let source = fs::read_to_string(path).ok()?;
+    let stream = proc_macro2::TokenStream::from_str(&source).ok()?;
+    let mut digest = Sha256::new();
+    field(&mut digest, stream.to_string().as_bytes());
+    Some(hex(&digest.finalize()))
+}
+
 /// The whole build, as the driver states it. Unknown fields are rejected: a driver that misspells a
 /// directory would otherwise write a pyramid nothing serves and report success.
 #[derive(Deserialize)]
@@ -195,7 +213,8 @@ pub struct Plan {
     /// any edit to the tiler invalidates them: they declare no modules of their own, and an output
     /// whose format changed would otherwise go on being served from the last build's bytes. It
     /// arrives file by file rather than as one hash because the shade pass DOES name the modules it
-    /// is a function of, and can only hash those if the plan carries them apart.
+    /// is a function of, and can only hash those if the plan carries them apart. The `.rs` entries
+    /// are rehashed here over their token streams before anything folds them — `hash_source_tokens`.
     code: BTreeMap<String, String>,
     manifest: PathBuf,
     /// The committed sources, `data/`: every pass resolves its own files under it.
@@ -261,6 +280,34 @@ impl Plan {
                 self.ramp.len()
             )
             .into())
+        }
+    }
+
+    /// Every `.rs` entry of the code map, rehashed over the module's TOKEN stream in place of its
+    /// bytes, before a single stamp is folded. A comment or a `cargo fmt` run then moves nothing:
+    /// the epoch reaches nearly every pass, so an edit that cannot change what the tiler produces
+    /// used to cost a rebake of the per-sun-position shade rows.
+    ///
+    /// Sound only while nothing that produces an artifact is a function of its own source layout —
+    /// no `line!`, `file!`, `column!` or `#[track_caller]`, and no `include_str!`/`include_bytes!`
+    /// of a file the code map does not carry. Neither appears anywhere in the crate today.
+    ///
+    /// Doc comments survive as `#[doc]` tokens and go on counting, since filtering them means
+    /// walking attribute groups and over-invalidation is the safe direction. A file that will not
+    /// read or lex keeps the byte hash it arrived with for the same reason — it is never skipped.
+    ///
+    /// The modules are read from the crate this binary was compiled from rather than from the
+    /// plan's repo-relative keys, which would be resolved against whatever the cwd happens to be.
+    fn hash_source_tokens(&mut self) {
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let prefix = format!("{SRC}/");
+        for (path, oid) in &mut self.code {
+            let Some(module) = path.strip_prefix(&prefix).filter(|m| m.ends_with(".rs")) else {
+                continue;
+            };
+            if let Some(hashed) = token_oid(&src.join(module)) {
+                *oid = hashed;
+            }
         }
     }
 
@@ -1367,7 +1414,8 @@ pub fn run(plan_file: &Path, jobs: Option<usize>, selection: &Selection) -> Fall
         "building on {threads} thread{}",
         if threads == 1 { "" } else { "s" }
     );
-    let plan: Plan = serde_json::from_slice(&fs::read(plan_file)?)?;
+    let mut plan: Plan = serde_json::from_slice(&fs::read(plan_file)?)?;
+    plan.hash_source_tokens();
     let manifest: Manifest = serde_json::from_slice(&fs::read(&plan.manifest)?)?;
     let cities = plan.pair(&manifest)?;
     plan.check_ramp()?;
@@ -1982,6 +2030,8 @@ pub fn graph_inputs(plan_file: &Path, report: &Path) -> Fallible<()> {
 
 #[cfg(test)]
 mod tests {
+    use proc_macro2::{Delimiter, TokenStream, TokenTree};
+
     use super::*;
 
     /// A manifest of two cities, one of which carries neither a canopy nor a genus layer, in the
@@ -2902,6 +2952,40 @@ mod tests {
         assert_eq!(after.buckets, before.buckets);
     }
 
+    /// What the token hash buys: a comment and a reformat are not a new tiler, and the epoch they
+    /// used to move is folded into nearly every pass. Doc comments are counted on purpose.
+    #[test]
+    fn a_comment_moves_no_module_hash_and_a_line_of_code_does() {
+        let root = scratch("token-hash");
+        fs::create_dir_all(&root).expect("a scratch tree");
+        let module = root.join("module.rs");
+        let write = |body: &str| fs::write(&module, body).expect("a module");
+
+        write("/// doc\nfn area(side: f64) -> f64 {\n    // a comment\n    side * side\n}\n");
+        let before = token_oid(&module).expect("a hash");
+        write("/// doc\nfn area( side : f64 )->f64{ /* moved */ side*side }\n");
+        assert_eq!(token_oid(&module).as_ref(), Some(&before), "a comment");
+        write("/// doc\nfn area(side: f64) -> f64 {\n    side * 2.0\n}\n");
+        assert_ne!(token_oid(&module).as_ref(), Some(&before), "an edit");
+        write("/// other\nfn area(side: f64) -> f64 {\n    side * side\n}\n");
+        assert_ne!(token_oid(&module).as_ref(), Some(&before), "a doc comment");
+    }
+
+    /// The substitution reaches the map the stamps are folded from, and only its modules: a
+    /// lockfile has no token stream to hash.
+    #[test]
+    fn the_code_map_carries_token_hashes_for_its_modules_alone() {
+        let mut plan = plan(BOTH);
+        let lockfile = plan.code["Cargo.lock"].clone();
+        plan.hash_source_tokens();
+
+        assert_ne!(
+            plan.code[&format!("{SRC}/shade.rs")],
+            "the bytes of shade.rs"
+        );
+        assert_eq!(plan.code["Cargo.lock"], lockfile);
+    }
+
     /// A bucket is stamped on its own bin and not on the schedule's shape, which is what makes an
     /// inserted bin cost one render rather than fifty-eight.
     #[test]
@@ -3110,6 +3194,49 @@ mod tests {
         assert_eq!(found, claimed);
     }
 
+    /// Every module a `crate::` path in these tokens names — the head of the path, and each head
+    /// inside a `use crate::{…}` group. Tokens rather than lines, so that `pub use`, the second and
+    /// later modules of a brace group, and a fully-qualified `crate::foo::bar` written with no `use`
+    /// at all are all counted; each of the three used to read as no import, which is the direction
+    /// that passes a scope that is not closed.
+    fn crate_heads(stream: TokenStream, found: &mut Vec<String>) {
+        let trees: Vec<TokenTree> = stream.into_iter().collect();
+        let colon = |tree: Option<&TokenTree>| matches!(tree, Some(TokenTree::Punct(punct)) if punct.as_char() == ':');
+        for (index, tree) in trees.iter().enumerate() {
+            match tree {
+                TokenTree::Group(group) => crate_heads(group.stream(), found),
+                TokenTree::Ident(ident)
+                    if ident == "crate"
+                        && colon(trees.get(index + 1))
+                        && colon(trees.get(index + 2)) =>
+                {
+                    match trees.get(index + 3) {
+                        Some(TokenTree::Ident(name)) => found.push(name.to_string()),
+                        // `use crate::{a, b::c}`: the head of every path the group lists, the
+                        // nested groups of which this loop reaches on its own.
+                        Some(TokenTree::Group(group)) if group.delimiter() == Delimiter::Brace => {
+                            let mut head = true;
+                            for tree in group.stream() {
+                                match tree {
+                                    TokenTree::Ident(name) if head => {
+                                        found.push(name.to_string());
+                                        head = false;
+                                    }
+                                    TokenTree::Punct(punct) if punct.as_char() == ',' => {
+                                        head = true;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// SHADE_CODE has to be CLOSED under what those modules import, not merely a list someone
     /// believed was closed. It is the one scope narrower than the whole crate, so a module that
     /// slipped into it unnamed — `crown.rs` reaching for the DEM to sample terrain under a canopy,
@@ -3122,16 +3249,13 @@ mod tests {
         let mut pending = vec![SHADE_CODE[0].to_owned()];
         while let Some(module) = pending.pop() {
             let body = fs::read_to_string(src.join(&module)).expect("a module of the crate");
-            for line in body.lines() {
-                let Some(rest) = line.trim().strip_prefix("use crate::") else {
-                    continue;
-                };
-                let imported = rest
-                    .trim_start_matches("{")
-                    .split(|character: char| !character.is_alphanumeric() && character != '_')
-                    .find(|name| !name.is_empty())
-                    .unwrap_or_default();
-                let file = format!("{imported}.rs");
+            let mut named = Vec::new();
+            crate_heads(
+                TokenStream::from_str(&body).expect("a module that lexes"),
+                &mut named,
+            );
+            for name in named {
+                let file = format!("{name}.rs");
                 // `use crate::Fallible` and friends name an item of lib.rs, not a module of its own.
                 if !src.join(&file).is_file() || reached.contains(&file) {
                     continue;

@@ -891,12 +891,23 @@ gate stamps its inputs off — see *What the stamp covers*.
 **The freshness check is per pass.** Each of the nine computes a SHA-256 over what *it* reads: the
 plan values it acts on, the content of every input file it opens, and the stamps of the passes whose
 output it consumes — a hash DAG, sound because the passes are deterministic. Folded into all of them
-are the manifest and a **code epoch**, the hash of `crates/tiler/src/**`, both `Cargo.toml`s and
-`Cargo.lock`; so any edit to the tiler invalidates every pass, including one whose output *format*
-changed, which no input file would have moved. `write-plan.ts` hashes those files one at a time and
-the plan carries them as the `code` map, which is what lets a pass name a scope of its own — the
-shade pass does, below. Content, not mtime — a fresh checkout (CI) or a `touch` rewrites mtimes
-without moving a byte.
+are the manifest and a **code epoch**, the hash of `crates/tiler/src/**`, both `Cargo.toml`s,
+`Cargo.lock` and `rust-toolchain.toml`; so any edit to the tiler invalidates every pass, including
+one whose output *format* changed, which no input file would have moved. The toolchain is in there
+because a compiler bump can move a low bit of `sin` through std or libm, and that is a shadow in a
+different place. `write-plan.ts` hashes those files one at a time and the plan carries them as the
+`code` map, which is what lets a pass name a scope of its own — the shade pass does, below. Content,
+not mtime — a fresh checkout (CI) or a `touch` rewrites mtimes without moving a byte.
+
+**A `.rs` file enters by its token stream, not by its bytes.** The tiler rehashes every module of
+the code map through `proc_macro2` before it folds a single stamp (`Plan::hash_source_tokens`),
+which drops ordinary `//` and `/* */` comments and normalizes whitespace — so a comment or a
+`cargo fmt` run moves nothing, where it used to invalidate every graph column and cost a
+twenty-five-minute rebake of the per-sun-position shade rows. Doc comments survive as `#[doc]`
+tokens and go on counting, and a file that will not read or lex keeps the hash of its bytes: both
+are the over-invalidating direction, which is the safe one. It holds only while nothing that
+produces an artifact is a function of its own source layout — no `line!`, `file!`, `column!` or
+`#[track_caller]`, and no `include_str!`/`include_bytes!` of a file the code map does not carry.
 
 **The shade pass is stamped finer than a pass: one key per sun bin.** A cold one is twenty minutes,
 and a bin's tiles are a pure function of that city's buildings and canopy, of *that*
@@ -919,7 +930,7 @@ finishes, so a build killed inside the pyramid keeps every bin that completed.
 
 **Shade also names the modules it is a function of** — `shade.rs`, `crown.rs`, `raster.rs`,
 `geometry.rs`, `binfmt.rs` and `manifest.rs`, the transitive closure of what `shade.rs` imports, plus
-the two `Cargo.toml`s and `Cargo.lock` — instead of folding in the whole-crate epoch, under which any
+the build files — instead of folding in the whole-crate epoch, under which any
 unrelated tiler edit would re-render the whole pyramid. No other pass names a scope yet, so the rest
 of the crate is listed as the complement and a test asserts that the two lists together ARE
 `crates/tiler/src/`: a module claimed by neither would be one no stamp is a function of, and the one
@@ -996,7 +1007,8 @@ serves and report success.
 {
   "code": {                                   // the tiler's own sources, file by file, repo-relative
     "Cargo.lock": "1d8b…",                    // the whole map is folded into every pass's stamp;
-    "crates/tiler/src/shade.rs": "9f2c…"      // the shade pass hashes the six modules it reads
+    "rust-toolchain.toml": "4c71…",           // the shade pass hashes the six modules it reads.
+    "crates/tiler/src/shade.rs": "9f2c…"      // .rs bytes here, token stream once the tiler has it
   },
   "manifest": "src/tree-cover/manifest.json", // every pass reads the city list from here
   "data": "data",                             // the committed sources; each pass resolves its own files under it
@@ -1123,11 +1135,16 @@ CI never passes either flag.
 ### Where the tile build spends its time
 
 **These are the costs of computing each thing once.** Every one of them is now behind a stamp, so
-what a given build actually pays is whichever of them its inputs moved: a build with nothing changed
-reaches the shade pass in 0.7 s where a cold one took 278 s, a graph assembled wholly out of its
-cache is 0.4 s for both cities against 255 s from scratch, and adding a source only the commercial
-pass reads left the 262 s of caster chunks untouched. Read the figures below as what a first build,
-or an edit to the tiler, has to pay for — not as what a re-run costs.
+what a given build actually pays is whichever of them its inputs moved. Measured on the real two-city
+plan: a cold build is 3893 s, a re-run with nothing changed is 0.2 s with all nine passes up to date,
+and adding San Francisco's historic districts — a source only the graph reads — was 0.3 s, taking
+that city's topology from cache and baking the one new column. A build stopped inside the pyramid
+keeps the bins that finished: killed after nine, the next run reported 49 of 58 left to render.
+
+(The smaller figures quoted while this was being built — a 0.4 s cached graph against 255 s from
+scratch, 262 s of caster chunks — came from reduced scratch plans with a few sun bins over a small
+window, and are not comparable to the whole-city costs below.) Read the figures below as what a first
+build, or an edit to the tiler, has to pay for — not as what a re-run costs.
 
 The pyramid is a few thousand webp tiles across z9–z15, rendered across the rayon pool a tile
 at a time. Two rasterizers dominate, and both lean on a spatial index so a tile touches only the
@@ -1167,7 +1184,8 @@ painted-tile and byte counts as it finishes.
 
 ## Committing the binaries: `sl` will silently corrupt them
 
-`data/**/*.bin` are build *inputs*, tracked in **Git LFS** (see `.gitattributes`). They are
+`data/**/*.bin` are build *inputs*, tracked in **Git LFS** (see `.gitattributes`) — every one of
+them but `data/historic/*.bin`, which is tens of kilobytes and committed plainly. They are
 never shipped to the client — only the tiles and chunks rendered from them are.
 
 > **`sl commit` does not run git-lfs clean filters.** It commits the raw multi-megabyte blob
@@ -2959,9 +2977,11 @@ key space, exactly — fails the next deploy with the same instruction. The land
 warning; `check-sheds` is the guarantee. Widening the fixture narrows the hole; widening the *stamp*
 back to the crate's source text closes it only by charging a re-place for every comment.
 
-It costs nothing on the fast path. Every blob under `data/` is LFS-tracked, and what the repository
-holds is a pointer whose oid *is* the sha256 of the object — so `input_oid` hashes the pointer when it
-finds one and the bytes when it does not, both kinds of checkout land on the same stamp, and the
+It costs nothing on the fast path. Nearly every blob under `data/` is LFS-tracked, and what the
+repository holds for those is a pointer whose oid *is* the sha256 of the object — so `input_oid`
+hashes the pointer when it finds one and the bytes when it does not, which is also what makes the
+plainly-committed `data/historic/*.bin` need no special case. Both kinds of checkout land on the same
+stamp, and the
 push/PR job keeps `lfs: false` and downloads not one byte to check this. The fixture is under `crates/`, which no `.gitattributes` rule reaches, so it arrives as
 bytes; the probe builds the tiler in the **debug** profile, since the release profile is lto with one
 codegen unit and the optimizer buys a 0.09 s run nothing. Both profiles give the fixture the same
