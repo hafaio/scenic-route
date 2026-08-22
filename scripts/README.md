@@ -263,7 +263,7 @@ in its own band.
 | buildings | NYC Building Footprints, Socrata `5zhs-2jue` (`feature_code=2100` with a positive `height_roof`, feet→metres) | 867,920 footprints with their roof heights; a committed source, magic `BLDG` — the walls the **building-shade** factor raises to cast shadows, for both the shade overlay pyramid and the signed per-edge shade routing bake; see "Binary layouts" |
 | landuse | NYC PLUTO, Socrata `64uk-42ks` (lots with `landuse` 1..5) | 788,591 tax lots, each with a land-use class byte; a committed source, magic `PLUT` — the commercial-vs-residential signal for the **commercial-area** overlay; see "Binary layouts" |
 | industrial | **NYC**: PLUTO's tax-lot polygons, DCP's MAPPLUTO ArcGIS FeatureServer (`services5.arcgis.com/.../MAPPLUTO/FeatureServer/0`), `LandUse = '06'`. **SF**: DataSF Land Use `c5ge-t6pj` + Zoning `3i4a-hu95`, the rule in `scripts/sf.ts` | industrial land as **polygons** — 9,295 lots in New York, 2,574 parcels in San Francisco; a committed source, magic `INDL` — drawn as an overlay so the city's industrial land can be seen, and sampled per edge into the graph's industrial-frontage penalty (GRPH byte 36). New York's geometry has to come from ArcGIS: the Socrata copy of PLUTO is lot centroids and its `geom` column is null on every row. See "Binary layouts" |
-| historic | NYC LPC **Historic Districts** ArcGIS FeatureServer (`services5.arcgis.com/Oos4pNA2538iVFA1/.../Historic_Districts/FeatureServer/0`) | the 159 designated historic districts as **polygons** — whole landmarked neighbourhoods (Park Slope, Brooklyn Heights, Greenwich Village …), not the individual buildings `landmarks` carries; a committed source, magic `HDST` — **display only**, it enters no routing input. The city's catalogued Socrata copy is unusable: see "Binary layouts" |
+| historic | NYC LPC **Historic Districts** ArcGIS FeatureServer (`services5.arcgis.com/Oos4pNA2538iVFA1/.../Historic_Districts/FeatureServer/0`) | the 159 designated historic districts as **polygons** — whole landmarked neighbourhoods (Park Slope, Brooklyn Heights, Greenwich Village …), not the individual buildings `landmarks` carries; a committed source, magic `HDST` — drawn as an overlay, and sampled per edge into the graph's historic-district discount (GRPH byte 37). The city's catalogued Socrata copy is unusable: see "Binary layouts" |
 | dining | NYC Dining Out `fpeh-f7ci` + OSM `outdoor_seating` via Overpass | outdoor-dining points; a committed source, magic `DINE` — a "cute" signal for the commercial overlay |
 | openstreets | NYC DOT Open Streets `uiay-nctu` (non-school), sampled every ~10 m | Open Streets corridor points; a committed source, magic `OSTR` — a "cute" signal for the commercial overlay |
 
@@ -930,8 +930,9 @@ assemble.** Everything through the name compaction — node identity and the ren
 sort, the ferries appended onto the finished walking node set, the ordinals over the order that
 leaves — is inherently sequential, and is a function of the streets, the paths, the OSM sidewalks,
 the ferries and the alley flag alone. What comes after is not: the landmark, art, highway and
-commercial fan-outs, the relief bytes, the direct canopy, the industrial frontage and the per-bin
-SHDE bake are each one byte per edge over an edge list that was final before any of them ran. So the
+commercial fan-outs, the relief bytes, the direct canopy, the industrial frontage, the historic
+share and the per-bin SHDE bake are each one byte per edge over an edge list that was final before
+any of them ran. So the
 base is cached as one entry, each column as another, and the pass lays the blob out of whichever it
 actually had to compute. Measured here on New York: 17 s of topology, 0.6 s for the four scenic
 bakes, 140 s for the direct canopy, 2.4 s for the industrial frontage and around 25 minutes for the
@@ -1013,7 +1014,7 @@ serves and report success.
     {
       "id": "sf",             // must name a manifest city; every manifest city needs an entry
       "alleys": false,        // does the centreline classify alleys? (default true — New York's meaning)
-      "sources": ["sidewalks", "ferries", "landmarks", "art", "highways", "industrial", "buildings"],
+      "sources": ["sidewalks", "ferries", "landmarks", "art", "highways", "industrial", "historic", "buildings"],
       "shade": {              // omit for a city whose year yields no above-horizon bin
         "maxZoom": 14,
         "maxShadowMeters": 500,
@@ -1334,8 +1335,9 @@ and its peak is a distance where what a walker minds is an amount.
 
 The **`LAND` polygon layout** exactly, under its own magic: the same 40-byte header, then `count`
 even-odd polygons of varint-delta rings, and nothing after them. Written by the shared
-`encodePolygons`, read by `src/tiles/historic.ts` and by nothing else — no Rust reader, no graph
-bake. New York only; San Francisco's equivalent (Planning's Article 10/11 districts) is not ingested.
+`encodePolygons`. New York only; San Francisco's equivalent (Planning's Article 10/11 districts) is
+not ingested — and until it is, every edge of that city's graph reads 0 and the slider gates itself
+off, so the factor lights up from the file's existence alone.
 
 A district whose boundary is a multi-part MultiPolygon expands to several polygon records, as `INDL`
 splits a multi-part lot. Districts are clipped to the coastline by whether **any vertex** is on land
@@ -1364,8 +1366,17 @@ older small district later enclosed by a larger one — Carnegie Hill inside Exp
 two Central Park West block districts inside Upper West Side/Central Park West, and DUMBO against
 Fulton Ferry. They are left undissolved, so those four patches paint twice and read darker.
 
-One thing reads it: the client, served verbatim as `public/historic/<id>.bin` by `serve-sources.ts`,
-which fills every district in one colour for the overlay.
+Two things read it. The client, served verbatim as `public/historic/<id>.bin` by
+`serve-sources.ts`, which fills every district in one colour for the overlay. And the graph pass,
+which bakes it into the per-edge historic byte (GRPH byte 37, `crates/tiler/src/historic.rs`): every
+edge's own polyline is walked a metre at a time and each sample is tested UNDERFOOT, so the byte is
+the length-fraction of the walk that falls inside a designated district. Deliberately not
+`industrial.rs`'s sideways probes, though both read polygons — those exist because a walker is never
+*in* a tax lot, where a district outline covers the street bed the walk is on, and probing would
+smear the discount one street-width past a boundary the designation drew where it did on purpose.
+A bridge or tunnel deck counts, unlike industrial's: a yard passes under a viaduct, where a viaduct
+through a district is still amid its fabric. The four overlapping districts need no dissolve —
+`PolygonSet::contains_point` ORs its candidates, so an overlap reads as the union it is.
 
 ### `data/buildings/<id>.bin` — the footprints and their heights, magic `BLDG` (v1)
 
@@ -2231,7 +2242,8 @@ can view them as typed arrays without copying):
 | 35 | u8 | **descent**, 0-254: the height it DROPS over the same walk, on the same scale. Walking the edge b→a swaps the two. Their SUM is the absolute grade the hill penalty reads — direction-free, because a route that avoids a hill avoids it both ways — and the two apart are what makes a descent quicker than the climb back (v9; v8 carried only the sum, in one byte). Because each clamps on its own, an edge that crests and drops can carry 70% of grade in total where the single byte pinned the pair at 35% |
 
 | 36 | u8 | **industrial frontage**, 0–254 (a penalty attribute; 0 for a ferry and for an edge on a bridge or tunnel deck): the share of the edge's length running past industrial land, each side of the walk counted for half, so both sides reads twice one side. Baked from `INDL` by `crates/tiler/src/industrial.rs`; 0 across a city with no industrial source, which is what drops that city's slider |
-| 37 | u8[3] | reserved, zero. The record grew to 40 for byte 36 and the next per-edge attribute rides here without a v11 |
+| 37 | u8 | **historic district**, 0–254 (a discount attribute; 0 for a ferry): the share of the edge's length falling inside a designated historic district, tested underfoot rather than probed sideways. Baked from `HDST` by `crates/tiler/src/historic.rs`; 0 across a city with no district source, which is what drops that city's slider. It took the first of byte 36's three reserved zeros **without a version bump** — an older v10 graph reads it back as 0 everywhere, which gates the slider off rather than mispricing anything |
+| 38 | u8[2] | reserved, zero. The record grew to 40 for byte 36 and the next per-edge attribute rides here without a v11 |
 
 The record is 40 bytes, a multiple of the 4-byte boundary every section starts on, so the name
 table that follows it needs no padding.
@@ -2858,6 +2870,7 @@ goes back in:
 | `data/ferries` | the KIND_FERRY edges | they carry `NO_SOURCE_ID`, and are appended after the walking sort and the node renumber onto nodes that already exist — `assign_ordinals` skips them and an append moves no earlier edge |
 | `data/landmarks`, `data/art`, `data/highways` | one scenic attribute byte each | read at `graph.rs:3501-3535`, after the last `v2_edges.push`, over a `scenic::Network` built from the finished edges |
 | `data/industrial` | one scenic attribute byte | read after the last `v2_edges.push` like the three above, but probed per metre against the lot polygons in `industrial.rs` rather than through a `scenic::Network` |
+| `data/historic` | one scenic attribute byte | the same, sampled underfoot against the district polygons in `historic.rs` |
 | `data/landuse`, `data/buildings`, `data/openstreets`, `data/dining` → `public/commercial-lines` | the commercial attribute byte | one more such byte, read at `graph.rs:3542`. the chunks and commercial passes are on this branch and nowhere else |
 | `data/canopy` | the direct-canopy byte, and the crowns of the SHDE bake | integrated along edge polylines that are already final |
 | `data/buildings` + the shade params (`shade-schedule.ts`, `src/shade/sun.ts`) | the per-edge SHDE bake | it runs *after* `fs::write(&args.out)`; it cannot move a key in the file it is written beside |

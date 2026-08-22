@@ -84,6 +84,7 @@ export interface RouteFactors {
   hill: number;
   commercial: number;
   industrial: number;
+  historic: number;
 }
 
 export interface RouteResult {
@@ -323,6 +324,7 @@ function reconstruct(
     hill: 0,
     commercial: 0,
     industrial: 0,
+    historic: 0,
   };
   for (const step of steps) {
     lengthMeters += step.lengthMeters;
@@ -340,6 +342,7 @@ function reconstruct(
       sums.hill += hillFractionOf(graph, edge) * stepMeters;
       sums.commercial += (graph.edgeCommercial[edge] / 255) * stepMeters;
       sums.industrial += (graph.edgeIndustrial[edge] / 255) * stepMeters;
+      sums.historic += (graph.edgeHistoric[edge] / 255) * stepMeters;
       // Sun exposure only: the positive (sunlit) part of the signed shade attribute at this point in the
       // walk, with a deck composited in whether or not scaffolding is barred, which is what the cost
       // model does too. It reads the deck's whole coverage rather than the share the sun has not slid
@@ -378,6 +381,7 @@ function reconstruct(
       hill: mean(sums.hill),
       commercial: mean(sums.commercial),
       industrial: mean(sums.industrial),
+      historic: mean(sums.historic),
     },
     start,
     dest,

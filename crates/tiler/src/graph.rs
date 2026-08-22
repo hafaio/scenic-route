@@ -13,7 +13,8 @@
 //! the durable edge key: a source record id (a CSCL physicalid, or an OSM way id for a conflated
 //! path) plus an ordinal that, with the side label already in the record, picks it out within that
 //! source. v10 grows the record to 40 bytes for the industrial-frontage penalty (`industrial.rs`)
-//! and leaves three reserved zeros for the next per-edge attribute.
+//! and the historic-district discount (`historic.rs`), leaving two reserved zeros for the next
+//! per-edge attribute.
 //!
 //! DESIGN.md, "The walking network", is why the pavement is placed the way it is — which source
 //! answers which question, what the seam rules are, and what the alternatives cost when they were
@@ -39,6 +40,7 @@ use crate::corners::{self, EdgeEnd};
 use crate::direct_canopy;
 use crate::geometry::{METERS_PER_DEGREE_LAT, round_half_up};
 use crate::graph_cache;
+use crate::historic;
 use crate::industrial;
 use crate::invariants;
 use crate::relief;
@@ -107,14 +109,18 @@ pub const SIDE_SOUTH: u8 = 3;
 const SIDE_WEST: u8 = 4;
 const FLAG_GEOMETRY_RIGHT: u8 = 1 << 2; // this sidewalk lies right of its stored geometry direction
 
-const GRAPH_FORMAT: u16 = 10; // v10 adds the industrial-frontage byte and three reserved bytes
+// v10 grew the record to 40 for the industrial-frontage byte and three reserved zeros. The
+// historic-district byte took the first of those three without moving the version: a graph written
+// before that bake reads byte 37 back as 0 everywhere, which gates its slider off rather than
+// mispricing anything, so the client needs no way to tell the two v10s apart.
+const GRAPH_FORMAT: u16 = 10;
 // The field the relief is sampled off is built at this zoom's pixel size — about 5 m at San
 // Francisco's latitude. Finer than the block a grade is measured over, coarser than the metre the
 // DEM is published at, and a whole city of it is tens of megabytes rather than gigabytes.
 const RELIEF_FIELD_ZOOM: u32 = 15;
 const GRAPH_HEADER_BYTES: usize = 64;
 // 24 + landmark(24), art(25), highway(26), commercial(27), directCanopy(28), sourceId(29..32),
-// ordinal(33), ascent(34), descent(35), industrial(36), reserved(37..39)
+// ordinal(33), ascent(34), descent(35), industrial(36), historic(37), reserved(38..39)
 const EDGE_RECORD_BYTES: usize = 40;
 // Record bytes 29-33: the source record an edge was derived from (a CSCL physicalid, or an OSM way
 // id for a conflated path) and the how-many-th edge of that source, on that side, this is. With the
@@ -275,6 +281,9 @@ pub struct Args {
     // The city's industrial tax lots (INDL), sampled per edge for the frontage penalty. A city with
     // no such source bakes zeros, which is what makes its slider vanish rather than move nothing.
     pub industrial: Option<PathBuf>,
+    // The city's designated historic districts (HDST), sampled per edge for the containment
+    // discount. Absent for a city that has none, on the same terms as the lots above.
+    pub historic: Option<PathBuf>,
     pub out: PathBuf,
     /// Where to WRITE this city's dropped ways, as the documented STRD artifact. Nothing reads it
     /// back: the re-chunk that clears those walks off the overlay takes the ids `run` returns.
@@ -4150,7 +4159,8 @@ fn topology(args: &Args) -> Fallible<Base> {
 }
 
 /// One byte per edge of the base, per attribute — the four scenic bakes, the two relief rows, the
-/// direct canopy and the industrial frontage — plus one (buildings, trees) row pair per sun bin.
+/// direct canopy, the industrial frontage and the historic-district share — plus one (buildings,
+/// trees) row pair per sun bin.
 /// Each is baked over the finished edge list and merged back in by position at the write.
 struct Columns {
     landmark: Vec<u8>,
@@ -4161,6 +4171,7 @@ struct Columns {
     descent: Vec<u8>,
     direct_canopy: Vec<u8>,
     industrial: Vec<u8>,
+    historic: Vec<u8>,
     /// In schedule order, and empty for a city with no per-edge shade bake.
     shade: Vec<(Vec<u8>, Vec<u8>)>,
 }
@@ -4444,6 +4455,27 @@ fn bake(
         None => vec![0u8; edge_count],
     };
 
+    // The historic byte (v10): how much of the edge runs inside a designated district, tested
+    // underfoot rather than probed sideways — see historic.rs for why a boundary is read that way
+    // and an industrial lot is not. A deck through a district is still in it, so no structure mask.
+    let historic = match &args.historic {
+        Some(path) => column(
+            cache.as_deref_mut(),
+            graph_cache::HISTORIC,
+            keys.map(|keys| keys.historic.as_str()),
+            edge_count,
+            || {
+                let baked = historic::historic(polylines.get(), path, base.origin_lat)?;
+                eprintln!(
+                    "historic: {} district parts, {} edges inside one, mean {:.4}, max byte {}",
+                    baked.polygons, baked.inside, baked.mean, baked.max_byte
+                );
+                Ok(baked.bytes)
+            },
+        )?,
+        None => vec![0u8; edge_count],
+    };
+
     let shade = match (&args.buildings, &args.shade_params) {
         (Some(buildings), Some(params)) => {
             shade_columns(args, base, buildings, params, &mut polylines, cache)?
@@ -4460,6 +4492,7 @@ fn bake(
         descent,
         direct_canopy,
         industrial,
+        historic,
         shade,
     })
 }
@@ -4686,9 +4719,11 @@ fn assemble(args: &Args, base: &Base, columns: &Columns) -> Fallible<()> {
             // a->b, so reversing it swaps the two. A ferry crosses water and has neither.
             bytes[record + 34] = columns.ascent[edge_id];
             bytes[record + 35] = columns.descent[edge_id];
-            // The industrial frontage byte (v10), read as a `1 + w*attr` penalty. Bytes 37-39 are
-            // the reserved zeros the 40-byte record leaves for the next attribute.
+            // The industrial frontage byte (v10), read as a `1 + w*attr` penalty, and beside it the
+            // share of the edge inside a historic district, read as a `1 - w*attr` discount. Bytes
+            // 38-39 are the reserved zeros the 40-byte record still leaves for the next attribute.
             bytes[record + 36] = columns.industrial[edge_id];
+            bytes[record + 37] = columns.historic[edge_id];
         }
         // The durable key (v6): the source record's id, and the ordinal that — with the side already
         // in byte 22 — picks this edge out within it. A crossing, link or ferry has no source

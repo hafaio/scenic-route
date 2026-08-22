@@ -30,12 +30,14 @@ mod geometry;
 mod graph;
 mod graph_cache;
 mod heights;
+mod historic;
 mod industrial;
 mod ingest;
 mod invariants;
 mod manifest;
 mod raster;
 mod relief;
+mod sampling;
 mod scenic;
 mod shade;
 mod sidewalks;
@@ -175,6 +177,7 @@ fn run() -> Fallible<()> {
                 highways: None,
                 commercial: None,
                 industrial: None,
+                historic: None,
                 out,
                 stranded_out: None,
                 buildings: None,

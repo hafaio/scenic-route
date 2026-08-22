@@ -58,6 +58,7 @@ const CONVENTION_SOURCES = [
   "art",
   "highways",
   "industrial",
+  "historic",
   "buildings",
 ] as const;
 type ConventionSource = (typeof CONVENTION_SOURCES)[number];

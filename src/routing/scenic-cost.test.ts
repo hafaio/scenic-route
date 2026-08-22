@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import {
   edgeMultiplier,
   effSeconds,
+  MAX_HISTORIC_WEIGHT,
   minMultiplier,
   type RouteWeights,
   WALK_METERS_PER_SECOND,
@@ -10,7 +11,8 @@ import { NO_GEOMETRY, otherEnd, type RoutingGraph } from "./graph";
 import { findRoute, type RouteResult } from "./search";
 import { haversineMeters, type Snap } from "./snap";
 
-// Phase-3 oracle for the three new scenic factors (landmark and art discounts, the highway penalty).
+// Phase-3 oracle for the three new scenic factors (landmark and art discounts, the highway penalty),
+// grown since with the commercial, industrial and historic-district factors.
 // The reference optimum is a self-contained Dijkstra over effective seconds rather than findRoute — a
 // stronger, independent check than comparing one A* against another.
 
@@ -27,6 +29,7 @@ const noScenic = (over: Partial<RouteWeights> = {}): RouteWeights => ({
   hill: 0,
   commercial: 0,
   industrial: 0,
+  historic: 0,
   shade: 0,
   shelter: 0,
   allowFerries: false,
@@ -49,6 +52,7 @@ interface EdgeSpec {
   highway?: number;
   commercial?: number;
   industrial?: number;
+  historic?: number;
 }
 
 function buildGraph(nodes: NodeSpec[], edges: EdgeSpec[]): RoutingGraph {
@@ -72,6 +76,7 @@ function buildGraph(nodes: NodeSpec[], edges: EdgeSpec[]): RoutingGraph {
   const edgeHighway = new Uint8Array(edgeCount);
   const edgeCommercial = new Uint8Array(edgeCount);
   const edgeIndustrial = new Uint8Array(edgeCount);
+  const edgeHistoric = new Uint8Array(edgeCount);
   const edgeKindSide = new Uint8Array(edgeCount);
   const edgeDurationSeconds = new Float32Array(edgeCount);
   const edgeNameId = new Uint16Array(edgeCount).fill(NAME_NONE);
@@ -85,6 +90,7 @@ function buildGraph(nodes: NodeSpec[], edges: EdgeSpec[]): RoutingGraph {
   let maxArt = 0;
   let maxCommercial = 0;
   let maxIndustrial = 0;
+  let maxHistoric = 0;
   for (let edge = 0; edge < edgeCount; edge++) {
     const spec = edges[edge];
     edgeNodeA[edge] = spec.a;
@@ -102,11 +108,13 @@ function buildGraph(nodes: NodeSpec[], edges: EdgeSpec[]): RoutingGraph {
     edgeHighway[edge] = byte(spec.highway);
     edgeCommercial[edge] = byte(spec.commercial);
     edgeIndustrial[edge] = byte(spec.industrial);
+    edgeHistoric[edge] = byte(spec.historic);
     maxCover = Math.max(maxCover, edgeCover[edge]);
     maxLandmark = Math.max(maxLandmark, edgeLandmark[edge]);
     maxArt = Math.max(maxArt, edgeArt[edge]);
     maxCommercial = Math.max(maxCommercial, edgeCommercial[edge]);
     maxIndustrial = Math.max(maxIndustrial, edgeIndustrial[edge]);
+    maxHistoric = Math.max(maxHistoric, edgeHistoric[edge]);
     adjacency[spec.a].push(edge);
     adjacency[spec.b].push(edge);
   }
@@ -150,10 +158,12 @@ function buildGraph(nodes: NodeSpec[], edges: EdgeSpec[]): RoutingGraph {
     maxRelief: 0,
     edgeCommercial,
     edgeIndustrial,
+    edgeHistoric,
     maxLandmark: maxLandmark / 255,
     maxArt: maxArt / 255,
     maxCommercial: maxCommercial / 255,
     maxIndustrial: maxIndustrial / 255,
+    maxHistoric: maxHistoric / 255,
     shade: null,
     edgeDurationSeconds,
     ferryEdges: new Uint32Array(0),
@@ -398,6 +408,68 @@ test("a strong commercial weight steers the route onto a nicer commercial street
   expect(
     upperTaken(findRoute(graph, start, dest, noScenic({ commercial: 1 }))),
   ).toBe(true);
+});
+
+test("edgeMultiplier prices a historic district as a discount beside the landmark one", () => {
+  // A block that is both inside a district and rich in landmarks: the two factors are independent,
+  // so they multiply rather than one standing in for the other.
+  const { graph } = diamond({ landmark: 0.4, historic: 0.9 }, {});
+  const weights = noScenic({ landmark: 0.5, historic: 0.3 });
+  const edge = 1; // the upper 0->1 edge, which carries both
+  const expected =
+    (1 - 0.5 * (graph.edgeLandmark[edge] / 255)) *
+    (1 - 0.3 * (graph.edgeHistoric[edge] / 255));
+
+  expect(edgeMultiplier(graph, edge, weights)).toBeCloseTo(expected, 12);
+  // A discount DOES enter the heuristic's lower bound, unlike the industrial penalty below.
+  expect(minMultiplier(graph, weights)).toBeCloseTo(
+    (1 - 0.3 * graph.maxHistoric) * (1 - 0.5 * graph.maxLandmark),
+    12,
+  );
+});
+
+test("a strong historic weight steers the route through a district it would otherwise skirt", () => {
+  // The upper path bows out (a real detour, ~35% longer) but runs inside a designated district; the
+  // lower is the short plain way. Like the landmark case, the discount must beat the extra distance.
+  const { graph, start, dest } = diamond(
+    { historic: 0.9 },
+    {},
+    0.0028, // upper bows far out — the longer path
+    0.0002, // lower stays near the straight line — the shorter path
+  );
+
+  expect(upperTaken(findRoute(graph, start, dest, noScenic()))).toBe(false);
+  expect(
+    upperTaken(findRoute(graph, start, dest, noScenic({ historic: 1 }))),
+  ).toBe(true);
+});
+
+test("the historic discount keeps a positive floor at the top of its slider", () => {
+  // The whole reason the bake caps the byte at 254 rather than 255. The attribute is close to binary
+  // — an interior sidewalk saturates — so this is the graph the factor actually meets, and at w = 1
+  // its floor is what the A* heuristic scales straight-line distance by. A floor of 0 would make an
+  // in-district metre free and let the search wander; a negative one is not a metric at all.
+  const { graph, start, dest } = diamond({ historic: 1 }, { historic: 1 });
+  const full = noScenic({ historic: MAX_HISTORIC_WEIGHT });
+
+  expect(graph.maxHistoric).toBeLessThan(1);
+  expect(minMultiplier(graph, full)).toBeGreaterThan(0);
+  for (let edge = 0; edge < graph.edgeCount; edge++) {
+    expect(edgeMultiplier(graph, edge, full)).toBeGreaterThan(0);
+    // The bound has to hold edge by edge, which is what makes the estimate admissible.
+    expect(edgeMultiplier(graph, edge, full)).toBeGreaterThanOrEqual(
+      minMultiplier(graph, full) - 1e-12,
+    );
+  }
+  // And the search still agrees with the reference optimum down there.
+  const result = findRoute(graph, start, dest, full);
+  expect(result).not.toBeNull();
+  expect(
+    Math.abs(
+      effectiveCostOf(graph, result as RouteResult, full) -
+        dijkstraCost(graph, start, dest, full),
+    ),
+  ).toBeLessThan(1e-3);
 });
 
 test("edgeMultiplier prices industrial frontage as a penalty beside the highway one", () => {

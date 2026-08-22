@@ -1,8 +1,9 @@
 // Cost is effective seconds: an edge's raw travel time times a product of scenic factors. Each
 // walked metre is discounted toward a floor by the tree cover, the landmarks and public art it
-// passes, the nice commercial frontage it runs along, and the shelter overhead (a factor 1 - w*attr
-// per element) and made dearer by a nearby highway or elevated rail and by the industrial land it
-// runs past (penalty factors 1 + w*attr); a ferry's crossing time is discounted by the ferry weight. The sun/shade axis is a single signed
+// passes, the nice commercial frontage it runs along, the designated historic district it runs
+// inside, and the shelter overhead (a factor 1 - w*attr per element) and made dearer by a nearby
+// highway or elevated rail and by the industrial land it runs past (penalty factors 1 + w*attr); a
+// ferry's crossing time is discounted by the ferry weight. The sun/shade axis is a single signed
 // factor `1 - w*attr` whose weight `w in [-1, 1]` and edge attribute `attr in (-1, 1)` are both
 // signed (attr positive = net sunlit, negative = net shaded, for the sun at the moment the edge is
 // reached): w > 0 discounts sun and penalizes shade, w < 0 flips it, w = 0 is neutral. Every
@@ -215,6 +216,15 @@ export const DEFAULT_HILL_WEIGHT = 0;
 // A discount for edges fronting a nice commercial block. Modest default, tunable by eye.
 export const MAX_COMMERCIAL_WEIGHT = 1;
 export const DEFAULT_COMMERCIAL_WEIGHT = 0.1;
+// A discount for walking inside a designated historic district. Parity with the landmark, art and
+// commercial discounts, deliberately: it is the same kind of preference, and no measurement yet says
+// otherwise. Note the attribute is close to binary — an interior sidewalk reads the 254 ceiling and
+// only a boundary edge reads a part — so at w = 1 an in-district metre is nearly free and the
+// heuristic floor nearly collapses. That is in-family (tree cover does it too) and admissible, since
+// the byte ceiling keeps maxHistoric < 1; it is a reason to move this on measurements rather than to
+// pre-inflate the maximum the way industrial's was.
+export const MAX_HISTORIC_WEIGHT = 1;
+export const DEFAULT_HISTORIC_WEIGHT = 0.1;
 // A penalty for edges running past industrial land, in the highway family. The top of the slider sits
 // where hill's does, and for the same reason: measured over 234 trips seeded on industrial streets, a
 // ceiling of 1 left a third of them on exactly the route they took with the slider off and removed
@@ -264,6 +274,9 @@ export interface RouteWeights {
   // Penalty for walking past industrial land: the share of the edge's length with a yard or a
   // warehouse beside it, counted per side, so both sides cost twice one.
   industrial: number;
+  // Discount for walking inside a designated historic district: the share of the edge's length that
+  // falls within one. Independent of `landmark`, which prices passing an individual monument.
+  historic: number;
   shade: number; // signed sun/shade preference in [-1, 1]; positive prefers sun, negative shade
   shelter: number; // preference for cover overhead in the rain: decks and canopy
   allowFerries: boolean;
@@ -342,10 +355,10 @@ export function maxShelter(graph: RoutingGraph): number {
   }
 }
 
-// The walking multiplier: the tree-cover, landmark, art and commercial discounts (each 1 - w*attr) and
-// the signed sun/shade factor (1 - w*attr, attr and w both signed) times the nuisance penalty
-// (1 + w*attr). At every weight 0 this is 1 (the shortest path); a shaded, landmarked metre far from
-// any highway approaches the floor. No per-factor clip is needed — each unsigned attribute is <= its graph max, and
+// The walking multiplier: the tree-cover, landmark, art, commercial and historic-district discounts
+// (each 1 - w*attr) and the signed sun/shade factor (1 - w*attr, attr and w both signed) times the
+// nuisance penalty (1 + w*attr). At every weight 0 this is 1 (the shortest path); a shaded,
+// landmarked metre far from any highway approaches the floor. No per-factor clip is needed — each unsigned attribute is <= its graph max, and
 // the shade factor is >= its `minMultiplier` term 1 - |w|*maxAbsAttr, so the product stays positive.
 // `elapsedSeconds` is how far into the walk the edge is reached; the shade field advances the sun by it,
 // so the same edge costs differently early vs late in a long route. It defaults to the departure instant.
@@ -374,6 +387,7 @@ export function edgeMultiplier(
     1 - weights.commercial * (graph.edgeCommercial[edge] / 255);
   const industrial =
     1 + weights.industrial * (graph.edgeIndustrial[edge] / 255);
+  const historic = 1 - weights.historic * (graph.edgeHistoric[edge] / 255);
   // The signed shade attribute for the sun at this point in the walk; 0 when no artifact is loaded or at
   // night. The field ignores elapsed time for a fixed sun position (constant field, tests).
   const shade =
@@ -387,6 +401,7 @@ export function edgeMultiplier(
     hill *
     commercial *
     industrial *
+    historic *
     shade *
     shelter;
   if (weights.allowSheds) {
@@ -413,6 +428,7 @@ export function minMultiplier(
     (1 - weights.landmark * graph.maxLandmark) *
     (1 - weights.art * graph.maxArt) *
     (1 - weights.commercial * graph.maxCommercial) *
+    (1 - weights.historic * graph.maxHistoric) *
     // The shade factor's per-edge floor: whichever sign of attr the weight discounts, at the field's
     // max magnitude over every edge and elapsed time. Positive because |shade| <= 1 and maxAbs < 1.
     // Compositing a deck in cannot leave that range: it mixes the baked attribute toward -intensity,

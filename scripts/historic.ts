@@ -1,6 +1,7 @@
 // `bun run scripts/historic.ts [city]`: fetches New York's designated historic districts and writes
 // them as data/historic/<id>.bin (magic HDST) — the district BOUNDARIES as polygons, drawn by the
-// historic-districts overlay. Display only: nothing bakes it into the graph. Layout: scripts/README.md.
+// historic-districts overlay and sampled per edge into the graph's historic-district discount.
+// Layout: scripts/README.md.
 //
 // These are whole neighbourhoods the Landmarks Preservation Commission has designated (Park Slope,
 // Brooklyn Heights, Greenwich Village …), not the individual landmarked buildings scripts/landmarks.ts
