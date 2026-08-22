@@ -881,17 +881,46 @@ gate stamps its inputs off — see *What the stamp covers*.
 plan values it acts on, the content of every input file it opens, and the stamps of the passes whose
 output it consumes — a hash DAG, sound because the passes are deterministic. Folded into all of them
 are the manifest and a **code epoch**, the hash of `crates/tiler/src/**`, both `Cargo.toml`s and
-`Cargo.lock`, which `write-plan.ts` computes and the plan carries as `codeEpoch`; so any edit to the
-tiler invalidates every pass, including one whose output *format* changed, which no input file would
-have moved. Content, not mtime — a fresh checkout (CI) or a `touch` rewrites mtimes without moving a
-byte.
+`Cargo.lock`; so any edit to the tiler invalidates every pass, including one whose output *format*
+changed, which no input file would have moved. `write-plan.ts` hashes those files one at a time and
+the plan carries them as the `code` map, which is what lets a pass name a scope of its own — the
+shade pass does, below. Content, not mtime — a fresh checkout (CI) or a `touch` rewrites mtimes
+without moving a byte.
+
+**The shade pass is stamped finer than a pass: one key per sun bin.** It is most of the build's
+twenty minutes, and a bin's tiles are a pure function of that city's buildings and canopy, of *that*
+bin's samples and intensity, of `maxZoom`/`maxShadowMeters` and of the shade code — not of the other
+bins, and not of the schedule's shape. The key lives at `public/tiles/shade/<city>/<bin>/.stamp` and
+claims the `tree-shade` twin beside it, which comes out of the same render over the same casters.
+
+The catch is that `<bin>` is a **position** in a schedule that sorts stably by (season, hour angle),
+so inserting one bin shifts the index of every later one. So the driver matches directories to bins
+**by their content key, never by position**: a directory whose key is still wanted is *renamed* into
+its new index — through a `.moving-<n>` staging name, since one bin's new index is usually another's
+old one — a bin no directory claimed is rendered, a directory nothing claimed is deleted, and
+`buckets.json` is written again from the grid on every build. It is written *before* a tile is
+rendered, because the renames have already moved the tiles and a schedule naming the old indices
+would send the client to another bin's; a bin the render has not reached yet is a directory of 404s,
+which it reads as no shade at all. So a schedule that gains a bin costs one bin's render plus the
+renames, one that loses a bin costs the renames alone, and a re-ingested `data/buildings/<id>.bin`
+correctly re-renders every bin, that file being opaque and city-wide. Each bin records its key as it
+finishes, so a build killed inside the pyramid keeps every bin that completed.
+
+**Shade also names the modules it is a function of** — `shade.rs`, `crown.rs`, `raster.rs`,
+`geometry.rs`, `binfmt.rs` and `manifest.rs`, the transitive closure of what `shade.rs` imports, plus
+the two `Cargo.toml`s and `Cargo.lock` — instead of folding in the whole-crate epoch, under which any
+unrelated tiler edit would re-render the whole pyramid. No other pass names a scope yet, so the rest
+of the crate is listed as the complement and a test asserts that the two lists together ARE
+`crates/tiler/src/`: a module claimed by neither would be one no stamp is a function of, and the one
+edit that leaves a stale pyramid being served.
 
 Each stamp is written **inside that pass's own output** — `public/streets/.stamp` and
 `.stamp-stranded`, `public/commercial/.stamp`, `public/casters/.stamp`,
 `public/tiles/canopy/.stamp`, `public/tiles/genus-field/.stamp`,
-`public/tiles/{shade,elevation}/<city>/.stamp`, `public/routing/.stamp-<city>` — and only once that
-pass succeeds, so a run killed halfway keeps every pass that finished and claims nothing for the one
-that did not. A pass is skipped when its stamp matches **and** its own output is still there: the
+`public/tiles/shade/<city>/<bin>/.stamp`, `public/tiles/elevation/<city>/.stamp`,
+`public/routing/.stamp-<city>` — and only once that pass (or, for shade, that bin) succeeds, so a
+run killed halfway keeps every pass that finished and claims nothing for the one that did not. A
+pass is skipped when its stamp matches **and** its own output is still there: the
 stamp says the inputs have not moved, not that the output is on disk, and a hand-deleted directory
 or a CI cache that restored only part of the tree has to rebuild. Existence, not completeness — an
 empty directory still passes.
@@ -922,7 +951,10 @@ serves and report success.
 
 ```jsonc
 {
-  "codeEpoch": "9f2c…",                       // the tiler's own sources, hashed; folded into every pass's stamp
+  "code": {                                   // the tiler's own sources, file by file, repo-relative
+    "Cargo.lock": "1d8b…",                    // the whole map is folded into every pass's stamp;
+    "crates/tiler/src/shade.rs": "9f2c…"      // the shade pass hashes the six modules it reads
+  },
   "manifest": "src/tree-cover/manifest.json", // every pass reads the city list from here
   "data": "data",                             // the committed sources; each pass resolves its own files under it
   "chunks": "public/streets",                 // STCK street chunks
@@ -970,11 +1002,15 @@ more: a pass clears its own directories immediately before it reruns, so a fresh
 survives a neighbour rebuilding — which is the whole point. `public/{streets,casters,tiles/canopy,
 tiles/genus-field}` are emptied and recreated by the pass that owns them, and
 `public/commercial{,-lines}` by the commercial pass, which has always cleared its own two.
-`public/tiles/{shade,tree-shade,elevation}/<city>`,
+`public/tiles/elevation/<city>`,
 `public/routing/<city>.{bin,stranded.bin,version.json}` and `public/routing/shade/<city>` are
 removed and left for their pass to remake, since a city that renders nothing must leave no directory
-at all — a shrunk sun schedule or a city that lost its buildings would otherwise keep serving the
-old bins. A pass that renders nothing this build clears its root and records no stamp, which is how
+at all — a city that lost its buildings would otherwise keep serving the old bins. The two shade
+pyramids are the same rule one level down: `public/tiles/{shade,tree-shade}/<city>` go outright for a
+city that stops casting a shadow, and for a city that goes on casting, every bin directory the
+schedule no longer claims goes instead — as does anything else under the pyramid, a staging name a
+killed run left or a stamp an older build wrote at the top of it. A pass that renders nothing this
+build clears its root and records no stamp, which is how
 a layer that stops being produced stops being served and costs nothing to decide again. Before the
 passes, the driver sweeps what no city claims: a pyramid or a routing artifact for a city the
 manifest dropped. `public/trees` is nobody's here — `serve-sources.ts` owns it. The
