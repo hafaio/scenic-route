@@ -1,6 +1,7 @@
 import { setBaseUrl } from "./base-url";
 import { canopyRenderer } from "./canopy";
 import { commercialRenderer } from "./commercial";
+import { historicRenderer } from "./historic";
 import { industrialRenderer } from "./industrial";
 import { linesRenderer } from "./lines";
 import { poiRenderer } from "./poi";
@@ -73,6 +74,8 @@ function rasterize(message: DrawMessage): Promise<void> {
       return run(linesRenderer, params, message);
     case "industrial":
       return run(industrialRenderer, params, message);
+    case "historic":
+      return run(historicRenderer, params, message);
     case "subway":
       return run(subwayRenderer, params, message);
     case "poi":

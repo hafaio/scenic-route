@@ -263,6 +263,7 @@ in its own band.
 | buildings | NYC Building Footprints, Socrata `5zhs-2jue` (`feature_code=2100` with a positive `height_roof`, feet→metres) | 867,920 footprints with their roof heights; a committed source, magic `BLDG` — the walls the **building-shade** factor raises to cast shadows, for both the shade overlay pyramid and the signed per-edge shade routing bake; see "Binary layouts" |
 | landuse | NYC PLUTO, Socrata `64uk-42ks` (lots with `landuse` 1..5) | 788,591 tax lots, each with a land-use class byte; a committed source, magic `PLUT` — the commercial-vs-residential signal for the **commercial-area** overlay; see "Binary layouts" |
 | industrial | **NYC**: PLUTO's tax-lot polygons, DCP's MAPPLUTO ArcGIS FeatureServer (`services5.arcgis.com/.../MAPPLUTO/FeatureServer/0`), `LandUse = '06'`. **SF**: DataSF Land Use `c5ge-t6pj` + Zoning `3i4a-hu95`, the rule in `scripts/sf.ts` | industrial land as **polygons** — 9,295 lots in New York, 2,574 parcels in San Francisco; a committed source, magic `INDL` — drawn as an overlay so the city's industrial land can be seen, and sampled per edge into the graph's industrial-frontage penalty (GRPH byte 36). New York's geometry has to come from ArcGIS: the Socrata copy of PLUTO is lot centroids and its `geom` column is null on every row. See "Binary layouts" |
+| historic | NYC LPC **Historic Districts** ArcGIS FeatureServer (`services5.arcgis.com/Oos4pNA2538iVFA1/.../Historic_Districts/FeatureServer/0`) | the 159 designated historic districts as **polygons** — whole landmarked neighbourhoods (Park Slope, Brooklyn Heights, Greenwich Village …), not the individual buildings `landmarks` carries; a committed source, magic `HDST` — **display only**, it enters no routing input. The city's catalogued Socrata copy is unusable: see "Binary layouts" |
 | dining | NYC Dining Out `fpeh-f7ci` + OSM `outdoor_seating` via Overpass | outdoor-dining points; a committed source, magic `DINE` — a "cute" signal for the commercial overlay |
 | openstreets | NYC DOT Open Streets `uiay-nctu` (non-school), sampled every ~10 m | Open Streets corridor points; a committed source, magic `OSTR` — a "cute" signal for the commercial overlay |
 
@@ -1328,6 +1329,43 @@ fronting industrial land and a street with yards on both sides reads exactly twi
 one. A bridge or tunnel deck reads 0 whatever is under it. Deliberately not the commercial pipeline's
 gate-then-`line_proximity` route: a Gaussian's tail reaches the residential street T-ing into a yard,
 and its peak is a distance where what a walker minds is an amount.
+
+### `data/historic/<id>.bin` — the designated historic districts, magic `HDST` (v1)
+
+The **`LAND` polygon layout** exactly, under its own magic: the same 40-byte header, then `count`
+even-odd polygons of varint-delta rings, and nothing after them. Written by the shared
+`encodePolygons`, read by `src/tiles/historic.ts` and by nothing else — no Rust reader, no graph
+bake. New York only; San Francisco's equivalent (Planning's Article 10/11 districts) is not ingested.
+
+A district whose boundary is a multi-part MultiPolygon expands to several polygon records, as `INDL`
+splits a multi-part lot. Districts are clipped to the coastline by whether **any vertex** is on land
+rather than by their centroid, for the reason the industrial lots are: a boundary drawn around a
+waterfront block runs out over the water, and the harbour districts (Governors Island, Ellis Island,
+South Street Seaport) meet the borough coastline only at the shore. At the 2026-08-20 read no district
+missed entirely: 159 districts are 187 records, 23,002 vertices, 59.4 KiB. Small enough to commit
+plainly — it is the one `data/*.bin` **not** tracked by git-LFS.
+
+The geometry comes from the **LPC's own ArcGIS FeatureServer**, not from Socrata. The dataset the
+city catalogues as "Historic Districts (Map)" (`xbvj-gfnw`) is a map *visualization*, not a table:
+its SODA rows come back as `{}` and its GeoJSON geometry as `null`, though `count(*)` passes through
+to the table underneath. That table, `skyk-mpzq`, does carry geometry — but in **state-plane feet
+(EPSG:2263)** rather than lon/lat, and it is **missing 18 designated districts**, among them the Park
+Slope, Upper East Side, SoHo-Cast Iron and Greenwich Village extensions and Murray Hill, Carnegie
+Hill, Vinegar Hill and East Village / Lower East Side outright — about a third of Park Slope's
+landmarked area would simply not draw. DoITT's `HistoricDistrict_view` mirror is likewise stale (157
+features, nothing designated after 2024-06-25). The LPC service is a strict superset of both, serves
+`outSR=4326` on request, and is the table the copies are cut from. It is designated-only —
+`STATUS_OF_BOUNDARY`, `LAST_ACTIO` and `CURRENT_STATUS` read DESIGNATED/DESIGNATED/Yes on every row —
+so the read needs no `where` clause; calendared and proposed districts are a separate service.
+
+Extensions are their own rows (25 of the 159), sitting flush against their parents, so a plain fill
+draws a parent and its extensions as one continuous area. Four pairs genuinely **overlap**, each an
+older small district later enclosed by a larger one — Carnegie Hill inside Expanded Carnegie Hill, the
+two Central Park West block districts inside Upper West Side/Central Park West, and DUMBO against
+Fulton Ferry. They are left undissolved, so those four patches paint twice and read darker.
+
+One thing reads it: the client, served verbatim as `public/historic/<id>.bin` by `serve-sources.ts`,
+which fills every district in one colour for the overlay.
 
 ### `data/buildings/<id>.bin` — the footprints and their heights, magic `BLDG` (v1)
 
