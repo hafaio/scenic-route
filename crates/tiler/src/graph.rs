@@ -18,6 +18,12 @@
 //! DESIGN.md, "The walking network", is why the pavement is placed the way it is — which source
 //! answers which question, what the seam rules are, and what the alternatives cost when they were
 //! measured. scripts/README.md is the layout.
+//!
+//! The pass is three stages, because they cost such different things: `topology` settles the edge
+//! list and is inherently sequential, `bake` fans out the attribute columns over it, and `assemble`
+//! lays the two out as the blob. Only the first is a function of the streets, and only the last
+//! writes anything, so the driver can hand over a key per stage and `graph_cache.rs` keeps a
+//! re-ingested landmark file to the one column it moved.
 
 use std::collections::{HashMap, HashSet};
 use std::f64::consts::TAU;
@@ -32,6 +38,7 @@ use crate::conflate::{self, ProtoEdge, SIDEWALK_LEFT, SIDEWALK_RIGHT, swap_sidew
 use crate::corners::{self, EdgeEnd};
 use crate::direct_canopy;
 use crate::geometry::{METERS_PER_DEGREE_LAT, round_half_up};
+use crate::graph_cache;
 use crate::industrial;
 use crate::invariants;
 use crate::relief;
@@ -278,14 +285,21 @@ pub struct Args {
     pub buildings: Option<PathBuf>,
     pub shade_params: Option<shade::Params>,
     pub shade_dir: Option<PathBuf>,
-    /// The bounds to resample the DEM over, when `run` is handed one. The city's own box: the
-    /// terrain overlay widens it to keep its shoreline, the relief byte has no shore to keep.
+    /// The bounds to resample the DEM over, and by being there at all, that this city HAS one — the
+    /// relief column is baked for a city that carries these and left flat for one that does not,
+    /// since a `dem` the driver did not open is a column it already holds rather than a city with no
+    /// terrain. The city's own box: the terrain overlay widens it to keep its shoreline, the relief
+    /// byte has no shore to keep.
     pub elevation_bounds: Option<crate::manifest::Bounds>,
     /// Whether this city's centreline classifies alleys — see the alley bounds in `run`.
     pub alleys: bool,
     // The measured canopy, read twice over: for the direct-canopy record byte, and — when the shade
     // bake runs — for the crowns that occlude the edges alongside the buildings.
     pub canopy: Option<PathBuf>,
+    /// Where this city's cached topology and columns live, and the key each is named by, or none
+    /// for a run that caches nothing — `key-probe` builds a fixture's graph and must not leave an
+    /// entry a real build would read.
+    pub cache: Option<graph_cache::Keys>,
     // `tiler key-probe`: build the key space of a fixture rather than of a city, and report it. The
     // bounds below — the alley reach, the pavement cells, the existence gate's two shares — are all
     // held over a whole city's population and say nothing whatever about a few hundred blocks, so
@@ -1601,8 +1615,7 @@ fn write_shade(
     dir: &std::path::Path,
     edge_count: usize,
     positions: &[shade::BinPosition],
-    buildings: &[u8],
-    trees: &[u8],
+    rows: &[(Vec<u8>, Vec<u8>)],
 ) -> Fallible<()> {
     match fs::remove_dir_all(dir) {
         Ok(()) => {}
@@ -1628,15 +1641,14 @@ fn write_shade(
     fs::write(dir.join("bins.json"), serde_json::to_vec(&manifest)?)?;
 
     const HEADER_BYTES: usize = 12;
-    for index in 0..positions.len() {
-        let span = index * edge_count..index * edge_count + edge_count;
+    for (index, (buildings, trees)) in rows.iter().enumerate() {
         let mut bytes = Vec::with_capacity(HEADER_BYTES + 2 * edge_count);
         bytes.extend_from_slice(b"SHDB");
         bytes.extend_from_slice(&2u16.to_le_bytes()); // version
         bytes.extend_from_slice(&0u16.to_le_bytes()); // pad
         bytes.extend_from_slice(&(edge_count as u32).to_le_bytes());
-        bytes.extend_from_slice(&buildings[span.clone()]);
-        bytes.extend_from_slice(&trees[span]);
+        bytes.extend_from_slice(buildings);
+        bytes.extend_from_slice(trees);
         fs::write(dir.join(format!("{index}.bin")), &bytes)?;
     }
     Ok(())
@@ -1767,12 +1779,212 @@ pub fn read_stranded(path: &std::path::Path) -> Fallible<Vec<u32>> {
         .collect())
 }
 
-/// Returns the OSM way ids the island drop stranded, sorted — what the second chunks pass folds
-/// into each chunk's trailing bitmap so the overlay stops painting a walk no route can follow.
+/// One city's finished walking network, as everything downstream of the edge list reads it: the
+/// nodes, the edges in the order the blob ships them, their geometry, the compacted name table and
+/// the durable keys. `topology` computes it; `graph_cache` holds it between builds.
 ///
-/// `dem` is borrowed rather than opened from a path because the elevation pass resamples the same
-/// mosaic for its overlay; `tiler build` opens it once and hands it to both.
-pub fn run(args: &Args, dem: Option<&mut crate::dem::Dem>) -> Fallible<Vec<u32>> {
+/// This is the thing every attribute column is a byte per edge OF, and the reason a column can be
+/// merged back in by position: a column entry's key folds this base's, so a base that moved cannot
+/// be handed one baked over another.
+struct Base {
+    origin_lng: f64,
+    origin_lat: f64,
+    scale: f64,
+    node_lng: Vec<i32>,
+    node_lat: Vec<i32>,
+    node_component: Vec<u16>,
+    component_count: usize,
+    edges: Vec<V2Edge>,
+    /// The ordinal half of the durable key, per edge, over this exact order.
+    ordinals: Vec<u8>,
+    key_hash: u64,
+    geometry_polys: Vec<(Vec<i32>, Vec<i32>)>,
+    /// The compact table; every edge's `name_id` already indexes it, `UNNAMED` and all.
+    names: Vec<String>,
+    ferry_side_table: Vec<(u32, u16, u16)>,
+    stranded_ways: Vec<u32>,
+    /// What the pass reports about the network it built, bar the two figures the write itself
+    /// measures. A build whose base came off the cache prints the same line, every number in it
+    /// being a function of this base.
+    stats: serde_json::Value,
+    /// Derived from the edges rather than stored, so a decoded base cannot disagree with them.
+    csr: Vec<u32>,
+    adjacency: Vec<u32>,
+}
+
+/// CSR adjacency of edge ids: node n owns [csr[n], csr[n + 1]); a self-loop lists its edge twice
+/// on its node, so the half-edge total is 2E.
+fn adjacency_of(node_count: usize, edges: &[V2Edge]) -> (Vec<u32>, Vec<u32>) {
+    let mut degree = vec![0u32; node_count];
+    for edge in edges {
+        degree[edge.a as usize] += 1;
+        degree[edge.b as usize] += 1;
+    }
+    let mut csr = vec![0u32; node_count + 1];
+    for node in 0..node_count {
+        csr[node + 1] = csr[node] + degree[node];
+    }
+    let mut cursor = csr.clone();
+    let mut adjacency = vec![0u32; 2 * edges.len()];
+    for (edge_id, edge) in edges.iter().enumerate() {
+        adjacency[cursor[edge.a as usize] as usize] = edge_id as u32;
+        cursor[edge.a as usize] += 1;
+        adjacency[cursor[edge.b as usize] as usize] = edge_id as u32;
+        cursor[edge.b as usize] += 1;
+    }
+    (csr, adjacency)
+}
+
+impl Base {
+    /// The base as its cache entry: every field little-endian, in this order. No format version of
+    /// its own — the key the entry is named by folds the tiler's own code, so a build whose layout
+    /// changed asks for a name no earlier build wrote.
+    fn encode(&self) -> Fallible<Vec<u8>> {
+        let mut out = graph_cache::Writer::default();
+        out.f64(self.origin_lng);
+        out.f64(self.origin_lat);
+        out.f64(self.scale);
+        out.usize(self.component_count);
+        out.u64(self.key_hash);
+        out.usize(self.node_lng.len());
+        for node in 0..self.node_lng.len() {
+            out.i32(self.node_lng[node]);
+            out.i32(self.node_lat[node]);
+            out.u16(self.node_component[node]);
+        }
+        out.usize(self.edges.len());
+        for (edge, ordinal) in self.edges.iter().zip(&self.ordinals) {
+            out.u32(edge.a);
+            out.u32(edge.b);
+            out.f32(edge.length);
+            out.u32(edge.geom);
+            out.u32(edge.source_id);
+            out.u16(edge.name_id);
+            out.u8(edge.cover);
+            out.u8(edge.half_offset);
+            out.u8(edge.kind);
+            out.u8(edge.side);
+            out.u8(edge.flags);
+            out.u8(*ordinal);
+        }
+        out.usize(self.geometry_polys.len());
+        for (poly_x, poly_y) in &self.geometry_polys {
+            out.usize(poly_x.len());
+            for (x, y) in poly_x.iter().zip(poly_y) {
+                out.i32(*x);
+                out.i32(*y);
+            }
+        }
+        out.usize(self.names.len());
+        for name in &self.names {
+            out.bytes(name.as_bytes());
+        }
+        out.usize(self.ferry_side_table.len());
+        for &(edge_id, a_stop_name, b_stop_name) in &self.ferry_side_table {
+            out.u32(edge_id);
+            out.u16(a_stop_name);
+            out.u16(b_stop_name);
+        }
+        out.usize(self.stranded_ways.len());
+        for way in &self.stranded_ways {
+            out.u32(*way);
+        }
+        out.bytes(&serde_json::to_vec(&self.stats)?);
+        Ok(out.bytes)
+    }
+
+    fn decode(bytes: &[u8]) -> Fallible<Base> {
+        let mut input = graph_cache::Reader::new(bytes);
+        let origin_lng = input.f64()?;
+        let origin_lat = input.f64()?;
+        let scale = input.f64()?;
+        let component_count = input.usize()?;
+        let key_hash = input.u64()?;
+        let node_count = input.usize()?;
+        let mut node_lng = Vec::with_capacity(node_count);
+        let mut node_lat = Vec::with_capacity(node_count);
+        let mut node_component = Vec::with_capacity(node_count);
+        for _ in 0..node_count {
+            node_lng.push(input.i32()?);
+            node_lat.push(input.i32()?);
+            node_component.push(input.u16()?);
+        }
+        let edge_count = input.usize()?;
+        let mut edges = Vec::with_capacity(edge_count);
+        let mut ordinals = Vec::with_capacity(edge_count);
+        for _ in 0..edge_count {
+            edges.push(V2Edge {
+                a: input.u32()?,
+                b: input.u32()?,
+                length: input.f32()?,
+                geom: input.u32()?,
+                source_id: input.u32()?,
+                name_id: input.u16()?,
+                cover: input.u8()?,
+                half_offset: input.u8()?,
+                kind: input.u8()?,
+                side: input.u8()?,
+                flags: input.u8()?,
+            });
+            ordinals.push(input.u8()?);
+        }
+        let geometry_count = input.usize()?;
+        let mut geometry_polys = Vec::with_capacity(geometry_count);
+        for _ in 0..geometry_count {
+            let vertices = input.usize()?;
+            let mut poly_x = Vec::with_capacity(vertices);
+            let mut poly_y = Vec::with_capacity(vertices);
+            for _ in 0..vertices {
+                poly_x.push(input.i32()?);
+                poly_y.push(input.i32()?);
+            }
+            geometry_polys.push((poly_x, poly_y));
+        }
+        let name_count = input.usize()?;
+        let mut names = Vec::with_capacity(name_count);
+        for _ in 0..name_count {
+            names.push(String::from_utf8(input.bytes()?.to_vec())?);
+        }
+        let ferry_count = input.usize()?;
+        let mut ferry_side_table = Vec::with_capacity(ferry_count);
+        for _ in 0..ferry_count {
+            ferry_side_table.push((input.u32()?, input.u16()?, input.u16()?));
+        }
+        let stranded_count = input.usize()?;
+        let mut stranded_ways = Vec::with_capacity(stranded_count);
+        for _ in 0..stranded_count {
+            stranded_ways.push(input.u32()?);
+        }
+        let stats = serde_json::from_slice(input.bytes()?)?;
+        input.finish()?;
+        let (csr, adjacency) = adjacency_of(node_count, &edges);
+        Ok(Base {
+            origin_lng,
+            origin_lat,
+            scale,
+            node_lng,
+            node_lat,
+            node_component,
+            component_count,
+            edges,
+            ordinals,
+            key_hash,
+            geometry_polys,
+            names,
+            ferry_side_table,
+            stranded_ways,
+            stats,
+            csr,
+            adjacency,
+        })
+    }
+}
+
+/// Everything through the name compaction: the base of the whole pass, and inherently sequential —
+/// node identity and the renumber, the walking sort, the ferries appended onto the finished walking
+/// node set, the ordinals over the order that leaves. Nothing here is a function of an attribute
+/// source, which is what lets the columns be baked and cached one at a time over what it returns.
+fn topology(args: &Args) -> Fallible<Base> {
     let streets = binfmt::read_streets(&args.streets)?;
     let origin_lng = streets.origin_lng;
     let origin_lat = streets.origin_lat;
@@ -3535,185 +3747,18 @@ pub fn run(args: &Args, dem: Option<&mut crate::dem::Dem>) -> Fallible<Vec<u32>>
             (edge_id, name_remap[&a_stop_name], name_remap[&b_stop_name])
         })
         .collect();
-
-    // CSR adjacency of edge ids: node n owns [csr[n], csr[n + 1]); a self-loop lists its edge twice
-    // on its node, so the half-edge total is 2E.
-    let mut degree = vec![0u32; node_count];
-    for edge in &v2_edges {
-        degree[edge.a as usize] += 1;
-        degree[edge.b as usize] += 1;
-    }
-    let mut csr = vec![0u32; node_count + 1];
-    for node in 0..node_count {
-        csr[node + 1] = csr[node] + degree[node];
-    }
-    let mut cursor = csr.clone();
-    let mut adjacency = vec![0u32; 2 * edge_count];
-    for (edge_id, edge) in v2_edges.iter().enumerate() {
-        adjacency[cursor[edge.a as usize] as usize] = edge_id as u32;
-        cursor[edge.a as usize] += 1;
-        adjacency[cursor[edge.b as usize] as usize] = edge_id as u32;
-        cursor[edge.b as usize] += 1;
-    }
-
-    // The scenic-factor bytes (GRPH v4): a network-fan-out amenity DISCOUNT for landmark and
-    // public-art proximity, and an areal PENALTY for highway / elevated-rail nearness — one per-edge
-    // byte each, which a later phase reads into the routing cost. Computed here over the finished
-    // walking graph (nodes, edges and CSR are all final); a ferry edge carries none, zeroed at write.
-    let edge_a: Vec<u32> = v2_edges.iter().map(|edge| edge.a).collect();
-    let edge_b: Vec<u32> = v2_edges.iter().map(|edge| edge.b).collect();
-    let edge_len_m: Vec<f64> = v2_edges.iter().map(|edge| f64::from(edge.length)).collect();
-    let network = scenic::Network {
-        node_x: &node_lng,
-        node_y: &node_lat,
-        csr: &csr,
-        adjacency: &adjacency,
-        edge_a: &edge_a,
-        edge_b: &edge_b,
-        edge_len_m: &edge_len_m,
-        origin_lng,
-        origin_lat,
-        scale,
-        mpu_lng: meters_per_unit_lng,
-        mpu_lat: meters_per_unit_lat,
-    };
-    let landmark_bytes = match &args.landmarks {
-        Some(path) => {
-            let pois = binfmt::read_points(path, "LMRK", binfmt::LANDMARK_FORMAT)?;
-            let (bytes, stats) = scenic::poi_amenity(&network, &scenic::LANDMARK_PARAMS, &pois);
-            eprintln!(
-                "landmarks: {} points, {} snapped, max amenity byte {}",
-                pois.len(),
-                stats.snapped,
-                stats.max_byte
-            );
-            bytes
-        }
-        None => vec![0u8; edge_count],
-    };
-    let art_bytes = match &args.art {
-        Some(path) => {
-            let pois = binfmt::read_points(path, "ARTW", binfmt::ART_FORMAT)?;
-            let (bytes, stats) = scenic::poi_amenity(&network, &scenic::ART_PARAMS, &pois);
-            eprintln!(
-                "art: {} points, {} snapped, max amenity byte {}",
-                pois.len(),
-                stats.snapped,
-                stats.max_byte
-            );
-            bytes
-        }
-        None => vec![0u8; edge_count],
-    };
-    let highway_bytes = match &args.highways {
-        Some(path) => {
-            let lines = binfmt::read_polygons(path, "HWAY", binfmt::HIGHWAY_FORMAT)?;
-            let (bytes, max_byte) = scenic::highway_penalty(&network, &lines);
-            eprintln!(
-                "highways: {} nuisance lines, max penalty byte {}",
-                lines.len(),
-                max_byte
-            );
-            bytes
-        }
-        None => vec![0u8; edge_count],
-    };
-    let commercial_bytes = match &args.commercial {
-        Some(path) => {
-            let lines = binfmt::read_polygons(path, "CMLN", binfmt::COMMERCIAL_FORMAT)?;
-            let (bytes, max_byte) = scenic::commercial_amenity(&network, &lines);
-            eprintln!(
-                "commercial: {} qualifying lines, max amenity byte {}",
-                lines.len(),
-                max_byte
-            );
-            bytes
-        }
-        None => vec![0u8; edge_count],
-    };
-
-    // Every edge's polyline in degrees, recovered exactly as the pre-write geometry check does: a
-    // ferry has none, a geometry-less edge is its straight node-to-node line, and a sidewalk or path
-    // is its own baked entry. Both canopy bakes below read the sidewalk a walker is actually on.
-    let to_coord = |quantized_x: i32, quantized_y: i32| binfmt::Coord {
-        lng: origin_lng + f64::from(quantized_x) * scale,
-        lat: origin_lat + f64::from(quantized_y) * scale,
-    };
-    let edge_polys: Vec<Vec<binfmt::Coord>> = v2_edges
+    // The edges are remapped here rather than at the write, so what the base holds is already the
+    // table the blob ships and the strings the compaction dropped are gone with it.
+    let names: Vec<String> = used_names
         .iter()
-        .map(|edge| {
-            if edge.kind == KIND_FERRY {
-                Vec::new()
-            } else if edge.geom == NO_GEOMETRY {
-                vec![
-                    to_coord(node_lng[edge.a as usize], node_lat[edge.a as usize]),
-                    to_coord(node_lng[edge.b as usize], node_lat[edge.b as usize]),
-                ]
-            } else {
-                let (poly_x, poly_y) = &geometry_polys[edge.geom as usize];
-                poly_x
-                    .iter()
-                    .zip(poly_y)
-                    .map(|(&quantized_x, &quantized_y)| to_coord(quantized_x, quantized_y))
-                    .collect()
-            }
-        })
+        .map(|&original| all_names[original as usize].clone())
         .collect();
-
-    // The relief bytes (v9): the height climbed and the height dropped along each edge walked a->b,
-    // sampled off the city's DEM resampled to a lat/lng field. A city with no elevation source
-    // leaves every edge flat.
-    let (ascent_bytes, descent_bytes) = match dem {
-        Some(dem) => {
-            let bounds = args
-                .elevation_bounds
-                .ok_or("a DEM needs the city bounds to resample over")?;
-            let field = crate::dem::resample(&bounds, RELIEF_FIELD_ZOOM, dem)?;
-            let lengths: Vec<f32> = v2_edges.iter().map(|edge| edge.length).collect();
-            let baked = relief::relief(&edge_polys, &lengths, &field)?;
-            eprintln!(
-                "relief: {} edges measured, mean grade {:.1}%, steepest {:.1}%",
-                baked.measured,
-                100.0 * baked.mean_grade,
-                100.0 * baked.max_grade
-            );
-            (baked.ascent, baked.descent)
+    for edge in &mut v2_edges {
+        if edge.name_id != UNNAMED {
+            edge.name_id = name_remap[&edge.name_id];
         }
-        None => (vec![0u8; v2_edges.len()], vec![0u8; v2_edges.len()]),
-    };
-
-    // The direct-canopy byte (v6): the fraction of the edge under a crown, integrated along that
-    // polyline with no kernel — see direct_canopy.rs for why the cover byte cannot stand in.
-    let direct_canopy_bytes = match &args.canopy {
-        Some(path) => {
-            let baked = direct_canopy::direct_canopy(&edge_polys, path, origin_lat)?;
-            eprintln!(
-                "direct canopy: {} polygons, mean covered fraction {:.3}, max byte {}",
-                baked.polygons, baked.mean, baked.max_byte
-            );
-            baked.bytes
-        }
-        None => vec![0u8; edge_count],
-    };
-
-    // The industrial byte (v10): how much of the edge runs past an industrial lot, both sides
-    // probed. A deck over a yard fronts nothing, so the structure flag is handed over with the
-    // polylines rather than being masked out afterwards, which would flatter the reported mean.
-    let industrial_bytes = match &args.industrial {
-        Some(path) => {
-            let on_structure: Vec<bool> = v2_edges
-                .iter()
-                .map(|edge| edge.flags & GRPH_STRUCTURE != 0)
-                .collect();
-            let baked = industrial::industrial(&edge_polys, &on_structure, path, origin_lat)?;
-            eprintln!(
-                "industrial: {} lots, {} edges fronting one, mean frontage {:.4}, max byte {}",
-                baked.polygons, baked.fronting, baked.mean, baked.max_byte
-            );
-            baked.bytes
-        }
-        None => vec![0u8; edge_count],
-    };
+    }
+    let (csr, adjacency) = adjacency_of(node_count, &v2_edges);
 
     // Pre-write invariants: a stored-geometry edge begins and ends exactly on its node coordinates
     // (a sidewalk is baked corner-to-corner, a path keeps its pinned endpoints), so no geometry
@@ -3940,197 +3985,7 @@ pub fn run(args: &Args, dem: Option<&mut crate::dem::Dem>) -> Fallible<Vec<u32>>
         .filter(|edge| edge.source_id != NO_SOURCE_ID)
         .count();
     let max_ordinal = edge_ordinals.iter().copied().max().unwrap_or(0);
-
-    // The geometry blob: one entry per sidewalk and per path edge, its first vertex absolute (delta
-    // from the graph origin — kept origin-anchored so the client decoder is unchanged), the rest
-    // from the previous vertex.
-    let mut geometry: Vec<u8> = Vec::new();
-    let mut geometry_offsets: Vec<u32> = Vec::with_capacity(geometry_polys.len());
-    for (poly_x, poly_y) in &geometry_polys {
-        geometry_offsets.push(geometry.len() as u32);
-        let mut previous_x = 0i64;
-        let mut previous_y = 0i64;
-        for (&vertex_x, &vertex_y) in poly_x.iter().zip(poly_y) {
-            write_varint(&mut geometry, zigzag(i64::from(vertex_x) - previous_x));
-            write_varint(&mut geometry, zigzag(i64::from(vertex_y) - previous_y));
-            previous_x = i64::from(vertex_x);
-            previous_y = i64::from(vertex_y);
-        }
-    }
-
-    // The name table blob: (count + 1) byte offsets, then the UTF-8 names back to back.
-    let mut name_blob: Vec<u8> = Vec::new();
-    let mut name_offsets: Vec<u32> = Vec::with_capacity(used_names.len() + 1);
-    for &original in &used_names {
-        name_offsets.push(name_blob.len() as u32);
-        name_blob.extend_from_slice(all_names[original as usize].as_bytes());
-    }
-    name_offsets.push(name_blob.len() as u32);
-    let name_table_bytes = 4 + 4 * name_offsets.len() + name_blob.len();
-
-    let align4 = |offset: usize| offset.div_ceil(4) * 4;
-    let component_pad = if node_count % 2 == 1 { 2 } else { 0 };
-    let node_lng_offset = GRAPH_HEADER_BYTES;
-    let node_lat_offset = node_lng_offset + 4 * node_count;
-    let node_component_offset = node_lat_offset + 4 * node_count;
-    let csr_offset = node_component_offset + 2 * node_count + component_pad;
-    let adjacency_offset = csr_offset + 4 * (node_count + 1);
-    let edges_offset = adjacency_offset + 8 * edge_count;
-    // Every section starts on a 4-byte boundary so the client can view it as a typed array; the
-    // record's own size is not part of the contract, so the name table is padded back onto one.
-    let name_offset = align4(edges_offset + EDGE_RECORD_BYTES * edge_count);
-    let geometry_offset = align4(name_offset + name_table_bytes);
-
-    let mut bytes = vec![0u8; geometry_offset];
-    bytes[0..4].copy_from_slice(b"GRPH");
-    put_u16(&mut bytes, 4, GRAPH_FORMAT);
-    put_u16(&mut bytes, 6, GRAPH_HEADER_BYTES as u16);
-    put_u32(&mut bytes, 8, node_count as u32);
-    put_u32(&mut bytes, 12, edge_count as u32);
-    put_f64(&mut bytes, 16, origin_lng);
-    put_f64(&mut bytes, 24, origin_lat);
-    put_f64(&mut bytes, 32, scale);
-    put_u32(&mut bytes, 40, component_count as u32);
-    put_u32(&mut bytes, 44, name_offset as u32);
-    put_u32(&mut bytes, 48, name_table_bytes as u32);
-    put_u32(&mut bytes, 52, geometry_offset as u32);
-    put_u32(&mut bytes, 56, geometry.len() as u32);
-
-    for (index, &value) in node_lng.iter().enumerate() {
-        put_i32(&mut bytes, node_lng_offset + 4 * index, value);
-    }
-    for (index, &value) in node_lat.iter().enumerate() {
-        put_i32(&mut bytes, node_lat_offset + 4 * index, value);
-    }
-    for (index, &value) in node_component.iter().enumerate() {
-        put_u16(&mut bytes, node_component_offset + 2 * index, value);
-    }
-    for (index, &value) in csr.iter().enumerate() {
-        put_u32(&mut bytes, csr_offset + 4 * index, value);
-    }
-    for (index, &value) in adjacency.iter().enumerate() {
-        put_u32(&mut bytes, adjacency_offset + 4 * index, value);
-    }
-    // The cover byte is clamped to 254 so the client's maxCover stays < 1: cost.ts's admissible
-    // heuristic collapses (the greenest edge goes free at w = 1) if any edge reads a full 255, which
-    // the denser OSM tree field can now reach.
-    let mut cover_clamped = 0usize;
-    for (edge_id, edge) in v2_edges.iter().enumerate() {
-        let record = edges_offset + EDGE_RECORD_BYTES * edge_id;
-        let (geom_offset, vertex_count) = if edge.geom == NO_GEOMETRY {
-            (NO_GEOMETRY, 0u16)
-        } else {
-            (
-                geometry_offsets[edge.geom as usize],
-                geometry_polys[edge.geom as usize].0.len() as u16,
-            )
-        };
-        let name = match name_remap.get(&edge.name_id) {
-            Some(&index) => index,
-            None => UNNAMED,
-        };
-        // A ferry carries a u16 duration in bytes 20-21 (edge.cover is its low byte, edge.half_offset
-        // its high byte), so the 254 cover clamp — which keeps a real edge's client maxCover < 1 —
-        // applies only to the cover-bearing kinds.
-        let cover = if edge.kind == KIND_FERRY {
-            edge.cover
-        } else if edge.cover > 254 {
-            cover_clamped += 1;
-            254
-        } else {
-            edge.cover
-        };
-        put_u32(&mut bytes, record, edge.a);
-        put_u32(&mut bytes, record + 4, edge.b);
-        put_f32(&mut bytes, record + 8, edge.length);
-        put_u32(&mut bytes, record + 12, geom_offset);
-        put_u16(&mut bytes, record + 16, vertex_count);
-        put_u16(&mut bytes, record + 18, name);
-        bytes[record + 20] = cover;
-        bytes[record + 21] = edge.half_offset;
-        bytes[record + 22] = (edge.kind & KIND_MASK) | (edge.side << SIDE_SHIFT);
-        bytes[record + 23] = edge.flags;
-        // The attribute bytes (v5 scenic, v6 direct canopy): a ferry passes no landmark, art,
-        // highway or commercial frontage and walks under no crown, so it keeps the record's default
-        // zeros; every walking kind carries the baked attributes.
-        if edge.kind != KIND_FERRY {
-            bytes[record + 24] = landmark_bytes[edge_id];
-            bytes[record + 25] = art_bytes[edge_id];
-            bytes[record + 26] = highway_bytes[edge_id];
-            bytes[record + 27] = commercial_bytes[edge_id];
-            bytes[record + 28] = direct_canopy_bytes[edge_id];
-            // The relief bytes (v9): how much height this edge climbs and how much it drops, walked
-            // a->b, so reversing it swaps the two. A ferry crosses water and has neither.
-            bytes[record + 34] = ascent_bytes[edge_id];
-            bytes[record + 35] = descent_bytes[edge_id];
-            // The industrial frontage byte (v10), read as a `1 + w*attr` penalty. Bytes 37-39 are
-            // the reserved zeros the 40-byte record leaves for the next attribute.
-            bytes[record + 36] = industrial_bytes[edge_id];
-        }
-        // The durable key (v6): the source record's id, and the ordinal that — with the side already
-        // in byte 22 — picks this edge out within it. A crossing, link or ferry has no source
-        // geometry, so it carries the sentinel and a zero ordinal.
-        put_u32(&mut bytes, record + 29, edge.source_id);
-        bytes[record + 33] = edge_ordinals[edge_id];
-    }
-
-    put_u32(&mut bytes, name_offset, used_names.len() as u32);
-    for (index, &value) in name_offsets.iter().enumerate() {
-        put_u32(&mut bytes, name_offset + 4 + 4 * index, value);
-    }
-    let name_blob_offset = name_offset + 4 + 4 * name_offsets.len();
-    bytes[name_blob_offset..name_blob_offset + name_blob.len()].copy_from_slice(&name_blob);
-    bytes.extend_from_slice(&geometry);
-
-    // The ferry endpoint-stop-name side table, 4-aligned after the geometry blob: a u32 count, then
-    // per ferry edge a (u32 edge id, u16 a-stop name id, u16 b-stop name id) triple, the ids into
-    // the name table above. Its offset rides in the spare header u32 at byte 60 (0-length when the
-    // build carried no ferries).
-    while bytes.len() % 4 != 0 {
-        bytes.push(0);
-    }
-    let ferry_table_offset = bytes.len() as u32;
-    put_u32(&mut bytes, 60, ferry_table_offset);
-    bytes.extend_from_slice(&(ferry_side_table.len() as u32).to_le_bytes());
-    for &(edge_id, a_stop_name, b_stop_name) in &ferry_side_table {
-        bytes.extend_from_slice(&edge_id.to_le_bytes());
-        bytes.extend_from_slice(&a_stop_name.to_le_bytes());
-        bytes.extend_from_slice(&b_stop_name.to_le_bytes());
-    }
-
-    if let Some(parent) = args.out.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(&args.out, &bytes)?;
     let key_hash = key_space_hash(&v2_edges, &edge_ordinals);
-    write_version(&args.out, &bytes, edge_count, key_hash)?;
-    if let Some(path) = &args.stranded_out {
-        write_stranded(path, &stranded_ways)?;
-    }
-
-    // The SHDE artifact (optional): the building and crown occlusion fractions per edge per
-    // sun-position bin, keyed off the same finalized `v2_edges` order the client reads GRPH records
-    // in, over the same `edge_polys` the direct-canopy bake sampled.
-    if let (Some(buildings_path), Some(params), Some(shade_dir_path)) =
-        (&args.buildings, &args.shade_params, &args.shade_dir)
-    {
-        let (building_bytes, tree_bytes, positions) =
-            shade::edge_shade_attrs(buildings_path, args.canopy.as_deref(), params, &edge_polys)?;
-        assert_eq!(building_bytes.len(), positions.len() * v2_edges.len());
-        assert_eq!(tree_bytes.len(), building_bytes.len());
-        write_shade(
-            shade_dir_path,
-            edge_count,
-            &positions,
-            &building_bytes,
-            &tree_bytes,
-        )?;
-        eprintln!(
-            "shade: {} bins x {edge_count} edges baked to {}",
-            positions.len(),
-            shade_dir_path.display()
-        );
-    }
 
     let dropped_fraction = 1.0 - kept_side_km / derived_side_km;
     let demoted_alley_fraction = demoted_alley_km / alley_km;
@@ -4209,7 +4064,6 @@ pub fn run(args: &Args, dem: Option<&mut crate::dem::Dem>) -> Fallible<Vec<u32>>
         "seamMergedComponents": seam_merged_components,
         "v1Components": v1_component_count,
         "lengthClamped": length_clamped,
-        "coverClamped": cover_clamped,
         "durableIdEdges": durable_id_edges,
         "maxOrdinal": max_ordinal,
         // The whole point of `key-probe`, and worth a line in every build log besides: the one
@@ -4251,7 +4105,7 @@ pub fn run(args: &Args, dem: Option<&mut crate::dem::Dem>) -> Fallible<Vec<u32>>
         "ferryDroppedUnsnapped": ferry_dropped_unsnapped,
         "ferryDroppedSameNode": ferry_dropped_same_node,
         "ferryDroppedDuplicate": ferry_dropped_duplicate,
-        "names": used_names.len(),
+        "names": names.len(),
         "alleyKm": alley_reach.total_km,
         "alleyOffComponentKm": alley_reach.off_component_km,
         "alleyMouths": mouth_walk.mouths,
@@ -4272,13 +4126,690 @@ pub fn run(args: &Args, dem: Option<&mut crate::dem::Dem>) -> Fallible<Vec<u32>>
         "pavementCellWorstDemotedShare": pavement_cells.worst_demoted_share,
         "seamHairpins": seam_hairpins,
         "totalKm": total_km,
-        "bytes": bytes.len(),
     });
+
+    Ok(Base {
+        origin_lng,
+        origin_lat,
+        scale,
+        node_lng,
+        node_lat,
+        node_component,
+        component_count,
+        edges: v2_edges,
+        ordinals: edge_ordinals,
+        key_hash,
+        geometry_polys,
+        names,
+        ferry_side_table,
+        stranded_ways,
+        stats,
+        csr,
+        adjacency,
+    })
+}
+
+/// One byte per edge of the base, per attribute — the four scenic bakes, the two relief rows, the
+/// direct canopy and the industrial frontage — plus one (buildings, trees) row pair per sun bin.
+/// Each is baked over the finished edge list and merged back in by position at the write.
+struct Columns {
+    landmark: Vec<u8>,
+    art: Vec<u8>,
+    highway: Vec<u8>,
+    commercial: Vec<u8>,
+    ascent: Vec<u8>,
+    descent: Vec<u8>,
+    direct_canopy: Vec<u8>,
+    industrial: Vec<u8>,
+    /// In schedule order, and empty for a city with no per-edge shade bake.
+    shade: Vec<(Vec<u8>, Vec<u8>)>,
+}
+
+/// Every edge's polyline in degrees, recovered exactly as the pre-write geometry check does: a
+/// ferry has none, a geometry-less edge is its straight node-to-node line, and a sidewalk or path
+/// is its own baked entry. Every column that samples the ground reads the sidewalk a walker is
+/// actually on, so they all read these.
+fn edge_polylines(base: &Base) -> Vec<Vec<binfmt::Coord>> {
+    let to_coord = |quantized_x: i32, quantized_y: i32| binfmt::Coord {
+        lng: base.origin_lng + f64::from(quantized_x) * base.scale,
+        lat: base.origin_lat + f64::from(quantized_y) * base.scale,
+    };
+    base.edges
+        .iter()
+        .map(|edge| {
+            if edge.kind == KIND_FERRY {
+                Vec::new()
+            } else if edge.geom == NO_GEOMETRY {
+                vec![
+                    to_coord(
+                        base.node_lng[edge.a as usize],
+                        base.node_lat[edge.a as usize],
+                    ),
+                    to_coord(
+                        base.node_lng[edge.b as usize],
+                        base.node_lat[edge.b as usize],
+                    ),
+                ]
+            } else {
+                let (poly_x, poly_y) = &base.geometry_polys[edge.geom as usize];
+                poly_x
+                    .iter()
+                    .zip(poly_y)
+                    .map(|(&quantized_x, &quantized_y)| to_coord(quantized_x, quantized_y))
+                    .collect()
+            }
+        })
+        .collect()
+}
+
+/// The polylines, built at most once and only for a column that has to bake: they are a couple of
+/// hundred megabytes for New York, and a build whose columns all come off the cache never needs
+/// them at all.
+struct Polylines<'a> {
+    base: &'a Base,
+    built: Option<Vec<Vec<binfmt::Coord>>>,
+}
+
+impl Polylines<'_> {
+    fn get(&mut self) -> &[Vec<binfmt::Coord>] {
+        self.built.get_or_insert_with(|| edge_polylines(self.base))
+    }
+}
+
+/// One column: the entry this key names, or the bake, stored under it. Both halves are skipped for
+/// a build the driver handed no keys — `key-probe` builds a fixture's graph and caches nothing.
+fn column(
+    mut cache: Option<&mut graph_cache::Cache>,
+    name: &str,
+    key: Option<&str>,
+    expect: usize,
+    bake: impl FnOnce() -> Fallible<Vec<u8>>,
+) -> Fallible<Vec<u8>> {
+    let held = match (cache.as_deref_mut(), key) {
+        (Some(cache), Some(key)) => cache.load(name, key, expect)?,
+        _ => None,
+    };
+    match held {
+        Some(bytes) => Ok(bytes),
+        None => {
+            let bytes = bake()?;
+            if let (Some(cache), Some(key)) = (cache, key) {
+                cache.store(name, key, &bytes)?;
+            }
+            Ok(bytes)
+        }
+    }
+}
+
+/// The attribute columns over a finished base: independent of each other, each a function of the
+/// base and of its own source alone, and each cached under a key that folds the base's — so a
+/// re-ingested source bakes one of them and the rest are read back.
+fn bake(
+    args: &Args,
+    base: &Base,
+    dem: Option<&mut crate::dem::Dem>,
+    mut cache: Option<&mut graph_cache::Cache>,
+) -> Fallible<Columns> {
+    let keys = args.cache.as_ref();
+    let edge_count = base.edges.len();
+    let mut polylines = Polylines { base, built: None };
+
+    // The scenic-factor bytes (GRPH v4): a network-fan-out amenity DISCOUNT for landmark and
+    // public-art proximity, and an areal PENALTY for highway / elevated-rail nearness — one per-edge
+    // byte each, which a later phase reads into the routing cost. A fan-out over the whole CSR, so
+    // it takes the finished graph rather than the source file alone; a ferry edge carries none,
+    // zeroed at write.
+    let edge_a: Vec<u32> = base.edges.iter().map(|edge| edge.a).collect();
+    let edge_b: Vec<u32> = base.edges.iter().map(|edge| edge.b).collect();
+    let edge_len_m: Vec<f64> = base
+        .edges
+        .iter()
+        .map(|edge| f64::from(edge.length))
+        .collect();
+    let meters_per_unit_lat = METERS_PER_DEGREE_LAT * base.scale;
+    let meters_per_unit_lng =
+        METERS_PER_DEGREE_LAT * base.origin_lat.to_radians().cos() * base.scale;
+    let network = scenic::Network {
+        node_x: &base.node_lng,
+        node_y: &base.node_lat,
+        csr: &base.csr,
+        adjacency: &base.adjacency,
+        edge_a: &edge_a,
+        edge_b: &edge_b,
+        edge_len_m: &edge_len_m,
+        origin_lng: base.origin_lng,
+        origin_lat: base.origin_lat,
+        scale: base.scale,
+        mpu_lng: meters_per_unit_lng,
+        mpu_lat: meters_per_unit_lat,
+    };
+
+    let landmark = match &args.landmarks {
+        Some(path) => column(
+            cache.as_deref_mut(),
+            graph_cache::LANDMARKS,
+            keys.map(|keys| keys.landmarks.as_str()),
+            edge_count,
+            || {
+                let pois = binfmt::read_points(path, "LMRK", binfmt::LANDMARK_FORMAT)?;
+                let (bytes, stats) = scenic::poi_amenity(&network, &scenic::LANDMARK_PARAMS, &pois);
+                eprintln!(
+                    "landmarks: {} points, {} snapped, max amenity byte {}",
+                    pois.len(),
+                    stats.snapped,
+                    stats.max_byte
+                );
+                Ok(bytes)
+            },
+        )?,
+        None => vec![0u8; edge_count],
+    };
+    let art = match &args.art {
+        Some(path) => column(
+            cache.as_deref_mut(),
+            graph_cache::ART,
+            keys.map(|keys| keys.art.as_str()),
+            edge_count,
+            || {
+                let pois = binfmt::read_points(path, "ARTW", binfmt::ART_FORMAT)?;
+                let (bytes, stats) = scenic::poi_amenity(&network, &scenic::ART_PARAMS, &pois);
+                eprintln!(
+                    "art: {} points, {} snapped, max amenity byte {}",
+                    pois.len(),
+                    stats.snapped,
+                    stats.max_byte
+                );
+                Ok(bytes)
+            },
+        )?,
+        None => vec![0u8; edge_count],
+    };
+    let highway = match &args.highways {
+        Some(path) => column(
+            cache.as_deref_mut(),
+            graph_cache::HIGHWAYS,
+            keys.map(|keys| keys.highways.as_str()),
+            edge_count,
+            || {
+                let lines = binfmt::read_polygons(path, "HWAY", binfmt::HIGHWAY_FORMAT)?;
+                let (bytes, max_byte) = scenic::highway_penalty(&network, &lines);
+                eprintln!(
+                    "highways: {} nuisance lines, max penalty byte {}",
+                    lines.len(),
+                    max_byte
+                );
+                Ok(bytes)
+            },
+        )?,
+        None => vec![0u8; edge_count],
+    };
+    let commercial = match &args.commercial {
+        Some(path) => column(
+            cache.as_deref_mut(),
+            graph_cache::COMMERCIAL,
+            keys.map(|keys| keys.commercial.as_str()),
+            edge_count,
+            || {
+                let lines = binfmt::read_polygons(path, "CMLN", binfmt::COMMERCIAL_FORMAT)?;
+                let (bytes, max_byte) = scenic::commercial_amenity(&network, &lines);
+                eprintln!(
+                    "commercial: {} qualifying lines, max amenity byte {}",
+                    lines.len(),
+                    max_byte
+                );
+                Ok(bytes)
+            },
+        )?,
+        None => vec![0u8; edge_count],
+    };
+
+    // The relief bytes (v9): the height climbed and the height dropped along each edge walked a->b,
+    // sampled off the city's DEM resampled to a lat/lng field. Cached as one entry, the two rows
+    // back to back, because they come out of one pass over that field — which is also the 1.77 GB
+    // decode this cache is worth most for. A city with no elevation source leaves every edge flat.
+    let (ascent, descent) = match args.elevation_bounds {
+        Some(bounds) => {
+            let rows = column(
+                cache.as_deref_mut(),
+                graph_cache::RELIEF,
+                keys.map(|keys| keys.relief.as_str()),
+                2 * edge_count,
+                || {
+                    let dem = dem.ok_or(
+                        "this city has a DEM and the driver opened none: its relief column was \
+                         there when that was decided and is not now, so build again",
+                    )?;
+                    let field = crate::dem::resample(&bounds, RELIEF_FIELD_ZOOM, dem)?;
+                    let lengths: Vec<f32> = base.edges.iter().map(|edge| edge.length).collect();
+                    let baked = relief::relief(polylines.get(), &lengths, &field)?;
+                    eprintln!(
+                        "relief: {} edges measured, mean grade {:.1}%, steepest {:.1}%",
+                        baked.measured,
+                        100.0 * baked.mean_grade,
+                        100.0 * baked.max_grade
+                    );
+                    Ok([baked.ascent, baked.descent].concat())
+                },
+            )?;
+            let (ascent, descent) = rows.split_at(edge_count);
+            (ascent.to_vec(), descent.to_vec())
+        }
+        None => (vec![0u8; edge_count], vec![0u8; edge_count]),
+    };
+
+    // The direct-canopy byte (v6): the fraction of the edge under a crown, integrated along that
+    // polyline with no kernel — see direct_canopy.rs for why the cover byte cannot stand in.
+    let direct_canopy = match &args.canopy {
+        Some(path) => column(
+            cache.as_deref_mut(),
+            graph_cache::CANOPY,
+            keys.map(|keys| keys.canopy.as_str()),
+            edge_count,
+            || {
+                let baked = direct_canopy::direct_canopy(polylines.get(), path, base.origin_lat)?;
+                eprintln!(
+                    "direct canopy: {} polygons, mean covered fraction {:.3}, max byte {}",
+                    baked.polygons, baked.mean, baked.max_byte
+                );
+                Ok(baked.bytes)
+            },
+        )?,
+        None => vec![0u8; edge_count],
+    };
+
+    // The industrial byte (v10): how much of the edge runs past an industrial lot, both sides
+    // probed. A deck over a yard fronts nothing, so the structure flag is handed over with the
+    // polylines rather than being masked out afterwards, which would flatter the reported mean.
+    let industrial = match &args.industrial {
+        Some(path) => column(
+            cache.as_deref_mut(),
+            graph_cache::INDUSTRIAL,
+            keys.map(|keys| keys.industrial.as_str()),
+            edge_count,
+            || {
+                let on_structure: Vec<bool> = base
+                    .edges
+                    .iter()
+                    .map(|edge| edge.flags & GRPH_STRUCTURE != 0)
+                    .collect();
+                let baked =
+                    industrial::industrial(polylines.get(), &on_structure, path, base.origin_lat)?;
+                eprintln!(
+                    "industrial: {} lots, {} edges fronting one, mean frontage {:.4}, max byte {}",
+                    baked.polygons, baked.fronting, baked.mean, baked.max_byte
+                );
+                Ok(baked.bytes)
+            },
+        )?,
+        None => vec![0u8; edge_count],
+    };
+
+    let shade = match (&args.buildings, &args.shade_params) {
+        (Some(buildings), Some(params)) => {
+            shade_columns(args, base, buildings, params, &mut polylines, cache)?
+        }
+        _ => Vec::new(),
+    };
+
+    Ok(Columns {
+        landmark,
+        art,
+        highway,
+        commercial,
+        ascent,
+        descent,
+        direct_canopy,
+        industrial,
+        shade,
+    })
+}
+
+/// The per-bin shade rows, one cached column per sun bin: what the buildings and the crowns occlude
+/// of each edge with the sun where that bin puts it. A bin is a function of its own sun position and
+/// of nothing else in the schedule, so a grid that gained a bin bakes exactly the one — which is the
+/// same property the shade pyramid's per-bucket keys have, one artifact over.
+///
+/// The bins that are missing are baked in ONE call, because the bake parallelises across bins and
+/// not within one: a cold build that took them one at a time would run on a single thread.
+fn shade_columns(
+    args: &Args,
+    base: &Base,
+    buildings: &std::path::Path,
+    params: &shade::Params,
+    polylines: &mut Polylines,
+    mut cache: Option<&mut graph_cache::Cache>,
+) -> Fallible<Vec<(Vec<u8>, Vec<u8>)>> {
+    let keys = args.cache.as_ref();
+    if let Some(keys) = keys
+        && keys.shade.len() != params.buckets.len()
+    {
+        return Err("the driver keyed a different number of sun bins than the grid holds".into());
+    }
+    let edge_count = base.edges.len();
+    let mut rows: Vec<Option<(Vec<u8>, Vec<u8>)>> = Vec::with_capacity(params.buckets.len());
+    for bin in 0..params.buckets.len() {
+        let held = match (cache.as_deref_mut(), keys) {
+            (Some(cache), Some(keys)) => cache
+                .load(graph_cache::SHADE, &keys.shade[bin], 2 * edge_count)?
+                .map(|bytes| {
+                    let (buildings, trees) = bytes.split_at(edge_count);
+                    (buildings.to_vec(), trees.to_vec())
+                }),
+            _ => None,
+        };
+        rows.push(held);
+    }
+
+    let missing: Vec<usize> = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| row.is_none())
+        .map(|(bin, _)| bin)
+        .collect();
+    if !missing.is_empty() {
+        eprintln!(
+            "shade: {} of {} bins to bake",
+            missing.len(),
+            params.buckets.len()
+        );
+        let casters = shade::edge_shade_casters(buildings, args.canopy.as_deref())?;
+        let wanted: Vec<shade::Bucket> = missing
+            .iter()
+            .map(|bin| params.buckets[*bin].clone())
+            .collect();
+        let baked = shade::bake_edge_shade(
+            &casters,
+            &wanted,
+            params.max_shadow_meters,
+            params.max_zoom,
+            polylines.get(),
+        );
+        for (bin, (buildings, trees)) in missing.iter().zip(baked) {
+            if let (Some(cache), Some(keys)) = (cache.as_deref_mut(), keys) {
+                let mut entry = Vec::with_capacity(2 * edge_count);
+                entry.extend_from_slice(&buildings);
+                entry.extend_from_slice(&trees);
+                cache.store(graph_cache::SHADE, &keys.shade[*bin], &entry)?;
+            }
+            rows[*bin] = Some((buildings, trees));
+        }
+    }
+
+    rows.into_iter()
+        .map(|row| row.ok_or_else(|| "a sun bin nothing baked".into()))
+        .collect()
+}
+
+/// The graph blob, its version file, the stranded list and the SHDE bake, out of the base and the
+/// columns baked over it. Seconds: nothing here computes anything about the city, it only lays the
+/// two out in the order the client reads them.
+fn assemble(args: &Args, base: &Base, columns: &Columns) -> Fallible<()> {
+    let Base {
+        origin_lng,
+        origin_lat,
+        scale,
+        node_lng,
+        node_lat,
+        node_component,
+        component_count,
+        edges: v2_edges,
+        ordinals: edge_ordinals,
+        key_hash,
+        geometry_polys,
+        names,
+        ferry_side_table,
+        stranded_ways,
+        csr,
+        adjacency,
+        ..
+    } = base;
+    let (origin_lng, origin_lat, scale) = (*origin_lng, *origin_lat, *scale);
+    let (component_count, key_hash) = (*component_count, *key_hash);
+    let node_count = node_lng.len();
+    let edge_count = v2_edges.len();
+
+    // The geometry blob: one entry per sidewalk and per path edge, its first vertex absolute (delta
+    // from the graph origin — kept origin-anchored so the client decoder is unchanged), the rest
+    // from the previous vertex.
+    let mut geometry: Vec<u8> = Vec::new();
+    let mut geometry_offsets: Vec<u32> = Vec::with_capacity(geometry_polys.len());
+    for (poly_x, poly_y) in geometry_polys {
+        geometry_offsets.push(geometry.len() as u32);
+        let mut previous_x = 0i64;
+        let mut previous_y = 0i64;
+        for (&vertex_x, &vertex_y) in poly_x.iter().zip(poly_y) {
+            write_varint(&mut geometry, zigzag(i64::from(vertex_x) - previous_x));
+            write_varint(&mut geometry, zigzag(i64::from(vertex_y) - previous_y));
+            previous_x = i64::from(vertex_x);
+            previous_y = i64::from(vertex_y);
+        }
+    }
+
+    // The name table blob: (count + 1) byte offsets, then the UTF-8 names back to back.
+    let mut name_blob: Vec<u8> = Vec::new();
+    let mut name_offsets: Vec<u32> = Vec::with_capacity(names.len() + 1);
+    for name in names {
+        name_offsets.push(name_blob.len() as u32);
+        name_blob.extend_from_slice(name.as_bytes());
+    }
+    name_offsets.push(name_blob.len() as u32);
+    let name_table_bytes = 4 + 4 * name_offsets.len() + name_blob.len();
+
+    let align4 = |offset: usize| offset.div_ceil(4) * 4;
+    let component_pad = if node_count % 2 == 1 { 2 } else { 0 };
+    let node_lng_offset = GRAPH_HEADER_BYTES;
+    let node_lat_offset = node_lng_offset + 4 * node_count;
+    let node_component_offset = node_lat_offset + 4 * node_count;
+    let csr_offset = node_component_offset + 2 * node_count + component_pad;
+    let adjacency_offset = csr_offset + 4 * (node_count + 1);
+    let edges_offset = adjacency_offset + 8 * edge_count;
+    // Every section starts on a 4-byte boundary so the client can view it as a typed array; the
+    // record's own size is not part of the contract, so the name table is padded back onto one.
+    let name_offset = align4(edges_offset + EDGE_RECORD_BYTES * edge_count);
+    let geometry_offset = align4(name_offset + name_table_bytes);
+
+    let mut bytes = vec![0u8; geometry_offset];
+    bytes[0..4].copy_from_slice(b"GRPH");
+    put_u16(&mut bytes, 4, GRAPH_FORMAT);
+    put_u16(&mut bytes, 6, GRAPH_HEADER_BYTES as u16);
+    put_u32(&mut bytes, 8, node_count as u32);
+    put_u32(&mut bytes, 12, edge_count as u32);
+    put_f64(&mut bytes, 16, origin_lng);
+    put_f64(&mut bytes, 24, origin_lat);
+    put_f64(&mut bytes, 32, scale);
+    put_u32(&mut bytes, 40, component_count as u32);
+    put_u32(&mut bytes, 44, name_offset as u32);
+    put_u32(&mut bytes, 48, name_table_bytes as u32);
+    put_u32(&mut bytes, 52, geometry_offset as u32);
+    put_u32(&mut bytes, 56, geometry.len() as u32);
+
+    for (index, &value) in node_lng.iter().enumerate() {
+        put_i32(&mut bytes, node_lng_offset + 4 * index, value);
+    }
+    for (index, &value) in node_lat.iter().enumerate() {
+        put_i32(&mut bytes, node_lat_offset + 4 * index, value);
+    }
+    for (index, &value) in node_component.iter().enumerate() {
+        put_u16(&mut bytes, node_component_offset + 2 * index, value);
+    }
+    for (index, &value) in csr.iter().enumerate() {
+        put_u32(&mut bytes, csr_offset + 4 * index, value);
+    }
+    for (index, &value) in adjacency.iter().enumerate() {
+        put_u32(&mut bytes, adjacency_offset + 4 * index, value);
+    }
+    // The cover byte is clamped to 254 so the client's maxCover stays < 1: cost.ts's admissible
+    // heuristic collapses (the greenest edge goes free at w = 1) if any edge reads a full 255, which
+    // the denser OSM tree field can now reach.
+    let mut cover_clamped = 0usize;
+    for (edge_id, edge) in v2_edges.iter().enumerate() {
+        let record = edges_offset + EDGE_RECORD_BYTES * edge_id;
+        let (geom_offset, vertex_count) = if edge.geom == NO_GEOMETRY {
+            (NO_GEOMETRY, 0u16)
+        } else {
+            (
+                geometry_offsets[edge.geom as usize],
+                geometry_polys[edge.geom as usize].0.len() as u16,
+            )
+        };
+        // A ferry carries a u16 duration in bytes 20-21 (edge.cover is its low byte, edge.half_offset
+        // its high byte), so the 254 cover clamp — which keeps a real edge's client maxCover < 1 —
+        // applies only to the cover-bearing kinds.
+        let cover = if edge.kind == KIND_FERRY {
+            edge.cover
+        } else if edge.cover > 254 {
+            cover_clamped += 1;
+            254
+        } else {
+            edge.cover
+        };
+        put_u32(&mut bytes, record, edge.a);
+        put_u32(&mut bytes, record + 4, edge.b);
+        put_f32(&mut bytes, record + 8, edge.length);
+        put_u32(&mut bytes, record + 12, geom_offset);
+        put_u16(&mut bytes, record + 16, vertex_count);
+        put_u16(&mut bytes, record + 18, edge.name_id);
+        bytes[record + 20] = cover;
+        bytes[record + 21] = edge.half_offset;
+        bytes[record + 22] = (edge.kind & KIND_MASK) | (edge.side << SIDE_SHIFT);
+        bytes[record + 23] = edge.flags;
+        // The attribute bytes (v5 scenic, v6 direct canopy): a ferry passes no landmark, art,
+        // highway or commercial frontage and walks under no crown, so it keeps the record's default
+        // zeros; every walking kind carries the baked attributes.
+        if edge.kind != KIND_FERRY {
+            bytes[record + 24] = columns.landmark[edge_id];
+            bytes[record + 25] = columns.art[edge_id];
+            bytes[record + 26] = columns.highway[edge_id];
+            bytes[record + 27] = columns.commercial[edge_id];
+            bytes[record + 28] = columns.direct_canopy[edge_id];
+            // The relief bytes (v9): how much height this edge climbs and how much it drops, walked
+            // a->b, so reversing it swaps the two. A ferry crosses water and has neither.
+            bytes[record + 34] = columns.ascent[edge_id];
+            bytes[record + 35] = columns.descent[edge_id];
+            // The industrial frontage byte (v10), read as a `1 + w*attr` penalty. Bytes 37-39 are
+            // the reserved zeros the 40-byte record leaves for the next attribute.
+            bytes[record + 36] = columns.industrial[edge_id];
+        }
+        // The durable key (v6): the source record's id, and the ordinal that — with the side already
+        // in byte 22 — picks this edge out within it. A crossing, link or ferry has no source
+        // geometry, so it carries the sentinel and a zero ordinal.
+        put_u32(&mut bytes, record + 29, edge.source_id);
+        bytes[record + 33] = edge_ordinals[edge_id];
+    }
+
+    put_u32(&mut bytes, name_offset, names.len() as u32);
+    for (index, &value) in name_offsets.iter().enumerate() {
+        put_u32(&mut bytes, name_offset + 4 + 4 * index, value);
+    }
+    let name_blob_offset = name_offset + 4 + 4 * name_offsets.len();
+    bytes[name_blob_offset..name_blob_offset + name_blob.len()].copy_from_slice(&name_blob);
+    bytes.extend_from_slice(&geometry);
+
+    // The ferry endpoint-stop-name side table, 4-aligned after the geometry blob: a u32 count, then
+    // per ferry edge a (u32 edge id, u16 a-stop name id, u16 b-stop name id) triple, the ids into
+    // the name table above. Its offset rides in the spare header u32 at byte 60 (0-length when the
+    // build carried no ferries).
+    while bytes.len() % 4 != 0 {
+        bytes.push(0);
+    }
+    let ferry_table_offset = bytes.len() as u32;
+    put_u32(&mut bytes, 60, ferry_table_offset);
+    bytes.extend_from_slice(&(ferry_side_table.len() as u32).to_le_bytes());
+    for &(edge_id, a_stop_name, b_stop_name) in ferry_side_table {
+        bytes.extend_from_slice(&edge_id.to_le_bytes());
+        bytes.extend_from_slice(&a_stop_name.to_le_bytes());
+        bytes.extend_from_slice(&b_stop_name.to_le_bytes());
+    }
+
+    if let Some(parent) = args.out.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&args.out, &bytes)?;
+    write_version(&args.out, &bytes, edge_count, key_hash)?;
+    if let Some(path) = &args.stranded_out {
+        write_stranded(path, stranded_ways)?;
+    }
+
+    // The SHDE artifact (optional): the building and crown occlusion fractions per edge per
+    // sun-position bin, keyed off the same finalized edge order the client reads GRPH records in.
+    // One bin is one column, so a schedule that gained a bin baked one bin and the rest of these
+    // rows came off the cache.
+    if let (Some(params), Some(shade_dir_path)) = (&args.shade_params, &args.shade_dir)
+        && !columns.shade.is_empty()
+    {
+        let positions: Vec<shade::BinPosition> =
+            params.buckets.iter().map(shade::bin_position).collect();
+        write_shade(shade_dir_path, edge_count, &positions, &columns.shade)?;
+        eprintln!(
+            "shade: {} bins x {edge_count} edges baked to {}",
+            positions.len(),
+            shade_dir_path.display()
+        );
+    }
+
+    let mut stats = base.stats.clone();
+    stats["coverClamped"] = cover_clamped.into();
+    stats["bytes"] = bytes.len().into();
     match &args.report {
         Some(path) => crate::write_report(path, &stats)?,
         None => println!("{}", serde_json::to_string(&stats)?),
     }
-    Ok(stranded_ways)
+    Ok(())
+}
+
+/// Returns the OSM way ids the island drop stranded, sorted — what the second chunks pass folds
+/// into each chunk's trailing bitmap so the overlay stops painting a walk no route can follow.
+///
+/// Three stages, each cached in its own right when the driver hands over the keys: the sequential
+/// topology, a fan-out of attribute columns over the edge list it settles, and the assemble that
+/// lays the two out as the blob. So a re-ingested landmark file bakes one column and writes the
+/// graph, where it used to rebuild the city.
+///
+/// `dem` is borrowed rather than opened from a path because the elevation pass resamples the same
+/// mosaic for its overlay; `tiler build` opens it once and hands it to both.
+pub fn run(args: &Args, dem: Option<&mut crate::dem::Dem>) -> Fallible<Vec<u32>> {
+    let mut cache = args
+        .cache
+        .as_ref()
+        .map(|keys| graph_cache::Cache::new(&keys.dir));
+    let key = args.cache.as_ref().map(|keys| keys.base.as_str());
+    let held = match (cache.as_mut(), key) {
+        (Some(cache), Some(key)) => cache.load_base(key)?,
+        _ => None,
+    };
+    // A cache entry that will not decode is treated as a miss rather than an error. It is the one
+    // staleness that cannot heal itself otherwise: the run would fail, the workflow would bank the
+    // same unreadable entry under a fresh key, and the next deploy would restore it again — a loop
+    // that only a topology change or a hand-deleted cache breaks out of. Recomputing overwrites it.
+    let base = match held.and_then(|bytes| match Base::decode(&bytes) {
+        Ok(base) => Some(base),
+        Err(error) => {
+            eprintln!("topology: the cached base did not decode ({error}), rebuilding it");
+            None
+        }
+    }) {
+        Some(base) => {
+            eprintln!(
+                "topology: {} nodes, {} edges from the cache",
+                base.node_lng.len(),
+                base.edges.len()
+            );
+            base
+        }
+        None => {
+            let base = topology(args)?;
+            if let (Some(cache), Some(key)) = (cache.as_mut(), key) {
+                cache.store(graph_cache::BASE, key, &base.encode()?)?;
+            }
+            base
+        }
+    };
+    let columns = bake(args, &base, dem, cache.as_mut())?;
+    assemble(args, &base, &columns)?;
+    if let Some(cache) = &cache {
+        cache.prune()?;
+    }
+    Ok(base.stranded_ways)
 }
 
 #[cfg(test)]
@@ -4704,10 +5235,12 @@ mod tests {
             },
         ];
         let edge_count = 3;
-        // Two bins x three edges, row-major; bin 1's row is the last three of each grid.
-        let buildings: Vec<u8> = vec![1, 2, 3, 4, 5, 6];
-        let trees: Vec<u8> = vec![10, 20, 30, 40, 50, 60];
-        write_shade(&dir, edge_count, &positions, &buildings, &trees).expect("write");
+        // One (buildings, trees) row pair per bin, three edges each.
+        let rows = vec![
+            (vec![1u8, 2, 3], vec![10u8, 20, 30]),
+            (vec![4u8, 5, 6], vec![40u8, 50, 60]),
+        ];
+        write_shade(&dir, edge_count, &positions, &rows).expect("write");
 
         let manifest: serde_json::Value =
             serde_json::from_slice(&fs::read(dir.join("bins.json")).expect("bins.json")).unwrap();

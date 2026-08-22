@@ -44,6 +44,10 @@ const COMMERCIAL_DIR = join(PUBLIC_DIR, "commercial");
 // graph proximity-bakes into the per-edge commercial discount.
 const COMMERCIAL_LINES_DIR = join(PUBLIC_DIR, "commercial-lines");
 const ROUTING_DIR = join(PUBLIC_DIR, "routing");
+// The graph pass's own cache: one directory of content-keyed entries per city, holding that city's
+// finished topology and one file per attribute column baked over it. Gitignored build glue like the
+// plan beside it — a build that finds it empty computes everything.
+const GRAPH_CACHE_DIR = join(ROOT, ".build", "graph-cache");
 // The graph inputs referenced by convention, `data/<kind>/<id>.bin`: they sit outside the manifest
 // because its versioned CityEntry schema would throw for existing cities if bumped, so the plan
 // names the ones actually on disk and the tiler resolves the same convention.
@@ -98,6 +102,7 @@ interface Plan {
   canopyTiles: string;
   genusFieldTiles: string;
   routing: string;
+  graphCache: string;
   ramp: number[];
   cities: PlanCity[];
 }
@@ -213,6 +218,7 @@ async function writePlan(): Promise<void> {
     canopyTiles: CANOPY_TILE_DIR,
     genusFieldTiles: GENUS_FIELD_TILE_DIR,
     routing: ROUTING_DIR,
+    graphCache: GRAPH_CACHE_DIR,
     ramp: rampTable(),
     cities: await Promise.all(cities.map(planCity)),
   };

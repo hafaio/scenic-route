@@ -28,6 +28,7 @@ mod elevation;
 mod genus_field;
 mod geometry;
 mod graph;
+mod graph_cache;
 mod heights;
 mod industrial;
 mod ingest;
@@ -167,6 +168,7 @@ fn run() -> Fallible<()> {
                 elevation_bounds: None,
                 alleys: true,
                 canopy: None,
+                cache: None,
                 probe: true,
                 report: Some(report),
             },

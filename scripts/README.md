@@ -914,6 +914,37 @@ of the crate is listed as the complement and a test asserts that the two lists t
 `crates/tiler/src/`: a module claimed by neither would be one no stamp is a function of, and the one
 edit that leaves a stale pyramid being served.
 
+**The graph pass is split finer still: a base topology, a column per attribute, and a cheap
+assemble.** Everything through the name compaction — node identity and the renumber, the walking
+sort, the ferries appended onto the finished walking node set, the ordinals over the order that
+leaves — is inherently sequential, and is a function of the streets, the paths, the OSM sidewalks,
+the ferries and the alley flag alone. What comes after is not: the landmark, art, highway and
+commercial fan-outs, the relief bytes, the direct canopy, the industrial frontage and the per-bin
+SHDE bake are each one byte per edge over an edge list that was final before any of them ran. So the
+base is cached as one entry, each column as another, and the pass lays the blob out of whichever it
+actually had to compute. Measured here on New York: 17 s of topology, 0.6 s for the four scenic
+bakes, 140 s for the direct canopy, 2.4 s for the industrial frontage and around 25 minutes for the
+58-bin shade bake — so a re-ingested `data/industrial/nyc.bin`, which used to cost all of that, now
+costs the 2.4 s and the write.
+
+The entries live in `.build/graph-cache/<city>/`, one file per key, named `<column>-<key>.bin`.
+**Every column's key folds the base's**, and that is the whole correctness argument for merging a
+column back in by POSITION: a base that moved renames every column with it, so a row can never be
+read back beside an edge list it was not baked over. Ferry bytes are part of the base — ferries are
+appended edges — so a ferry re-ingest correctly takes the columns with it. The SHDE bake is keyed one
+sun bin at a time, exactly as the pyramid is, so an inserted bin bakes the one bin. What a build did
+not ask for is pruned as that city finishes, leaving one generation, a couple of hundred megabytes a
+city. None of it is output and no pass's stamp claims it: `.build/` is gitignored build glue, and a
+build that finds the directory empty computes everything, which is what every build did before it
+existed. The durable key space is untouched by all of this — the base is what a key comes out of, and
+the same base gives the same `keyHash`, so a committed shed artifact resolves exactly as before.
+
+**The caster chunks are keyed on `maxShadowMeters` and not on the grid.** They carry no sun position
+at all; what they take from the schedule is the halo radius a viewport has to gather casters over,
+which rides in their manifest. Between that and the two per-bin keys, adding a bin to a city's
+schedule now costs one bucket rendered, one bin baked and some renames — where it used to cost the
+262 s caster pass and the whole per-edge bake besides.
+
 Each stamp is written **inside that pass's own output** — `public/streets/.stamp` and
 `.stamp-stranded`, `public/commercial/.stamp`, `public/casters/.stamp`,
 `public/tiles/canopy/.stamp`, `public/tiles/genus-field/.stamp`,
@@ -965,6 +996,7 @@ serves and report success.
   "canopyTiles": "public/tiles/canopy",
   "genusFieldTiles": "public/tiles/genus-field",
   "routing": "public/routing",                // <id>.bin, <id>.stranded.bin, and the per-edge bake under shade/<id>
+  "graphCache": ".build/graph-cache",         // the graph pass's own cache: <city>/<column>-<key>.bin
   "ramp": [0, 0, 0, 0, "…"],                  // exactly 1024 bytes: RGBA for each of 256 density steps
   "cities": [
     {
@@ -1044,6 +1076,11 @@ blank webp:
   tree pyramid comes out at ~88% of the building pyramid's bytes and paints about the
   same fraction of the plan (43.7% against 42.5%), so it roughly doubles what the shade tiles cost
   the deploy.
+
+- **The per-edge shade bake (the graph pass).** The same sweep once per sun bin against every edge's
+  polyline rather than against a tile: 58 bins over New York's 629k edges is around 25 minutes, most
+  of that pass and comparable to the pyramid itself. It is cached one bin at a time for that reason,
+  beside the direct-canopy integration next to it, which is 140 s of the same pass.
 
 `tiler ingest` is the third heavy pass: it convolves the same canopy indicator at both
 sidewalks of every street and path vertex, and draws a seeded million-point land sample for the
