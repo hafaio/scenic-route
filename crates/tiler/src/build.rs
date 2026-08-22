@@ -20,7 +20,10 @@
 //!
 //! `tiler graph-inputs` is here for the same reason: which sources a city hands `graph::run`, and
 //! under which flags, is decided in this file, so the stamp the shed guard gates on is taken from
-//! the same expressions rather than from a second reading of the plan somewhere else.
+//! the same expressions rather than from a second reading of the plan somewhere else. The keys that
+//! pass caches its topology and its attribute columns under (graph_cache.rs) are computed here for
+//! that reason too — they ARE its stamp, so what it thinks is current and what it reads back off
+//! the disk cannot come apart.
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -35,8 +38,8 @@ use sha2::{Digest, Sha256};
 use crate::dem::Dem;
 use crate::manifest::{City, Manifest};
 use crate::{
-    Fallible, canopy, caster_chunks, chunks, commercial, elevation, genus_field, graph, heights,
-    shade,
+    Fallible, canopy, caster_chunks, chunks, commercial, elevation, genus_field, graph,
+    graph_cache, heights, shade,
 };
 
 /// The by-convention sources: `data/<kind>/<id>.bin`, listed rather than pathed because the passes
@@ -103,7 +106,7 @@ const SHADE_CODE: [&str; 6] = [
 /// no scope is a function of, and the one edit that leaves a stale pyramid standing. Nothing but
 /// that test reads it, since the epoch these belong to is every file the plan carries.
 #[cfg(test)]
-const OUTSIDE_SHADE: [&str; 22] = [
+const OUTSIDE_SHADE: [&str; 23] = [
     "association.rs",
     "build.rs",
     "canopy.rs",
@@ -118,6 +121,7 @@ const OUTSIDE_SHADE: [&str; 22] = [
     "elevation.rs",
     "genus_field.rs",
     "graph.rs",
+    "graph_cache.rs",
     "heights.rs",
     "industrial.rs",
     "ingest.rs",
@@ -203,6 +207,10 @@ pub struct Plan {
     /// `public/routing`: each city's graph, its stranded list beside it, and the per-edge shade bake
     /// under `shade/<city>`.
     routing: PathBuf,
+    /// `.build/graph-cache`: the graph pass's own cache, one `<city>` directory of content-keyed
+    /// entries under it. Gitignored build glue rather than output — a build that finds it empty
+    /// computes everything, which is what every build did before it existed.
+    graph_cache: PathBuf,
     /// The 256-step RGBA table of src/tree-cover/ramp.ts, 1024 bytes.
     ramp: Vec<u8>,
     cities: Vec<PlanCity>,
@@ -310,6 +318,11 @@ impl Plan {
             }
         }
         for entry in listing(&self.routing.join("shade"))? {
+            if !claimed.contains(city_of(&entry).as_str()) {
+                discard(&entry)?;
+            }
+        }
+        for entry in listing(&self.graph_cache)? {
             if !claimed.contains(city_of(&entry).as_str()) {
                 discard(&entry)?;
             }
@@ -601,15 +614,6 @@ fn field(digest: &mut Sha256, bytes: &[u8]) {
     digest.update([0]);
 }
 
-/// The sun grid as the pass will act on it, serialized rather than walked field by field so a bin
-/// that gained a sample cannot slip past.
-fn sun_bytes(params: Option<&shade::Params>) -> Fallible<Vec<u8>> {
-    match params {
-        Some(params) => Ok(serde_json::to_vec(params)?),
-        None => Ok(Vec::new()),
-    }
-}
-
 /// A mosaic's identity: which tiles, how big, and how they are georeferenced — not 1.77 GB of
 /// pixels. The 3DEP tiles are immutable upstream products fetched into content-named cache entries,
 /// so hashing them every build would buy nothing for the ten seconds of reading.
@@ -749,15 +753,20 @@ impl<'a> Stamps<'a> {
         Ok(hex(&digest.finalize()))
     }
 
-    /// Pass 3. The chunks carry no sun position, so they are cut over every city from whichever
-    /// grid the driver found first — that grid, not the city it came from, is what they depend on.
+    /// Pass 3. The chunks carry no sun position at all: what they take from the grid is
+    /// `maxShadowMeters` alone, the halo radius a viewport gathers casters over, which rides in
+    /// their manifest. So that is what enters here and not the grid — an inserted bin moves every
+    /// bin index and not one of these 166 MB of chunks, and the pass is four minutes.
     fn casters(
         &mut self,
         cities: &[(&City, &PlanCity)],
         sun: Option<&shade::Params>,
     ) -> Fallible<String> {
         let mut digest = self.open("caster-chunks");
-        field(&mut digest, &sun_bytes(sun)?);
+        match sun {
+            Some(params) => field(&mut digest, &params.max_shadow_meters.to_le_bytes()),
+            None => field(&mut digest, b"no sun"),
+        }
         for (city, _) in cities {
             let mut inputs = vec![
                 self.plan
@@ -796,8 +805,8 @@ impl<'a> Stamps<'a> {
         field(&mut digest, city.id.as_bytes());
         field(&mut digest, &params.max_zoom.to_le_bytes());
         field(&mut digest, &params.max_shadow_meters.to_le_bytes());
-        // Serialized rather than walked field by field, for `sun_bytes`'s reason: a bin that gained
-        // a sun-disk sample cannot then slip past.
+        // Serialized rather than walked field by field, so a bin that gained a sun-disk sample
+        // cannot slip past.
         field(&mut digest, &serde_json::to_vec(bucket)?);
         let mut inputs = vec![
             self.plan
@@ -854,38 +863,155 @@ impl<'a> Stamps<'a> {
         Ok(hex(&digest.finalize()))
     }
 
-    /// Pass 8, one city. The match over `Source` is exhaustive for `key_space_files`'s reason: a
-    /// source wired into the graph later must reach this stamp without anyone remembering to add
-    /// it, and every one of them is genuinely read by `graph::run`. The commercial lines are not
-    /// among the files because they are pass 2's output rather than a committed source, so that
-    /// pass's whole stamp stands in for them.
-    fn graph(&mut self, city: &City, planned: &PlanCity, commercial: &str) -> Fallible<String> {
-        let mut digest = self.open("graph");
-        field(&mut digest, commercial.as_bytes());
+    /// Pass 8's keys, one city: the topology's own, and one per attribute column baked over it.
+    ///
+    /// The base is what the sequential half of `graph::run` is a function of — the streets, the
+    /// paths, the OSM sidewalks, the ferries and the alley flag — and nothing else, because nothing
+    /// else can move an edge. Every column key folds it, which is what makes merging a column back
+    /// in by position sound: a base that moved renames every column with it, so a row can never be
+    /// read back beside an edge list it was not baked over.
+    ///
+    /// The match over `Source` is exhaustive for `key_space_files`'s reason: a source wired into the
+    /// graph later must reach these keys without anyone remembering to add it, and every one of them
+    /// is genuinely read by `graph::run`. The commercial lines are pass 2's output rather than a
+    /// committed source, so that pass's whole stamp stands in for them.
+    fn graph_keys(
+        &mut self,
+        city: &City,
+        planned: &PlanCity,
+        commercial: &str,
+        bakes_shade: bool,
+    ) -> Fallible<graph_cache::Keys> {
+        let mut digest = self.open("graph-base");
         field(&mut digest, city.id.as_bytes());
         field(
             &mut digest,
             if planned.alleys { b"alleys" } else { b"none" },
         );
-        field(&mut digest, &sun_bytes(planned.shade.as_ref())?);
-        dem_identity(&mut digest, planned.elevation.as_ref())?;
         let mut inputs = vec![self.plan.data.join("streets").join(&city.streets.file)];
         inputs.extend(
             city.paths
                 .as_ref()
                 .map(|layer| self.plan.data.join("paths").join(&layer.file)),
         );
-        inputs.extend(
-            city.field
-                .canopy
-                .as_ref()
-                .map(|layer| self.plan.data.join("canopy").join(&layer.file)),
-        );
         for source in Source::ALL {
-            inputs.extend(planned.source(&self.plan.data, source));
+            let topology = match source {
+                Source::Sidewalks | Source::Ferries => true,
+                // Each of these bakes one column over edges that were final before it ran, so it
+                // keys that column and stays out of the base.
+                Source::Landmarks
+                | Source::Art
+                | Source::Highways
+                | Source::Industrial
+                | Source::Buildings => false,
+            };
+            if topology {
+                inputs.extend(planned.source(&self.plan.data, source));
+            }
         }
         self.files(&mut digest, &inputs)?;
+        let base = hex(&digest.finalize());
+
+        let canopy_file = city
+            .field
+            .canopy
+            .as_ref()
+            .map(|layer| self.plan.data.join("canopy").join(&layer.file));
+        let buildings = planned.source(&self.plan.data, Source::Buildings);
+        let mut shade = Vec::new();
+        if let Some(params) = &planned.shade
+            && bakes_shade
+        {
+            for bucket in &params.buckets {
+                let mut digest = self.open("graph-shade");
+                field(&mut digest, base.as_bytes());
+                field(&mut digest, &params.max_zoom.to_le_bytes());
+                field(&mut digest, &params.max_shadow_meters.to_le_bytes());
+                // Serialized rather than walked field by field, so a bin that gained a sun-disk
+                // sample cannot slip past. Deliberately this bin alone — a schedule that gained one
+                // bakes the one, exactly as the pyramid renders the one.
+                field(&mut digest, &serde_json::to_vec(bucket)?);
+                let files: Vec<PathBuf> = buildings.iter().chain(&canopy_file).cloned().collect();
+                self.files(&mut digest, &files)?;
+                shade.push(hex(&digest.finalize()));
+            }
+        }
+
+        let mut relief = self.open("graph-relief");
+        field(&mut relief, base.as_bytes());
+        dem_identity(&mut relief, planned.elevation.as_ref())?;
+        let mut commercial_key = self.open("graph-commercial");
+        field(&mut commercial_key, base.as_bytes());
+        field(&mut commercial_key, commercial.as_bytes());
+        Ok(graph_cache::Keys {
+            dir: self.plan.graph_cache.join(&city.id),
+            landmarks: self.graph_column(
+                &base,
+                "graph-landmarks",
+                planned.source(&self.plan.data, Source::Landmarks).as_ref(),
+            )?,
+            art: self.graph_column(
+                &base,
+                "graph-art",
+                planned.source(&self.plan.data, Source::Art).as_ref(),
+            )?,
+            highways: self.graph_column(
+                &base,
+                "graph-highways",
+                planned.source(&self.plan.data, Source::Highways).as_ref(),
+            )?,
+            industrial: self.graph_column(
+                &base,
+                "graph-industrial",
+                planned.source(&self.plan.data, Source::Industrial).as_ref(),
+            )?,
+            canopy: self.graph_column(&base, "graph-canopy", canopy_file.as_ref())?,
+            commercial: hex(&commercial_key.finalize()),
+            relief: hex(&relief.finalize()),
+            base,
+            shade,
+        })
+    }
+
+    /// One column's key: the base it was baked over, and the one file it reads.
+    fn graph_column(
+        &mut self,
+        base: &str,
+        name: &str,
+        input: Option<&PathBuf>,
+    ) -> Fallible<String> {
+        let mut digest = self.open(name);
+        field(&mut digest, base.as_bytes());
+        match input {
+            Some(path) => self.file(&mut digest, path)?,
+            None => field(&mut digest, b"no source"),
+        }
         Ok(hex(&digest.finalize()))
+    }
+
+    /// Pass 8's stamp: its keys, and nothing besides. They are between them everything the pass
+    /// reads, so the artifacts it writes are current exactly when none of them has moved — and when
+    /// one has, the cache those same keys name is what keeps the rerun to the part that did.
+    fn graph(&self, keys: &graph_cache::Keys) -> String {
+        let mut digest = self.open("graph");
+        for key in [
+            &keys.base,
+            &keys.landmarks,
+            &keys.art,
+            &keys.highways,
+            &keys.commercial,
+            &keys.relief,
+            &keys.canopy,
+            &keys.industrial,
+        ] {
+            field(&mut digest, key.as_bytes());
+        }
+        // The count as well as the keys, so a city that stopped baking shade at all moves it.
+        field(&mut digest, &keys.shade.len().to_le_bytes());
+        for key in &keys.shade {
+            field(&mut digest, key.as_bytes());
+        }
+        hex(&digest.finalize())
     }
 
     /// Pass 9: pass 1's answer, plus what the graph decided to strand. The stranded set rather than
@@ -1020,14 +1146,24 @@ pub fn run(plan_file: &Path, jobs: Option<usize>) -> Fallible<()> {
         .collect::<Fallible<Vec<Pass>>>()?;
     let canopy_pass = Pass::whole(stamps.canopy(&cities)?, &plan.canopy_tiles);
     let genus_pass = Pass::whole(stamps.genus_field(&cities)?, &plan.genus_field_tiles);
-    let graph_passes: Vec<Pass> = cities
+    // The graph's keys before its stamp, because the stamp IS its keys: the base's, and one per
+    // attribute column over it. What the pass rebuilds when it reruns is decided by the same set.
+    let graph_keys: Vec<graph_cache::Keys> = cities
         .iter()
         .zip(&baked)
         .map(|((city, planned), bake)| {
+            stamps.graph_keys(city, planned, &commercial_pass.stamp, bake.is_some())
+        })
+        .collect::<Fallible<Vec<graph_cache::Keys>>>()?;
+    let graph_passes: Vec<Pass> = cities
+        .iter()
+        .zip(&baked)
+        .enumerate()
+        .map(|(index, ((city, _), bake))| {
             let blob = plan.routing.join(format!("{}.bin", city.id));
             let stranded = plan.routing.join(format!("{}.stranded.bin", city.id));
             Ok(Pass {
-                stamp: stamps.graph(city, planned, &commercial_pass.stamp)?,
+                stamp: stamps.graph(&graph_keys[index]),
                 stamp_file: plan.routing.join(format!(".stamp-{}", city.id)),
                 root: None,
                 pieces: vec![
@@ -1050,8 +1186,13 @@ pub fn run(plan_file: &Path, jobs: Option<usize>) -> Fallible<()> {
     // are both current opens nothing, which is what makes a no-op build a matter of milliseconds.
     let mut dems: HashMap<&str, Dem> = HashMap::new();
     for (index, (_, planned)) in cities.iter().enumerate() {
+        // A stale graph that already holds its relief column reads no DEM: the bake is what wants
+        // the pixels, and its column is keyed on the mosaic's identity.
+        let keys = &graph_keys[index];
+        let graph_reads_dem = !graph_passes[index].is_fresh()
+            && !graph_cache::holds(&keys.dir, graph_cache::RELIEF, &keys.relief);
         if let Some(elevation) = &planned.elevation
-            && (!elevation_passes[index].is_fresh() || !graph_passes[index].is_fresh())
+            && (!elevation_passes[index].is_fresh() || graph_reads_dem)
         {
             let dem = Dem::open(
                 &elevation.tiles,
@@ -1285,8 +1426,9 @@ pub fn run(plan_file: &Path, jobs: Option<usize>) -> Fallible<()> {
                     .canopy
                     .as_ref()
                     .map(|layer| plan.data.join("canopy").join(&layer.file)),
-                elevation_bounds: dem.is_some().then_some(city.bounds),
+                elevation_bounds: planned.elevation.is_some().then_some(city.bounds),
                 alleys: planned.alleys,
+                cache: Some(graph_keys[index].clone()),
                 probe: false,
                 report: None,
             },
@@ -1524,6 +1666,7 @@ mod tests {
               "canopyTiles": "public/tiles/canopy",
               "genusFieldTiles": "public/tiles/genus-field",
               "routing": "public/routing",
+              "graphCache": ".build/graph-cache",
               "ramp": [],
               "cities": {cities}
             }}"#
@@ -1552,7 +1695,7 @@ mod tests {
     /// New York with a two-bin sun grid and the footprints to cast it, since the shade pass is now
     /// stamped one bin at a time and has nothing to say about a city with no grid.
     const SUNNY: &str = r#"[
-      {"id": "nyc", "sources": ["buildings"],
+      {"id": "nyc", "sources": ["buildings", "landmarks", "industrial"],
        "shade": {"maxZoom": 14, "maxShadowMeters": 500,
                  "buckets": [
                    {"season": 0, "hourAngle": -30.0, "elevation": 20.0, "azimuth": 120.0,
@@ -1691,6 +1834,7 @@ mod tests {
         plan.commercial_signals = root.join("commercial");
         plan.commercial_lines = root.join("commercial-lines");
         plan.routing = root.join("routing");
+        plan.graph_cache = root.join("graph-cache");
         plan
     }
 
@@ -1769,6 +1913,7 @@ mod tests {
         }
         for city in ["nyc", "sf", "boston"] {
             fs::create_dir_all(plan.routing.join("shade").join(city)).expect("a per-edge bake");
+            fs::create_dir_all(plan.graph_cache.join(city)).expect("a cache directory");
             for suffix in ["bin", "stranded.bin", "version.json"] {
                 fs::write(plan.routing.join(format!("{city}.{suffix}")), b"stale")
                     .expect("a routing artifact");
@@ -1803,6 +1948,8 @@ mod tests {
         }
         assert!(plan.routing.join("shade").join("nyc").is_dir());
         assert!(!plan.routing.join("shade").join("boston").exists());
+        assert!(plan.graph_cache.join("nyc").is_dir());
+        assert!(!plan.graph_cache.join("boston").exists(), "its cache too");
     }
 
     /// A pyramid over a scratch tree, wanting the buckets these keys stand for.
@@ -1963,7 +2110,7 @@ mod tests {
     /// over both sidewalk extracts, each with its own path as its contents so a file read in
     /// another's place is caught. What is missing is deliberate: the commercial pass's dining and
     /// open-streets sources are read only if they exist, and the stamps have to say so.
-    const INPUTS: [(&str, &str); 12] = [
+    const INPUTS: [(&str, &str); 14] = [
         ("streets", "nyc.bin"),
         ("streets", "sf.bin"),
         ("paths", "nyc.bin"),
@@ -1976,6 +2123,8 @@ mod tests {
         ("canopy", "nyc.bin"),
         ("landuse", "nyc.bin"),
         ("buildings", "nyc.bin"),
+        ("landmarks", "nyc.bin"),
+        ("industrial", "nyc.bin"),
     ];
 
     /// A plan whose data root and manifest are a scratch tree of this test's own, so the per-pass
@@ -1991,6 +2140,7 @@ mod tests {
         let mut plan = plan(SUNNY);
         plan.data = data;
         plan.manifest = root.join("manifest.json");
+        plan.graph_cache = root.join("graph-cache");
         plan
     }
 
@@ -2006,6 +2156,8 @@ mod tests {
         canopy: String,
         genus_field: String,
         graph: String,
+        /// Pass 8 one level down: the topology's key, and one per attribute column over it.
+        keys: graph_cache::Keys,
     }
 
     /// New York's bucket keys, in schedule order.
@@ -2035,6 +2187,9 @@ mod tests {
             .commercial(&cities, &chunks)
             .expect("the commercial stamp");
         let (city, planned) = cities[0];
+        let keys = stamps
+            .graph_keys(city, planned, &commercial, true)
+            .expect("the graph keys");
         Stamped {
             casters: stamps
                 .casters(&cities, planned.shade.as_ref())
@@ -2045,9 +2200,8 @@ mod tests {
                 .expect("the elevation stamp"),
             canopy: stamps.canopy(&cities).expect("the canopy stamp"),
             genus_field: stamps.genus_field(&cities).expect("the genus-field stamp"),
-            graph: stamps
-                .graph(city, planned, &commercial)
-                .expect("the graph stamp"),
+            graph: stamps.graph(&keys),
+            keys,
             chunks,
             commercial,
         }
@@ -2168,18 +2322,133 @@ mod tests {
     fn a_bucket_key_says_nothing_about_the_rest_of_the_schedule() {
         let plan = stamping_plan("stamps-bucket");
         let before = bucket_keys(&plan);
-        let mut grown = stamping_plan("stamps-bucket-grown");
-        let inserted = r#"{"season": 0, "hourAngle": 0.0, "elevation": 30.0, "azimuth": 180.0,
-                           "intensity": 0.5, "samples": [{"east": 0.0, "north": 1.0,
-                                                          "shadowPerHeight": 1.7}]},"#;
-        grown.cities = serde_json::from_str(
-            &SUNNY.replace(r#""buckets": ["#, &format!(r#""buckets": [{inserted}"#)),
-        )
-        .expect("a grown schedule");
-        let after = bucket_keys(&grown);
+        let after = bucket_keys(&grown("stamps-bucket-grown"));
 
         assert_eq!(after.len(), before.len() + 1);
         assert_eq!(after[1..], before[..], "the bins that did not move");
+    }
+
+    /// A schedule that gained a bin, as the plan would carry it: the driver's own grid with one more
+    /// bin at the front, which is where a (season, hour angle) sort puts an earlier hour.
+    fn grown(name: &str) -> Plan {
+        let mut plan = stamping_plan(name);
+        let inserted = r#"{"season": 0, "hourAngle": 0.0, "elevation": 30.0, "azimuth": 180.0,
+                           "intensity": 0.5, "samples": [{"east": 0.0, "north": 1.0,
+                                                          "shadowPerHeight": 1.7}]},"#;
+        plan.cities = serde_json::from_str(
+            &SUNNY.replace(r#""buckets": ["#, &format!(r#""buckets": [{inserted}"#)),
+        )
+        .expect("a grown schedule");
+        plan
+    }
+
+    /// What the split is for: a re-ingested attribute source keys ITS column anew and nothing else,
+    /// so the pass reruns to bake one byte per edge over a topology it reads back whole.
+    #[test]
+    fn a_re_ingested_attribute_moves_one_column_and_leaves_the_topology_standing() {
+        let plan = stamping_plan("keys-column");
+        let before = stamped_passes(&plan);
+
+        fs::write(plan.data.join("industrial").join("nyc.bin"), b"re-ingested").expect("a source");
+        let after = stamped_passes(&plan);
+
+        assert_ne!(after.keys.industrial, before.keys.industrial);
+        assert_ne!(after.graph, before.graph, "so the pass reruns at all");
+        assert_eq!(after.keys.base, before.keys.base, "the sequential half");
+        assert_eq!(after.keys.landmarks, before.keys.landmarks);
+        assert_eq!(after.keys.canopy, before.keys.canopy);
+        assert_eq!(after.keys.relief, before.keys.relief, "the DEM decode");
+        assert_eq!(
+            after.keys.shade, before.keys.shade,
+            "the twenty-minute bake"
+        );
+    }
+
+    /// And the other way about, which is the whole correctness argument for merging a column back in
+    /// by position: a street input moves the base, so every column is keyed anew and none of them
+    /// can be read back beside an edge list it was not baked over.
+    #[test]
+    fn a_street_that_moved_moves_the_base_and_every_column_with_it() {
+        let plan = stamping_plan("keys-base");
+        let before = stamped_passes(&plan);
+
+        fs::write(plan.data.join("streets").join("nyc.bin"), b"re-ingested").expect("a source");
+        let after = stamped_passes(&plan);
+
+        assert_ne!(after.keys.base, before.keys.base);
+        for (moved, held) in [
+            (&after.keys.landmarks, &before.keys.landmarks),
+            (&after.keys.art, &before.keys.art),
+            (&after.keys.highways, &before.keys.highways),
+            (&after.keys.commercial, &before.keys.commercial),
+            (&after.keys.relief, &before.keys.relief),
+            (&after.keys.canopy, &before.keys.canopy),
+            (&after.keys.industrial, &before.keys.industrial),
+        ] {
+            assert_ne!(moved, held);
+        }
+        assert!(
+            after
+                .keys
+                .shade
+                .iter()
+                .zip(&before.keys.shade)
+                .all(|(after, before)| after != before)
+        );
+    }
+
+    /// The per-edge shade bake is keyed a bin at a time, exactly as the pyramid's buckets are: an
+    /// inserted bin bakes the one bin, where the whole grid in the key used to bake all fifty-eight.
+    #[test]
+    fn an_inserted_sun_bin_leaves_the_other_bins_shade_columns_alone() {
+        let before = stamped_passes(&stamping_plan("keys-bins")).keys.shade;
+        let after = stamped_passes(&grown("keys-bins-grown")).keys.shade;
+
+        assert_eq!(after.len(), before.len() + 1);
+        assert_eq!(after[1..], before[..], "the bins that did not move");
+    }
+
+    /// A city that stops baking shade at all — its footprints gone — moves the pass's stamp even
+    /// though every column key it still has is where it was.
+    #[test]
+    fn a_city_that_stops_baking_shade_moves_the_graph_stamp() {
+        let plan = stamping_plan("keys-unshaded");
+        let manifest = manifest();
+        let cities = plan.pair(&manifest).expect("a pairing");
+        let mut stamps = Stamps::new(&plan).expect("the stamps");
+        let (city, planned) = cities[0];
+        let baked = stamps
+            .graph_keys(city, planned, "commercial", true)
+            .expect("the graph keys");
+        let unbaked = stamps
+            .graph_keys(city, planned, "commercial", false)
+            .expect("the graph keys");
+
+        assert_eq!(baked.base, unbaked.base);
+        assert!(unbaked.shade.is_empty());
+        assert_ne!(stamps.graph(&baked), stamps.graph(&unbaked));
+    }
+
+    /// The caster chunks carry no sun position: what they take from the grid is the halo radius a
+    /// viewport gathers them over. So an inserted bin leaves the four-minute pass alone, and a
+    /// changed halo does not.
+    #[test]
+    fn the_caster_chunks_follow_the_halo_and_not_the_schedule() {
+        let plan = stamping_plan("casters-halo");
+        let before = stamped_passes(&plan).casters;
+
+        assert_eq!(
+            stamped_passes(&grown("casters-halo-grown")).casters,
+            before,
+            "one more bin is the same 166 MB of chunks"
+        );
+
+        let mut widened = stamping_plan("casters-halo-wider");
+        widened.cities = serde_json::from_str(
+            &SUNNY.replace(r#""maxShadowMeters": 500"#, r#""maxShadowMeters": 600"#),
+        )
+        .expect("a wider halo");
+        assert_ne!(stamped_passes(&widened).casters, before);
     }
 
     /// The footprints are one opaque city-wide file, so a re-ingest correctly re-renders the whole

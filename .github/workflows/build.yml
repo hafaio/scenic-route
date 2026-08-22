@@ -112,6 +112,7 @@ jobs:
             public/dining
             public/openstreets
             public/landuse
+            .build/graph-cache
           key: tiles-${{ github.run_id }}
           restore-keys: |
             tiles-

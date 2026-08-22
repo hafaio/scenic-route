@@ -1219,32 +1219,39 @@ fn edge_fractions(hulls: &[Polygon], spec: &GridSpec, edge_polys: &[Vec<Coord>])
         .collect()
 }
 
+/// Where the sun stands in one bin, as the SHDE manifest reports it.
+pub fn bin_position(bucket: &Bucket) -> BinPosition {
+    BinPosition {
+        season: bucket.season,
+        hour_angle: bucket.hour_angle,
+        elevation: bucket.elevation,
+        azimuth: bucket.azimuth,
+    }
+}
+
 /// Per bin, per edge, the two unsigned occlusion fractions the client routes on: how much of the
 /// edge's polyline the bin's BUILDING shadows cover, and how much its CROWN shadows do, both from the
 /// bin's crisp centre sample (the ring samples give the tiles their penumbra; an edge is cleanly in
-/// or out of shadow). Two row-major `[bin * edge_count + edge]` grids, buildings then trees. An edge
+/// or out of shadow). One (buildings, trees) row pair per bin given, each `edge_count` bytes. An edge
 /// with no polyline — a ferry, whose cost never reads a shade attribute — reads 0 in both.
-fn bake_edge_shade(
+///
+/// The bins are taken as a slice rather than as the whole grid because the graph bakes only the ones
+/// its cache is missing; they are given together rather than one at a time because the parallelism
+/// here is ACROSS bins, and a bin at a time would run on one thread.
+pub fn bake_edge_shade(
     casters: &Casters,
     bins: &[Bucket],
     max_shadow_meters: f64,
     max_zoom: u32,
     edge_polys: &[Vec<Coord>],
-) -> (Vec<u8>, Vec<u8>, Vec<BinPosition>) {
+) -> Vec<(Vec<u8>, Vec<u8>)> {
     let edge_count = edge_polys.len();
-    let positions = bins
-        .iter()
-        .map(|bucket| BinPosition {
-            season: bucket.season,
-            hour_angle: bucket.hour_angle,
-            elevation: bucket.elevation,
-            azimuth: bucket.azimuth,
-        })
-        .collect();
     let Some(spec) = grid_spec(edge_polys) else {
         // No edge carries geometry (all ferries/empty): nothing occludes anything.
-        let empty = vec![0u8; bins.len() * edge_count];
-        return (empty.clone(), empty, positions);
+        return bins
+            .iter()
+            .map(|_| (vec![0u8; edge_count], vec![0u8; edge_count]))
+            .collect();
     };
 
     let mut rows: Vec<(usize, Vec<u8>, Vec<u8>)> = bins
@@ -1285,44 +1292,26 @@ fn bake_edge_shade(
         })
         .collect();
     rows.sort_by_key(|(bin, _, _)| *bin);
-
-    let mut building_bytes: Vec<u8> = Vec::with_capacity(bins.len() * edge_count);
-    let mut tree_bytes: Vec<u8> = Vec::with_capacity(bins.len() * edge_count);
-    for (_, buildings, trees) in rows {
-        building_bytes.extend_from_slice(&buildings);
-        tree_bytes.extend_from_slice(&trees);
-    }
-    (building_bytes, tree_bytes, positions)
+    rows.into_iter()
+        .map(|(_, buildings, trees)| (buildings, trees))
+        .collect()
 }
 
-/// The per-edge, per-bin shade routing fractions for one city: read the buildings and, when the city
-/// has one, the canopy, then bake the two grids over `edge_polys` (each an edge's polyline in
-/// DEGREES, in GRPH `v2_edges` order). A city with no canopy file, or none of whose crowns carries a
-/// measured height, bakes all-zero tree fractions and routes on buildings alone. Returns the two
-/// row-major byte grids and the bins' sun positions, all in bin order.
-pub fn edge_shade_attrs(
-    buildings_path: &Path,
-    canopy_path: Option<&Path>,
-    params: &Params,
-    edge_polys: &[Vec<Coord>],
-) -> Fallible<(Vec<u8>, Vec<u8>, Vec<BinPosition>)> {
+/// What a city casts onto its own edges: the buildings and, when it has one, the canopy. Read once
+/// however many bins are left to bake, and not at all when none are — the two files are 115 MB in
+/// New York and the crown slicing over them is not free either.
+pub fn edge_shade_casters(buildings_path: &Path, canopy_path: Option<&Path>) -> Fallible<Casters> {
     let (polygons, heights) = binfmt::read_buildings(buildings_path)?;
     let (crown_polygons, crown_heights) = match canopy_path {
         Some(path) => read_crowns(path)?,
         None => (Vec::new(), Vec::new()),
     };
-    Ok(bake_edge_shade(
-        &Casters {
-            polygons,
-            heights,
-            crowns: crown::slice_crowns(&crown_polygons),
-            crown_heights,
-        },
-        &params.buckets,
-        params.max_shadow_meters,
-        params.max_zoom,
-        edge_polys,
-    ))
+    Ok(Casters {
+        polygons,
+        heights,
+        crowns: crown::slice_crowns(&crown_polygons),
+        crown_heights,
+    })
 }
 
 #[cfg(test)]
@@ -1402,17 +1391,15 @@ mod tests {
             crowns: crown::slice_crowns(&crowns),
             crown_heights,
         };
-        let (buildings, trees, positions) =
-            bake_edge_shade(&casters, &bins, 500.0, 15, &edge_polys);
+        let rows = bake_edge_shade(&casters, &bins, 500.0, 15, &edge_polys);
 
-        assert_eq!(positions.len(), 2);
+        assert_eq!(rows.len(), 2);
         let edge_count = edge_polys.len();
-        assert_eq!(buildings.len(), bins.len() * edge_count);
-        assert_eq!(trees.len(), bins.len() * edge_count);
-
-        for bin in 0..bins.len() {
-            let building_at = |edge: usize| buildings[bin * edge_count + edge];
-            let tree_at = |edge: usize| trees[bin * edge_count + edge];
+        for (buildings, trees) in &rows {
+            assert_eq!(buildings.len(), edge_count);
+            assert_eq!(trees.len(), edge_count);
+            let building_at = |edge: usize| buildings[edge];
+            let tree_at = |edge: usize| trees[edge];
             assert_eq!(
                 building_at(0),
                 255,
