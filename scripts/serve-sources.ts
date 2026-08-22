@@ -32,6 +32,7 @@ const SERVED_SOURCES = [
   "openstreets",
   "landuse",
   "industrial",
+  "historic",
 ] as const;
 
 async function fileExists(path: string): Promise<boolean> {
