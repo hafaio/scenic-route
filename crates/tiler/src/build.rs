@@ -22,6 +22,7 @@
 //! under which flags, is decided in this file, so the stamp the shed guard gates on is taken from
 //! the same expressions rather than from a second reading of the plan somewhere else.
 
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs;
@@ -80,6 +81,57 @@ impl Source {
     }
 }
 
+/// Where the plan's code map names the crate's modules, its keys being repo-relative.
+const SRC: &str = "crates/tiler/src";
+
+/// The modules the shade pyramid is a function of: shade.rs, and everything it reads through. The
+/// list is the transitive closure of its imports and nothing wider, because the pyramid is most of
+/// the build's twenty minutes and an edit to the graph is no reason to render it again — which is
+/// the whole reason this pass declines the whole-crate epoch every other pass folds in.
+const SHADE_CODE: [&str; 6] = [
+    "shade.rs",
+    "crown.rs",
+    "raster.rs",
+    "geometry.rs",
+    "binfmt.rs",
+    "manifest.rs",
+];
+
+/// The rest of the crate. No other pass names its own modules yet, so these reach every stamp
+/// through the whole-crate epoch and this list decides nothing — it exists so that the two together
+/// are the directory, which a test asserts. A module added to neither would otherwise be a module
+/// no scope is a function of, and the one edit that leaves a stale pyramid standing. Nothing but
+/// that test reads it, since the epoch these belong to is every file the plan carries.
+#[cfg(test)]
+const OUTSIDE_SHADE: [&str; 22] = [
+    "association.rs",
+    "build.rs",
+    "canopy.rs",
+    "caster_chunks.rs",
+    "chunks.rs",
+    "commercial.rs",
+    "conflate.rs",
+    "corners.rs",
+    "dem.rs",
+    "densities.rs",
+    "direct_canopy.rs",
+    "elevation.rs",
+    "genus_field.rs",
+    "graph.rs",
+    "heights.rs",
+    "industrial.rs",
+    "ingest.rs",
+    "invariants.rs",
+    "main.rs",
+    "relief.rs",
+    "scenic.rs",
+    "sidewalks.rs",
+];
+
+/// In every scope beside the modules: a dependency's bytes can move the geometry without a line of
+/// this crate changing, and a feature flag can move what the compiler does with it.
+const BUILD_FILES: [&str; 3] = ["Cargo.toml", "Cargo.lock", "crates/tiler/Cargo.toml"];
+
 /// One city's DEM. The mosaic is several hundred tiles, so the plan lists them; the projection is
 /// named because a GeoTIFF carries an EPSG code and not the parameters, so something has to know
 /// what 7131 is.
@@ -128,12 +180,14 @@ impl PlanCity {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Plan {
-    /// The tiler crate as one hash — its sources, its Cargo.toml and the workspace lockfile —
-    /// computed by scripts/write-plan.ts over the same file list this binary is compiled from. It
-    /// enters every pass's stamp, so any edit to the tiler invalidates every pass: no pass declares
-    /// which modules it is a function of, and an output whose format changed would otherwise go on
-    /// being served from the last build's bytes.
-    code_epoch: String,
+    /// The tiler crate file by file — its sources, both Cargo.tomls and the workspace lockfile,
+    /// each under its repo-relative path — hashed by scripts/write-plan.ts over the same file list
+    /// this binary is compiled from. Whole, it is what every pass but one folds into its stamp, so
+    /// any edit to the tiler invalidates them: they declare no modules of their own, and an output
+    /// whose format changed would otherwise go on being served from the last build's bytes. It
+    /// arrives file by file rather than as one hash because the shade pass DOES name the modules it
+    /// is a function of, and can only hash those if the plan carries them apart.
+    code: BTreeMap<String, String>,
     manifest: PathBuf,
     /// The committed sources, `data/`: every pass resolves its own files under it.
     data: PathBuf,
@@ -197,6 +251,39 @@ impl Plan {
         }
     }
 
+    /// The whole crate as one hash, which is what a pass that names no modules of its own is a
+    /// function of.
+    fn code_epoch(&self) -> String {
+        let mut digest = Sha256::new();
+        for (path, oid) in &self.code {
+            field(&mut digest, path.as_bytes());
+            field(&mut digest, oid.as_bytes());
+        }
+        hex(&digest.finalize())
+    }
+
+    /// One pass's own scope as a hash: the modules it reads through, and the crate's build inputs.
+    /// A named file the plan does not carry is an error rather than a field quietly left out — the
+    /// scope is only worth anything if it is the code that ran.
+    fn code_scope(&self, modules: &[&str]) -> Fallible<String> {
+        let mut named: Vec<String> = modules
+            .iter()
+            .map(|module| format!("{SRC}/{module}"))
+            .chain(BUILD_FILES.iter().map(|file| (*file).to_owned()))
+            .collect();
+        named.sort();
+        let mut digest = Sha256::new();
+        for path in named {
+            let oid = self
+                .code
+                .get(&path)
+                .ok_or_else(|| format!("the plan carries no hash for {path}"))?;
+            field(&mut digest, path.as_bytes());
+            field(&mut digest, oid.as_bytes());
+        }
+        Ok(hex(&digest.finalize()))
+    }
+
     /// The pyramids written one `<name>/<city>` at a time under `public/tiles`, so no pass ever
     /// sees the whole directory.
     const PYRAMIDS: [&'static str; 3] = ["shade", "tree-shade", "elevation"];
@@ -246,6 +333,9 @@ impl Plan {
     }
 }
 
+/// What a pass's claim is called wherever it lives inside a directory it owns.
+const STAMP: &str = ".stamp";
+
 /// One pass's freshness, and the output it owns the lifecycle of.
 ///
 /// The stamp covers everything the pass reads — the plan values it acts on, the content of every
@@ -277,7 +367,7 @@ impl Pass {
     fn whole(stamp: String, root: &Path) -> Pass {
         Pass {
             stamp,
-            stamp_file: root.join(".stamp"),
+            stamp_file: root.join(STAMP),
             root: Some(root.to_path_buf()),
             pieces: Vec::new(),
             witnesses: vec![root.to_path_buf()],
@@ -322,6 +412,138 @@ impl Pass {
         }
         Ok(fs::write(&self.stamp_file, &self.stamp)?)
     }
+}
+
+/// One city's shade pyramid, whose freshness is decided a sun bucket at a time.
+///
+/// A bucket's tiles are a pure function of what casts a shadow in that city, of where the sun stands
+/// in THAT bucket, and of how deep and how far the pyramid is rendered — not of the other buckets,
+/// and not of the schedule's shape. So the pass that costs most of the build reruns a bucket at a
+/// time, and a schedule that gained a bin has not moved the other fifty-odd.
+///
+/// The trap is that a bucket's directory is named after its POSITION in the schedule, which sorts
+/// stably by (season, hour angle): insert one bin and every later index shifts by one. Matching
+/// directories to buckets by position would then re-render the whole pyramid for the one schedule
+/// tweak this exists to make cheap. So nothing here matches by position — each directory records its
+/// own content key, the keys are matched against the buckets wanted, and a directory that matched is
+/// RENAMED into its new index.
+struct ShadePyramid {
+    /// `<tiles>/shade/<city>`, where the bucket directories and their keys live.
+    buildings: PathBuf,
+    /// `<tiles>/tree-shade/<city>`, which the same key claims: the twin comes out of the same render
+    /// over the same casters. Whether it is produced at all turns on the canopy carrying a measured
+    /// height, which only the pass finds out, so a bucket claims it without asking for it.
+    trees: PathBuf,
+    /// One content key per bucket the schedule wants, in schedule order.
+    keys: Vec<String>,
+}
+
+/// Where a directory that is moving between indices waits. Inside the pyramid, so the moves stay
+/// renames within the one filesystem.
+const MOVING: &str = ".moving-";
+
+impl ShadePyramid {
+    /// Take both pyramids away, for a city that casts no shadow this build. Not recreated: absence
+    /// is how the client tells "no shade layer here" from "an empty one".
+    fn clear(&self) -> Fallible<()> {
+        discard(&self.buildings)?;
+        discard(&self.trees)
+    }
+
+    fn bucket(root: &Path, index: usize) -> PathBuf {
+        root.join(index.to_string())
+    }
+
+    /// The key a bucket directory records, or none for one that holds no claim — a render killed
+    /// before it recorded leaves a directory of half a bucket's tiles.
+    fn key_of(directory: &Path) -> Fallible<Option<String>> {
+        match fs::read_to_string(directory.join(STAMP)) {
+            Ok(key) => Ok(Some(key.trim().to_owned())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Bring what is on disk in line with the schedule, and say which buckets are left to render:
+    /// the matched directories are moved into their new indices, the unclaimed ones go away, and
+    /// what no directory claimed is what the pass renders.
+    fn reconcile(&self) -> Fallible<Vec<shade::Render>> {
+        let mut held: Vec<(usize, Option<String>)> = Vec::new();
+        for entry in listing(&self.buildings)? {
+            match file_name(&entry).parse::<usize>() {
+                Ok(index) if entry.is_dir() => held.push((index, Self::key_of(&entry)?)),
+                // Everything else under a directory this pass owns outright: a staging name a killed
+                // run left behind, a stamp an older build wrote at the top of the pyramid, and
+                // buckets.json itself, which is written again from the schedule the moment this
+                // returns — an old one would name the indices the renames below are about to move.
+                _ => discard(&entry)?,
+            }
+        }
+
+        let mut by_key: HashMap<&str, usize> = HashMap::new();
+        for (index, key) in &held {
+            if let Some(key) = key {
+                by_key.entry(key.as_str()).or_insert(*index);
+            }
+        }
+        let mut claimed: HashSet<usize> = HashSet::new();
+        let mut moves: Vec<(usize, usize)> = Vec::new();
+        let mut render: Vec<shade::Render> = Vec::new();
+        for (index, key) in self.keys.iter().enumerate() {
+            // Taken rather than read, so two buckets that hashed alike cannot both be answered by
+            // the one directory that holds their tiles.
+            match by_key.remove(key.as_str()) {
+                Some(from) => {
+                    claimed.insert(from);
+                    if from != index {
+                        moves.push((from, index));
+                    }
+                }
+                None => render.push(shade::Render {
+                    index,
+                    stamp: Self::bucket(&self.buildings, index).join(STAMP),
+                    key: key.clone(),
+                }),
+            }
+        }
+
+        for (index, _) in &held {
+            if !claimed.contains(index) {
+                discard(&Self::bucket(&self.buildings, *index))?;
+            }
+        }
+        // The twin is claimed by its bucket's key and holds none of its own, so an index the
+        // buildings' pyramid no longer keeps is one nothing would ever look at again.
+        for entry in listing(&self.trees)? {
+            let index = file_name(&entry).parse::<usize>();
+            if !index.is_ok_and(|index| claimed.contains(&index)) {
+                discard(&entry)?;
+            }
+        }
+        for root in [&self.buildings, &self.trees] {
+            shift(root, &moves)?;
+        }
+        Ok(render)
+    }
+}
+
+/// Move each bucket directory that matched into its new index. In two passes through a staging
+/// name, because one bucket's new index is very often another's old one, and a rename onto a
+/// directory that has not moved out of the way yet would carry the wrong tiles into it.
+fn shift(root: &Path, moves: &[(usize, usize)]) -> Fallible<()> {
+    for (from, to) in moves {
+        let source = ShadePyramid::bucket(root, *from);
+        if source.is_dir() {
+            fs::rename(&source, root.join(format!("{MOVING}{to}")))?;
+        }
+    }
+    for (_, to) in moves {
+        let staged = root.join(format!("{MOVING}{to}"));
+        if staged.is_dir() {
+            fs::rename(&staged, ShadePyramid::bucket(root, *to))?;
+        }
+    }
+    Ok(())
 }
 
 fn absent(error: std::io::Error) -> std::io::Result<()> {
@@ -430,6 +652,11 @@ fn dem_identity(digest: &mut Sha256, elevation: Option<&Elevation>) -> Fallible<
 /// file enters as its path relative to the data root, and the cities in `pair`'s manifest order.
 struct Stamps<'a> {
     plan: &'a Plan,
+    /// The whole crate, hashed once: what a pass that names no modules of its own is a function of.
+    code: String,
+    /// The shade pass's own scope, which is what keeps an edit to the graph from re-rendering
+    /// twenty minutes of pyramid.
+    shade_code: String,
     manifest_oid: String,
     /// Each input hashed once: the commercial pass, the shade pass and the graph all read the same
     /// buildings, and `data/` is 168 MB.
@@ -439,6 +666,8 @@ struct Stamps<'a> {
 impl<'a> Stamps<'a> {
     fn new(plan: &'a Plan) -> Fallible<Stamps<'a>> {
         Ok(Stamps {
+            code: plan.code_epoch(),
+            shade_code: plan.code_scope(&SHADE_CODE)?,
             plan,
             manifest_oid: input_oid(&plan.manifest)?,
             oids: HashMap::new(),
@@ -447,11 +676,16 @@ impl<'a> Stamps<'a> {
 
     /// A digest seeded with what every pass shares. Folding the whole manifest into all of them is
     /// coarse — one city's bounds moving re-renders another city's pyramid — and cheap, because the
-    /// manifest changes about as often as the code epoch beside it does.
+    /// manifest changes about as often as the code beside it does.
     fn open(&self, pass: &str) -> Sha256 {
+        self.scoped(pass, &self.code)
+    }
+
+    /// The same, for a pass that is a function of some of the crate rather than all of it.
+    fn scoped(&self, pass: &str, code: &str) -> Sha256 {
         let mut digest = Sha256::new();
         field(&mut digest, pass.as_bytes());
-        field(&mut digest, self.plan.code_epoch.as_bytes());
+        field(&mut digest, code.as_bytes());
         field(&mut digest, self.manifest_oid.as_bytes());
         digest
     }
@@ -543,12 +777,28 @@ impl<'a> Stamps<'a> {
         Ok(hex(&digest.finalize()))
     }
 
-    /// Pass 4, one city: what casts a shadow there and where its sun stands. Both pyramids it
+    /// Pass 4, one city and ONE of its sun buckets: what casts a shadow there, where the sun stands
+    /// in this bucket, and how deep and how far the pyramid is rendered. Both pyramids the bucket
     /// writes, the buildings' and the trees', come out of this.
-    fn shade(&mut self, city: &City, planned: &PlanCity) -> Fallible<String> {
-        let mut digest = self.open("shade");
+    ///
+    /// What is deliberately absent is the rest of the schedule: a bucket rendered under a grid of
+    /// fifty-eight bins is the same tiles as one rendered under a grid of fifty-nine, so an inserted
+    /// bin costs one render and the moving of some directory names. The city's buildings are in it
+    /// whole, since a footprint file is opaque and city-wide — a re-ingest correctly re-renders
+    /// every bucket.
+    fn shade_bucket(
+        &mut self,
+        city: &City,
+        params: &shade::Params,
+        bucket: &shade::Bucket,
+    ) -> Fallible<String> {
+        let mut digest = self.scoped("shade-bucket", &self.shade_code);
         field(&mut digest, city.id.as_bytes());
-        field(&mut digest, &sun_bytes(planned.shade.as_ref())?);
+        field(&mut digest, &params.max_zoom.to_le_bytes());
+        field(&mut digest, &params.max_shadow_meters.to_le_bytes());
+        // Serialized rather than walked field by field, for `sun_bytes`'s reason: a bin that gained
+        // a sun-disk sample cannot then slip past.
+        field(&mut digest, &serde_json::to_vec(bucket)?);
         let mut inputs = vec![
             self.plan
                 .data
@@ -725,7 +975,7 @@ pub fn run(plan_file: &Path, jobs: Option<usize>) -> Fallible<()> {
     let chunk_pass = Pass::whole(stamps.chunks(&cities)?, &plan.chunks);
     let commercial_pass = Pass {
         stamp: stamps.commercial(&cities, &chunk_pass.stamp)?,
-        stamp_file: plan.commercial_signals.join(".stamp"),
+        stamp_file: plan.commercial_signals.join(STAMP),
         // That pass empties both of its own directories, since it is the one that knows a city with
         // no served chunk writes no file at all.
         root: None,
@@ -736,30 +986,32 @@ pub fn run(plan_file: &Path, jobs: Option<usize>) -> Fallible<()> {
         ],
     };
     let caster_pass = Pass::whole(stamps.casters(&cities, sun)?, &plan.casters);
-    let shade_passes: Vec<Pass> = cities
+    // Alone among the passes, shade is stamped below itself: one key per sun bucket rather than one
+    // for the city, since the pyramid is most of the build and no bucket is a function of another.
+    let shade_pyramids: Vec<ShadePyramid> = cities
         .iter()
         .map(|(city, planned)| {
-            Ok(Pass {
-                stamp: stamps.shade(city, planned)?,
-                stamp_file: plan.tiles.join("shade").join(&city.id).join(".stamp"),
-                root: None,
-                pieces: vec![
-                    plan.tiles.join("shade").join(&city.id),
-                    plan.tiles.join("tree-shade").join(&city.id),
-                ],
-                // Only the buildings' pyramid: whether the trees' twin is produced at all turns on
-                // the canopy carrying a measured height, which only the pass finds out.
-                witnesses: vec![plan.tiles.join("shade").join(&city.id)],
+            Ok(ShadePyramid {
+                buildings: plan.tiles.join("shade").join(&city.id),
+                trees: plan.tiles.join("tree-shade").join(&city.id),
+                keys: match &planned.shade {
+                    Some(params) => params
+                        .buckets
+                        .iter()
+                        .map(|bucket| stamps.shade_bucket(city, params, bucket))
+                        .collect::<Fallible<Vec<String>>>()?,
+                    None => Vec::new(),
+                },
             })
         })
-        .collect::<Fallible<Vec<Pass>>>()?;
+        .collect::<Fallible<Vec<ShadePyramid>>>()?;
     let elevation_passes: Vec<Pass> = cities
         .iter()
         .map(|(city, planned)| {
             let root = plan.tiles.join("elevation").join(&city.id);
             Ok(Pass {
                 stamp: stamps.elevation(city, planned)?,
-                stamp_file: root.join(".stamp"),
+                stamp_file: root.join(STAMP),
                 root: None,
                 pieces: vec![root.clone()],
                 witnesses: vec![root],
@@ -877,25 +1129,36 @@ pub fn run(plan_file: &Path, jobs: Option<usize>) -> Fallible<()> {
     // One shade pyramid per city, because a bin's sun position is synthesised at the city's own
     // latitude: two cities share neither a bin index nor a pyramid.
     stage(4, "shade", &started);
-    for ((city, planned), pass) in cities.iter().zip(&shade_passes) {
+    for ((city, planned), pyramid) in cities.iter().zip(&shade_pyramids) {
         let footprints = planned.source(&plan.data, Source::Buildings).is_some();
         match &planned.shade {
             Some(params) if footprints => {
-                if pass.is_fresh() {
+                let render = pyramid.reconcile()?;
+                // Written before a tile is rendered rather than after: the reconcile has already
+                // moved the kept buckets into their new indices, and a schedule naming the old ones
+                // would send the client to another bin's tiles. A bucket the render has not reached
+                // yet is a directory of 404s, which it reads as no shade at all.
+                shade::write_schedule(&pyramid.buildings, params)?;
+                if render.is_empty() {
                     current(Some(&city.id));
                 } else {
-                    pass.restart()?;
+                    eprintln!(
+                        "{}: {} of {} buckets to render",
+                        city.id,
+                        render.len(),
+                        params.buckets.len()
+                    );
                     shade::run(&shade::Args {
                         manifest: plan.manifest.clone(),
                         data: plan.data.clone(),
                         tiles: plan.tiles.clone(),
                         params: params.clone(),
                         city: city.id.clone(),
+                        render,
                     })?;
-                    pass.record()?;
                 }
             }
-            _ => pass.clear()?,
+            _ => pyramid.clear()?,
         }
     }
 
@@ -1250,7 +1513,7 @@ mod tests {
     fn plan_json(cities: &str) -> String {
         format!(
             r#"{{
-              "codeEpoch": "5eaf00d",
+              "code": {{}},
               "manifest": "src/tree-cover/manifest.json",
               "data": "data",
               "chunks": "public/streets",
@@ -1270,8 +1533,36 @@ mod tests {
     fn plan(cities: &str) -> Plan {
         let mut plan: Plan = serde_json::from_str(&plan_json(cities)).expect("a plan");
         plan.ramp = vec![0u8; 256 * 4];
+        plan.code = code_map();
         plan
     }
+
+    /// The crate as the plan carries it: every file some scope claims, hashed to its own name, so a
+    /// test can move one module and ask which scopes noticed.
+    fn code_map() -> BTreeMap<String, String> {
+        SHADE_CODE
+            .iter()
+            .chain(&OUTSIDE_SHADE)
+            .map(|module| format!("{SRC}/{module}"))
+            .chain(BUILD_FILES.iter().map(|file| (*file).to_owned()))
+            .map(|path| (path.clone(), format!("the bytes of {path}")))
+            .collect()
+    }
+
+    /// New York with a two-bin sun grid and the footprints to cast it, since the shade pass is now
+    /// stamped one bin at a time and has nothing to say about a city with no grid.
+    const SUNNY: &str = r#"[
+      {"id": "nyc", "sources": ["buildings"],
+       "shade": {"maxZoom": 14, "maxShadowMeters": 500,
+                 "buckets": [
+                   {"season": 0, "hourAngle": -30.0, "elevation": 20.0, "azimuth": 120.0,
+                    "intensity": 0.34, "samples": [{"east": 0.5, "north": 0.5,
+                                                    "shadowPerHeight": 2.7}]},
+                   {"season": 0, "hourAngle": 30.0, "elevation": 22.0, "azimuth": 240.0,
+                    "intensity": 0.37, "samples": [{"east": -0.5, "north": 0.5,
+                                                    "shadowPerHeight": 2.5}]}]}},
+      {"id": "sf"}
+    ]"#;
 
     fn manifest() -> Manifest {
         serde_json::from_str(MANIFEST).expect("a manifest")
@@ -1449,23 +1740,23 @@ mod tests {
     #[test]
     fn a_city_that_stops_rendering_leaves_no_directory_behind() {
         let root = scratch("pieces");
-        let pyramid = root.join("tiles/shade/nyc");
+        let overlay = root.join("tiles/elevation/nyc");
         let pass = Pass {
             stamp: "a".to_owned(),
-            stamp_file: pyramid.join(".stamp"),
+            stamp_file: overlay.join(STAMP),
             root: None,
-            pieces: vec![pyramid.clone(), root.join("tiles/tree-shade/nyc")],
-            witnesses: vec![pyramid.clone()],
+            pieces: vec![overlay.clone(), root.join("routing/shade/nyc")],
+            witnesses: vec![overlay.clone()],
         };
-        pass.restart().expect("the pyramid");
-        fs::create_dir_all(root.join("tiles/tree-shade/nyc")).expect("the tree pyramid");
+        pass.restart().expect("the overlay");
+        fs::create_dir_all(root.join("routing/shade/nyc")).expect("the per-edge bake");
         pass.record().expect("a stamp");
         assert!(pass.is_fresh());
 
         pass.clear().expect("a clearing");
 
-        assert!(!pyramid.exists());
-        assert!(!root.join("tiles/tree-shade/nyc").exists());
+        assert!(!overlay.exists());
+        assert!(!root.join("routing/shade/nyc").exists());
     }
 
     #[test]
@@ -1514,6 +1805,160 @@ mod tests {
         assert!(!plan.routing.join("shade").join("boston").exists());
     }
 
+    /// A pyramid over a scratch tree, wanting the buckets these keys stand for.
+    fn planted_pyramid(name: &str, keys: &[&str]) -> ShadePyramid {
+        let root = scratch(name);
+        ShadePyramid {
+            buildings: root.join("tiles/shade/nyc"),
+            trees: root.join("tiles/tree-shade/nyc"),
+            keys: keys.iter().map(|key| (*key).to_owned()).collect(),
+        }
+    }
+
+    /// A bucket directory as a finished render left it: a tile named after the bin it came from, so
+    /// a directory can be followed across a move, and the key that render recorded. `None` for the
+    /// key is a render killed before it recorded one.
+    fn plant_bucket(root: &Path, index: usize, key: Option<&str>) {
+        let directory = root.join(index.to_string());
+        fs::create_dir_all(&directory).expect("a bucket");
+        fs::write(directory.join("tile.webp"), format!("bin {index}")).expect("a tile");
+        if let Some(key) = key {
+            fs::write(directory.join(STAMP), key).expect("a key");
+        }
+    }
+
+    /// Which render a bucket directory's tiles came out of, by the marker `plant_bucket` left.
+    fn tile_of(root: &Path, index: usize) -> Option<String> {
+        fs::read_to_string(root.join(index.to_string()).join("tile.webp")).ok()
+    }
+
+    /// The whole point of matching by content key. The schedule sorts by (season, hour angle), so a
+    /// bin inserted at the front shifts every later index — and every later bin is nonetheless the
+    /// same tiles, so it is moved into its new index rather than rendered again.
+    #[test]
+    fn a_bucket_the_schedule_kept_is_moved_into_its_new_index_rather_than_rendered() {
+        let pyramid = planted_pyramid("shade-insert", &["new", "morning", "noon"]);
+        plant_bucket(&pyramid.buildings, 0, Some("morning"));
+        plant_bucket(&pyramid.buildings, 1, Some("noon"));
+
+        let render = pyramid.reconcile().expect("a reconciliation");
+
+        assert_eq!(render.len(), 1, "only the bin nothing on disk claimed");
+        assert_eq!(render[0].index, 0);
+        assert_eq!(render[0].key, "new");
+        assert_eq!(render[0].stamp, pyramid.buildings.join("0").join(STAMP));
+        assert_eq!(tile_of(&pyramid.buildings, 1).as_deref(), Some("bin 0"));
+        assert_eq!(tile_of(&pyramid.buildings, 2).as_deref(), Some("bin 1"));
+        assert!(!pyramid.buildings.join("0").exists(), "the bin to render");
+    }
+
+    /// The mirror case: a bin taken out of the schedule costs the moves and no render at all.
+    #[test]
+    fn a_bucket_the_schedule_dropped_costs_moves_and_nothing_else() {
+        let pyramid = planted_pyramid("shade-drop", &["morning", "noon"]);
+        plant_bucket(&pyramid.buildings, 0, Some("dawn"));
+        plant_bucket(&pyramid.buildings, 1, Some("morning"));
+        plant_bucket(&pyramid.buildings, 2, Some("noon"));
+
+        let render = pyramid.reconcile().expect("a reconciliation");
+
+        assert!(render.is_empty());
+        assert_eq!(tile_of(&pyramid.buildings, 0).as_deref(), Some("bin 1"));
+        assert_eq!(tile_of(&pyramid.buildings, 1).as_deref(), Some("bin 2"));
+        assert!(!pyramid.buildings.join("2").exists());
+    }
+
+    /// A bin whose key nothing wants is a directory no build would ever look at again — and, since
+    /// the pyramid is served as it stands, one the client would otherwise go on reading.
+    #[test]
+    fn a_bucket_nothing_claims_is_deleted() {
+        let pyramid = planted_pyramid("shade-zombie", &["morning"]);
+        plant_bucket(&pyramid.buildings, 0, Some("morning"));
+        plant_bucket(
+            &pyramid.buildings,
+            1,
+            Some("a bin the sun grid no longer has"),
+        );
+        plant_bucket(&pyramid.trees, 0, None);
+        plant_bucket(&pyramid.trees, 1, None);
+
+        let render = pyramid.reconcile().expect("a reconciliation");
+
+        assert!(render.is_empty());
+        assert!(!pyramid.buildings.join("1").exists());
+        assert!(!pyramid.trees.join("1").exists(), "the twin goes with it");
+    }
+
+    /// The trees' pyramid records no key of its own: it is written by the same render over the same
+    /// casters, so it is claimed by the buildings' bucket and moves with it.
+    #[test]
+    fn the_tree_twin_moves_with_its_bucket() {
+        let pyramid = planted_pyramid("shade-twin", &["new", "morning"]);
+        plant_bucket(&pyramid.buildings, 0, Some("morning"));
+        plant_bucket(&pyramid.trees, 0, None);
+
+        let render = pyramid.reconcile().expect("a reconciliation");
+
+        assert_eq!(render.len(), 1);
+        assert_eq!(tile_of(&pyramid.trees, 1).as_deref(), Some("bin 0"));
+        assert!(!pyramid.trees.join("0").exists());
+    }
+
+    /// A build killed inside a bin leaves its tiles and no key, and the tiles are half a bin's — so
+    /// the directory claims nothing and is rendered again.
+    #[test]
+    fn a_bucket_left_half_written_claims_nothing() {
+        let pyramid = planted_pyramid("shade-killed", &["morning"]);
+        plant_bucket(&pyramid.buildings, 0, None);
+
+        let render = pyramid.reconcile().expect("a reconciliation");
+
+        assert_eq!(render.len(), 1);
+        assert_eq!(render[0].index, 0);
+        assert!(!pyramid.buildings.join("0").exists());
+    }
+
+    /// The schedule names which directory holds which sun position, and the reconcile has just
+    /// moved the directories, so the one on disk is wrong the moment a bin shifts. It is swept and
+    /// written again from the grid every build, whether or not anything was rendered.
+    #[test]
+    fn the_schedule_is_written_again_every_build() {
+        let pyramid = planted_pyramid("shade-schedule", &["morning"]);
+        plant_bucket(&pyramid.buildings, 0, Some("morning"));
+        let schedule = pyramid.buildings.join("buckets.json");
+        fs::write(&schedule, b"[{\"index\": 7}]").expect("a stale schedule");
+
+        let render = pyramid.reconcile().expect("a reconciliation");
+
+        assert!(render.is_empty());
+        assert!(
+            !schedule.exists(),
+            "the stale one does not outlive the moves"
+        );
+        let params: shade::Params = serde_json::from_str(
+            r#"{"maxZoom": 14, "maxShadowMeters": 500,
+                "buckets": [{"season": 0, "hourAngle": -30.0, "elevation": 20.0, "azimuth": 120.0,
+                             "intensity": 0.34, "samples": []}]}"#,
+        )
+        .expect("a sun grid");
+        shade::write_schedule(&pyramid.buildings, &params).expect("a schedule");
+        assert!(schedule.is_file());
+    }
+
+    /// A city that stops casting a shadow leaves neither pyramid behind, since absence is how the
+    /// client tells "no shade here" from "an empty layer".
+    #[test]
+    fn a_city_that_stops_casting_leaves_neither_pyramid_behind() {
+        let pyramid = planted_pyramid("shade-cleared", &[]);
+        plant_bucket(&pyramid.buildings, 0, Some("morning"));
+        plant_bucket(&pyramid.trees, 0, None);
+
+        pyramid.clear().expect("a clearing");
+
+        assert!(!pyramid.buildings.exists());
+        assert!(!pyramid.trees.exists());
+    }
+
     /// Every file a pass of this build could name, given the manifest above and a plan that hands
     /// over both sidewalk extracts, each with its own path as its contents so a file read in
     /// another's place is caught. What is missing is deliberate: the commercial pass's dining and
@@ -1543,7 +1988,7 @@ mod tests {
             fs::write(data.join(kind).join(file), format!("{kind}/{file}")).expect("a source");
         }
         fs::write(root.join("manifest.json"), MANIFEST).expect("a manifest");
-        let mut plan = plan(BOTH);
+        let mut plan = plan(SUNNY);
         plan.data = data;
         plan.manifest = root.join("manifest.json");
         plan
@@ -1555,11 +2000,30 @@ mod tests {
         chunks: String,
         commercial: String,
         casters: String,
-        shade: String,
+        /// One key per sun bin, in schedule order.
+        buckets: Vec<String>,
         elevation: String,
         canopy: String,
         genus_field: String,
         graph: String,
+    }
+
+    /// New York's bucket keys, in schedule order.
+    fn bucket_keys(plan: &Plan) -> Vec<String> {
+        let manifest = manifest();
+        let cities = plan.pair(&manifest).expect("a pairing");
+        let mut stamps = Stamps::new(plan).expect("the stamps");
+        let (city, planned) = cities[0];
+        let params = planned.shade.as_ref().expect("a sun grid");
+        params
+            .buckets
+            .iter()
+            .map(|bucket| {
+                stamps
+                    .shade_bucket(city, params, bucket)
+                    .expect("a bucket key")
+            })
+            .collect()
     }
 
     fn stamped_passes(plan: &Plan) -> Stamped {
@@ -1575,7 +2039,7 @@ mod tests {
             casters: stamps
                 .casters(&cities, planned.shade.as_ref())
                 .expect("the caster-chunks stamp"),
-            shade: stamps.shade(city, planned).expect("the shade stamp"),
+            buckets: bucket_keys(plan),
             elevation: stamps
                 .elevation(city, planned)
                 .expect("the elevation stamp"),
@@ -1598,7 +2062,7 @@ mod tests {
         assert_eq!(again.chunks, before.chunks);
         assert_eq!(again.commercial, before.commercial);
         assert_eq!(again.casters, before.casters);
-        assert_eq!(again.shade, before.shade);
+        assert_eq!(again.buckets, before.buckets);
         assert_eq!(again.elevation, before.elevation);
         assert_eq!(again.canopy, before.canopy);
         assert_eq!(again.genus_field, before.genus_field);
@@ -1620,7 +2084,7 @@ mod tests {
         assert_ne!(after.graph, before.graph);
         assert_eq!(after.chunks, before.chunks);
         assert_eq!(after.casters, before.casters);
-        assert_eq!(after.shade, before.shade, "the twenty-minute pass");
+        assert_eq!(after.buckets, before.buckets, "the twenty-minute pass");
         assert_eq!(after.elevation, before.elevation);
         assert_eq!(after.canopy, before.canopy);
         assert_eq!(after.genus_field, before.genus_field);
@@ -1639,7 +2103,7 @@ mod tests {
         assert_ne!(after.chunks, before.chunks);
         assert_ne!(after.commercial, before.commercial);
         assert_ne!(after.graph, before.graph);
-        assert_eq!(after.shade, before.shade);
+        assert_eq!(after.buckets, before.buckets);
         assert_eq!(after.canopy, before.canopy);
     }
 
@@ -1656,23 +2120,113 @@ mod tests {
         assert_ne!(stamped_passes(&plan).commercial, before.commercial);
     }
 
-    /// No pass declares which modules it is a function of, so any edit to the tiler invalidates all
+    /// A module edited, as the plan would carry it.
+    fn edited(plan: &mut Plan, module: &str) {
+        plan.code
+            .insert(format!("{SRC}/{module}"), "a different tiler".to_owned());
+    }
+
+    /// Every pass but shade declares no modules of its own, so any edit to the tiler invalidates all
     /// of them — an output whose FORMAT changed moves no input file.
     #[test]
-    fn a_new_tiler_reruns_every_pass() {
+    fn a_new_tiler_reruns_every_pass_that_names_no_modules() {
         let mut plan = stamping_plan("stamps-epoch");
         let before = stamped_passes(&plan);
-        plan.code_epoch = "a different tiler".to_owned();
+        edited(&mut plan, "shade.rs");
         let after = stamped_passes(&plan);
 
         assert_ne!(after.chunks, before.chunks);
         assert_ne!(after.commercial, before.commercial);
         assert_ne!(after.casters, before.casters);
-        assert_ne!(after.shade, before.shade);
         assert_ne!(after.elevation, before.elevation);
         assert_ne!(after.canopy, before.canopy);
         assert_ne!(after.genus_field, before.genus_field);
         assert_ne!(after.graph, before.graph);
+        assert_ne!(
+            after.buckets, before.buckets,
+            "the pass that reads shade.rs"
+        );
+    }
+
+    /// What the shade pass's own scope is for: the pyramid is most of the build, and an edit to the
+    /// graph is not a reason to render it a second time.
+    #[test]
+    fn an_edit_the_shade_pass_does_not_read_leaves_the_pyramid_standing() {
+        let mut plan = stamping_plan("stamps-scope");
+        let before = stamped_passes(&plan);
+        edited(&mut plan, "graph.rs");
+        let after = stamped_passes(&plan);
+
+        assert_ne!(after.graph, before.graph);
+        assert_ne!(after.chunks, before.chunks);
+        assert_eq!(after.buckets, before.buckets);
+    }
+
+    /// A bucket is stamped on its own bin and not on the schedule's shape, which is what makes an
+    /// inserted bin cost one render rather than fifty-eight.
+    #[test]
+    fn a_bucket_key_says_nothing_about_the_rest_of_the_schedule() {
+        let plan = stamping_plan("stamps-bucket");
+        let before = bucket_keys(&plan);
+        let mut grown = stamping_plan("stamps-bucket-grown");
+        let inserted = r#"{"season": 0, "hourAngle": 0.0, "elevation": 30.0, "azimuth": 180.0,
+                           "intensity": 0.5, "samples": [{"east": 0.0, "north": 1.0,
+                                                          "shadowPerHeight": 1.7}]},"#;
+        grown.cities = serde_json::from_str(
+            &SUNNY.replace(r#""buckets": ["#, &format!(r#""buckets": [{inserted}"#)),
+        )
+        .expect("a grown schedule");
+        let after = bucket_keys(&grown);
+
+        assert_eq!(after.len(), before.len() + 1);
+        assert_eq!(after[1..], before[..], "the bins that did not move");
+    }
+
+    /// The footprints are one opaque city-wide file, so a re-ingest correctly re-renders the whole
+    /// pyramid — the coarseness this stops at, and the reason per-tile diffing was not attempted.
+    #[test]
+    fn a_building_re_ingest_moves_every_bucket_key() {
+        let plan = stamping_plan("stamps-buildings");
+        let before = bucket_keys(&plan);
+        fs::write(plan.data.join("buildings").join("nyc.bin"), b"re-ingested").expect("a source");
+        let after = bucket_keys(&plan);
+
+        assert!(
+            after
+                .iter()
+                .zip(&before)
+                .all(|(after, before)| after != before)
+        );
+    }
+
+    /// A module claimed by no scope is a module no stamp is a function of: edit it and the pyramid
+    /// it renders differently goes on being served. The lists are checked against the DIRECTORY
+    /// rather than against each other, so a module added later fails here until someone says which
+    /// side of the shade pass's line it is on.
+    #[test]
+    fn every_module_of_the_tiler_is_claimed_by_a_code_scope() {
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut found: Vec<String> = Vec::new();
+        let mut pending = vec![src.clone()];
+        while let Some(directory) = pending.pop() {
+            for entry in listing(&directory).expect("the crate's modules") {
+                if entry.is_dir() {
+                    pending.push(entry);
+                } else {
+                    let name = entry.strip_prefix(&src).expect("a module inside the crate");
+                    found.push(name.to_string_lossy().into_owned());
+                }
+            }
+        }
+        let mut claimed: Vec<String> = SHADE_CODE
+            .iter()
+            .chain(&OUTSIDE_SHADE)
+            .map(|module| (*module).to_owned())
+            .collect();
+        found.sort();
+        claimed.sort();
+
+        assert_eq!(found, claimed);
     }
 
     /// The second chunks pass is stamped on what the graph STRANDED rather than on the graph's own
