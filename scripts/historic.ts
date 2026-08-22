@@ -1,16 +1,25 @@
-// `bun run scripts/historic.ts [city]`: fetches New York's designated historic districts and writes
+// `bun run scripts/historic.ts [city]`: fetches a city's designated historic districts and writes
 // them as data/historic/<id>.bin (magic HDST) — the district BOUNDARIES as polygons, drawn by the
 // historic-districts overlay and sampled per edge into the graph's historic-district discount.
 // Layout: scripts/README.md.
 //
-// These are whole neighbourhoods the Landmarks Preservation Commission has designated (Park Slope,
-// Brooklyn Heights, Greenwich Village …), not the individual landmarked buildings scripts/landmarks.ts
-// reads — a different source, a different artifact, and areas rather than points.
+// These are whole neighbourhoods a city has designated (Park Slope, Brooklyn Heights, Greenwich
+// Village; Jackson Square, Telegraph Hill, Alamo Square), not the individual landmarked buildings
+// scripts/landmarks.ts reads — a different source, a different artifact, areas rather than points.
 //
-// The geometry comes from the LPC's own ArcGIS FeatureServer, not from the Socrata dataset the city
-// catalogues as "Historic Districts (Map)" (`xbvj-gfnw`): that one is a map visualization whose rows
-// read back empty, and the table under it is in state-plane feet and missing 18 designated districts
-// — a third of Park Slope's landmarked area among them. scripts/README.md has the whole comparison.
+// The two cities do not share a source, and each publishes one that has to be picked past a decoy:
+//
+//   - **New York.** The geometry comes from the LPC's own ArcGIS FeatureServer, not from the Socrata
+//     dataset the city catalogues as "Historic Districts (Map)" (`xbvj-gfnw`): that one is a map
+//     visualization whose rows read back empty, and the table under it is in state-plane feet and
+//     missing 18 designated districts — a third of Park Slope's landmarked area among them.
+//
+//   - **San Francisco.** One Planning table holds every district ANY register recognises, of which
+//     the city's own designations are the Article 10 / Article 11 subset `fetchSfDistricts` cuts.
+//     Its "Map of Historic Districts" (`y75h-nbt2`) is the same decoy `xbvj-gfnw` is, and the
+//     dedicated "Landmark Districts" table (`knm6-5ej6`) is three years stale and has no Article 11.
+//
+// scripts/README.md has both comparisons.
 
 import { createHash } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
@@ -21,6 +30,7 @@ import { encodePolygons } from "./geometry";
 import { type LandContext, loadLandContext } from "./land";
 import type { SourceFile } from "./manifest";
 import type { Polygon } from "./overpass";
+import { DATA_SF } from "./socrata";
 
 const DATA_DIR = join(import.meta.dirname, "..", "data");
 const HISTORIC_DIR = join(DATA_DIR, "historic");
@@ -43,6 +53,19 @@ const REQUEST_TIMEOUT_MS = 120_000;
 const EXPECTED_DISTRICTS = 150;
 const USER_AGENT =
   "scenic-route/0.1 (+https://github.com/erikbrinkman/scenic-route)";
+
+// SF Planning's "Historic Districts" table: 204 areas, every one any register or survey has
+// recognised, as WGS84 MultiPolygons — populated on all of them.
+const SF_DATASET = "63x5-g3m4";
+// The two Planning Code articles, which is what "designated" means here: Article 10 landmark
+// districts and Article 11 downtown conservation districts. Without this the read would take in the
+// 180 National- and California-Register districts sharing the table, which carry no local
+// designation and no controls. The flag's value is the string "Listed" — `a10='Yes'` matches nothing
+// and would write a silently empty artifact.
+const SF_WHERE = "a10='Listed' OR a11='Listed'";
+// 16 Article 10 plus 7 Article 11 at the last probe (2026-08-22). A floor like New York's: the
+// shared reader tolerates 5% either way, so a new designation notes rather than fails.
+const SF_DISTRICTS = 23;
 
 type GeoJsonGeometry =
   | { type: "Polygon"; coordinates: [number, number][][] }
@@ -125,8 +148,8 @@ function partsOf(geometry: GeoJsonGeometry): Polygon[] {
 
 // A district is kept if any vertex of it is on land, as the industrial lots are: a boundary drawn
 // around a waterfront block runs out over the water, and the harbour districts (Governors Island,
-// Ellis Island, South Street Seaport) meet the coastline the borough boundaries draw only at the
-// shore. At the 2026-08-20 read no district missed entirely.
+// Ellis Island, South Street Seaport; Northeast Waterfront) meet the coastline the land polygons
+// draw only at the shore. At the 2026-08-22 read no district in either city missed entirely.
 function touchesLand(part: Polygon, onLand: LandContext["onLand"]): boolean {
   return part.some((ring) => ring.some(onLand));
 }
@@ -137,9 +160,20 @@ interface Districts {
   offLand: number; // features every part of which missed the coastline
 }
 
+// Appends a feature's on-land parts to `polygons`; false when every part missed the coastline.
+function keepDistrict(
+  geometry: GeoJsonGeometry,
+  onLand: LandContext["onLand"],
+  polygons: Polygon[],
+): boolean {
+  const parts = partsOf(geometry).filter((part) => touchesLand(part, onLand));
+  polygons.push(...parts);
+  return parts.length > 0;
+}
+
 // Pages the whole layer, each page cached by its request URL through scripts/cache.ts, so a re-run —
 // or a resume after a transient failure — serves the completed pages from disk.
-async function fetchDistricts(land: LandContext): Promise<Districts> {
+async function fetchNycDistricts(land: LandContext): Promise<Districts> {
   const polygons: Polygon[] = [];
   let fetched = 0;
   let districts = 0;
@@ -155,15 +189,11 @@ async function fetchDistricts(land: LandContext): Promise<Districts> {
       if (!feature.geometry) {
         continue;
       }
-      const parts = partsOf(feature.geometry).filter((part) =>
-        touchesLand(part, land.onLand),
-      );
-      if (parts.length === 0) {
+      if (keepDistrict(feature.geometry, land.onLand, polygons)) {
+        districts += 1;
+      } else {
         offLand += 1;
-        continue;
       }
-      districts += 1;
-      polygons.push(...parts);
     }
     console.error(
       `  historic: ${fetched} districts fetched, ${polygons.length} parts kept`,
@@ -180,19 +210,60 @@ async function fetchDistricts(land: LandContext): Promise<Districts> {
   return { polygons, districts, offLand };
 }
 
+interface SfDistrictRow {
+  the_geom?: GeoJsonGeometry | null;
+}
+
+// `*` so a newly-read column is free after one refetch (the disk cache keys on the query);
+// SfDistrictRow reads only the geometry, since nothing downstream of the artifact names a district.
+async function fetchSfDistricts(land: LandContext): Promise<Districts> {
+  const rows = await DATA_SF.dataset<SfDistrictRow>(
+    SF_DATASET,
+    { $select: "*", $where: SF_WHERE },
+    SF_DISTRICTS,
+  );
+  const polygons: Polygon[] = [];
+  let districts = 0;
+  let offLand = 0;
+  for (const row of rows) {
+    if (!row.the_geom) {
+      continue;
+    }
+    if (keepDistrict(row.the_geom, land.onLand, polygons)) {
+      districts += 1;
+    } else {
+      offLand += 1;
+    }
+  }
+  return { polygons, districts, offLand };
+}
+
+async function fetchCityDistricts(
+  cityId: string,
+  land: LandContext,
+): Promise<Districts> {
+  if (cityId === "nyc") {
+    return await fetchNycDistricts(land);
+  } else if (cityId === "sf") {
+    return await fetchSfDistricts(land);
+  } else {
+    // A city with no source throws rather than defaulting to another's, which would clip one city's
+    // districts against a foreign shoreline and write a silently empty artifact.
+    throw new Error(`no historic-district source for ${cityId}`);
+  }
+}
+
 export async function ingestHistoric(
   cityId: string,
   land: LandContext,
 ): Promise<SourceFile> {
-  // Only New York has a source. A city with none throws rather than defaulting to another's, which
-  // would clip New York's districts against a foreign shoreline and write a silently empty artifact.
-  if (cityId !== "nyc") {
-    throw new Error(`no historic-district source for ${cityId}`);
-  }
   const started = performance.now();
   await mkdir(HISTORIC_DIR, { recursive: true });
 
-  const { polygons, districts, offLand } = await fetchDistricts(land);
+  const { polygons, districts, offLand } = await fetchCityDistricts(
+    cityId,
+    land,
+  );
   const bytes = encodePolygons(HISTORIC_MAGIC, HISTORIC_FORMAT, polygons);
   const file = `${cityId}.bin`;
   await writeFile(join(HISTORIC_DIR, file), bytes);

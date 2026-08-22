@@ -7,7 +7,7 @@ import WorkerTileLayer from "../src/tiles/layer";
 import manifest from "../src/tree-cover/manifest.json";
 import { useCity } from "./city-context";
 
-// The LPC's designated historic districts (magic HDST), filled. Like the industrial lots it rides in
+// The active city's designated historic districts (magic HDST), filled. Like the industrial lots it rides in
 // a dedicated pane so the dark-mode tile-pane invert leaves the fill's colour true, and it sits under
 // them: it is the broadest areal wash the map draws — whole neighbourhoods — so anything finer put
 // beneath it would be lost. The decoding and the drawing live in the tile worker
