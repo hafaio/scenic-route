@@ -318,11 +318,18 @@ let manifest: Promise<CasterManifest | null> | null = null;
 
 // The chunk grid, or null where the deploy carries no casters — then the shade layer stays on the
 // baked pyramid at every zoom.
+//
+// A 404 is a fact about the deploy and is remembered; a fetch that never arrived is a fact about the
+// network and is not, or one offline moment would pin the whole session to the baked pyramid long
+// after the connection came back.
 export function casterManifest(): Promise<CasterManifest | null> {
   if (!manifest) {
     manifest = fetch(resolveUrl(MANIFEST_URL))
       .then((response) => (response.ok ? response.json() : null))
-      .catch(() => null);
+      .catch(() => {
+        manifest = null;
+        return null;
+      });
   }
   return manifest;
 }
@@ -389,6 +396,15 @@ function fetchChunk(key: string): Promise<CasterChunk | null> {
   return entry.chunk;
 }
 
+// The casters gathered for one tile, and whether that is all of them. A chunk the manifest lists but
+// the fetch never delivered leaves a hole in the geometry, and a hole in shadow geometry does not read
+// as "unknown" — it reads as sunlight, over ground the app is asked to route through. So the gather
+// says so, and the tile falls back to the baked pyramid rather than drawing a confident lie.
+export interface CasterGather {
+  chunks: CasterChunk[];
+  complete: boolean;
+}
+
 // Every chunk whose casters can throw a shadow into a zoom-0 world-pixel box: the box grown by the
 // manifest's shadow reach, in chunks that were written.
 export async function chunksFor(
@@ -398,7 +414,7 @@ export async function chunksFor(
   east: number,
   south: number,
   latitude: number,
-): Promise<CasterChunk[]> {
+): Promise<CasterGather> {
   const { chunkZoom, maxShadowMeters } = manifest;
   const halo =
     maxShadowMeters /
@@ -419,5 +435,6 @@ export async function chunksFor(
     }
   }
   const loaded = await Promise.all(wanted);
-  return loaded.filter((chunk): chunk is CasterChunk => chunk !== null);
+  const chunks = loaded.filter((chunk): chunk is CasterChunk => chunk !== null);
+  return { chunks, complete: chunks.length === loaded.length };
 }

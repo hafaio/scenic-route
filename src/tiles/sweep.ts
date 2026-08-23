@@ -765,7 +765,9 @@ export function setShedDecks(decks: ShedDecks): void {
 }
 
 // The chunks a tile's shadows can come from, and the sun to throw them with. Null where the deploy
-// carries no casters, which is what sends the tile back to the magnified pyramid.
+// carries no casters, and null again where a chunk this tile needed did not arrive — both send the
+// tile back to the magnified pyramid, which is blurry but whole. Sweeping the chunks that did arrive
+// would be sharper and wrong: the missing one's buildings would come out as sunlit ground.
 export async function sweptGround(
   params: ShadeParams,
   coords: TileCoords,
@@ -775,7 +777,7 @@ export async function sweptGround(
     return null;
   }
   const frame = frameFor(coords);
-  const chunks = await chunksFor(
+  const { chunks, complete } = await chunksFor(
     manifest,
     frame.originX / frame.scale,
     frame.originY / frame.scale,
@@ -783,6 +785,9 @@ export async function sweptGround(
     (frame.originY + TILE_SIZE) / frame.scale,
     frame.latitude,
   );
+  if (!complete) {
+    return null;
+  }
   const { elevation, azimuth } = rampedSun(params, coords.z);
   return {
     chunks,
