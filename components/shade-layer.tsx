@@ -4,6 +4,7 @@ import { useEffect } from "react";
 import { useMap } from "react-leaflet";
 import * as SunCalc from "suncalc";
 import { activeCity } from "../src/cities";
+import { reportLayerData, watchLayerStatus } from "../src/overlays/status";
 import {
   getResolvedDate,
   isPickerOpen,
@@ -93,6 +94,8 @@ interface Bin {
 
 // One shared fetch of each city's bin schedule, so every ShadeLayer mount reuses it.
 const schedules = new Map<string, Promise<Bin[]>>();
+// One token for the schedule, so its verdict is kept apart from the per-bin tile layers' verdicts.
+const SCHEDULE_TOKEN = Symbol("shade schedule");
 
 function loadSchedule(cityId: string): Promise<Bin[]> {
   const cached = schedules.get(cityId);
@@ -100,8 +103,17 @@ function loadSchedule(cityId: string): Promise<Bin[]> {
     return cached;
   }
   const promise: Promise<Bin[]> = fetch(scheduleUrl(cityId))
-    .then((response) => (response.ok ? response.json() : []))
-    .catch(() => []);
+    .then((response) => {
+      reportLayerData("shade", SCHEDULE_TOKEN, true);
+      return response.ok ? response.json() : [];
+    })
+    // An empty schedule means no bins, so the layer mounts nothing and no tile ever errors — the one
+    // failure in this layer the tile path cannot see. Say it here instead.
+    .catch(() => {
+      reportLayerData("shade", SCHEDULE_TOKEN, false);
+      schedules.delete(cityId); // a network failure is retried, not remembered as an empty schedule
+      return [] as Bin[];
+    });
   schedules.set(cityId, promise);
   return promise;
 }
@@ -185,6 +197,9 @@ export default function ShadeLayer() {
     // Only the visible bin, plus the outgoing one until its fade ends.
     const layers = new Map<number, WorkerTileLayer>();
     const ready = new Set<number>(); // bins whose tiles have finished painting at least once
+    // Per bin, how to stop reporting its tile failures. One bin is visible at a time (two mid-fade),
+    // so what the layers menu badges is whichever bin the reader is actually looking at.
+    const watching = new Map<number, () => void>();
 
     // The tile layer for a bin, created hidden. A CSS opacity transition on its container turns
     // setOpacity into a crossfade; the `load` event marks the bin ready, so a switch can wait for the
@@ -229,6 +244,8 @@ export default function ShadeLayer() {
         },
       );
       layer.on("load", () => ready.add(index));
+      // Before it goes on the map, or the first load cycle's `loading` is missed.
+      watching.set(index, watchLayerStatus(layer, "shade"));
       layer.addTo(map);
       const container = layer.getContainer();
       if (container) {
@@ -241,6 +258,8 @@ export default function ShadeLayer() {
     const evict = (index: number): void => {
       const layer = layers.get(index);
       if (layer) {
+        watching.get(index)?.();
+        watching.delete(index);
         layer.remove();
         layers.delete(index);
         ready.delete(index);
@@ -441,6 +460,9 @@ export default function ShadeLayer() {
       cancelled = true;
       unsubscribe();
       map.off("moveend", moved);
+      for (const detach of watching.values()) {
+        detach();
+      }
       for (const layer of layers.values()) {
         layer.remove();
       }

@@ -3,6 +3,7 @@
 import L from "leaflet";
 import { useEffect } from "react";
 import { useMap } from "react-leaflet";
+import { watchLayerStatus } from "../src/overlays/status";
 import WorkerTileLayer from "../src/tiles/layer";
 import manifest from "../src/tree-cover/manifest.json";
 import { useCity } from "./city-context";
@@ -56,10 +57,15 @@ export default function CanopyLayer() {
           },
         );
       });
+    // Attached before the layers go on the map, or the first load cycle's `loading` is missed.
+    const watching = layers.map((layer) => watchLayerStatus(layer, "canopy"));
     for (const layer of layers) {
       layer.addTo(map);
     }
     return () => {
+      for (const detach of watching) {
+        detach();
+      }
       for (const layer of layers) {
         layer.remove();
       }

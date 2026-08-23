@@ -1,13 +1,14 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { FiCheck, FiLayers } from "react-icons/fi";
+import { FiCheck, FiCloudOff, FiLayers } from "react-icons/fi";
 import type { City } from "../src/cities";
 import {
   OVERLAYS,
   type OverlayId,
   overlayLabel,
 } from "../src/overlays/registry";
+import { useUnreachableLayers } from "../src/overlays/status";
 
 interface LayersControlProps {
   city: City;
@@ -27,6 +28,7 @@ export default function LayersControl({
 }: LayersControlProps) {
   const [menuOpen, setMenuOpen] = useState<boolean>(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
+  const unreachable = useUnreachableLayers();
 
   useEffect(() => {
     if (!menuOpen) {
@@ -86,6 +88,11 @@ export default function LayersControl({
         >
           {offered.map((overlay) => {
             const on = active.has(overlay.id);
+            // A layer whose data did not arrive draws nothing, which on a map is indistinguishable
+            // from a layer with nothing to draw. The glyph is what tells the two apart, and it
+            // replaces the tick rather than crowding it — a layer that is on but showing you
+            // nothing is not in the state the tick claims.
+            const lost = on && unreachable.has(overlay.id);
             return (
               <button
                 key={overlay.id}
@@ -94,10 +101,18 @@ export default function LayersControl({
                 aria-checked={on}
                 onClick={() => onToggle(overlay.id)}
                 className={on ? ROW_ACTIVE : ROW_IDLE}
+                title={
+                  lost ? "This layer's data could not be loaded" : undefined
+                }
               >
                 {overlay.icon}
                 {overlayLabel(overlay, city)}
-                {on ? (
+                {lost ? (
+                  <FiCloudOff
+                    className="ml-auto h-4 w-4 text-slate-400 dark:text-slate-500"
+                    aria-label="data could not be loaded"
+                  />
+                ) : on ? (
                   <FiCheck className="ml-auto h-4 w-4" aria-hidden="true" />
                 ) : null}
               </button>

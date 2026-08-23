@@ -3,6 +3,8 @@
 import L from "leaflet";
 import { useEffect } from "react";
 import { useMap } from "react-leaflet";
+import type { OverlayId } from "../src/overlays/registry";
+import { watchLayerStatus } from "../src/overlays/status";
 import WorkerTileLayer from "../src/tiles/layer";
 import manifest from "../src/tree-cover/manifest.json";
 import { useCity } from "./city-context";
@@ -20,11 +22,13 @@ const MIN_ZOOM = 11; // below this the city is a speck; the dots would just be n
 const MAX_ZOOM = 20;
 
 export default function PoiLayer({
+  overlay,
   dir,
   magic,
   color,
   labelAnchor,
 }: {
+  overlay: OverlayId; // which menu row this instance is, since two of them share this component
   dir: string; // the served directory, e.g. "landmarks" — the blob is <dir>/<city>.bin
   magic: string; // the expected 4-byte magic, e.g. "LMRK"
   color: string; // CSS fill colour for the dots
@@ -57,15 +61,20 @@ export default function PoiLayer({
           },
         );
       });
+    // Attached before the layers go on the map, or the first load cycle's `loading` is missed.
+    const watching = layers.map((layer) => watchLayerStatus(layer, overlay));
     for (const layer of layers) {
       layer.addTo(map);
     }
     return () => {
+      for (const detach of watching) {
+        detach();
+      }
       for (const layer of layers) {
         layer.remove();
       }
     };
-  }, [map, dir, magic, color, labelAnchor, active.id]);
+  }, [map, overlay, dir, magic, color, labelAnchor, active.id]);
 
   return null;
 }

@@ -10,6 +10,7 @@ import {
 import {
   FiChevronDown,
   FiChevronUp,
+  FiCloudOff,
   FiCrosshair,
   FiLoader,
   FiNavigation,
@@ -111,6 +112,10 @@ interface RoutePanelProps {
   industrialWeight: number;
   historicWeight: number;
   shadeWeight: number; // signed: −1 = prefer shade, +1 = prefer sun, 0 = off
+  // The per-edge sun/shade fractions did not load. Not a capability: every city bakes them, and the
+  // artifact is refetched on every clock tick, so this says the network dropped one — not that the
+  // city has nothing to say about shade.
+  shadeDataLost: boolean;
   shelterWeight: number;
   allowSheds: boolean;
   directions: Maneuver[] | null;
@@ -156,6 +161,11 @@ interface Factor {
   // Distinct from `disabled`, which is a live control the reader has switched off.
   available?: boolean;
   disabled?: boolean;
+  // Set when the data this factor prices exists but did not load. The control goes dead like
+  // `disabled` does, with the reason said out loud: a slider the reader did not grey themselves is
+  // otherwise just a control that has stopped working, and the route beside it is quietly priced
+  // without the thing the slider claims to be asking for.
+  lost?: string;
   signed?: boolean; // a bipolar −max..max slider (sun ↔ shade) rather than one-sided 0..max
 }
 
@@ -252,6 +262,7 @@ export default function RoutePanel({
   industrialWeight,
   historicWeight,
   shadeWeight,
+  shadeDataLost,
   shelterWeight,
   allowSheds,
   directions,
@@ -329,6 +340,11 @@ export default function RoutePanel({
       signed: true,
       tint: "text-amber-600 dark:text-amber-400",
       color: "#f59e0b",
+      // The one factor that can go dark while the graph is perfectly healthy: the sun-position
+      // fractions are their own artifact, refetched whenever the clock moves.
+      lost: shadeDataLost
+        ? "Shade data could not be loaded — this route ignores sun and shade."
+        : undefined,
     },
     {
       key: "shelter",
@@ -447,6 +463,11 @@ export default function RoutePanel({
 
   const factorChips = factors.filter(
     (factor) => factor.key !== "ferry" && factor.key !== "shelter",
+  );
+  // A factor whose data is missing AND which the reader has asked for: the route on screen is not
+  // the route they asked for, and the greyed slider saying so is folded away behind "Scenery".
+  const ignoredFactors = factors.filter(
+    (factor) => factor.lost !== undefined && factor.weight !== 0,
   );
   const hasFerry =
     directions?.some((maneuver) => maneuver.kind === "ferry") ?? false;
@@ -641,7 +662,9 @@ export default function RoutePanel({
                   <span
                     key={factor.key}
                     className={`flex items-center gap-0.5 text-[11px] font-semibold tabular-nums ${
-                      factor.disabled ? "opacity-40" : factor.tint
+                      factor.disabled || factor.lost
+                        ? "opacity-40"
+                        : factor.tint
                     }`}
                   >
                     <factor.Icon className="h-3.5 w-3.5" aria-hidden={true} />
@@ -662,7 +685,9 @@ export default function RoutePanel({
                 <label
                   key={factor.key}
                   className={`block ${
-                    factor.disabled ? "pointer-events-none opacity-40" : ""
+                    factor.disabled || factor.lost
+                      ? "pointer-events-none opacity-40"
+                      : ""
                   }`}
                 >
                   <span className="flex items-center justify-between text-xs font-medium text-slate-500 dark:text-slate-400">
@@ -682,7 +707,7 @@ export default function RoutePanel({
                     min={factor.signed ? -100 : 0}
                     max={100}
                     value={percent(factor)}
-                    disabled={factor.disabled}
+                    disabled={factor.disabled || factor.lost !== undefined}
                     onChange={(event) =>
                       factor.onChange(
                         (Number.parseInt(event.target.value, 10) / 100) *
@@ -701,6 +726,11 @@ export default function RoutePanel({
                       } as CSSProperties
                     }
                   />
+                  {factor.lost ? (
+                    <span className="mt-1 block text-[11px] text-slate-500 dark:text-slate-400">
+                      {factor.lost}
+                    </span>
+                  ) : null}
                 </label>
               ))}
             </div>
@@ -724,6 +754,18 @@ export default function RoutePanel({
             <p className="text-sm font-semibold text-slate-800 dark:text-slate-100">
               {summarize(summary, hasFerry)}
             </p>
+            {ignoredFactors.map((factor) => (
+              <p
+                key={factor.key}
+                className="mt-1.5 flex items-start gap-1.5 text-xs font-medium text-amber-700 dark:text-amber-500"
+              >
+                <FiCloudOff
+                  className="mt-0.5 h-3.5 w-3.5 shrink-0"
+                  aria-hidden="true"
+                />
+                {factor.lost}
+              </p>
+            ))}
             {factorChips.length > 0 ? (
               <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1">
                 {factorChips.map((factor) => (

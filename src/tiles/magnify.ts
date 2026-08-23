@@ -25,10 +25,18 @@ const MARGIN_PX = 4;
 // drawn tile layer per bin cost.
 const CACHE_LIMIT = 256;
 
+// A source tile, or why there is not one. The two reasons are not interchangeable: ABSENT is a fact
+// about the deploy — the pyramids are sparse, and neither is baked outside its city — while FAILED is
+// a fact about the network. Collapsing them, which this used to do, leaves an overlay that drew
+// nothing looking exactly like an overlay with nothing to draw.
+export type Source =
+  | { bitmap: ImageBitmap }
+  | { bitmap: null; failed: boolean };
+
 // A cached source tile. `users` counts the draws still assembling from it, so an entry evicted while
 // one is mid-flight is closed only once that draw has let go of it.
 export interface CacheEntry {
-  bitmap: Promise<ImageBitmap | null>;
+  source: Promise<Source>;
   users: number;
   evicted: boolean;
 }
@@ -50,20 +58,20 @@ export function tileUrl(
   );
 }
 
-async function fetchBitmap(url: string): Promise<ImageBitmap | null> {
+async function fetchBitmap(url: string): Promise<Source> {
   const response = await fetch(url);
   // The pyramids are sparse — the shade pass skips tiles with no shadow in them, and neither pyramid is
   // baked outside its city — so a 404 means "nothing here", not a failure.
   if (!response.ok) {
-    return null;
+    return { bitmap: null, failed: false };
   } else {
-    return createImageBitmap(await response.blob());
+    return { bitmap: await createImageBitmap(await response.blob()) };
   }
 }
 
 function dispose(entry: CacheEntry): void {
   if (entry.evicted && entry.users === 0) {
-    void entry.bitmap.then((bitmap) => bitmap?.close());
+    void entry.source.then((source) => source.bitmap?.close());
   }
 }
 
@@ -98,9 +106,9 @@ export function acquire(url: string): CacheEntry {
       evicted: false,
       // A transient fetch failure draws as nothing but is dropped rather than cached, so the next
       // tile over the same ground tries again.
-      bitmap: fetchBitmap(url).catch(() => {
+      source: fetchBitmap(url).catch((): Source => {
         cache.delete(url);
-        return null;
+        return { bitmap: null, failed: true };
       }),
     };
     cache.set(url, entry);
@@ -154,12 +162,16 @@ export function cutFor(maxNativeZoom: number, { x, y, z }: TileCoords): Cut {
   };
 }
 
-// Cut the tile's ground out of one baked pyramid, blitted 1:1 into a patch. Null when every source
-// tile it wants is a 404 — that pyramid has nothing over this ground.
-export async function assemble(
-  template: string,
-  cut: Cut,
-): Promise<OffscreenCanvas | null> {
+// The tile's ground cut out of one pyramid, and whether anything it wanted failed to arrive. A null
+// patch with `failed` false is a pyramid with nothing over this ground; with `failed` true it is a
+// pyramid this device could not reach, which is a different thing to say and is said differently.
+export interface Assembled {
+  patch: OffscreenCanvas | null;
+  failed: boolean;
+}
+
+// Cut the tile's ground out of one baked pyramid, blitted 1:1 into a patch.
+export async function assemble(template: string, cut: Cut): Promise<Assembled> {
   const { sourceZoom, sourceX, sourceY, originX, originY, size, ring } = cut;
   const entries: CacheEntry[] = [];
   for (let row = -ring; row <= ring; row++) {
@@ -171,14 +183,17 @@ export async function assemble(
   }
 
   try {
-    const bitmaps = await Promise.all(entries.map((entry) => entry.bitmap));
+    const sources = await Promise.all(entries.map((entry) => entry.source));
+    const failed = sources.some(
+      (source) => source.bitmap === null && source.failed,
+    );
     const patch = new OffscreenCanvas(size, size);
     const context = patch.getContext("2d");
-    if (!context || bitmaps.every((bitmap) => bitmap === null)) {
-      return null;
+    if (!context || sources.every((source) => source.bitmap === null)) {
+      return { patch: null, failed };
     } else {
       context.imageSmoothingEnabled = false; // integer 1:1 blits, nothing to interpolate
-      for (const [index, bitmap] of bitmaps.entries()) {
+      for (const [index, { bitmap }] of sources.entries()) {
         if (bitmap) {
           const column = (index % (2 * ring + 1)) - ring;
           const row = Math.floor(index / (2 * ring + 1)) - ring;
@@ -189,7 +204,7 @@ export async function assemble(
           );
         }
       }
-      return patch;
+      return { patch, failed };
     }
   } finally {
     for (const entry of entries) {
