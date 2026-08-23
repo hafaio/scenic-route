@@ -64,6 +64,22 @@ function attemptShape(elapsedMs: number): string {
   }
 }
 
+// A network failure, restated so p-retry will try again. Its own message and stack are kept — only
+// the constructor changes, because that is the whole of what p-retry inspects. A deliberate abort
+// keeps its name so the timeout still stops the attempt.
+async function retryable<T>(work: () => Promise<T>): Promise<T> {
+  try {
+    return await work();
+  } catch (error) {
+    if (error instanceof TypeError) {
+      const restated = new Error(error.message, { cause: error });
+      restated.stack = error.stack;
+      throw restated;
+    }
+    throw error;
+  }
+}
+
 async function fetchJson<Row>(url: string): Promise<Row[]> {
   const headers: Record<string, string> =
     APP_TOKEN === undefined ? {} : { "X-App-Token": APP_TOKEN };
@@ -74,11 +90,23 @@ async function fetchJson<Row>(url: string): Promise<Row[]> {
     return await pRetry(
       async () => {
         attemptStarted = Date.now();
-        const response = await fetch(url, {
-          headers,
-          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-          verbose: VERBOSE,
-        } as RequestInit);
+        // A fetch that dies mid-body throws a TypeError, and p-retry ABANDONS the retry on any
+        // TypeError whose message its `is-network-error` list does not recognise — reasoning that a
+        // TypeError is usually a bug rather than a network fault. Bun's message for it, "The socket
+        // connection was closed unexpectedly", is not on that list, and the gate runs before
+        // `shouldRetry` so it cannot be overridden. The effect was silent and total: eight retries
+        // collapsed to one attempt the day CI moved from bun 1.3.14 to 1.4.0, and the shed job failed
+        // every day after on a fault a second attempt clears.
+        //
+        // Rethrowing as a plain Error is what gets the retries back. This reads a public dataset over
+        // the open internet, where a failure is transient until proven otherwise.
+        const response = await retryable(() =>
+          fetch(url, {
+            headers,
+            signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+            verbose: VERBOSE,
+          } as RequestInit),
+        );
         if (!response.ok) {
           // Socrata says WHY in its own headers, and a bare status line throws that away — an
           // expired token and an over-quota address are both "403" until you read them.
@@ -87,7 +115,7 @@ async function fetchJson<Row>(url: string): Promise<Row[]> {
             .join(" ");
           throw new Error(`${response.status} ${response.statusText} ${told}`);
         }
-        return (await response.json()) as Row[];
+        return (await retryable(() => response.json())) as Row[];
       },
       {
         retries: MAX_ATTEMPTS - 1,
