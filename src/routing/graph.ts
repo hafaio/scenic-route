@@ -1,5 +1,5 @@
 // The client's view of the routing graph baked by the graph pass. Layout: scripts/README.md
-// (magic GRPH, v9 — the sidewalk graph with inert ferry edges). Fixed sections are viewed in place
+// (magic GRPH, v10 — the sidewalk graph with inert ferry edges). Fixed sections are viewed in place
 // over the fetched buffer; the strided edge records are copied once into parallel typed arrays so
 // the search loop touches only flat arrays.
 
