@@ -10,11 +10,13 @@ import {
   FiLogOut,
   FiMap,
   FiMapPin,
+  FiMessageSquare,
   FiRefreshCw,
   FiUser,
 } from "react-icons/fi";
 import { CITIES, type City } from "../src/cities";
 import type { OverlayId } from "../src/overlays/registry";
+import { REPO_URL } from "./about-dialog";
 import CityDialog from "./city-dialog";
 import ClockControl from "./clock-control";
 import InstallDialog from "./install-dialog";
@@ -300,6 +302,24 @@ export default function Toolbar({
                 </span>
               </button>
             ) : null}
+            {/* Opens a tab rather than routing anywhere, so it is an anchor: a menu item that leaves
+                the app should be middle-clickable like any other link. */}
+            <a
+              href={`${REPO_URL}/issues/new`}
+              target="_blank"
+              rel="noreferrer"
+              role="menuitem"
+              onClick={() => setMenuOpen(false)}
+              className={`${MENU_ITEM} ${MENU_DIVIDER}`}
+            >
+              <FiMessageSquare />
+              <span className="flex min-w-0 flex-col">
+                <span>Feedback</span>
+                <span className="mt-0.5 text-xs font-normal text-slate-400 dark:text-slate-500">
+                  Open an issue on GitHub
+                </span>
+              </span>
+            </a>
             <button
               type="button"
               role="menuitem"
