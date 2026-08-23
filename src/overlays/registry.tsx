@@ -177,6 +177,7 @@ export const OVERLAYS: readonly OverlayDef[] = [
     ),
     render: () => (
       <PoiLayer
+        overlay="landmarks"
         dir="landmarks"
         magic="LMRK"
         color={LANDMARK_COLOR}
@@ -189,14 +190,14 @@ export const OVERLAYS: readonly OverlayDef[] = [
     label: "Public art",
     icon: <MdPalette className="h-4 w-4 text-fuchsia-500" aria-hidden="true" />,
     render: () => (
-      <PoiLayer dir="art" magic="ARTW" color={ART_COLOR} labelAnchor="bottom" />
+      <PoiLayer overlay="art" dir="art" magic="ARTW" color={ART_COLOR} labelAnchor="bottom" />
     ),
   },
   {
     id: "ferries",
     label: "Ferry routes",
     icon: <PiBoatFill className="h-4 w-4 text-blue-600" aria-hidden="true" />,
-    render: () => <LinesLayer dir="ferries" format="ferr" color={FERRY_COLOR} />,
+    render: () => <LinesLayer overlay="ferries" dir="ferries" format="ferr" color={FERRY_COLOR} />,
   },
   {
     id: "subway",
@@ -213,7 +214,7 @@ export const OVERLAYS: readonly OverlayDef[] = [
     id: "highways",
     label: "Highways",
     icon: <MdDirectionsCar className="h-4 w-4 text-red-500" aria-hidden="true" />,
-    render: () => <LinesLayer dir="highways" format="hway" color={HIGHWAY_COLOR} />,
+    render: () => <LinesLayer overlay="highways" dir="highways" format="hway" color={HIGHWAY_COLOR} />,
   },
   {
     id: "industrial",

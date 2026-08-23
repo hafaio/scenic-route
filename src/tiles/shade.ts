@@ -118,6 +118,9 @@ function merge(
 type ShadeSource = { swept: SweptGround } | { baked: Patch | null };
 
 // The tile's source pixels: both pyramids cut out of the same ground and composited into one patch.
+// Throws where a pyramid could not be reached, as against merely having nothing over this ground —
+// the shade layer's whole job is to say where the sun is, and a tile that quietly draws no shade
+// because its source did not arrive is the one answer it must never give.
 async function bakedPatch(
   params: ShadeParams,
   coords: TileCoords,
@@ -127,7 +130,19 @@ async function bakedPatch(
     assemble(binTemplate(params.url, params.bin), cut),
     assemble(binTemplate(params.treeUrl, params.bin), cut),
   ]);
-  const patch = merge(buildings, trees, cut, params);
+  // Either pyramid missing entirely is fatal to the tile, not just the building one: drawing the
+  // canopy's shadows alone over ground whose buildings did not arrive puts a sunlit street where a
+  // tower stands. A neighbour that failed while the centre tile arrived only costs the resample a
+  // little context at the edge.
+  if (
+    (!buildings.patch && buildings.failed) ||
+    (!trees.patch && trees.failed)
+  ) {
+    throw new Error(
+      `shade bin ${params.bin}: source tiles could not be fetched`,
+    );
+  }
+  const patch = merge(buildings.patch, trees.patch, cut, params);
   return patch ? { patch, margin: cut.margin, scale: cut.scale } : null;
 }
 

@@ -3,6 +3,7 @@
 import L from "leaflet";
 import { useEffect } from "react";
 import { useMap } from "react-leaflet";
+import { watchLayerStatus } from "../src/overlays/status";
 import WorkerTileLayer from "../src/tiles/layer";
 import {
   getEnabledGenera,
@@ -53,6 +54,8 @@ export default function TreeDotsLayer() {
           },
         );
       });
+    // Attached before the layers go on the map, or the first load cycle's `loading` is missed.
+    const watching = layers.map((layer) => watchLayerStatus(layer, "genus"));
     for (const layer of layers) {
       layer.addTo(map);
     }
@@ -66,6 +69,9 @@ export default function TreeDotsLayer() {
 
     return () => {
       unsubscribe();
+      for (const detach of watching) {
+        detach();
+      }
       for (const layer of layers) {
         layer.remove();
       }

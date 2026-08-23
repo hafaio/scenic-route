@@ -3,6 +3,8 @@
 import L from "leaflet";
 import { useEffect } from "react";
 import { useMap } from "react-leaflet";
+import type { OverlayId } from "../src/overlays/registry";
+import { watchLayerStatus } from "../src/overlays/status";
 import WorkerTileLayer from "../src/tiles/layer";
 import manifest from "../src/tree-cover/manifest.json";
 import { useCity } from "./city-context";
@@ -18,10 +20,12 @@ const MIN_ZOOM = 10;
 const MAX_ZOOM = 20;
 
 export default function LinesLayer({
+  overlay,
   dir,
   format,
   color,
 }: {
+  overlay: OverlayId; // which menu row this instance is, since two of them share this component
   dir: string; // the served directory, e.g. "highways" — the blob is <dir>/<city>.bin
   format: "hway" | "ferr"; // which binary layout to decode
   color: string; // CSS stroke colour
@@ -51,15 +55,20 @@ export default function LinesLayer({
           },
         );
       });
+    // Attached before the layers go on the map, or the first load cycle's `loading` is missed.
+    const watching = layers.map((layer) => watchLayerStatus(layer, overlay));
     for (const layer of layers) {
       layer.addTo(map);
     }
     return () => {
+      for (const detach of watching) {
+        detach();
+      }
       for (const layer of layers) {
         layer.remove();
       }
     };
-  }, [map, dir, format, color, active.id]);
+  }, [map, overlay, dir, format, color, active.id]);
 
   return null;
 }
