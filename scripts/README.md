@@ -3038,6 +3038,28 @@ Four rules carry the weight:
   worker therefore fetches those from the network first and, offline, rebuilds a fresh `Response`
   from the stored body, which leaves the fragment alone.
 
+Two caps bound the rest, at **128 MB** for routing and **1 GB** for overlay; the precached shell has
+none, since losing a piece of it is the one thing that would stop the app opening at all. Both are
+sized off what the artifacts actually weigh. Routing's realistic worst case is both cities loaded
+with a day of shade each — New York's graph is 39.3 MB and San Francisco's 6.4 MB, plus about 15 MB
+of routing shade bins between them — so the cap is roughly double what it can hold and the store
+never evicts in practice. Overlay is sized so one city fits comfortably: New York walked over at
+every zoom is about 400 MB — caster chunks 169 MB, one season of both display pyramids around 125 MB
+city-wide, the canopy pyramid 48 MB, the genus field 37 MB — so a gigabyte leaves room to wander
+without evicting ground still in use, and a second city's residue is what the cap eventually pushes
+out. **A city's graph is never evicted at
+all**, whatever the cap says: it is fetched once and read from memory for the rest of the session, so
+its last-read time never moves and a least-recently-read sweep would take the one artifact a walk in
+progress cannot do without, first. The
+Cache API will not say how big a cache is, so `src/sw/ledger.ts` keeps the worker's own book in
+IndexedDB — a row per response with its size and when it was last read, and a running total per
+store updated in the same transaction as the rows, so the total cannot drift from what it sums. A put
+that overruns the cap evicts least-recently-read first; a write the browser refuses for want of quota frees half
+the store's cap and takes one more run at it, and only what actually landed is written down. Hits update the read time at most every ten minutes, because a pan is
+dozens of hits and their bookkeeping must not land in a draw. The page asks for
+`navigator.storage.persist()` — only the page can, the worker's StorageManager has no `persist` — and
+a refusal costs nothing but evictability.
+
 Deliberately **no `skipWaiting`**: a new deploy takes over when the last tab closes, or on the
 installed app's next launch. A deploy while you are offline cannot strand you either — install fails
 because the new shell cannot be fetched, so the old worker and its caches keep serving.

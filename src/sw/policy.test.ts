@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { fileRequest, shadeKey } from "./policy";
+import { fileRequest, isGraph, shadeKey } from "./policy";
 
 // A deploy under a basePath, which is the only shape that ever runs in production — the worker's
 // scope is its own directory and every path it files is relative to that.
@@ -109,4 +109,16 @@ test("a fragment does not become part of the path either", () => {
   expect(
     fileRequest(`${SCOPE}#at=40.7484,-73.9857,17&layers=shade`, SCOPE),
   ).toEqual({ path: "", store: "shell", fresh: false });
+});
+
+// The graph is fetched once and then read from memory all session, so its last-read time never
+// moves. Under a least-recently-read eviction that makes the one artifact a walk cannot do without
+// the FIRST thing out of the store; nothing evicts it.
+test("a city graph is recognisable, so eviction can leave it alone", () => {
+  expect(isGraph("routing/nyc.bin")).toBe(true);
+  expect(isGraph("routing/sf.bin")).toBe(true);
+  // Not the things that sit beside it and are meant to rotate.
+  expect(isGraph("routing/nyc.stranded.bin")).toBe(true); // shares the graph's fate; it is tiny
+  expect(isGraph("routing/shade/nyc/12.bin")).toBe(false);
+  expect(isGraph("casters/5232/6162.bin")).toBe(false);
 });
