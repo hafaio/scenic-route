@@ -101,6 +101,14 @@ export function shadeKey(path: string): ShadeKey | null {
   return null;
 }
 
+// A city's routing graph, which is the one cached thing a walk in progress cannot be without. It is
+// fetched once and then read from memory for the rest of the session, so its last-READ time never
+// moves — under a least-recently-read eviction it is the first thing out of the routing store, which
+// is the exact opposite of what should happen. Nothing evicts it.
+export function isGraph(path: string): boolean {
+  return /^routing\/[^/]+\.bin$/.test(path);
+}
+
 function binNumber(text: string | undefined): number | null {
   return text !== undefined && /^\d+$/.test(text) ? Number(text) : null;
 }
