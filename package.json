@@ -9,7 +9,7 @@
     "fmt": "biome format --write && biome check --write && cargo fmt",
     "lint": "tsc && biome check && cargo fmt --check && cargo clippy -- -D warnings",
     "dev": "bun run build-tiles && next dev --turbopack",
-    "export": "bun run build-tiles && next build",
+    "export": "bun run build-tiles && next build && bun run scripts/build-sw.ts",
     "start": "next start",
     "set-admin": "bun run scripts/set-admin.ts",
     "key-probe": "cargo run --bin tiler -- key-probe --report .build/key-probe.json",
