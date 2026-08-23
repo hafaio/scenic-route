@@ -150,9 +150,12 @@ export default function AboutDialog({ onClose }: AboutDialogProps) {
             />
             <Source
               label="Basemap"
-              detail="CARTO tiles · OpenStreetMap contributors, ODbL"
+              detail="Protomaps vector tiles · OpenStreetMap contributors, ODbL"
             />
-            <Source label="Map rendering" detail="Leaflet (BSD-2-Clause)" />
+            <Source
+              label="Map rendering"
+              detail="Leaflet (BSD-2-Clause) and protomaps-leaflet"
+            />
           </ul>
         </div>
 

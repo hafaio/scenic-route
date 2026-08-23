@@ -19,6 +19,13 @@ import {
 // cache names and the old ones go on activate; the precache list is the exported shell.
 declare const SW_VERSION: string;
 declare const SW_PRECACHE: readonly string[];
+// The cities' extents, so the basemap is kept only over ground this app can route across.
+declare const SW_CITIES: readonly {
+  west: number;
+  south: number;
+  east: number;
+  north: number;
+}[];
 
 interface ExtendableEventLike {
   waitUntil(promise: Promise<unknown>): void;
@@ -117,7 +124,7 @@ scope.addEventListener("fetch", (event) => {
     event.respondWith(serveWorkerScript(event));
     return;
   }
-  const filed = fileRequest(request.url, scope.registration.scope);
+  const filed = fileRequest(request.url, scope.registration.scope, SW_CITIES);
   if (filed) {
     event.respondWith(serve(event, filed));
   }
@@ -162,7 +169,7 @@ async function serve(event: FetchEventLike, filed: Filed): Promise<Response> {
     try {
       const response = await fetch(request);
       if (response.ok) {
-        event.waitUntil(store(filed.store, request, response.clone()));
+        event.waitUntil(store(filed.store, request.url, response.clone()));
       }
       return response;
     } catch (error) {
@@ -173,9 +180,10 @@ async function serve(event: FetchEventLike, filed: Filed): Promise<Response> {
       throw error;
     }
   }
-  const hit = await cache.match(request);
+  const key = filed.cacheKey ?? request.url;
+  const hit = await cache.match(key);
   if (hit) {
-    event.waitUntil(read(filed.store, request.url));
+    event.waitUntil(read(filed.store, key));
     return hit;
   }
   const response = await fetch(request);
@@ -184,7 +192,7 @@ async function serve(event: FetchEventLike, filed: Filed): Promise<Response> {
   // deploy that changes it. Leaving it uncached also keeps the page's own distinction intact: a 404
   // is "nothing here", a rejected fetch is "could not reach", and the two must not converge.
   if (response.ok) {
-    event.waitUntil(store(filed.store, request, response.clone()));
+    event.waitUntil(store(filed.store, key, response.clone()));
     event.waitUntil(keepOneSeason(filed.path));
   }
   return response;
@@ -194,7 +202,7 @@ async function serve(event: FetchEventLike, filed: Filed): Promise<Response> {
 // landing in the book that bounds it.
 async function store(
   which: Store,
-  request: Request,
+  key: string,
   response: Response,
 ): Promise<void> {
   const cache = await caches.open(STORES[which]);
@@ -208,17 +216,17 @@ async function store(
       statusText: response.statusText,
       headers: response.headers,
     });
-  let stored = await put(cache, request, copy());
+  let stored = await put(cache, key, copy());
   if (!stored) {
     // Out of quota, whatever this store's own cap says — the browser's is origin-wide and something
     // else may have filled it. Nothing here is irreplaceable, so free half of this store and take
     // one more run at it. If that fails too, the response has already gone to the page and the only
     // thing lost is having kept it.
     await evict(which, cap === Number.POSITIVE_INFINITY ? 0 : cap / 2);
-    stored = await put(cache, request, copy());
+    stored = await put(cache, key, copy());
   }
   if (stored) {
-    await record(which, request.url, body.size, Date.now()).catch(() => {});
+    await record(which, key, body.size, Date.now()).catch(() => {});
     await evict(which, cap);
   }
 }
@@ -227,11 +235,11 @@ async function store(
 // book must not claim bytes the cache does not hold.
 async function put(
   cache: Cache,
-  request: Request,
+  key: string,
   response: Response,
 ): Promise<boolean> {
   try {
-    await cache.put(request, response);
+    await cache.put(key, response);
     return true;
   } catch {
     return false;
@@ -257,7 +265,7 @@ async function evict(which: Store, cap: number): Promise<void> {
   }
   const over = await overflowing(which, cap).catch(() => [] as string[]);
   const doomed = over.filter((url) => {
-    const filed = fileRequest(url, scope.registration.scope);
+    const filed = fileRequest(url, scope.registration.scope, SW_CITIES);
     return !filed || !isGraph(filed.path);
   });
   if (doomed.length === 0) {
@@ -338,7 +346,11 @@ async function purgeOtherSeasons(
     const cache = await caches.open(STORES[which]);
     const doomed: string[] = [];
     for (const request of await cache.keys()) {
-      const filed = fileRequest(request.url, scope.registration.scope);
+      const filed = fileRequest(
+        request.url,
+        scope.registration.scope,
+        SW_CITIES,
+      );
       const key = filed && shadeKey(filed.path);
       if (key && key.city === city && table.get(key.bin) !== season) {
         doomed.push(request.url);
