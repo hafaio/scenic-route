@@ -1,5 +1,11 @@
-import { expect, test } from "bun:test";
-import { decodeChunk } from "./casters";
+import { afterAll, beforeAll, expect, test } from "bun:test";
+import { setBaseUrl } from "./base-url";
+import {
+  type CasterManifest,
+  casterManifest,
+  chunksFor,
+  decodeChunk,
+} from "./casters";
 import { projectX, projectY } from "./mercator";
 
 // The decoder against a chunk written the way crates/tiler/src/caster_chunks.rs writes one. Both bugs
@@ -254,4 +260,75 @@ test("reads a ring's winding rather than its stored order", () => {
 
   expect(forward.wound[0]).not.toBe(backward.wound[0]);
   expect(forward.wound[1]).not.toBe(backward.wound[1]);
+});
+
+// The gather's completeness, which is what stands between a dropped chunk and a tile that renders its
+// buildings as sunlit ground. A chunk the manifest lists always has geometry in it, so anything short
+// of every listed chunk arriving is a hole, not an empty patch of city.
+
+const MANIFEST: CasterManifest = {
+  chunkZoom: 15,
+  coordScale: SCALE,
+  maxShadowMeters: 0, // no halo, so the gather asks for exactly the cells the box covers
+  chunks: [
+    { x: 100, y: 200, bytes: 0 },
+    { x: 101, y: 200, bytes: 0 },
+    { x: 110, y: 200, bytes: 0 },
+    { x: 111, y: 200, bytes: 0 },
+  ],
+};
+
+// The zoom-0 world-pixel box covering chunk cells `from` to `to` on one row, at chunkZoom 15.
+function boxOver(from: number, to: number): [number, number, number, number] {
+  const cell = 256 / 2 ** MANIFEST.chunkZoom;
+  return [from * cell, 200 * cell, to * cell, 200 * cell];
+}
+
+const originalFetch = globalThis.fetch;
+
+function serve(fail: (url: string) => boolean): void {
+  globalThis.fetch = ((input: RequestInfo | URL): Promise<Response> => {
+    const url = String(input);
+    if (fail(url)) {
+      return Promise.reject(new Error("offline"));
+    }
+    return Promise.resolve(new Response(chunk([PLAIN], [])));
+  }) as typeof fetch;
+}
+
+beforeAll(() => {
+  setBaseUrl("https://example.test/");
+});
+
+afterAll(() => {
+  globalThis.fetch = originalFetch;
+});
+
+test("a gather missing one of its chunks says so", async () => {
+  serve((url) => url.endsWith("casters/100/200.bin"));
+  const gather = await chunksFor(MANIFEST, ...boxOver(100, 101), ORIGIN_LAT);
+
+  expect(gather.chunks.length).toBe(1);
+  expect(gather.complete).toBe(false);
+});
+
+test("a gather that got everything the manifest lists is complete", async () => {
+  serve(() => false);
+  const gather = await chunksFor(MANIFEST, ...boxOver(110, 111), ORIGIN_LAT);
+
+  expect(gather.chunks.length).toBe(2);
+  expect(gather.complete).toBe(true);
+});
+
+test("a manifest that could not be reached is not remembered as absent", async () => {
+  let attempts = 0;
+  globalThis.fetch = ((): Promise<Response> => {
+    attempts += 1;
+    return attempts === 1
+      ? Promise.reject(new Error("offline"))
+      : Promise.resolve(new Response(JSON.stringify(MANIFEST)));
+  }) as typeof fetch;
+
+  expect(await casterManifest()).toBeNull();
+  expect(await casterManifest()).toEqual(MANIFEST);
 });
