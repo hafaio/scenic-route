@@ -2200,8 +2200,8 @@ that closed the defect taken back out on the other:
 | --- | --- | --- | --- | --- |
 | alley km off the main component | `alleyKm`, `alleyOffComponentKm` | 0.42 of 303.1 km (0.14%) | 1% | 87.1% unnoded, 2.0% uncut |
 | alley mouth's walk to mapped pavement | `alleyMouthWalk*`, `alleyMouthsStranded` | p50 0 m, p90 37 m, 0 of 3,813 stranded | 10 m / 120 m / 10 | p50 108 m, p90 349 m, 94 stranded |
-| one-sided streets carrying both sides | `phantomSidewalks`, `oneSidedKeys` | 25 of 14,961 | 200 | — |
-| link edge lengths | `linkEdgesScored`, `linkP99M`, `linkLongestM` | p99 32 m, longest 56.8 m over 15,539 links | 50 m / `SEAM_REPAIR_METERS` | — |
+| one-sided streets carrying both sides | `phantomSidewalks`, `oneSidedKeys` | 25 of 14,962 | 200 | — |
+| link edge lengths | `linkEdgesScored`, `linkP99M`, `linkLongestM` | p99 32 m, longest 56.8 m over 15,594 links | 50 m / `SEAM_REPAIR_METERS` | — |
 | worst neighbourhood's unpaved share | `pavementCell*` | p90 9.4% over 2,877 half-km cells | 30% | — |
 
 Each bound is held over a population the build classifies for itself, so each would pass on the empty
@@ -2211,7 +2211,7 @@ alley (`MIN_ALLEY_KM`), 600 mouths, 2,500 one-sided keys, 500 scored cells and 2
 roughly a sixth of what the city measures.
 
 Two more are recorded and left unbounded, because each is dominated by a shape that is correct: the
-crossings whose far end has nothing on it (`crossingsToNowhere`, 5,784 — mostly crossing stubs OSM
+crossings whose far end has nothing on it (`crossingsToNowhere`, 5,888 — mostly crossing stubs OSM
 drew short), and the degree-2 derived-to-mapped hand-offs that turn past a right angle
 (`seamHairpins`, 113 — about half of them cul-de-sacs wrapping round their own head). The whole pass
 costs ~200 ms, against the 16.7 s of sequential topology it checks.
@@ -2305,10 +2305,10 @@ triple, and one that split or merged the stretch does not pretend otherwise.
 
 **Crossings, links and ferry edges carry `0xFFFFFFFF` and ordinal 0.** They are derived topology,
 not source geometry: a crossing exists because two sidewalks meet, a link because a path reaches a
-corner, and a ferry leg comes from `FERR`, which carries no CSCL id at all. Over NYC 299,623 of the
-531,520 edges (56.4%) carry a durable id — every sidewalk and every path edge. 79.6% of those are
-ordinal 0, 9.7% ordinal 1, 4.1% ordinal 2 and 6.5% higher; the maximum is **102**, an OSM greenway
-welded to every street it crosses (the busiest sidewalk key reaches only 25, since only a street's
+corner, and a ferry leg comes from `FERR`, which carries no CSCL id at all. Over NYC 368,326 of the
+628,718 edges (58.6%) carry a durable id — every sidewalk and every path edge. 59.1% of those are
+ordinal 0, 22.0% ordinal 1, 9.7% ordinal 2 and 9.2% higher; the maximum is **98**, an OSM path
+welded at every street it crosses (the busiest sidewalk key reaches only 27, since only a street's
 two sides share a source id). The ordinal therefore needs a whole byte, and the graph pass fails
 rather than truncating if one ever passes 255.
 
