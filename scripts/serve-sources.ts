@@ -22,6 +22,10 @@ const PUBLIC_DIR = join(import.meta.dirname, "..", "public");
 const TREE_DIR = join(PUBLIC_DIR, "trees");
 // Committed point/line sources served to the client verbatim for the map overlays (dots and lines).
 // Not rendered by the tiler, so they are copied straight across whenever their file is present.
+//
+// `landuse` and `openstreets` were on this list and should not have been: nothing in the client ever
+// fetches them, and the tiler reads them from `data/` where they are written. Copying them here only
+// put 3.7 MB of build input into the deploy.
 const SERVED_SOURCES = [
   "landmarks",
   "art",
@@ -29,8 +33,6 @@ const SERVED_SOURCES = [
   "subway",
   "highways",
   "dining",
-  "openstreets",
-  "landuse",
   "industrial",
   "historic",
 ] as const;
