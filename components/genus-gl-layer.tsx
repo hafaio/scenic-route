@@ -3,6 +3,7 @@
 import L from "leaflet";
 import { useEffect } from "react";
 import { useMap } from "react-leaflet";
+import { watchLayerStatus } from "../src/overlays/status";
 import { GENUS_COLORS } from "../src/tree-cover/genus";
 import {
   getEnabledGenera,
@@ -369,6 +370,12 @@ export default function GenusGlLayer() {
       keepBuffer: 2,
     });
 
+    // The WebGL grid is the whole genus overlay below z15, where the dots layer has not taken over —
+    // so without this a total failure of the field tiles badges nothing at the zoom the reader is
+    // most likely to switch the layer on at. `genusBounds` keeps Leaflet from asking outside the
+    // baked pyramid, so every error here is a failure to reach rather than a sparse tile.
+    const detachStatus = watchLayerStatus(layer, "genus");
+
     layer.on("tileunload", (event: L.TileEvent) => {
       const key = `${event.coords.z}/${event.coords.x}/${event.coords.y}`;
       const entry = tiles.get(key);
@@ -415,6 +422,7 @@ export default function GenusGlLayer() {
 
     return () => {
       unsubscribe();
+      detachStatus();
       glCanvas.removeEventListener("webglcontextlost", onLost);
       glCanvas.removeEventListener("webglcontextrestored", onRestored);
       map.removeLayer(layer);

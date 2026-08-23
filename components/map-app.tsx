@@ -323,6 +323,11 @@ export default function MapApp() {
   // as the resolved time (the global clock) moves, so the route re-costs against the sun's new
   // position; `shadeContextRef` records which tick the route cache was built against.
   const [shadeWeight, setShadeWeight] = useState<number>(DEFAULT_SHADE_WEIGHT);
+  // Whether the last attempt to build the sun/shade field failed. The graph is fetched once and its
+  // own maxima gate the other sliders (`capabilities`); this artifact is refetched every time the
+  // clock moves, so it can go missing with the graph perfectly healthy — and then the slider sits
+  // there moving nothing, which is what this is for.
+  const [shadeDataLost, setShadeDataLost] = useState<boolean>(false);
   const [routeTimeTick, setRouteTimeTick] = useState<number>(0);
   const shadeContextRef = useRef<string>("");
   // Rain shelter (decks plus canopy) and the scaffolding gate. Both read the same per-edge shed
@@ -833,18 +838,25 @@ export default function MapApp() {
               routeCacheRef.current = null;
               dragSolverRef.current = null;
               shadeContextRef.current = context;
+              let lost = false;
               try {
                 await computeEdgeShade(graph, getResolvedDate(), routeCity);
               } catch (error) {
                 // A missing or malformed SHDE artifact is not fatal — routing just drops the sun/shade
                 // bias for this time. Surface it so a stale local bake (the usual cause) is visible in
-                // the console rather than leaving the slider silently inert.
+                // the console, and grey the slider so the reader is not left adjusting a control that
+                // moves nothing.
                 console.error("shade routing disabled:", error);
                 graph.shade = null;
+                lost = true;
               }
               if (cancelled) {
                 return;
               }
+              // Below the guard, not inside the try: a clock scrub starts a fetch per tick, and a
+              // slow failure landing after a later tick has already succeeded would otherwise grey
+              // out a slider whose data is loaded and being used.
+              setShadeDataLost(lost);
             }
           } else {
             graph.shade = null;
@@ -1689,6 +1701,7 @@ export default function MapApp() {
             industrialWeight={industrialWeight}
             historicWeight={historicWeight}
             shadeWeight={shadeWeight}
+            shadeDataLost={shadeDataLost}
             shelterWeight={shelterWeight}
             allowSheds={allowSheds}
             directions={directions}
