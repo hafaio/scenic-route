@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { fileRequest, isGraph, shadeKey } from "./policy";
+import { coversACity, fileRequest, isGraph, shadeKey } from "./policy";
 
 // A deploy under a basePath, which is the only shape that ever runs in production — the worker's
 // scope is its own directory and every path it files is relative to that.
@@ -121,4 +121,58 @@ test("a city graph is recognisable, so eviction can leave it alone", () => {
   expect(isGraph("routing/nyc.stranded.bin")).toBe(true); // shares the graph's fate; it is tiny
   expect(isGraph("routing/shade/nyc/12.bin")).toBe(false);
   expect(isGraph("casters/5232/6162.bin")).toBe(false);
+});
+
+// The basemap answers for the whole planet; this app routes across two cities of it. Panning across
+// an ocean must not fill the cache with ground nothing else in the app knows anything about.
+const CITIES = [
+  { west: -74.2555, south: 40.4968, east: -73.6995, north: 40.9155 }, // New York
+  { west: -122.5141, south: 37.7068, east: -122.3607, north: 37.8325 }, // San Francisco
+];
+
+test("a basemap tile over a city is cached, under a key without its API key", () => {
+  // z15 over midtown Manhattan.
+  expect(
+    fileRequest(
+      "https://api.protomaps.com/tiles/v4/15/9649/12315.mvt?key=abc123",
+      SCOPE,
+      CITIES,
+    ),
+  ).toEqual({
+    path: "tiles/v4/15/9649/12315.mvt",
+    store: "overlay",
+    fresh: false,
+    // The key rides in the query string, so keying by the full URL would orphan every cached tile
+    // the moment the key is rotated.
+    cacheKey: "https://api.protomaps.com/tiles/v4/15/9649/12315.mvt",
+  });
+});
+
+test("a basemap tile somewhere else is not cached at all", () => {
+  for (const tile of [
+    "15/17000/11000", // the Atlantic
+    "15/5000/12000", // the Pacific
+    "15/9649/12000", // upstate, north of the New York box
+  ]) {
+    expect(
+      fileRequest(
+        `https://api.protomaps.com/tiles/v4/${tile}.mvt?key=abc123`,
+        SCOPE,
+        CITIES,
+      ),
+    ).toBeNull();
+  }
+});
+
+// A low-zoom tile is enormous and mostly not the city; keeping it anyway is what lets the reader zoom
+// in from a world view rather than starting on a blank one.
+test("a low-zoom tile that merely covers a city is kept", () => {
+  expect(coversACity("tiles/v4/0/0/0.mvt", CITIES)).toBe(true);
+  expect(coversACity("tiles/v4/4/4/6.mvt", CITIES)).toBe(true); // eastern US
+  expect(coversACity("tiles/v4/4/8/6.mvt", CITIES)).toBe(false); // north Africa
+});
+
+test("nothing else on that host is a tile", () => {
+  expect(coversACity("tiles/v4.json", CITIES)).toBe(false);
+  expect(coversACity("tiles/v4/15/9649/12315.mvt/extra", CITIES)).toBe(false);
 });

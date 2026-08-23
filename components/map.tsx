@@ -13,7 +13,6 @@ import {
   AttributionControl,
   MapContainer,
   Marker,
-  TileLayer,
   Tooltip,
   useMap,
   useMapEvents,
@@ -30,6 +29,7 @@ import type { RoutingGraph } from "../src/routing/graph";
 import type { RouteResult } from "../src/routing/search";
 import installTilePrune from "../src/tiles/prune";
 import type { Camera } from "../src/url-state";
+import Basemap from "./basemap";
 import { savedIcon, userIcon } from "./map-icons";
 import RouteLayer from "./route-layer";
 
@@ -67,6 +67,9 @@ interface MapViewProps {
   // The settled camera, plus what it can see: the visible bounds pick the active city when only one
   // city is on screen, which the centre alone cannot tell.
   onCamera: (camera: Camera, view: CityBounds) => void;
+  // The basemap could not be fetched, so the map has no streets under the overlays. It has no row in
+  // the layers menu to badge, so the app says it in the banner instead.
+  onBasemapLost: (lost: boolean) => void;
   onMapPick: (lat: number, lng: number) => void;
   onDisengageFollow: () => void;
   onEndpointDragMove: (
@@ -498,6 +501,7 @@ function summarizePin(pin: Pin): string {
 }
 
 export default function MapView({
+  onBasemapLost,
   city,
   pins,
   draft,
@@ -589,13 +593,7 @@ export default function MapView({
     >
       {/* The full source list lives in About; the corner carries only the basemap credit. */}
       <AttributionControl prefix={false} />
-      <TileLayer
-        url="https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png"
-        attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a> &middot; <a href="https://carto.com/attributions">CARTO</a>'
-        subdomains="abcd"
-        maxZoom={20}
-        keepBuffer={4}
-      />
+      <Basemap onLost={onBasemapLost} />
       {/* every active overlay's Leaflet layers, from the registry; nothing when the set is empty */}
       {OVERLAYS.filter((overlay) => activeOverlays.has(overlay.id)).map(
         (overlay) => (

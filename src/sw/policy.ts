@@ -17,6 +17,58 @@ const FEED_HOST = "raw.githubusercontent.com";
 const FEED_PREFIX = "/hafaio/scenic-route/main/public/";
 const FEED_DIRS = ["sheds/", "ferry-schedule/"];
 
+// The basemap, served from Protomaps' hosted API rather than out of the deploy: a planet is far too
+// large to ship, and the whole point of the switch away from CARTO is that these MAY be kept — their
+// terms treat a map as an asset you download, not a service you rent.
+//
+// Only the cities are kept, though. The API answers for the whole world, and a reader who pans across
+// an ocean should not fill the cache with ground this app cannot route over. The bound is geographic
+// rather than a byte count because that is the honest shape of the rule: this app is New York and San
+// Francisco, and everywhere else is scenery.
+const BASEMAP_HOST = "api.protomaps.com";
+const BASEMAP_TILE = /^\/tiles\/v\d+\/(\d+)\/(\d+)\/(\d+)\.[a-z]+$/;
+
+// A city's extent, in degrees. Passed in rather than imported so the rule stays a pure function of
+// its inputs and the worker decides where the manifest comes from.
+export interface CityBounds {
+  west: number;
+  south: number;
+  east: number;
+  north: number;
+}
+
+// Whether a basemap tile covers ground the app actually works over. Tiles are compared as boxes, not
+// points: a low-zoom tile is enormous and one covering New York has to be kept even though most of it
+// is not New York, or the city has no map to zoom in from.
+export function coversACity(
+  path: string,
+  cities: readonly CityBounds[],
+): boolean {
+  const match = BASEMAP_TILE.exec(`/${path}`);
+  if (!match) {
+    return false;
+  }
+  const [zoom, x, y] = match.slice(1).map(Number);
+  const span = 2 ** zoom;
+  if (x < 0 || y < 0 || x >= span || y >= span) {
+    return false;
+  }
+  const west = (x / span) * 360 - 180;
+  const east = ((x + 1) / span) * 360 - 180;
+  // Web Mercator: latitude is the inverse Gudermannian of the row, and y counts DOWN from the north.
+  const latitude = (row: number): number =>
+    (Math.atan(Math.sinh(Math.PI * (1 - (2 * row) / span))) * 180) / Math.PI;
+  const north = latitude(y);
+  const south = latitude(y + 1);
+  return cities.some(
+    (city) =>
+      west < city.east &&
+      east > city.west &&
+      south < city.north &&
+      north > city.south,
+  );
+}
+
 // The exported app itself, as against the data it reads.
 const SHELL_FILES = ["", "index.html", "404.html", "manifest.webmanifest"];
 const SHELL_DIRS = ["_next/", "icons/"];
@@ -30,10 +82,31 @@ export interface Filed {
   // Network first, falling back to the cache. Only the two daily feeds: a stale timetable is worse
   // than a slow one, and they are the only things here that change without a deploy.
   fresh: boolean;
+  // What to store the response under, when that is not the request's own URL. The basemap needs it:
+  // its API key rides in the query string, so keying by the full URL would make a key rotation
+  // orphan every tile ever cached, and a developer's own key a second copy of all of them.
+  cacheKey?: string;
 }
 
-export function fileRequest(url: string, scope: string): Filed | null {
+export function fileRequest(
+  url: string,
+  scope: string,
+  cities: readonly CityBounds[] = [],
+): Filed | null {
   const target = new URL(url);
+  if (target.host === BASEMAP_HOST) {
+    // The key rides in the query string, so the path alone is the cache identity — two keys must not
+    // become two copies of the same tile.
+    const path = target.pathname.replace(/^\//, "");
+    return coversACity(path, cities)
+      ? {
+          path,
+          store: "overlay",
+          fresh: false,
+          cacheKey: `${target.origin}/${path}`,
+        }
+      : null;
+  }
   if (target.host === FEED_HOST) {
     const dir = target.pathname.startsWith(FEED_PREFIX)
       ? target.pathname.slice(FEED_PREFIX.length)

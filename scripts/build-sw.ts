@@ -10,6 +10,7 @@
 import { execFileSync } from "node:child_process";
 import { access, readdir, writeFile } from "node:fs/promises";
 import { join, relative } from "node:path";
+import manifest from "../src/tree-cover/manifest.json";
 
 const ROOT = join(import.meta.dirname, "..");
 const OUT = join(ROOT, "out");
@@ -105,6 +106,17 @@ const built = await Bun.build({
   define: {
     SW_VERSION: JSON.stringify(stamp),
     SW_PRECACHE: JSON.stringify(precache),
+    // The basemap is a whole planet the app only routes across two cities of, so the worker keeps
+    // its tiles only over those. Baked in from the manifest rather than fetched, because the rule
+    // has to hold on the very first tile, before anything has loaded.
+    SW_CITIES: JSON.stringify(
+      manifest.cities.map(({ bounds }) => ({
+        west: bounds.west,
+        south: bounds.south,
+        east: bounds.east,
+        north: bounds.north,
+      })),
+    ),
   },
 });
 if (!built.success) {

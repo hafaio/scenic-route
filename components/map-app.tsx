@@ -282,6 +282,14 @@ export default function MapApp() {
     "denied" | "unavailable" | null
   >(null);
   const [banner, setBanner] = useState<string | null>(null);
+  // The basemap is the one layer with no menu row to badge, and the one whose absence leaves the map
+  // unreadable rather than just emptier — overlays floating on blank ground with no streets to place
+  // them against. It gets the banner.
+  const handleBasemapLost = useCallback((lost: boolean) => {
+    if (lost) {
+      setBanner("Map background unavailable — check your connection.");
+    }
+  }, []);
   const [routingOpen, setRoutingOpen] = useState<boolean>(false);
   const [manualStart, setManualStart] = useState<{
     lat: number;
@@ -1601,6 +1609,7 @@ export default function MapApp() {
           initialCamera={initialCamera}
           preframedDest={preframedDest}
           onCamera={handleCamera}
+          onBasemapLost={handleBasemapLost}
           onDisengageFollow={handleDisengageFollow}
           onEndpointDragMove={handleEndpointDragMove}
           onEndpointDrag={handleEndpointDrag}
