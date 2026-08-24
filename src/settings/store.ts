@@ -1,7 +1,12 @@
 "use client";
 
 import { OVERLAYS, type OverlayId } from "../overlays/registry";
-import { FACTORS, type FactorKey } from "../routing/factors";
+import {
+  FACTORS,
+  type FactorKey,
+  GATES,
+  type GateKey,
+} from "../routing/factors";
 import { COVERAGE, DEFAULT_COVERAGE } from "./offline";
 
 // The reader's own preferences, as one versioned document rather than the scatter of keys the app
@@ -27,9 +32,15 @@ export interface Settings {
   weights: Partial<Record<FactorKey, number>>;
   allowFerries: boolean;
   allowSheds: boolean;
+  // The scenic factors in the order the route panel lists them. Empty is the table's own order, in
+  // src/routing/factors.tsx.
+  factorOrder: readonly FactorKey[];
   // Factors the reader has taken out of the route panel: no slider and no summary chip. Their
   // weights still price the route, so the panel counts the non-zero ones and says so.
   hiddenFactors: readonly FactorKey[];
+  // The two gates, taken out of the panel's header. Same bargain as a hidden factor: the gate keeps
+  // gating, so a hidden one that is CLOSED is counted alongside them.
+  hiddenGates: readonly GateKey[];
   // How much of the map to keep for offline use, as one of the coverage options in ./offline.ts. The
   // service worker is the one that enforces it and holds its own copy, since it runs when no page
   // does; this is the reader's side of that, and components/service-worker.tsx carries it across.
@@ -42,7 +53,9 @@ export const DEFAULT_SETTINGS: Settings = {
   weights: {},
   allowFerries: true,
   allowSheds: true,
+  factorOrder: [],
   hiddenFactors: [],
+  hiddenGates: [],
   coverage: DEFAULT_COVERAGE,
 };
 
@@ -89,6 +102,16 @@ function factorKeys(value: unknown): FactorKey[] {
     ? (value.filter(
         (key) => typeof key === "string" && FACTOR_KEYS.has(key),
       ) as FactorKey[])
+    : [];
+}
+
+const GATE_KEYS = new Set<string>(GATES.map(({ key }) => key));
+
+function gateKeys(value: unknown): GateKey[] {
+  return Array.isArray(value)
+    ? (value.filter(
+        (key) => typeof key === "string" && GATE_KEYS.has(key),
+      ) as GateKey[])
     : [];
 }
 
@@ -156,7 +179,9 @@ export function settingsFrom(
         ? folded.allowFerries
         : stored.allowFerries !== false,
       allowSheds: folded ? folded.allowSheds : stored.allowSheds !== false,
+      factorOrder: factorKeys(stored.factorOrder),
       hiddenFactors: factorKeys(hiddenFactors),
+      hiddenGates: gateKeys(stored.hiddenGates),
       coverage: COVERAGE.some(({ id }) => id === stored.coverage)
         ? (stored.coverage as string)
         : DEFAULT_COVERAGE,
@@ -257,14 +282,14 @@ export function subscribeSettings(listener: () => void): () => void {
   };
 }
 
-// The stored order reconciled with the registry, which is the one that changes under it. Ids the
-// registry has dropped go; ids it has gained are inserted where IT puts them relative to the
-// neighbours that survived, so a new overlay lands somewhere sensible rather than at the end of a
+// A stored order reconciled with the built-in one, which is what changes under it. Ids the build has
+// dropped go; ids it has gained are inserted where IT puts them relative to the neighbours that
+// survived, so a new overlay or a new factor lands somewhere sensible rather than at the end of a
 // list the reader arranged.
-export function mergeLayerOrder(
-  stored: readonly OverlayId[],
-  registry: readonly OverlayId[] = REGISTRY_ORDER,
-): OverlayId[] {
+export function mergeOrder<Key extends string>(
+  stored: readonly Key[],
+  registry: readonly Key[],
+): Key[] {
   const known = new Set(registry);
   const merged = stored.filter((id) => known.has(id));
   const placed = new Set(merged);
@@ -288,7 +313,20 @@ export function orderedOverlays(
 ): OverlayId[] {
   const hidden = new Set(hiddenLayers);
   const wanted = new Set(offered);
-  return mergeLayerOrder(layerOrder).filter(
+  return layerMenuOrder(layerOrder).filter(
     (id) => wanted.has(id) && !hidden.has(id),
+  );
+}
+
+export function layerMenuOrder(stored: readonly OverlayId[]): OverlayId[] {
+  return mergeOrder(stored, REGISTRY_ORDER);
+}
+
+// The scenic factors in the reader's order. Hiding is NOT applied here: the route panel drops the
+// hidden ones and the settings page shows them greyed, so the two want the same list.
+export function factorRunOrder(stored: readonly FactorKey[]): FactorKey[] {
+  return mergeOrder(
+    stored,
+    FACTORS.map(({ key }) => key),
   );
 }

@@ -3,6 +3,8 @@
 import type { ComponentType, CSSProperties } from "react";
 import {
   MdAccountBalance,
+  MdConstruction,
+  MdDirectionsBoat,
   MdDirectionsCar,
   MdFactory,
   MdMapsHomeWork,
@@ -53,6 +55,32 @@ export interface Factor {
   // time. Absent means every city has it.
   overlay?: OverlayId;
 }
+
+// The two gates. Switches rather than sliders, and drawn in the route panel's header rather than
+// among the sliders, so unlike the factors they carry no order — only whether they are offered.
+export type GateKey = "allowFerries" | "allowSheds";
+
+export interface Gate {
+  key: GateKey;
+  label: string;
+  Icon: ComponentType<{ className?: string; "aria-hidden"?: boolean }>;
+  overlay: OverlayId; // the layer a city without this gate's data omits
+}
+
+export const GATES: readonly Gate[] = [
+  {
+    key: "allowFerries",
+    label: "Allow ferries",
+    Icon: MdDirectionsBoat,
+    overlay: "ferries",
+  },
+  {
+    key: "allowSheds",
+    label: "Allow scaffolding",
+    Icon: MdConstruction,
+    overlay: "scaffolding",
+  },
+];
 
 export const FACTORS: readonly Factor[] = [
   {

@@ -1,13 +1,9 @@
 "use client";
 
-import type { ReactNode } from "react";
+import type { CSSProperties } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { FiEye, FiEyeOff, FiX } from "react-icons/fi";
-import {
-  MdConstruction,
-  MdDirectionsBoat,
-  MdDragIndicator,
-} from "react-icons/md";
+import { MdDragIndicator } from "react-icons/md";
 import type { City } from "../src/cities";
 import {
   OVERLAYS,
@@ -20,35 +16,81 @@ import {
   type FactorKey,
   FactorSlider,
   factorReading,
+  GATES,
+  type Gate,
+  type GateKey,
 } from "../src/routing/factors";
 import { COVERAGE, formatBytes } from "../src/settings/offline";
-import { mergeLayerOrder, updateSettings } from "../src/settings/store";
+import {
+  factorRunOrder,
+  layerMenuOrder,
+  updateSettings,
+} from "../src/settings/store";
 import { totals } from "../src/sw/ledger";
 import { useCity } from "./city-context";
 import { clearOfflineMaps } from "./service-worker";
+import { type RowDrag, useRowDrag } from "./use-row-drag";
 import { useSettings } from "./use-settings";
 
 // The reader's preferences. Opened at `#settings`, like the About dialog, so it is deep-linkable and
 // the back button dismisses it — and so the layers menu and the route panel can link INTO a section
 // rather than describing where it is.
 
-// Rows are a fixed height because the drag arithmetic is in rows: how far the finger has travelled,
-// divided by this, is how many places the layer has moved. Keep it in step with the row's own class.
-const ROW_HEIGHT = 44;
-
-interface Drag {
-  from: number; // where the row started
-  to: number; // where it would land if the finger lifted now
-  offset: number; // pixels the finger has travelled
+// The handle a row is dragged by, and the arrow keys that do the same thing without a pointer.
+// `touch-none` is on the handle alone, so a finger anywhere else on the row still scrolls the sheet.
+function DragHandle({
+  label,
+  index,
+  count,
+  drag,
+  move,
+}: {
+  label: string;
+  index: number;
+  count: number;
+  drag: RowDrag;
+  move: (from: number, to: number) => void;
+}) {
+  return (
+    <button
+      type="button"
+      onPointerDown={(event) => drag.start(event, index)}
+      onKeyDown={(event) => {
+        const step =
+          event.key === "ArrowUp" ? -1 : event.key === "ArrowDown" ? 1 : 0;
+        const to = index + step;
+        if (step !== 0 && to >= 0 && to < count) {
+          event.preventDefault();
+          move(index, to);
+        }
+      }}
+      aria-label={`Reorder ${label}, ${index + 1} of ${count}`}
+      className="grid h-8 w-8 shrink-0 cursor-grab touch-none place-items-center rounded-full text-slate-300 hover:bg-slate-100 active:cursor-grabbing dark:text-slate-500 dark:hover:bg-slate-700"
+    >
+      <MdDragIndicator />
+    </button>
+  );
 }
+
+// What a row wears while its list is being dragged in: the dragged one lifts and follows the finger,
+// the rest slide out of its way.
+function draggingRow(index: number, drag: RowDrag): CSSProperties {
+  const lifted = drag.isDragging(index);
+  return {
+    transform: `translateY(${drag.shiftOf(index)}px)`,
+    transition: drag.active && !lifted ? "transform 120ms" : "none",
+    zIndex: lifted ? 1 : 0,
+  };
+}
+
+const LIFTED =
+  "bg-white shadow-lg ring-1 ring-black/5 dark:bg-slate-700 dark:ring-white/10";
 
 function LayerRows() {
   const city = useCity();
   const { layerOrder, hiddenLayers } = useSettings();
-  const order = mergeLayerOrder(layerOrder);
+  const order = layerMenuOrder(layerOrder);
   const hidden = new Set(hiddenLayers);
-  const [drag, setDrag] = useState<Drag | null>(null);
-  // Read inside the pointer handlers, which are registered once and must not close over a stale one.
   const live = useRef(order);
   live.current = order;
 
@@ -57,6 +99,7 @@ function LayerRows() {
     next.splice(to, 0, ...next.splice(from, 1));
     updateSettings({ layerOrder: next });
   };
+  const drag = useRowDrag(order.length, move);
 
   const toggle = (id: OverlayId): void => {
     const next = new Set(hidden);
@@ -64,54 +107,6 @@ function LayerRows() {
       next.add(id);
     }
     updateSettings({ hiddenLayers: [...next] });
-  };
-
-  const startDrag = (
-    event: React.PointerEvent<HTMLButtonElement>,
-    from: number,
-  ): void => {
-    const handle = event.currentTarget;
-    handle.setPointerCapture(event.pointerId);
-    const originY = event.clientY;
-    const last = live.current.length - 1;
-    let landing = from;
-
-    const onMove = (moved: PointerEvent): void => {
-      const offset = moved.clientY - originY;
-      landing = Math.min(
-        last,
-        Math.max(0, from + Math.round(offset / ROW_HEIGHT)),
-      );
-      setDrag({ from, to: landing, offset });
-    };
-    const onEnd = (): void => {
-      handle.removeEventListener("pointermove", onMove);
-      handle.removeEventListener("pointerup", onEnd);
-      handle.removeEventListener("pointercancel", onEnd);
-      setDrag(null);
-      if (landing !== from) {
-        move(from, landing);
-      }
-    };
-    handle.addEventListener("pointermove", onMove);
-    handle.addEventListener("pointerup", onEnd);
-    handle.addEventListener("pointercancel", onEnd);
-  };
-
-  // Where a row sits while another is being dragged over it: the dragged one follows the finger, and
-  // the rows it has passed step out of its way by exactly one place.
-  const shiftOf = (index: number): number => {
-    if (!drag) {
-      return 0;
-    } else if (index === drag.from) {
-      return drag.offset;
-    } else if (drag.to > drag.from && index > drag.from && index <= drag.to) {
-      return -ROW_HEIGHT;
-    } else if (drag.to < drag.from && index >= drag.to && index < drag.from) {
-      return ROW_HEIGHT;
-    } else {
-      return 0;
-    }
   };
 
   return (
@@ -122,24 +117,13 @@ function LayerRows() {
           return null;
         }
         const off = hidden.has(id);
-        const dragging = drag?.from === index;
+        const label = overlayLabel(overlay, city);
         return (
           <li
             key={id}
-            style={{
-              height: ROW_HEIGHT,
-              transform: `translateY(${shiftOf(index)}px)`,
-              transition: drag
-                ? dragging
-                  ? "none"
-                  : "transform 120ms"
-                : "none",
-              zIndex: dragging ? 1 : 0,
-            }}
+            style={{ height: 44, ...draggingRow(index, drag) }}
             className={`relative flex items-center gap-3 rounded-xl px-2 ${
-              dragging
-                ? "bg-white shadow-lg ring-1 ring-black/5 dark:bg-slate-700 dark:ring-white/10"
-                : ""
+              drag.isDragging(index) ? LIFTED : ""
             }`}
           >
             <span className={off ? "opacity-40" : undefined}>
@@ -152,48 +136,54 @@ function LayerRows() {
                   : "text-slate-700 dark:text-slate-200"
               }`}
             >
-              <span className="truncate">{overlayLabel(overlay, city)}</span>
+              <span className="truncate">{label}</span>
               <MissingHere city={city} overlay={id} />
             </span>
-            <button
-              type="button"
-              onClick={() => toggle(id)}
-              aria-pressed={!off}
-              aria-label={
-                off
-                  ? `Show ${overlayLabel(overlay, city)} in the layers menu`
-                  : `Hide ${overlayLabel(overlay, city)} from the layers menu`
-              }
-              className="grid h-8 w-8 place-items-center rounded-full text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-700"
-            >
-              {off ? <FiEyeOff /> : <FiEye />}
-            </button>
-            {/* `touch-none` only here, so a finger anywhere else on the row still scrolls the sheet. */}
-            <button
-              type="button"
-              onPointerDown={(event) => startDrag(event, index)}
-              onKeyDown={(event) => {
-                const step =
-                  event.key === "ArrowUp"
-                    ? -1
-                    : event.key === "ArrowDown"
-                      ? 1
-                      : 0;
-                const to = index + step;
-                if (step !== 0 && to >= 0 && to < order.length) {
-                  event.preventDefault();
-                  move(index, to);
-                }
-              }}
-              aria-label={`Reorder ${overlayLabel(overlay, city)}, ${index + 1} of ${order.length}`}
-              className="grid h-8 w-8 cursor-grab touch-none place-items-center rounded-full text-slate-300 hover:bg-slate-100 active:cursor-grabbing dark:text-slate-500 dark:hover:bg-slate-700"
-            >
-              <MdDragIndicator />
-            </button>
+            <HideToggle
+              off={off}
+              label={label}
+              where="the layers menu"
+              onToggle={() => toggle(id)}
+            />
+            <DragHandle
+              label={label}
+              index={index}
+              count={order.length}
+              drag={drag}
+              move={move}
+            />
           </li>
         );
       })}
     </ul>
+  );
+}
+
+// The eye every hideable row wears. `where` is what the row is being taken out of, said out loud,
+// because "hide" alone leaves a reader guessing whether the thing stops applying.
+function HideToggle({
+  off,
+  label,
+  where,
+  onToggle,
+}: {
+  off: boolean;
+  label: string;
+  where: string;
+  onToggle: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      aria-pressed={!off}
+      aria-label={
+        off ? `Show ${label} in ${where}` : `Hide ${label} from ${where}`
+      }
+      className="grid h-8 w-8 shrink-0 place-items-center rounded-full text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-700"
+    >
+      {off ? <FiEyeOff /> : <FiEye />}
+    </button>
   );
 }
 
@@ -212,52 +202,107 @@ function MissingHere({ city, overlay }: { city: City; overlay?: OverlayId }) {
   }
 }
 
-// One of the two gates, editing the same state as the route panel's header toggles — which are only
-// there in a city that has the thing, so this is where a reader in the other city can still set it.
+// One of the two gates, editing the same state as the route panel's header toggles. Hideable like a
+// factor and on the same bargain: the gate keeps gating, so a closed one that has been hidden is
+// counted in the panel's "hidden preferences still apply" line.
 function GateRow({
-  icon,
-  label,
-  overlay,
+  gate,
   on,
+  hidden,
   onChange,
+  onHide,
 }: {
-  icon: ReactNode;
-  label: string;
-  overlay: OverlayId;
+  gate: Gate;
   on: boolean;
+  hidden: boolean;
   onChange: (on: boolean) => void;
+  onHide: () => void;
 }) {
   const city = useCity();
   return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={on}
-      onClick={() => onChange(!on)}
-      className="flex w-full items-center gap-3 rounded-xl px-2 py-2 text-left hover:bg-slate-50 dark:hover:bg-slate-700/60"
-    >
+    <li className="flex items-center gap-3 rounded-xl px-2 py-2">
       <span
-        className={on ? "text-slate-500 dark:text-slate-400" : "opacity-40"}
+        className={
+          hidden
+            ? "opacity-40"
+            : on
+              ? "text-slate-500 dark:text-slate-400"
+              : "opacity-40"
+        }
       >
-        {icon}
-      </span>
-      <span className="flex min-w-0 flex-1 items-baseline gap-2 text-sm text-slate-700 dark:text-slate-200">
-        <span className="truncate">{label}</span>
-        <MissingHere city={city} overlay={overlay} />
+        <gate.Icon className="h-4 w-4" aria-hidden={true} />
       </span>
       <span
-        aria-hidden="true"
+        className={`flex min-w-0 flex-1 items-baseline gap-2 text-sm ${
+          hidden
+            ? "text-slate-400 dark:text-slate-500"
+            : "text-slate-700 dark:text-slate-200"
+        }`}
+      >
+        <span className="truncate">{gate.label}</span>
+        <MissingHere city={city} overlay={gate.overlay} />
+      </span>
+      <button
+        type="button"
+        role="switch"
+        aria-checked={on}
+        aria-label={gate.label}
+        onClick={() => onChange(!on)}
         className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition ${
           on ? "bg-brand-500" : "bg-slate-300 dark:bg-slate-600"
         }`}
       >
         <span
+          aria-hidden="true"
           className={`inline-block h-4 w-4 rounded-full bg-white transition ${
             on ? "translate-x-4" : "translate-x-0.5"
           }`}
         />
-      </span>
-    </button>
+      </button>
+      <HideToggle
+        off={hidden}
+        label={gate.label}
+        where="the route panel"
+        onToggle={onHide}
+      />
+    </li>
+  );
+}
+
+function GateRows({
+  weights,
+  onAllowFerries,
+  onAllowSheds,
+}: {
+  weights: RouteWeights;
+  onAllowFerries: (on: boolean) => void;
+  onAllowSheds: (on: boolean) => void;
+}) {
+  const { hiddenGates } = useSettings();
+  const hidden = new Set(hiddenGates);
+  const setters: Record<GateKey, (on: boolean) => void> = {
+    allowFerries: onAllowFerries,
+    allowSheds: onAllowSheds,
+  };
+  return (
+    <ul className="mt-2">
+      {GATES.map((gate) => (
+        <GateRow
+          key={gate.key}
+          gate={gate}
+          on={weights[gate.key]}
+          hidden={hidden.has(gate.key)}
+          onChange={setters[gate.key]}
+          onHide={() => {
+            const next = new Set(hidden);
+            if (!next.delete(gate.key)) {
+              next.add(gate.key);
+            }
+            updateSettings({ hiddenGates: [...next] });
+          }}
+        />
+      ))}
+    </ul>
   );
 }
 
@@ -269,8 +314,18 @@ function FactorRows({
   onWeight: (key: FactorKey, weight: number) => void;
 }) {
   const city = useCity();
-  const { hiddenFactors } = useSettings();
+  const { factorOrder, hiddenFactors } = useSettings();
+  const order = factorRunOrder(factorOrder);
   const hidden = new Set(hiddenFactors);
+  const live = useRef(order);
+  live.current = order;
+
+  const move = (from: number, to: number): void => {
+    const next = [...live.current];
+    next.splice(to, 0, ...next.splice(from, 1));
+    updateSettings({ factorOrder: next });
+  };
+  const drag = useRowDrag(order.length, move);
 
   const toggle = (key: FactorKey): void => {
     const next = new Set(hidden);
@@ -282,11 +337,21 @@ function FactorRows({
 
   return (
     <ul className="mt-3">
-      {FACTORS.map((factor) => {
-        const off = hidden.has(factor.key);
-        const weight = weights[factor.key];
+      {order.map((key, index) => {
+        const factor = FACTORS.find((entry) => entry.key === key);
+        if (!factor) {
+          return null;
+        }
+        const off = hidden.has(key);
+        const weight = weights[key];
         return (
-          <li key={factor.key} className="px-2 py-1.5">
+          <li
+            key={key}
+            style={draggingRow(index, drag)}
+            className={`relative rounded-xl px-2 py-1.5 ${
+              drag.isDragging(index) ? LIFTED : ""
+            }`}
+          >
             <div className="flex items-center gap-3">
               <span className={off ? "opacity-40" : factor.tint}>
                 <factor.Icon className="h-4 w-4" aria-hidden={true} />
@@ -304,24 +369,24 @@ function FactorRows({
               <span className="shrink-0 text-xs tabular-nums text-slate-400 dark:text-slate-500">
                 {factorReading(factor, weight)}
               </span>
-              <button
-                type="button"
-                onClick={() => toggle(factor.key)}
-                aria-pressed={!off}
-                aria-label={
-                  off
-                    ? `Show ${factor.label} in the route panel`
-                    : `Hide ${factor.label} from the route panel`
-                }
-                className="grid h-8 w-8 place-items-center rounded-full text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-700"
-              >
-                {off ? <FiEyeOff /> : <FiEye />}
-              </button>
+              <HideToggle
+                off={off}
+                label={factor.label}
+                where="the route panel"
+                onToggle={() => toggle(key)}
+              />
+              <DragHandle
+                label={factor.label}
+                index={index}
+                count={order.length}
+                drag={drag}
+                move={move}
+              />
             </div>
             <FactorSlider
               factor={factor}
               weight={weight}
-              onChange={(next) => onWeight(factor.key, next)}
+              onChange={(next) => onWeight(key, next)}
               className="mt-1 w-full"
             />
           </li>
@@ -496,22 +561,11 @@ export default function SettingsDialog({
             Hiding one takes it out of the panel; it still prices the route.
           </p>
           <FactorRows weights={weights} onWeight={onWeight} />
-          <div className="mt-2">
-            <GateRow
-              icon={<MdDirectionsBoat className="h-4 w-4" aria-hidden={true} />}
-              label="Allow ferries"
-              overlay="ferries"
-              on={weights.allowFerries}
-              onChange={onAllowFerries}
-            />
-            <GateRow
-              icon={<MdConstruction className="h-4 w-4" aria-hidden={true} />}
-              label="Allow scaffolding"
-              overlay="scaffolding"
-              on={weights.allowSheds}
-              onChange={onAllowSheds}
-            />
-          </div>
+          <GateRows
+            weights={weights}
+            onAllowFerries={onAllowFerries}
+            onAllowSheds={onAllowSheds}
+          />
         </div>
 
         <OfflineSection />

@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { OverlayId } from "../overlays/registry";
-import { mergeLayerOrder, orderedOverlays, settingsFrom } from "./store";
+import { mergeOrder, orderedOverlays, settingsFrom } from "./store";
 
 // The registry is what changes under a stored order — a release adds a layer, a release removes one —
 // so these pin what happens to an order the reader arranged when it does.
@@ -9,7 +9,7 @@ const registry = ["canopy", "shade", "historic", "genus"] as OverlayId[];
 
 test("an order the reader arranged is kept", () => {
   const stored = ["genus", "canopy", "shade", "historic"] as OverlayId[];
-  expect(mergeLayerOrder(stored, registry)).toEqual(stored);
+  expect(mergeOrder(stored, registry)).toEqual(stored);
 });
 
 test("a layer the registry has dropped goes", () => {
@@ -20,7 +20,7 @@ test("a layer the registry has dropped goes", () => {
     "shade",
     "historic",
   ] as OverlayId[];
-  expect(mergeLayerOrder(stored, registry)).toEqual([
+  expect(mergeOrder(stored, registry)).toEqual([
     "genus",
     "canopy",
     "shade",
@@ -31,7 +31,7 @@ test("a layer the registry has dropped goes", () => {
 test("a new layer lands where the registry puts it, not at the end", () => {
   // The reader never saw `historic`; the registry lists it after `shade`, so that is where it goes.
   const stored = ["genus", "canopy", "shade"] as OverlayId[];
-  expect(mergeLayerOrder(stored, registry)).toEqual([
+  expect(mergeOrder(stored, registry)).toEqual([
     "genus",
     "canopy",
     "shade",
@@ -41,7 +41,7 @@ test("a new layer lands where the registry puts it, not at the end", () => {
 
 test("new layers at the front of the registry stay at the front", () => {
   const stored = ["historic", "genus"] as OverlayId[];
-  expect(mergeLayerOrder(stored, registry)).toEqual([
+  expect(mergeOrder(stored, registry)).toEqual([
     "canopy",
     "shade",
     "historic",
@@ -50,7 +50,7 @@ test("new layers at the front of the registry stay at the front", () => {
 });
 
 test("nothing stored is the registry's own order", () => {
-  expect(mergeLayerOrder([], registry)).toEqual(registry);
+  expect(mergeOrder([], registry)).toEqual(registry);
 });
 
 test("a city shows its own subset, in the reader's order, minus what they hid", () => {
