@@ -109,6 +109,11 @@ const CITY_SOURCES: Record<string, readonly DataSource[]> = {
     },
     { label: "Historic districts", detail: "Historic Districts · SF Planning" },
     {
+      label: "Businesses",
+      detail:
+        "Legacy Business Registry · SF Office of Small Business, filtered to those trading 50+ years",
+    },
+    {
       label: "Industrial land",
       detail: "Land use and PDR zoning · SF Planning, via DataSF",
     },

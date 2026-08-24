@@ -29,6 +29,7 @@ const TREE_DIR = join(PUBLIC_DIR, "trees");
 const SERVED_SOURCES = [
   "landmarks",
   "art",
+  "legacy",
   "ferries",
   "subway",
   "highways",
