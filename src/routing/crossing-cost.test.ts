@@ -3,7 +3,15 @@
 // that: a plain crossing is one edge, a median crossing is three, and both must cost one wait.
 
 import { expect, test } from "bun:test";
-import { CROSSING_SECONDS, crossingWait, rawSeconds } from "./cost";
+import { DEFAULT_WEIGHTS } from "../url-state";
+import {
+  CROSSING_AVOID_MULTIPLE,
+  CROSSING_SECONDS,
+  crossingPrice,
+  crossingWait,
+  type RouteWeights,
+  rawSeconds,
+} from "./cost";
 import { markMidRoadwayNodes, type RoutingGraph } from "./graph";
 
 const KIND_SIDEWALK = 0;
@@ -112,4 +120,52 @@ test("the wait rides on the ETA unit, on top of the walked time", () => {
   expect(rawSeconds(PLAIN, 1, 0)).toBeCloseTo(walked + CROSSING_SECONDS, 6);
   // entered from the island, the same edge is a continuation and owes nothing
   expect(rawSeconds(DIVIDED, 2, 4)).toBeCloseTo(DIVIDED.edgeLength[2] / 1.3, 6);
+});
+
+// The price the router pays for crossing, which is a different thing from the wait above: the wait is
+// how long a crossing takes and is always in the ETA, the price is what stops the route buying one
+// and is only charged when the reader has asked for fewer.
+
+const CROSSING_FREE: RouteWeights = {
+  ...DEFAULT_WEIGHTS,
+  fewerCrossings: false,
+};
+const CROSSING_PRICED: RouteWeights = {
+  ...DEFAULT_WEIGHTS,
+  fewerCrossings: true,
+};
+
+test("crossings cost the router nothing extra until asked", () => {
+  expect(crossingPrice(PLAIN, 1, 0, CROSSING_FREE)).toBe(0);
+  expect(crossingPrice(DIVIDED, 1, 0, CROSSING_FREE)).toBe(0);
+});
+
+test("asking for fewer prices the act of crossing, not the pavement", () => {
+  expect(crossingPrice(PLAIN, 1, 0, CROSSING_PRICED)).toBe(
+    CROSSING_SECONDS * CROSSING_AVOID_MULTIPLE,
+  );
+  expect(crossingPrice(PLAIN, 0, 2, CROSSING_PRICED)).toBe(0); // pavement
+});
+
+test("a divided street is priced once, not once per carriageway", () => {
+  const legs: Array<[number, number]> = [
+    [1, 0],
+    [2, 4],
+    [3, 5],
+  ];
+  const total = legs.reduce(
+    (sum, [edge, from]) =>
+      sum + crossingPrice(DIVIDED, edge, from, CROSSING_PRICED),
+    0,
+  );
+  expect(total).toBe(CROSSING_SECONDS * CROSSING_AVOID_MULTIPLE);
+});
+
+// The whole mechanism: a path cost has no memory, so "and straight back" cannot be recognised — but
+// an undone crossing pays the price twice for no progress, which is what makes it stop being worth
+// buying. This is the arithmetic that has to hold for that to work.
+test("crossing and crossing back costs twice, so a zigzag has to earn twice", () => {
+  const there = crossingPrice(PLAIN, 1, 0, CROSSING_PRICED);
+  const back = crossingPrice(PLAIN, 1, 1, CROSSING_PRICED);
+  expect(there + back).toBe(2 * CROSSING_SECONDS * CROSSING_AVOID_MULTIPLE);
 });

@@ -4,7 +4,6 @@ import type { CSSProperties } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { FiEye, FiEyeOff, FiX } from "react-icons/fi";
 import { MdDragIndicator } from "react-icons/md";
-import type { City } from "../src/cities";
 import {
   OVERLAYS,
   type OverlayId,
@@ -137,7 +136,6 @@ function LayerRows() {
               }`}
             >
               <span className="truncate">{label}</span>
-              <MissingHere city={city} overlay={id} />
             </span>
             <HideToggle
               off={off}
@@ -187,21 +185,6 @@ function HideToggle({
   );
 }
 
-// A preference this city has no data for, tagged the way the layers rows tag a layer it lacks. The
-// row stays live either way: one weight covers every city, and it prices the route in the ones that
-// do have the data.
-function MissingHere({ city, overlay }: { city: City; overlay?: OverlayId }) {
-  if (overlay === undefined || city.overlays.includes(overlay)) {
-    return null;
-  } else {
-    return (
-      <span className="shrink-0 text-[11px] text-slate-400 dark:text-slate-500">
-        not in {city.name}
-      </span>
-    );
-  }
-}
-
 // One of the two gates, editing the same state as the route panel's header toggles. Hideable like a
 // factor and on the same bargain: the gate keeps gating, so a closed one that has been hidden is
 // counted in the panel's "hidden preferences still apply" line.
@@ -218,7 +201,6 @@ function GateRow({
   onChange: (on: boolean) => void;
   onHide: () => void;
 }) {
-  const city = useCity();
   return (
     <li className="flex items-center gap-3 rounded-xl px-2 py-2">
       <span
@@ -240,7 +222,6 @@ function GateRow({
         }`}
       >
         <span className="truncate">{gate.label}</span>
-        <MissingHere city={city} overlay={gate.overlay} />
       </span>
       <button
         type="button"
@@ -271,19 +252,13 @@ function GateRow({
 
 function GateRows({
   weights,
-  onAllowFerries,
-  onAllowSheds,
+  onGate,
 }: {
   weights: RouteWeights;
-  onAllowFerries: (on: boolean) => void;
-  onAllowSheds: (on: boolean) => void;
+  onGate: (key: GateKey, on: boolean) => void;
 }) {
   const { hiddenGates } = useSettings();
   const hidden = new Set(hiddenGates);
-  const setters: Record<GateKey, (on: boolean) => void> = {
-    allowFerries: onAllowFerries,
-    allowSheds: onAllowSheds,
-  };
   return (
     <ul className="mt-2">
       {GATES.map((gate) => (
@@ -292,7 +267,7 @@ function GateRows({
           gate={gate}
           on={weights[gate.key]}
           hidden={hidden.has(gate.key)}
-          onChange={setters[gate.key]}
+          onChange={(on) => onGate(gate.key, on)}
           onHide={() => {
             const next = new Set(hidden);
             if (!next.delete(gate.key)) {
@@ -313,7 +288,6 @@ function FactorRows({
   weights: RouteWeights;
   onWeight: (key: FactorKey, weight: number) => void;
 }) {
-  const city = useCity();
   const { factorOrder, hiddenFactors } = useSettings();
   const order = factorRunOrder(factorOrder);
   const hidden = new Set(hiddenFactors);
@@ -364,7 +338,6 @@ function FactorRows({
                 }`}
               >
                 <span className="truncate">{factor.label}</span>
-                <MissingHere city={city} overlay={factor.overlay} />
               </span>
               <span className="shrink-0 text-xs tabular-nums text-slate-400 dark:text-slate-500">
                 {factorReading(factor, weight)}
@@ -489,15 +462,13 @@ function OfflineSection() {
 export default function SettingsDialog({
   weights,
   onWeight,
-  onAllowFerries,
-  onAllowSheds,
+  onGate,
   syncingAs,
   onClose,
 }: {
   weights: RouteWeights;
   onWeight: (key: FactorKey, weight: number) => void;
-  onAllowFerries: (allow: boolean) => void;
-  onAllowSheds: (allow: boolean) => void;
+  onGate: (key: GateKey, on: boolean) => void;
   syncingAs: string | null; // the signed-in address, or null on a device that is only ever local
   onClose: () => void;
 }) {
@@ -563,11 +534,7 @@ export default function SettingsDialog({
             Hiding one takes it out of the panel; it still prices the route.
           </p>
           <FactorRows weights={weights} onWeight={onWeight} />
-          <GateRows
-            weights={weights}
-            onAllowFerries={onAllowFerries}
-            onAllowSheds={onAllowSheds}
-          />
+          <GateRows weights={weights} onGate={onGate} />
         </div>
 
         <OfflineSection />

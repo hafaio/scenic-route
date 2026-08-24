@@ -55,6 +55,7 @@ function quantizeWeights(weights: RouteWeights): RouteWeights {
     shelter: quantize(weights.shelter),
     allowFerries: weights.allowFerries,
     allowSheds: weights.allowSheds,
+    fewerCrossings: weights.fewerCrossings,
   };
 }
 

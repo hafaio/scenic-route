@@ -11,6 +11,7 @@ import {
   MdPalette,
   MdStorefront,
   MdTerrain,
+  MdTraffic,
   MdWaterDrop,
   MdWbSunny,
 } from "react-icons/md";
@@ -35,11 +36,12 @@ import {
 // both draw the same eleven sliders, so the metadata lives here rather than in either of them: two
 // tables would be two chances for a label, a colour or a scale to drift.
 
-// The cost context minus its two gates, which are switches rather than sliders.
-export type FactorKey = Exclude<
-  keyof RouteWeights,
-  "allowFerries" | "allowSheds"
->;
+// The switches, as against the sliders. Drawn in the route panel's header rather than among the
+// sliders, so unlike the factors they carry no order — only whether they are offered.
+export type GateKey = "allowFerries" | "allowSheds" | "fewerCrossings";
+
+// Everything else in the cost context: one slider each.
+export type FactorKey = Exclude<keyof RouteWeights, GateKey>;
 
 export interface Factor {
   key: FactorKey;
@@ -56,15 +58,16 @@ export interface Factor {
   overlay?: OverlayId;
 }
 
-// The two gates. Switches rather than sliders, and drawn in the route panel's header rather than
-// among the sliders, so unlike the factors they carry no order — only whether they are offered.
-export type GateKey = "allowFerries" | "allowSheds";
-
 export interface Gate {
   key: GateKey;
   label: string;
   Icon: ComponentType<{ className?: string; "aria-hidden"?: boolean }>;
-  overlay: OverlayId; // the layer a city without this gate's data omits
+  // The layer a city without this gate's data omits. Absent where the gate needs no data of its own,
+  // so every city offers it.
+  overlay?: OverlayId;
+  // What the switch means when it is ON, for the panel's tooltip and the settings row.
+  on: string;
+  off: string;
 }
 
 export const GATES: readonly Gate[] = [
@@ -73,12 +76,23 @@ export const GATES: readonly Gate[] = [
     label: "Allow ferries",
     Icon: MdDirectionsBoat,
     overlay: "ferries",
+    on: "Ferries allowed — click to route without them",
+    off: "Ferries barred — click to allow ferry crossings",
   },
   {
     key: "allowSheds",
     label: "Allow scaffolding",
     Icon: MdConstruction,
     overlay: "scaffolding",
+    on: "Scaffolding allowed — click to route around sidewalk sheds",
+    off: "Scaffolding avoided — click to walk under sidewalk sheds again",
+  },
+  {
+    key: "fewerCrossings",
+    label: "Fewer crossings",
+    Icon: MdTraffic,
+    on: "Crossings priced high — click to let the route cross freely",
+    off: "Crossings cost what they take — click to stop the route zigzagging across a street",
   },
 ];
 
@@ -191,16 +205,18 @@ export const FACTORS: readonly Factor[] = [
 export const factorPercent = (factor: Factor, weight: number): number =>
   Math.round((weight / factor.max) * 100);
 
-// The reading beside a factor's slider: a plain "%" for one-sided factors, a bipolar "sun / shade"
-// for the signed shade factor (0 reads as off).
+// The reading beside a factor's slider. No per cent sign anywhere: every number on this map is one
+// of these, they are all read against each other rather than against a quantity of anything, and
+// eleven of them in a row with a sign each is a lot of punctuation for no information. The signed
+// factor keeps its direction, which is the one thing its number does not say on its own.
 export function factorReading(factor: Factor, weight: number): string {
   const value = factorPercent(factor, weight);
   if (!factor.signed) {
-    return `${value}%`;
+    return `${value}`;
   } else if (value === 0) {
     return "off";
   } else {
-    return value > 0 ? `${value}% sun` : `${-value}% shade`;
+    return value > 0 ? `${value} sun` : `${-value} shade`;
   }
 }
 

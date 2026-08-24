@@ -32,6 +32,7 @@ export interface Settings {
   weights: Partial<Record<FactorKey, number>>;
   allowFerries: boolean;
   allowSheds: boolean;
+  fewerCrossings: boolean;
   // The scenic factors in the order the route panel lists them. Empty is the table's own order, in
   // src/routing/factors.tsx.
   factorOrder: readonly FactorKey[];
@@ -57,6 +58,7 @@ export const DEFAULT_SETTINGS: Settings = {
   weights: {},
   allowFerries: true,
   allowSheds: true,
+  fewerCrossings: true,
   factorOrder: [],
   hiddenFactors: [],
   hiddenGates: [],
@@ -194,6 +196,9 @@ export function settingsFrom(
         ? folded.allowFerries
         : stored.allowFerries !== false,
       allowSheds: folded ? folded.allowSheds : stored.allowSheds !== false,
+      // Never had a pre-document key: it did not exist before the settings document did. Absent
+      // reads as ON, like the two gates above it.
+      fewerCrossings: stored.fewerCrossings !== false,
       factorOrder: factorKeys(stored.factorOrder),
       hiddenFactors: factorKeys(hiddenFactors),
       hiddenGates: gateKeys(stored.hiddenGates),

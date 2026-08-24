@@ -60,7 +60,7 @@ import {
   type RouteWeights,
 } from "../src/routing/cost";
 import { buildDirections } from "../src/routing/directions";
-import type { FactorKey } from "../src/routing/factors";
+import type { FactorKey, GateKey } from "../src/routing/factors";
 import { computeFerrySchedule } from "../src/routing/ferry-schedule";
 import { loadGraph, type RoutingGraph } from "../src/routing/graph";
 import { navProgress } from "../src/routing/nav-progress";
@@ -167,7 +167,8 @@ function loadRouting(
 // The weights the settings document holds, each falling back to its default. These are what a URL key
 // overrides and what a missing one leaves in place.
 function storedWeights(): RouteWeights {
-  const { weights, allowFerries, allowSheds } = storedSettings();
+  const { weights, allowFerries, allowSheds, fewerCrossings } =
+    storedSettings();
   const read = (key: FactorKey, fallback: number, min: number, max: number) => {
     const stored = weights[key];
     return stored === undefined
@@ -198,6 +199,7 @@ function storedWeights(): RouteWeights {
     shelter: read("shelter", DEFAULT_SHELTER_WEIGHT, 0, MAX_SHELTER_WEIGHT),
     allowFerries,
     allowSheds,
+    fewerCrossings,
   };
 }
 
@@ -346,6 +348,7 @@ export default function MapApp() {
     DEFAULT_SHELTER_WEIGHT,
   );
   const [allowSheds, setAllowSheds] = useState<boolean>(true);
+  const [fewerCrossings, setFewerCrossings] = useState<boolean>(true);
   const shedDayRef = useRef<string>("");
   // Which (city, clock tick) the graph's ferry timetable was resolved for. The DAY picks the services
   // that run, but the sailing you catch moves with the clock inside that day, so this rebuilds on
@@ -798,8 +801,10 @@ export default function MapApp() {
       shelter: shelterWeight,
       allowFerries,
       allowSheds,
+      fewerCrossings,
     }),
     [
+      fewerCrossings,
       treeWeight,
       ferryWeight,
       landmarkWeight,
@@ -1074,6 +1079,10 @@ export default function MapApp() {
       setPickTarget(null);
       setRouteState({ kind: "idle" });
       routedForRef.current = null;
+      // The peek bar is a way of getting a computed route out of the way, so it has no meaning over
+      // an empty panel: without this, closing directions while minimized and opening them again
+      // brings back a slim bar with nothing in it and no obvious way to see the fields.
+      setPanelMinimized(false);
     } else {
       // warm the graph so the first route lands without a fetch stall
       void loadRouting(city.id);
@@ -1089,11 +1098,6 @@ export default function MapApp() {
   const handleFerryWeight = useCallback((weight: number) => {
     setFerryWeight(weight);
     persistWeight("ferry", weight);
-  }, []);
-
-  const handleAllowFerries = useCallback((allow: boolean) => {
-    setAllowFerries(allow);
-    updateSettings({ allowFerries: allow });
   }, []);
 
   const handleLandmarkWeight = useCallback((weight: number) => {
@@ -1141,9 +1145,16 @@ export default function MapApp() {
     persistWeight("shelter", weight);
   }, []);
 
-  const handleAllowSheds = useCallback((allow: boolean) => {
-    setAllowSheds(allow);
-    updateSettings({ allowSheds: allow });
+  // The three switches, by key rather than a callback each: they are a table now (src/routing/
+  // factors.tsx), and a callback each would be a fourth place to add a line every time one is added.
+  const handleGate = useCallback((key: GateKey, on: boolean) => {
+    const setters: Record<GateKey, (on: boolean) => void> = {
+      allowFerries: setAllowFerries,
+      allowSheds: setAllowSheds,
+      fewerCrossings: setFewerCrossings,
+    };
+    setters[key](on);
+    updateSettings({ [key]: on });
   }, []);
 
   // The settings page edits the same weights the panel does, and sends a key and a value rather than
@@ -1776,13 +1787,13 @@ export default function MapApp() {
             shadeDataLost={shadeDataLost}
             shelterWeight={shelterWeight}
             allowSheds={allowSheds}
+            fewerCrossings={fewerCrossings}
             directions={directions}
             progress={progress}
             directionsOpen={directionsOpen}
             minimized={panelMinimized}
             onTreeWeight={handleTreeWeight}
             onFerryWeight={handleFerryWeight}
-            onAllowFerries={handleAllowFerries}
             onLandmarkWeight={handleLandmarkWeight}
             onArtWeight={handleArtWeight}
             onHighwayWeight={handleHighwayWeight}
@@ -1792,7 +1803,7 @@ export default function MapApp() {
             onHistoricWeight={handleHistoricWeight}
             onShadeWeight={handleShadeWeight}
             onShelterWeight={handleShelterWeight}
-            onAllowSheds={handleAllowSheds}
+            onGate={handleGate}
             onStartSelect={handleStartSelect}
             onDestSelect={handleDestSelect}
             onStartClear={handleClearStart}
@@ -1821,8 +1832,7 @@ export default function MapApp() {
           <SettingsDialog
             weights={weights}
             onWeight={handleWeight}
-            onAllowFerries={handleAllowFerries}
-            onAllowSheds={handleAllowSheds}
+            onGate={handleGate}
             syncingAs={auth.kind === "signedIn" ? auth.info.user.email : null}
             onClose={() => setSettingsOpen(false)}
           />

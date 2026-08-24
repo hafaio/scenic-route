@@ -34,6 +34,23 @@ export const WALK_METERS_PER_SECOND = 1.3;
 // worth a minute on a half-hour walk, so telling them apart buys less than it costs.
 export const CROSSING_SECONDS = 3;
 
+// What a crossing costs the ROUTER, as a multiple of the delay above, when the reader has asked for
+// fewer of them. Nothing to do with how long a crossing takes — that is CROSSING_SECONDS and is what
+// the ETA reports either way. This is a price on the act.
+//
+// The thing being priced out is a crossing that gets undone: over to the shady side of a block and
+// straight back, which buys one block of better pavement for two crossings. A path cost cannot see
+// "and straight back" — it has no memory — but it does not need to, because an undone crossing pays
+// this twice for no progress. Pricing the act is the whole mechanism.
+//
+// 10x is 30 effective seconds. The floor is what a one-block detour buys: about 80 m of pavement at
+// full discount saves in the order of 30 effective seconds, so a crossing has to cost more than half
+// of that for the pair to stop being worth it. There is no matching ceiling — the alternative to
+// crossing a street is going round the end of the block, which means crossing two OTHER streets, so
+// raising this never makes a route go round the houses to avoid a crossing. It just stops buying
+// them.
+export const CROSSING_AVOID_MULTIPLE = 10;
+
 // How long a walker will stand on a pier before the ferry stops counting as a way to get anywhere.
 // The timetable always has a next sailing — tomorrow's first boat, if nothing else — so without a
 // bound a route planned at midnight would propose waiting until morning. Past this the edge costs
@@ -281,6 +298,10 @@ export interface RouteWeights {
   shelter: number; // preference for cover overhead in the rain: decks and canopy
   allowFerries: boolean;
   allowSheds: boolean; // false routes around scaffolding, at a large per-metre penalty
+  // Prices every crossing far above what it takes to walk, which is what stops a route zigzagging
+  // across a street to chase the shady side and straight back. On by default: the zigzag is not a
+  // taste, it is the cost model buying something nobody wanted. See CROSSING_AVOID_MULTIPLE.
+  fewerCrossings: boolean;
 }
 
 // This edge's own cover, 0..1. In v2 the side is topology, so an edge carries a single value.
@@ -528,12 +549,30 @@ export function effSeconds(
       return wait + crossing * Math.max(FERRY_FLOOR, 1 - weights.ferry);
     }
   } else {
+    // The crossing price is added AFTER the multiplier, not multiplied by it: it is a price on
+    // crossing rather than a property of the pavement, and a strong shade preference discounting it
+    // is exactly the thing it exists to stop.
     return (
       (graph.edgeLength[edge] /
         walkSpeedOn(graph, edge, edgeForward(graph, edge, fromNode))) *
-      edgeMultiplier(graph, edge, weights, elapsedSeconds)
+        edgeMultiplier(graph, edge, weights, elapsedSeconds) +
+      crossingPrice(graph, edge, fromNode, weights)
     );
   }
+}
+
+// What this edge adds for being a crossing. Zero unless the reader has asked for fewer, and charged
+// through `crossingWait`, so a divided street chained through its island is priced once rather than
+// once per carriageway.
+export function crossingPrice(
+  graph: RoutingGraph,
+  edge: number,
+  fromNode: number,
+  weights: RouteWeights,
+): number {
+  return weights.fewerCrossings
+    ? crossingWait(graph, edge, fromNode) * CROSSING_AVOID_MULTIPLE
+    : 0;
 }
 
 // The least seconds a walked metre can cost — the min multiplier over walking speed. The A* heuristic
