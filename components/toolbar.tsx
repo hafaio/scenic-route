@@ -40,6 +40,7 @@ interface ToolbarProps {
   onSignOut: () => void | Promise<void>;
   onRefreshClaims: () => void | Promise<void>;
   onAbout: () => void;
+  onSettings: () => void;
   onLogHere: () => void;
   logHereDisabled: boolean; // no live location yet, so there's nothing to log
   logHereBusy: boolean; // a high-accuracy fix + geocode is in flight
@@ -75,6 +76,7 @@ export default function Toolbar({
   onSignOut,
   onRefreshClaims,
   onAbout,
+  onSettings,
   onLogHere,
   logHereDisabled,
   logHereBusy,
@@ -134,6 +136,7 @@ export default function Toolbar({
         city={city}
         active={activeOverlays}
         onToggle={onToggleOverlay}
+        onSettings={onSettings}
       />
       <ClockControl />
       <ShareControl composeUrl={composeShareUrl} />

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { FiCheck, FiCloudOff, FiLayers } from "react-icons/fi";
+import { FiCheck, FiCloudOff, FiLayers, FiSliders } from "react-icons/fi";
 import type { City } from "../src/cities";
 import {
   OVERLAYS,
@@ -9,11 +9,14 @@ import {
   overlayLabel,
 } from "../src/overlays/registry";
 import { useUnreachableLayers } from "../src/overlays/status";
+import { orderedOverlays } from "../src/settings/store";
+import { useSettings } from "./use-settings";
 
 interface LayersControlProps {
   city: City;
   active: ReadonlySet<OverlayId>;
   onToggle: (id: OverlayId) => void;
+  onSettings: () => void;
 }
 
 const ROW_BASE =
@@ -25,10 +28,12 @@ export default function LayersControl({
   city,
   active,
   onToggle,
+  onSettings,
 }: LayersControlProps) {
   const [menuOpen, setMenuOpen] = useState<boolean>(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const unreachable = useUnreachableLayers();
+  const settings = useSettings();
 
   useEffect(() => {
     if (!menuOpen) {
@@ -54,9 +59,11 @@ export default function LayersControl({
 
   // The button wears the single active layer's own glyph when exactly one is on, so the toolbar hints
   // at what's showing; with none or several on it falls back to the generic layers icon.
-  const offered = OVERLAYS.filter((overlay) =>
-    city.overlays.includes(overlay.id),
-  );
+  // The city's own layers, in the reader's order and without the ones they have hidden
+  // (src/settings/store.ts).
+  const offered = orderedOverlays(city.overlays, settings)
+    .map((id) => OVERLAYS.find((overlay) => overlay.id === id))
+    .filter((overlay) => overlay !== undefined);
   const activeEntries = offered.filter((overlay) => active.has(overlay.id));
   const soleEntry = activeEntries.length === 1 ? activeEntries[0] : null;
 
@@ -118,6 +125,18 @@ export default function LayersControl({
               </button>
             );
           })}
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              setMenuOpen(false);
+              onSettings();
+            }}
+            className={`${ROW_IDLE} border-t border-slate-200/60 text-slate-500 dark:border-slate-700/60 dark:text-slate-400`}
+          >
+            <FiSliders className="h-4 w-4" aria-hidden="true" />
+            Layer settings…
+          </button>
         </div>
       ) : null}
     </div>
