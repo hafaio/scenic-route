@@ -35,6 +35,7 @@ test("every route field survives a round trip", () => {
     shelter: 0.25,
     allowFerries: false,
     allowSheds: false,
+    fewerCrossings: true,
   };
   const state: RouteUrlState = {
     start: { lat: 40.712776, lng: -74.005974 },

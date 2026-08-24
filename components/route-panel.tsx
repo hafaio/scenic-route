@@ -6,16 +6,15 @@ import {
   FiChevronUp,
   FiCloudOff,
   FiCrosshair,
+  FiEyeOff,
   FiLoader,
   FiNavigation,
   FiSearch,
-  FiSettings,
   FiX,
 } from "react-icons/fi";
 import {
   MdAccountBalance,
   MdArrowUpward,
-  MdConstruction,
   MdDirectionsBoat,
   MdFlag,
   MdOutlineDirectionsWalk,
@@ -104,13 +103,13 @@ interface RoutePanelProps {
   shadeDataLost: boolean;
   shelterWeight: number;
   allowSheds: boolean;
+  fewerCrossings: boolean;
   directions: Maneuver[] | null;
   progress: NavProgress | null; // live position along the route, or null when off-route/unlocated
   directionsOpen: boolean;
   minimized: boolean; // shrunk to the slim peek bar
   onTreeWeight: (weight: number) => void;
   onFerryWeight: (weight: number) => void;
-  onAllowFerries: (allow: boolean) => void;
   onLandmarkWeight: (weight: number) => void;
   onArtWeight: (weight: number) => void;
   onHighwayWeight: (weight: number) => void;
@@ -120,7 +119,7 @@ interface RoutePanelProps {
   onHistoricWeight: (weight: number) => void;
   onShadeWeight: (weight: number) => void;
   onShelterWeight: (weight: number) => void;
-  onAllowSheds: (allow: boolean) => void;
+  onGate: (key: GateKey, on: boolean) => void;
   onStartSelect: (result: GeocodeResult) => void;
   onDestSelect: (result: GeocodeResult) => void;
   onStartClear: () => void;
@@ -233,13 +232,13 @@ export default function RoutePanel({
   shadeDataLost,
   shelterWeight,
   allowSheds,
+  fewerCrossings,
   directions,
   progress,
   directionsOpen,
   minimized,
   onTreeWeight,
   onFerryWeight,
-  onAllowFerries,
   onLandmarkWeight,
   onArtWeight,
   onHighwayWeight,
@@ -249,7 +248,7 @@ export default function RoutePanel({
   onHistoricWeight,
   onShadeWeight,
   onShelterWeight,
-  onAllowSheds,
+  onGate,
   onStartSelect,
   onDestSelect,
   onStartClear,
@@ -265,13 +264,23 @@ export default function RoutePanel({
   const { factorOrder, hiddenFactors, hiddenGates } = useSettings();
   const hidden = new Set(hiddenFactors);
   const hiddenGate = new Set(hiddenGates);
+  // Each gate's own colour when it is on, which is the layer's where it has one.
+  const gateTint: Record<GateKey, string> = {
+    allowFerries: "text-blue-600 dark:text-blue-400",
+    allowSheds: "text-orange-600 dark:text-orange-400",
+    fewerCrossings: "text-slate-600 dark:text-slate-300",
+  };
   const gateOpen: Record<GateKey, boolean> = {
     allowFerries,
     allowSheds,
+    fewerCrossings,
   };
+  // Whether the city has anything for this gate to act on. Crossings are not a dataset — every city
+  // has streets to cross — so it is offered everywhere.
   const gateHere: Record<GateKey, boolean> = {
     allowFerries: capabilities.ferries,
     allowSheds: capabilities.sheds,
+    fewerCrossings: true,
   };
   // The highlighted maneuver row is scrolled into view whenever the next maneuver advances.
   const highlightRef = useRef<HTMLLIElement | null>(null);
@@ -471,46 +480,23 @@ export default function RoutePanel({
             Walking directions
           </p>
           <div className="flex items-center gap-1">
-            {capabilities.ferries && !hiddenGate.has("allowFerries") && (
+            {GATES.filter(
+              (gate) => gateHere[gate.key] && !hiddenGate.has(gate.key),
+            ).map((gate) => (
               <button
+                key={gate.key}
                 type="button"
-                onClick={() => onAllowFerries(!allowFerries)}
-                aria-label="Allow ferries"
-                aria-pressed={allowFerries}
-                title={
-                  allowFerries
-                    ? "Ferries allowed — click to route without them"
-                    : "Ferries barred — click to allow ferry crossings"
-                }
+                onClick={() => onGate(gate.key, !gateOpen[gate.key])}
+                aria-label={gate.label}
+                aria-pressed={gateOpen[gate.key]}
+                title={gateOpen[gate.key] ? gate.on : gate.off}
                 className={`-m-1 grid h-8 w-8 place-items-center rounded-full hover:bg-slate-100 dark:hover:bg-slate-700 ${
-                  allowFerries
-                    ? "text-blue-600 dark:text-blue-400"
-                    : "text-slate-400"
+                  gateOpen[gate.key] ? gateTint[gate.key] : "text-slate-400"
                 }`}
               >
-                <MdDirectionsBoat />
+                <gate.Icon />
               </button>
-            )}
-            {capabilities.sheds && !hiddenGate.has("allowSheds") && (
-              <button
-                type="button"
-                onClick={() => onAllowSheds(!allowSheds)}
-                aria-label="Allow scaffolding"
-                aria-pressed={allowSheds}
-                title={
-                  allowSheds
-                    ? "Scaffolding allowed — click to route around sidewalk sheds"
-                    : "Scaffolding avoided — click to walk under sidewalk sheds again"
-                }
-                className={`-m-1 grid h-8 w-8 place-items-center rounded-full hover:bg-slate-100 dark:hover:bg-slate-700 ${
-                  allowSheds
-                    ? "text-orange-600 dark:text-orange-400"
-                    : "text-slate-400"
-                }`}
-              >
-                <MdConstruction />
-              </button>
-            )}
+            ))}
             <button
               type="button"
               onClick={onToggleMinimize}
@@ -573,28 +559,48 @@ export default function RoutePanel({
         ) : null}
 
         <div className="mt-4">
-          <button
-            type="button"
-            onClick={toggleScenery}
-            aria-expanded={sceneryOpen}
-            aria-label={sceneryOpen ? "Hide scenery sliders" : "Adjust scenery"}
-            className="flex w-full items-center justify-between gap-2"
-          >
-            <span className="text-[11px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
-              Scenery
-            </span>
-            {sceneryOpen ? (
-              <FiChevronUp
-                className="h-4 w-4 text-slate-400"
-                aria-hidden="true"
-              />
-            ) : (
-              <FiChevronDown
-                className="h-4 w-4 text-slate-400"
-                aria-hidden="true"
-              />
-            )}
-          </button>
+          <div className="flex w-full items-center gap-2">
+            <button
+              type="button"
+              onClick={toggleScenery}
+              aria-expanded={sceneryOpen}
+              aria-label={
+                sceneryOpen ? "Hide scenery sliders" : "Adjust scenery"
+              }
+              className="flex min-w-0 flex-1 items-center justify-between gap-2"
+            >
+              <span className="text-[11px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                Scenery
+              </span>
+              {sceneryOpen ? (
+                <FiChevronUp
+                  className="h-4 w-4 text-slate-400"
+                  aria-hidden="true"
+                />
+              ) : (
+                <FiChevronDown
+                  className="h-4 w-4 text-slate-400"
+                  aria-hidden="true"
+                />
+              )}
+            </button>
+            {/* Hiding is about the panel, not the route, so a hidden preference at a non-zero weight
+                is still bending the line on the map — and this is the only thing on screen that says
+                so. A shut eye and a count rather than a sentence: it has to fit beside the heading,
+                because a line of its own is what the reader hid those preferences to get back. */}
+            {hiddenApplying > 0 ? (
+              <button
+                type="button"
+                onClick={onSettings}
+                title={`${hiddenApplying} hidden preference${hiddenApplying === 1 ? "" : "s"} still ${hiddenApplying === 1 ? "applies" : "apply"} to this route — open settings`}
+                aria-label={`${hiddenApplying} hidden preference${hiddenApplying === 1 ? "" : "s"} still applying. Open settings.`}
+                className="flex shrink-0 items-center gap-1 rounded-full px-1.5 py-0.5 text-[11px] font-semibold tabular-nums text-slate-400 hover:bg-slate-100 dark:text-slate-500 dark:hover:bg-slate-700"
+              >
+                <FiEyeOff className="h-3.5 w-3.5" aria-hidden="true" />
+                {hiddenApplying}
+              </button>
+            ) : null}
+          </div>
 
           {/* The collapsed peek, on its own row rather than beside the heading: it is eleven chips
               wide at most, and sharing a line with the heading left it about a third of the panel to
@@ -657,19 +663,6 @@ export default function RoutePanel({
               ))}
             </div>
           ) : null}
-
-          {hiddenApplying > 0 ? (
-            <button
-              type="button"
-              onClick={onSettings}
-              className="mt-2 flex items-center gap-1.5 text-[11px] text-slate-400 underline-offset-2 hover:underline dark:text-slate-500"
-            >
-              <FiSettings className="h-3 w-3" aria-hidden="true" />
-              {hiddenApplying === 1
-                ? "1 hidden preference still applies"
-                : `${hiddenApplying} hidden preferences still apply`}
-            </button>
-          ) : null}
         </div>
 
         {needsStart ? (
@@ -712,7 +705,6 @@ export default function RoutePanel({
                     {Math.round(
                       summary.factors[factor.key as keyof RouteFactors] * 100,
                     )}
-                    %
                   </span>
                 ))}
               </div>

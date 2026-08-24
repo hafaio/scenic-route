@@ -30,6 +30,7 @@ import {
   MAX_TREE_WEIGHT,
   type RouteWeights,
 } from "./routing/cost";
+import type { FactorKey } from "./routing/factors";
 
 export interface LatLng {
   lat: number;
@@ -72,6 +73,7 @@ export const DEFAULT_WEIGHTS: RouteWeights = {
   shelter: DEFAULT_SHELTER_WEIGHT,
   allowFerries: true,
   allowSheds: true,
+  fewerCrossings: true,
 };
 
 export const DEFAULT_ROUTE_STATE: RouteUrlState = {
@@ -90,7 +92,7 @@ const DAY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 
 interface WeightParam {
   key: string;
-  field: Exclude<keyof RouteWeights, "allowFerries" | "allowSheds">;
+  field: FactorKey;
   min: number;
   max: number;
 }
@@ -132,6 +134,7 @@ const ROUTE_KEYS: readonly string[] = [
   ...WEIGHT_PARAMS.map((param) => param.key),
   "ferries",
   "sheds",
+  "crossings",
   "time",
   "date",
 ];
@@ -206,6 +209,9 @@ export function decodeRoute(
   weights.allowSheds = params.has("sheds")
     ? params.get("sheds") !== "0"
     : defaults.weights.allowSheds;
+  weights.fewerCrossings = params.has("crossings")
+    ? params.get("crossings") !== "0"
+    : defaults.weights.fewerCrossings;
   const hour = params.get("time");
   const day = params.get("date");
   return {
@@ -237,6 +243,9 @@ export function encodeRoute(state: RouteUrlState): URLSearchParams {
   }
   if (!state.weights.allowSheds) {
     params.set("sheds", "0");
+  }
+  if (!state.weights.fewerCrossings) {
+    params.set("crossings", "0");
   }
   if (state.customHour !== null) {
     params.set("time", String(round(state.customHour, WEIGHT_DIGITS)));
