@@ -3,15 +3,14 @@
 // Which passes run at all is the tiler's decision, made pass by pass from stamps it computes over
 // the inputs each one reads; the passes themselves, the directories they own and the pyramids at
 // public/tiles/canopy/{z}/{x}/{y}.webp and the vector chunks at public/streets/{x}/{y}.bin are all
-// its side of the line. What is left here is what only TypeScript knows: the colour ramp, the sun
-// grid, the resolved DEM, which committed sources each city has, and the hash of the tiler's own
-// sources below. See scripts/README.md.
+// its side of the line. What is left here is what only TypeScript knows: the sun grid, the resolved
+// DEM, which committed sources each city has, and the hash of the tiler's own sources below. See
+// scripts/README.md.
 
 import { createHash } from "node:crypto";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 import manifest from "../src/tree-cover/manifest.json";
-import { rampAlpha, rampColor } from "../src/tree-cover/ramp";
 import { fetchElevationRaster } from "./elevation";
 import {
   computeShadeBuckets,
@@ -27,7 +26,7 @@ const DATA_DIR = join(ROOT, "data");
 const PUBLIC_DIR = join(ROOT, "public");
 const TILE_DIR = join(PUBLIC_DIR, "tiles");
 // The measured LiDAR canopy pyramid, rendered from data/canopy/*.bin: the map's cover fill, blurred
-// and coloured by the shared ramp.
+// and written as a covered fraction in alpha, which the client colours with the shared ramp.
 const CANOPY_TILE_DIR = join(TILE_DIR, "canopy");
 // The client-shaded genus dominance pyramid, rendered from data/trees/*.bin: four lossless data tiles
 // per position, each carrying three genera's local crown density in R/G/B. The WebGL overlay
@@ -104,26 +103,7 @@ interface Plan {
   genusFieldTiles: string;
   routing: string;
   graphCache: string;
-  ramp: number[];
   cities: PlanCity[];
-}
-
-// RGBA for every density a field byte can hold. The ramp is a *TypeScript* module because the
-// client's street layer imports the very same one, which is what makes the block fill and the
-// street lines one colour function; the tiler is handed the 256 steps of it rather than a
-// second definition to drift from.
-function rampTable(): number[] {
-  const table = new Uint8ClampedArray(256 * 4);
-  for (let step = 0; step < 256; step++) {
-    const density = step / 255;
-    const { red, green, blue } = rampColor(density);
-    const offset = step * 4;
-    table[offset] = red;
-    table[offset + 1] = green;
-    table[offset + 2] = blue;
-    table[offset + 3] = 255 * rampAlpha(density);
-  }
-  return Array.from(table);
 }
 
 function sourcePath(directory: string, file: string): string {
@@ -221,7 +201,6 @@ async function writePlan(): Promise<void> {
     genusFieldTiles: GENUS_FIELD_TILE_DIR,
     routing: ROUTING_DIR,
     graphCache: GRAPH_CACHE_DIR,
-    ramp: rampTable(),
     cities: await Promise.all(cities.map(planCity)),
   };
   await mkdir(join(ROOT, ".build"), { recursive: true });

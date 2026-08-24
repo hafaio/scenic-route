@@ -38,7 +38,7 @@ scripts either side of one hand their work over as files.
 
 | | |
 | --- | --- |
-| `scripts/` | Socrata paging, the Overpass mirror rotation, the disk cache, the `.bin` encoders, the manifest, and the colour ramp |
+| `scripts/` | Socrata paging, the Overpass mirror rotation, the disk cache, the `.bin` encoders, and the manifest |
 | `crates/tiler` | the canopy convolution and the cover it yields, the sidewalk offsets and their cover, the Monte-Carlo cover distribution, the per-polygon canopy heights, the genus-dot overlay, the tile pyramids, the WebPs, the street and caster chunks, and the routing graph |
 
 ```sh
@@ -81,11 +81,12 @@ Two things cross the boundary in the other direction, and both are deliberate:
   into each tree's crown byte, and the canopy's seasonal opacity stays in the client
   (`src/shade/phenology.ts`, applied when the shade overlay composites the two shadow pyramids), so
   the tiler does geometry, not botany.
-- **The colour ramp stays in TypeScript** (`src/tree-cover/ramp.ts`), because the client's
-  street layer imports the same module. That shared import is what guarantees the block fill
-  and the street lines are one colour function. `build-tiles` evaluates it over the 256 density
-  steps and hands the tiler a 1024-byte RGBA lookup table; Rust loads it as data and never
-  defines a ramp of its own.
+- **The colour ramp stays in TypeScript**, and it no longer reaches the tiler at all. Every
+  raster overlay ships **values, not colours** — the canopy pyramid carries the covered fraction
+  itself in alpha, the terrain pyramid carries height, relief and land cover in three channels —
+  and the client applies the ramp to those bytes in a shader. So the block fill and the street
+  lines are still one colour function, now because the same module paints both at render time
+  rather than because a lookup table was baked into the tiles.
 
 Because the estimator now sits *behind* the encoders, it reads the coordinates that actually
 ship: the cover at a street vertex is sampled at the quantized position in
@@ -297,8 +298,13 @@ separate point-KDE lifting park interiors; the ForMS points now drive only the g
 (the published all-canopy figure is ~22%), recorded in the manifest as `field.canopy.squareKm`.
 
 The canopy pass renders it into the cover **fill pyramid**, `public/tiles/canopy/{z}/{x}/{y}.webp`,
-over the z9–z15 plan and coloured by the **same ramp LUT** — canopy is a covered fraction in
-[0, 1), the very quantity the ramp is defined over. A coarse grid over the ~1.08 M polygons
+over the z9–z15 plan. The tile is a **value, not a picture**: each pixel's covered fraction is
+quantized to a byte and written into **alpha**, with RGB left at zero, and the client colours it
+with the shared ramp — canopy is a covered fraction in [0, 1), the very quantity the ramp is
+defined over. The quantization is the one the baked LUT used (`round(cover × 255)`), so the shaded
+tile is the old painted one pixel for pixel. The encode stays **lossy** WebP: its alpha plane is
+compressed losslessly, so the cover byte survives exactly, and the constant zero RGB costs nothing.
+A coarse grid over the ~1.08 M polygons
 (CSR-style, like the tree index) hands each tile only the polygons it touches; each pixel's canopy
 fraction is a 4× supersampled even-odd polygon fill averaged back down (so multipolygon holes
 punch through and edges antialias), clipped to the land mask so nothing bleeds over water. A tile
@@ -798,27 +804,39 @@ pairs to 5, and the five left are terminal loops and a mezzanine entrance. The f
 
 ## The colour scale
 
-`src/tree-cover/ramp.ts` — a single-hue emerald sequential ramp, monotonic in lightness, so
-more green always means more canopy. Its input is the covered fraction, in [0, 1). Only the light
-ramp exists; dark mode inverts the whole tile pane in CSS.
+`src/theme/palette.ts` — the map's colour, in one place. No overlay tile carries a painted
+colour: the canopy pyramid carries the covered fraction in alpha, the terrain pyramid carries
+height, relief and land cover in three channels, and the shade pyramids carry the fraction of
+light a pixel has lost. One shader (`src/tiles/theme-gl.ts`) reads whichever channel the palette
+names and colours the pixel as it is drawn, so a palette is a value rather than a rebuild.
 
-Cover is a fraction, and most of the city lands low — mean cover over land is single digits, a
-leafy street ~30–60%. So the ramp is **stretched over the part of [0, 1] the city actually
-occupies** rather than the whole of it: at and above `COVER_FULL` (0.55) the green is fully
-saturated. Cover past ~55% is already a spectacular street, so pinning full green there keeps the
-gradient among leafy streets visible — which is the whole point of this phase — instead of
-spending it on cover nobody reaches. It is a *display* choice, tuned by eye against the reported
-cover distribution, and it is single-sourced: the client's street layer imports the same module,
-and `build-tiles` bakes its 256 steps into the LUT the tiler reads.
+The canopy ramp is single-hue emerald and monotonic in lightness, so more green always means more
+canopy. Its input is the covered fraction, in [0, 1). Cover is a fraction and most of the city
+lands low — mean cover over land is single digits, a leafy street ~30–60% — so the ramp is
+**stretched over the part of [0, 1] the city actually occupies** rather than the whole of it: at
+and above `COVER_FULL` (0.55) the green is fully saturated. Cover past ~55% is already a
+spectacular street, so pinning full green there keeps the gradient among leafy streets visible
+instead of spending it on cover nobody reaches. It is a *display* choice, tuned by eye against the
+reported cover distribution, and it is single-sourced: the fill and the street lines read the same
+`PALETTE.canopy`.
 
 The low end is carried by **transparency, not by a pale green**. Most of the city sits well below
 full cover, so an alpha rising linearly would tint essentially everything and wash the map out.
-Alpha is therefore cubed in the stretched value, holding the crowded low end down to a haze and
-spending the opacity on ground that is genuinely leafy.
+The opacity curve is therefore concave — a square root of the stretched value — which spends the
+budget on the 0–30% range the city actually occupies rather than crushing it, since a block that
+shades 15% of its ground reads as tree-lined and telling that from bare ground is most of what the
+map is for.
 
 Street lines get a small opacity multiplier (`ROAD_OPACITY`, 1.2). Same colour function, same
 quantity — but a 2 px line has far less area to make its colour with than the field beneath
 it, so it needs a little more opacity to hold its own.
+
+The terrain ramp is hypsometric, the convention a paper topographic map uses: greens at the bottom
+through tans to browns at the top, interpolated rather than banded, stretched over the city's own
+range — which travels with the pyramid in `range.json`, since what a reader wants to see is which
+of *these* streets are the hills. The relief channel multiplies the tint it picks, and its scale
+matches `HILLSHADE_MAX` in the pass, which is above 1 because a lit face is brightened rather than
+only darkened.
 
 ## Running it
 
@@ -980,7 +998,7 @@ or a CI cache that restored only part of the tree has to rebuild. Existence, not
 empty directory still passes.
 
 `scripts/*.ts` is no longer hashed at all: everything the scripts contribute reaches the stamps as
-plan values (the ramp bytes, the sun grid, the resolved DEM) or as `data/**` bytes, so an
+plan values (the sun grid, the resolved DEM) or as `data/**` bytes, so an
 ingest-script edit alone is correctly not a rebuild until it changes what it ingests. The DEM mosaic
 enters as its sorted tile names and byte sizes rather than 1.77 GB of pixels, the 3DEP tiles being
 immutable upstream products in content-named cache entries. Measured: a build with nothing changed
@@ -997,9 +1015,9 @@ reach the chunk pass before the graph that computes it has run. It also opens ea
 **once** and hands it to both readers — the terrain overlay and the graph's relief bytes resample
 different grids over different bounds, but San Francisco's 1.77 GB of tiles are then indexed once.
 
-The plan file carries what the nine argv lists carried, including the two things that have to come
-from TypeScript because the client imports the very same modules: the colour ramp
-(`src/tree-cover/ramp.ts`) and the per-city sun-position grid (`scripts/shade-schedule.ts`).
+The plan file carries what the nine argv lists carried, including the one thing that has to come
+from TypeScript because the client inverts the very same module: the per-city sun-position grid
+(`scripts/shade-schedule.ts`).
 **Unknown keys are rejected** — a misspelled directory would otherwise write a pyramid nothing
 serves and report success.
 
@@ -1021,7 +1039,6 @@ serves and report success.
   "genusFieldTiles": "public/tiles/genus-field",
   "routing": "public/routing",                // <id>.bin, <id>.stranded.bin, and the per-edge bake under shade/<id>
   "graphCache": ".build/graph-cache",         // the graph pass's own cache: <city>/<column>-<key>.bin
-  "ramp": [0, 0, 0, 0, "…"],                  // exactly 1024 bytes: RGBA for each of 256 density steps
   "cities": [
     {
       "id": "sf",             // must name a manifest city; every manifest city needs an entry
@@ -1156,7 +1173,7 @@ blank webp:
   hundred whose box overlaps its haloed extent. Those are rasterized even-odd at **4× supersample**
   and averaged back down for edge anti-aliasing, then an **isotropic Gaussian** (σ_fill in pixel
   space, skipped below half a pixel, haloed by 3σ so tiles do not seam) grades the shade out past
-  a crown before the land clip and the ramp.
+  a crown before the land clip and the write into alpha.
 - **The genus dots (the genus-field pass).** A uniform **60 m index over the trees**, flat arrays,
   CSR-style: a tile scans only the buckets a dot can reach, and a tile with no tree whose disc
   spills into it goes straight to the blank webp. Each tree is a single anti-aliased disc, so this
@@ -2012,9 +2029,8 @@ the client's to take.
 
 ### `public/tiles/elevation/<city>/{z}/{x}/{y}.webp` — the terrain overlay (derived, gitignored)
 
-The city's ground, tinted by height and relief-shaded, baked by the elevation pass from the DEM
-mosaic. z9-z16; a tile with no ground under it is not written and the client reads the 404 as
-transparent.
+The city's ground as three **data channels**, baked by the elevation pass from the DEM mosaic.
+z9-z16; a tile with no ground under it is not written and the client reads the 404 as transparent.
 
 The DEM is several hundred one-metre GeoTIFFs on the city's own projected grid — for San Francisco
 the 3DEP campaign `CA_SanFrancisco_1_B23`, 651 five-band float32 COGs (DTM, DSM, canopy height,
@@ -2030,9 +2046,19 @@ readers that are actually going to run, and the graph's relief column is cached,
 terrain and graph are both current opens nothing. What the one process buys is the open: when both
 do run, `build` indexes the 1.77 GB of tiles once and hands the same `Dem` to both.
 
-The tint is hypsometric — greens through tans to browns — stretched over the city's own height range
-rather than an absolute scale, because what the layer is for is showing which of *these* streets are
-the hills. The hillshade is lit from the north-west, the direction a printed relief map lights from.
+Nothing in the tile is coloured. **R** is the height across the city's own range, **G** the relief
+shade divided by the most `hillshade` can return (1.15, which is what fits the brightening a lit
+face gets into a byte without clipping it), **B** unused, and **alpha** the antialiased land mask.
+`range.json` beside the pyramid carries `lowMeters` and `highMeters`; the 1.15 is a constant of
+`hillshade` rather than of a city, so it is spelled on both sides rather than shipped per pyramid.
+The client multiplies the shade back out and applies the tint in a shader: hypsometric — greens through tans to
+browns — stretched over the city's own height range rather than an absolute scale, because what the
+layer is for is showing which of *these* streets are the hills. The hillshade is lit from the
+north-west, the direction a printed relief map lights from.
+
+This pyramid is **lossless** WebP where the canopy one is lossy: a lossy encode keeps alpha exactly
+but stores the two chroma planes at quarter resolution, measured 18-22 off, and here R and G are
+data.
 
 ### `public/routing/{id}.bin` — the routing graph, magic `GRPH` (v10, derived, gitignored)
 

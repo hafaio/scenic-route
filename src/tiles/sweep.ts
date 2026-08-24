@@ -1,5 +1,6 @@
 import { DECK_HEIGHT_METERS } from "../routing/sheds";
 import { DISK_SAMPLES, type SunSample, sunSamples } from "../shade/sun";
+import { PALETTE } from "../theme/palette";
 import {
   type CasterChunk,
   casterManifest,
@@ -29,8 +30,16 @@ import {
 export const TILE_SIZE = 256;
 const DEGREES = Math.PI / 180;
 
-// Keep in sync with SHADE_RGB and MAX_SHADE_ALPHA in crates/tiler/src/shade.rs.
-export const SHADE_RGB: readonly [number, number, number] = [51, 65, 85];
+// The shadow's own colour, which is the palette's single stop for the shade layer and not a fact
+// about the pyramid: the swept tiles and the baked ones are two ways of computing the same fraction
+// of lost light, so both take their colour from the same place.
+export const SHADE_RGB: readonly [number, number, number] = [
+  PALETTE.shade.stops[0].red,
+  PALETTE.shade.stops[0].green,
+  PALETTE.shade.stops[0].blue,
+];
+// Keep in sync with MAX_SHADE_ALPHA in crates/tiler/src/shade.rs: the scale the pyramid's alphas are
+// baked at, and what the sweep matches so the handoff between them does not step.
 export const MAX_SHADE_ALPHA = 190;
 const SHADE_CSS = SHADE_RGB.join(", ");
 

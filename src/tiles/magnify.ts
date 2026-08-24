@@ -8,9 +8,10 @@ import type { TileCoords } from "./protocol";
 // reads as a seam. Here the source tile is assembled with its eight neighbours first, so the resample
 // has real pixels past every edge, and it runs at "high" quality rather than bilinear.
 //
-// Both baked overlays magnify through this: the shade wash (src/tiles/shade.ts), which composites two
-// pyramids into the patch before drawing it, and the canopy fill (src/tiles/canopy.ts), which draws one
-// straight.
+// All three baked overlays magnify through this: the shade wash (src/tiles/shade.ts), which composites
+// two pyramids into the patch before drawing it, and the canopy fill (src/tiles/canopy.ts) and the
+// terrain (src/tiles/elevation.ts), which each read one. What is resampled is VALUES, not a picture —
+// the palette's ramp is applied to the result (src/tiles/theme-gl.ts), never before it.
 
 const TILE_SIZE = 256;
 
@@ -213,8 +214,9 @@ export async function assemble(template: string, cut: Cut): Promise<Assembled> {
   }
 }
 
-// One resample, from the assembled patch straight to the tile's device pixels. The margin is drawn
-// too — off the tile, where it only feeds the filter.
+// One resample, from the assembled patch to the tile's device pixels. The margin is drawn too — off
+// the tile, where it only feeds the filter. The target is the theming shader's staging canvas rather
+// than the tile itself, so what lands there is still the overlay's values.
 export function draw(
   context: OffscreenCanvasRenderingContext2D,
   source: Patch | null,

@@ -63,6 +63,12 @@ export interface CanopyParams {
   maxNativeZoom: number; // the finest baked level; past it a tile is magnified from that level
 }
 
+export interface ElevationParams {
+  kind: "elevation";
+  url: string; // a {z}/{x}/{y} template
+  maxNativeZoom: number; // the finest baked level; past it a tile is magnified from that level
+}
+
 export interface ShadeParams {
   kind: "shade";
   url: string; // a {bin}/{z}/{x}/{y} template
@@ -88,6 +94,7 @@ export type TileParams =
   | PoiParams
   | TreeDotsParams
   | CanopyParams
+  | ElevationParams
   | ShadeParams;
 
 // Sent once per worker, before any draw. Data URLs in the layers are relative so they pick up the
