@@ -40,27 +40,36 @@ function scaled(width: unknown, factor: number): Width | undefined {
   return undefined; // not a width this rule uses; leave it alone
 }
 
+// Administrative boundaries, dropped whole. Protomaps draws them through two rules split on
+// `kind_detail`, and in this app's zoom range the only one with anything to draw is the finer of the
+// two — the county lines, which in New York are the borough lines, running straight through the
+// middle of the city and saying nothing to someone deciding which street to walk down. (Measured:
+// with boundaries coloured red and nothing filtered, no line appears over the Hudson at z11 or z13,
+// so the New York / New Jersey line is not in these tiles at these zooms either way.) A walking map
+// of one city has no use for either, so neither is drawn.
 export function basemapPaintRules(flavor: Flavor = VOYAGER): PaintRule[] {
-  return paintRules(flavor as never).map((rule) => {
-    if (rule.dataLayer !== "roads") {
-      return rule;
-    }
-    const symbolizer = rule.symbolizer as unknown as { width?: unknown };
-    const width = scaled(symbolizer.width, ROAD_WIDTH);
-    if (width === undefined) {
-      return rule;
-    }
-    // The symbolizer is mutated through a copy rather than in place: `paintRules` builds fresh
-    // objects per call, but a caller that reused one would otherwise get it widened twice.
-    return {
-      ...rule,
-      symbolizer: Object.assign(
-        Object.create(Object.getPrototypeOf(rule.symbolizer)),
-        rule.symbolizer,
-        { width },
-      ),
-    };
-  });
+  return paintRules(flavor as never)
+    .filter((rule) => rule.dataLayer !== "boundaries")
+    .map((rule) => {
+      if (rule.dataLayer !== "roads") {
+        return rule;
+      }
+      const symbolizer = rule.symbolizer as unknown as { width?: unknown };
+      const width = scaled(symbolizer.width, ROAD_WIDTH);
+      if (width === undefined) {
+        return rule;
+      }
+      // The symbolizer is mutated through a copy rather than in place: `paintRules` builds fresh
+      // objects per call, but a caller that reused one would otherwise get it widened twice.
+      return {
+        ...rule,
+        symbolizer: Object.assign(
+          Object.create(Object.getPrototypeOf(rule.symbolizer)),
+          rule.symbolizer,
+          { width },
+        ),
+      };
+    });
 }
 
 export function basemapLabelRules(
