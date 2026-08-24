@@ -1,13 +1,26 @@
 "use client";
 
+import type { ReactNode } from "react";
 import { useEffect, useRef, useState } from "react";
 import { FiEye, FiEyeOff, FiX } from "react-icons/fi";
-import { MdDragIndicator } from "react-icons/md";
+import {
+  MdConstruction,
+  MdDirectionsBoat,
+  MdDragIndicator,
+} from "react-icons/md";
+import type { City } from "../src/cities";
 import {
   OVERLAYS,
   type OverlayId,
   overlayLabel,
 } from "../src/overlays/registry";
+import type { RouteWeights } from "../src/routing/cost";
+import {
+  FACTORS,
+  type FactorKey,
+  FactorSlider,
+  factorReading,
+} from "../src/routing/factors";
 import { mergeLayerOrder, updateSettings } from "../src/settings/store";
 import { useCity } from "./city-context";
 import { useSettings } from "./use-settings";
@@ -132,18 +145,14 @@ function LayerRows() {
               {overlay.icon}
             </span>
             <span
-              className={`min-w-0 flex-1 truncate text-sm ${
+              className={`flex min-w-0 flex-1 items-baseline gap-2 text-sm ${
                 off
                   ? "text-slate-400 dark:text-slate-500"
                   : "text-slate-700 dark:text-slate-200"
               }`}
             >
-              {overlayLabel(overlay, city)}
-              {city.overlays.includes(id) ? null : (
-                <span className="ml-2 text-[11px] text-slate-400 dark:text-slate-500">
-                  not in {city.name}
-                </span>
-              )}
+              <span className="truncate">{overlayLabel(overlay, city)}</span>
+              <MissingHere city={city} overlay={id} />
             </span>
             <button
               type="button"
@@ -187,7 +196,153 @@ function LayerRows() {
   );
 }
 
-export default function SettingsDialog({ onClose }: { onClose: () => void }) {
+// A preference this city has no data for, tagged the way the layers rows tag a layer it lacks. The
+// row stays live either way: one weight covers every city, and it prices the route in the ones that
+// do have the data.
+function MissingHere({ city, overlay }: { city: City; overlay?: OverlayId }) {
+  if (overlay === undefined || city.overlays.includes(overlay)) {
+    return null;
+  } else {
+    return (
+      <span className="shrink-0 text-[11px] text-slate-400 dark:text-slate-500">
+        not in {city.name}
+      </span>
+    );
+  }
+}
+
+// One of the two gates, editing the same state as the route panel's header toggles — which are only
+// there in a city that has the thing, so this is where a reader in the other city can still set it.
+function GateRow({
+  icon,
+  label,
+  overlay,
+  on,
+  onChange,
+}: {
+  icon: ReactNode;
+  label: string;
+  overlay: OverlayId;
+  on: boolean;
+  onChange: (on: boolean) => void;
+}) {
+  const city = useCity();
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={on}
+      onClick={() => onChange(!on)}
+      className="flex w-full items-center gap-3 rounded-xl px-2 py-2 text-left hover:bg-slate-50 dark:hover:bg-slate-700/60"
+    >
+      <span
+        className={on ? "text-slate-500 dark:text-slate-400" : "opacity-40"}
+      >
+        {icon}
+      </span>
+      <span className="flex min-w-0 flex-1 items-baseline gap-2 text-sm text-slate-700 dark:text-slate-200">
+        <span className="truncate">{label}</span>
+        <MissingHere city={city} overlay={overlay} />
+      </span>
+      <span
+        aria-hidden="true"
+        className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition ${
+          on ? "bg-brand-500" : "bg-slate-300 dark:bg-slate-600"
+        }`}
+      >
+        <span
+          className={`inline-block h-4 w-4 rounded-full bg-white transition ${
+            on ? "translate-x-4" : "translate-x-0.5"
+          }`}
+        />
+      </span>
+    </button>
+  );
+}
+
+function FactorRows({
+  weights,
+  onWeight,
+}: {
+  weights: RouteWeights;
+  onWeight: (key: FactorKey, weight: number) => void;
+}) {
+  const city = useCity();
+  const { hiddenFactors } = useSettings();
+  const hidden = new Set(hiddenFactors);
+
+  const toggle = (key: FactorKey): void => {
+    const next = new Set(hidden);
+    if (!next.delete(key)) {
+      next.add(key);
+    }
+    updateSettings({ hiddenFactors: [...next] });
+  };
+
+  return (
+    <ul className="mt-3">
+      {FACTORS.map((factor) => {
+        const off = hidden.has(factor.key);
+        const weight = weights[factor.key];
+        return (
+          <li key={factor.key} className="px-2 py-1.5">
+            <div className="flex items-center gap-3">
+              <span className={off ? "opacity-40" : factor.tint}>
+                <factor.Icon className="h-4 w-4" aria-hidden={true} />
+              </span>
+              <span
+                className={`flex min-w-0 flex-1 items-baseline gap-2 text-sm ${
+                  off
+                    ? "text-slate-400 dark:text-slate-500"
+                    : "text-slate-700 dark:text-slate-200"
+                }`}
+              >
+                <span className="truncate">{factor.label}</span>
+                <MissingHere city={city} overlay={factor.overlay} />
+              </span>
+              <span className="shrink-0 text-xs tabular-nums text-slate-400 dark:text-slate-500">
+                {factorReading(factor, weight)}
+              </span>
+              <button
+                type="button"
+                onClick={() => toggle(factor.key)}
+                aria-pressed={!off}
+                aria-label={
+                  off
+                    ? `Show ${factor.label} in the route panel`
+                    : `Hide ${factor.label} from the route panel`
+                }
+                className="grid h-8 w-8 place-items-center rounded-full text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-700"
+              >
+                {off ? <FiEyeOff /> : <FiEye />}
+              </button>
+            </div>
+            <FactorSlider
+              factor={factor}
+              weight={weight}
+              onChange={(next) => onWeight(factor.key, next)}
+              className="mt-1 w-full"
+            />
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
+export default function SettingsDialog({
+  weights,
+  onWeight,
+  onAllowFerries,
+  onAllowSheds,
+  onClose,
+}: {
+  weights: RouteWeights;
+  onWeight: (key: FactorKey, weight: number) => void;
+  onAllowFerries: (allow: boolean) => void;
+  onAllowSheds: (allow: boolean) => void;
+  onClose: () => void;
+}) {
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
@@ -239,6 +394,33 @@ export default function SettingsDialog({ onClose }: { onClose: () => void }) {
             for every city — each shows the layers it has data for.
           </p>
           <LayerRows />
+        </div>
+
+        <div className="mt-6">
+          <p className="text-[11px] uppercase tracking-wide text-slate-400 dark:text-slate-500">
+            Route preferences
+          </p>
+          <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+            One value per preference — these are the route panel's own sliders.
+            Hiding one takes it out of the panel; it still prices the route.
+          </p>
+          <FactorRows weights={weights} onWeight={onWeight} />
+          <div className="mt-2">
+            <GateRow
+              icon={<MdDirectionsBoat className="h-4 w-4" aria-hidden={true} />}
+              label="Allow ferries"
+              overlay="ferries"
+              on={weights.allowFerries}
+              onChange={onAllowFerries}
+            />
+            <GateRow
+              icon={<MdConstruction className="h-4 w-4" aria-hidden={true} />}
+              label="Allow scaffolding"
+              overlay="scaffolding"
+              on={weights.allowSheds}
+              onChange={onAllowSheds}
+            />
+          </div>
         </div>
       </div>
     </div>

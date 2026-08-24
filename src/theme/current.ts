@@ -11,15 +11,28 @@ import type { ThemeName } from "./palette";
 
 const listeners = new Set<() => void>();
 
+// Reached for rather than asked about, the same way src/settings/store.ts reaches for localStorage:
+// the server render has no document, and a runtime can define one without the parts a browser has.
+function root(): Element | null {
+  try {
+    return typeof document === "undefined"
+      ? null
+      : (document.documentElement ?? null);
+  } catch {
+    return null;
+  }
+}
+
 function read(): ThemeName {
-  return document.documentElement.classList.contains("dark") ? "dark" : "light";
+  return root()?.classList.contains("dark") ? "dark" : "light";
 }
 
 // Server-rendered, so there is no document yet; the class is on <html> before first paint (the
 // provider's inline script puts it there), and the first read happens in a layer's effect.
 let current: ThemeName = "light";
 
-if (typeof document !== "undefined") {
+const watched = root();
+if (watched !== null && typeof MutationObserver === "function") {
   current = read();
   new MutationObserver(() => {
     const now = read();
@@ -29,7 +42,7 @@ if (typeof document !== "undefined") {
         listener();
       }
     }
-  }).observe(document.documentElement, {
+  }).observe(watched, {
     attributes: true,
     attributeFilter: ["class"],
   });
