@@ -1,17 +1,24 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { PALETTE } from "../src/theme/palette";
 import { useCity } from "./city-context";
 
 // The key for the elevation overlay. The tint is stretched over each city's own height range, so a
 // reader looking at the map alone can see which streets are higher and not by how much — the range
-// and the ramp travel with the pyramid in range.json for exactly that reason.
+// travels with the pyramid in range.json for exactly that reason. The colours do not: the tiles
+// carry height rather than a tint, and the ramp they are read through is the palette's.
 
 interface Range {
   lowMeters: number;
   highMeters: number;
-  ramp: [number, number, number][];
 }
+
+const RAMP = PALETTE.elevation.stops;
+const BAR = RAMP.map(
+  ({ red, green, blue }, index) =>
+    `rgb(${red} ${green} ${blue}) ${(100 * index) / (RAMP.length - 1)}%`,
+).join(", ");
 
 const ranges = new Map<string, Promise<Range | null>>();
 
@@ -53,12 +60,6 @@ export default function ElevationLegend(): React.ReactElement | null {
   if (!range) {
     return null;
   }
-  const stops = range.ramp
-    .map(
-      ([red, green, blue], index) =>
-        `rgb(${red} ${green} ${blue}) ${(100 * index) / (range.ramp.length - 1)}%`,
-    )
-    .join(", ");
   return (
     <div className="rounded-2xl bg-white/90 px-3 py-2 shadow-lg ring-1 ring-black/5 backdrop-blur-md dark:bg-slate-800/90 dark:ring-white/10">
       <div className="mb-1 text-[11px] font-semibold tracking-wide text-slate-600 uppercase dark:text-slate-300">
@@ -66,7 +67,7 @@ export default function ElevationLegend(): React.ReactElement | null {
       </div>
       <div
         className="h-2 w-40 rounded-full"
-        style={{ background: `linear-gradient(to right, ${stops})` }}
+        style={{ background: `linear-gradient(to right, ${BAR})` }}
       />
       <div className="mt-1 flex justify-between font-medium text-[11px] text-slate-600 tabular-nums dark:text-slate-300">
         <span>{feet(range.lowMeters)} ft</span>

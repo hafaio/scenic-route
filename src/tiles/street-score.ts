@@ -2,7 +2,7 @@ import {
   decodeStreetChunk,
   type StreetSegment as Segment,
 } from "../streets/chunk";
-import { ROAD_OPACITY, rampCss } from "../tree-cover/ramp";
+import { PALETTE, ROAD_OPACITY, rampCss } from "../theme/palette";
 import { resolveUrl } from "./base-url";
 import { projectX, projectY, unproject } from "./mercator";
 import type { StreetScoreParams, TileCoords } from "./protocol";
@@ -30,6 +30,7 @@ const LEVEL_BITS = 3;
 const LEVELS = 256 >> LEVEL_BITS;
 const COLORS: readonly string[] = Array.from({ length: LEVELS }, (_, level) =>
   rampCss(
+    PALETTE.canopy,
     ((level << LEVEL_BITS) + (1 << (LEVEL_BITS - 1))) / 255,
     ROAD_OPACITY,
   ),

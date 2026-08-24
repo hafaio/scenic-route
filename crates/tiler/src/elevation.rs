@@ -1,4 +1,4 @@
-//! The elevation overlay: a topographic map of the city, tinted by height.
+//! The elevation overlay: a topographic map of the city, as three data channels.
 //!
 //! The DEM arrives as several hundred one-metre tiles on the city's own projected grid, which is far
 //! finer than any zoom the map shows and in the wrong coordinate system. So it is resampled once,
@@ -6,10 +6,12 @@
 //! rendered from that. One pass over the tiles rather than one per zoom level, and the field for a
 //! whole city is a few tens of megabytes where the tiles are gigabytes.
 //!
-//! The tint is hypsometric — the convention a paper topographic map uses, greens at the bottom
-//! through tans to browns at the top — stretched over the city's own range rather than an absolute
-//! scale, because what a reader wants to see is which of *these* streets are the hills. A hillshade
-//! is multiplied over it so the form reads at a glance; without it a smooth ramp looks like fog.
+//! Nothing here is coloured. R carries the height across the city's own range, G the relief shade,
+//! and alpha how much of the pixel is ground; the client multiplies the three together and applies
+//! the hypsometric tint — greens at the bottom through tans to browns at the top, the convention a
+//! paper topographic map uses — in a shader. The range travels with the tiles in range.json, since
+//! the stretch is over the city's own ground rather than an absolute scale: what a reader wants to
+//! see is which of *these* streets are the hills.
 
 use std::fs;
 use std::path::PathBuf;
@@ -23,7 +25,7 @@ use crate::dem::{Dem, Field, resample};
 use crate::geometry::PolygonIndex;
 use crate::manifest::{Bounds, Manifest};
 use crate::raster::{
-    MIN_ZOOM, TILE_SIZE, Tile, encode_webp, pixel_x_to_lng, pixel_y_to_lat, plan_tiles,
+    MIN_ZOOM, TILE_SIZE, Tile, encode_webp_lossless, pixel_x_to_lng, pixel_y_to_lat, plan_tiles,
 };
 
 /// The finest level the pyramid is baked to, at which a pixel is about 2.4 m of ground.
@@ -48,26 +50,6 @@ pub struct Args {
     /// as readily as for a hill — so without this the overlay tints the sea at sea level and reads
     /// as ground. Also clips the shoreline back from the small creep the gap fill leaves behind it.
     pub land: PathBuf,
-}
-
-/// The hypsometric ramp, low to high: the greens, tans and browns a topographic map tints its
-/// contour bands with. Interpolated rather than banded, so a city with 100 m of range does not come
-/// out as three flat steps.
-const RAMP: [[f32; 3]; 6] = [
-    [86.0, 132.0, 96.0],   // valley green
-    [140.0, 168.0, 112.0], // low slope
-    [196.0, 190.0, 130.0], // tan
-    [214.0, 176.0, 122.0], // ochre
-    [186.0, 138.0, 104.0], // brown
-    [150.0, 108.0, 92.0],  // summit
-];
-
-fn tint(fraction: f32) -> [f32; 3] {
-    let clamped = fraction.clamp(0.0, 1.0) * (RAMP.len() - 1) as f32;
-    let step = clamped.floor() as usize;
-    let next = (step + 1).min(RAMP.len() - 1);
-    let blend = clamped - step as f32;
-    [0, 1, 2].map(|channel| RAMP[step][channel] * (1.0 - blend) + RAMP[next][channel] * blend)
 }
 
 /// A relief shade from the field's own slope, lit from the north-west at 45 degrees — the direction
@@ -103,6 +85,11 @@ fn hillshade(field: &Field, lng: f64, lat: f64, meters_per_degree_lat: f64) -> f
 /// costs less than the tile's WebP encode.
 const COVERAGE_SAMPLES: usize = 4;
 
+/// A [0, 1] field as the byte the tile stores it in.
+fn byte(fraction: f32) -> u8 {
+    (fraction * 255.0).round() as u8
+}
+
 /// How much of one tile pixel stands on ground, 0 to 1.
 fn pixel_coverage(field: &Field, lng: f64, lat: f64, zoom: u32) -> f32 {
     // The pixel's own span in degrees, from the tile grid rather than the field's step: what is
@@ -121,9 +108,12 @@ fn pixel_coverage(field: &Field, lng: f64, lat: f64, zoom: u32) -> f32 {
 }
 
 const METERS_PER_DEGREE_LAT: f64 = 111_320.0;
-// Low enough that the basemap under it stays legible — street names, park fills, the water — since
-// the terrain covers every pixel of the city and anything it buries is buried everywhere.
-const ALPHA: u8 = 170;
+
+/// The largest value `hillshade` can return, 0.65 + 0.5 * 1.0. Dividing by it is what fits the
+/// shade into a byte without clipping the brightening a lit face gets; the client multiplies it back
+/// before shading the tint with it. Keep in sync with the elevation ramp's `reliefScale` in
+/// src/theme/palette.ts.
+const HILLSHADE_MAX: f32 = 1.15;
 
 // How far past the land polygons the surface is still allowed to be ground, and how far up it has to
 // stand out there to count. San Francisco's shoreline polygons follow the natural shore, so the
@@ -176,12 +166,12 @@ fn render(field: &Field, directory: &std::path::Path, tile: &Tile) -> Fallible<u
                 continue;
             }
             let shade = hillshade(field, lng, lat, METERS_PER_DEGREE_LAT);
-            let colour = tint((value - field.low()) / range);
             let pixel = (row * TILE_SIZE + column) * 4;
-            for channel in 0..3 {
-                pixels[pixel + channel] = (colour[channel] * shade).clamp(0.0, 255.0) as u8;
-            }
-            pixels[pixel + 3] = (f32::from(ALPHA) * coverage).round().clamp(0.0, 255.0) as u8;
+            // Three fields, no colour: height across the city's range, the relief shade, and how
+            // much of the pixel is ground. Blue is unused.
+            pixels[pixel] = byte(((value - field.low()) / range).clamp(0.0, 1.0));
+            pixels[pixel + 1] = byte((shade / HILLSHADE_MAX).clamp(0.0, 1.0));
+            pixels[pixel + 3] = byte(coverage);
             painted = true;
         }
     }
@@ -190,7 +180,10 @@ fn render(field: &Field, directory: &std::path::Path, tile: &Tile) -> Fallible<u
     if !painted {
         return Ok(0);
     }
-    let bytes = encode_webp(&pixels)?;
+    // Lossless rather than lossy: alpha survives a lossy WebP exactly, but a COLOUR channel does
+    // not — lossy keeps the two chroma planes at quarter resolution, and the measured error is
+    // 18-22 — and this tile now carries data in R and G.
+    let bytes = encode_webp_lossless(&pixels);
     fs::write(
         directory
             .join(tile.zoom.to_string())
@@ -243,14 +236,15 @@ pub fn run(args: &Args, dem: &mut Dem) -> Fallible<()> {
     for tile in &plan {
         fs::create_dir_all(root.join(tile.zoom.to_string()).join(tile.x.to_string()))?;
     }
-    // The tint is stretched over the city's own range, so the range has to travel with it: without
-    // it a reader has a picture of which streets are higher and no idea by how much.
+    // The tint the client applies is stretched over the city's own range, so the range has to travel
+    // with the tiles: without it a reader has a picture of which streets are higher and no idea by
+    // how much. HILLSHADE_MAX does not travel — it is a constant of `hillshade` rather than of this
+    // city, so it is spelled on both sides like MAX_SHADE_ALPHA rather than shipped per pyramid.
     fs::write(
         root.join("range.json"),
         serde_json::to_vec(&serde_json::json!({
             "lowMeters": field.low(),
             "highMeters": field.high(),
-            "ramp": RAMP.map(|colour| colour.map(|channel| channel.round() as u8)),
         }))?,
     )?;
     let bytes: u64 = plan

@@ -4,7 +4,7 @@
 // pipeline, and id 11 is "Other". Only the light palette exists — dark mode leaves the genus pane
 // un-inverted, so these are the colours the map and the legend both show.
 
-import type { Rgb } from "./ramp";
+import type { Rgb } from "../theme/palette";
 
 export const OTHER_GENUS_ID = 11;
 
