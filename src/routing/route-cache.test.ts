@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import type { RouteWeights } from "./cost";
+import { GATE_KEYS, type RouteWeights } from "./cost";
 import type { RoutingGraph } from "./graph";
 import { RouteCache } from "./route-cache";
 import type { RouteResult } from "./search";
@@ -157,5 +157,20 @@ test("every weight a slider moves invalidates the cache", () => {
     cache.route(GRAPH, START, DEST, { ...base, [axis]: 0.7 });
     expect(`${axis}:${calls}`).toBe(`${axis}:1`);
     cache.route(GRAPH, START, DEST, base);
+  }
+});
+
+// A gate the cache does not compare is a control that does nothing: the search never runs and the
+// reader is handed back the route they already had. Not hypothetical — the crossing gate shipped
+// that way, because the comparison listed the two gates that existed when it was written. So this
+// walks GATE_KEYS rather than naming them, and fails on the next one added the same way.
+test("flipping any gate reaches the search, not just the two it was born with", () => {
+  for (const gate of GATE_KEYS) {
+    const cache = new RouteCache(stubSearch);
+    const base = weights(0.2, 0.2, true);
+    cache.route(GRAPH, START, DEST, base);
+    const before = calls;
+    cache.route(GRAPH, START, DEST, { ...base, [gate]: !base[gate] });
+    expect(calls).toBeGreaterThan(before);
   }
 });

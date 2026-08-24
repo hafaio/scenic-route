@@ -8,7 +8,7 @@
 // point, which is still valid because only the active slider moved. It reports whether the path
 // changed so the caller can skip redrawing an identical route.
 
-import type { RouteWeights } from "./cost";
+import { GATE_KEYS, type RouteWeights } from "./cost";
 import type { RoutingGraph } from "./graph";
 import { findRoute, type RouteResult } from "./search";
 import type { Snap } from "./snap";
@@ -59,11 +59,11 @@ function quantizeWeights(weights: RouteWeights): RouteWeights {
   };
 }
 
+// A gate that changed is not a bracketable axis and, more importantly, is not the same route. Read
+// off GATE_KEYS rather than listed here: this comparison decides whether the search runs at all, so
+// a gate missing from it is a control that silently does nothing.
 function sameGates(left: RouteWeights, right: RouteWeights): boolean {
-  return (
-    left.allowFerries === right.allowFerries &&
-    left.allowSheds === right.allowSheds
-  );
+  return GATE_KEYS.every((gate) => left[gate] === right[gate]);
 }
 
 function sameWeights(left: RouteWeights, right: RouteWeights): boolean {

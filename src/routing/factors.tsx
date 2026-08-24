@@ -29,6 +29,7 @@ import {
   MAX_SHADE_WEIGHT,
   MAX_SHELTER_WEIGHT,
   MAX_TREE_WEIGHT,
+  type GateKey,
   type RouteWeights,
 } from "./cost";
 
@@ -36,11 +37,9 @@ import {
 // both draw the same eleven sliders, so the metadata lives here rather than in either of them: two
 // tables would be two chances for a label, a colour or a scale to drift.
 
-// The switches, as against the sliders. Drawn in the route panel's header rather than among the
-// sliders, so unlike the factors they carry no order — only whether they are offered.
-export type GateKey = "allowFerries" | "allowSheds" | "fewerCrossings";
-
-// Everything else in the cost context: one slider each.
+// Everything else in the cost context: one slider each. The switches are in ./cost.ts, with the type
+// they are excluded by, so the two lists cannot drift apart.
+export type { GateKey };
 export type FactorKey = Exclude<keyof RouteWeights, GateKey>;
 
 export interface Factor {
