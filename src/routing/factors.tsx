@@ -87,11 +87,11 @@ export const GATES: readonly Gate[] = [
     off: "Scaffolding avoided — click to walk under sidewalk sheds again",
   },
   {
-    key: "fewerCrossings",
-    label: "Fewer crossings",
+    key: "allowCrossings",
+    label: "Allow crossings",
     Icon: MdTraffic,
-    on: "Crossings priced high — click to let the route cross freely",
-    off: "Crossings cost what they take — click to stop the route zigzagging across a street",
+    on: "Crossings are free — click to stop the route crossing and crossing back",
+    off: "Crossings are priced — click to let the route spend them to reach what it is after",
   },
 ];
 

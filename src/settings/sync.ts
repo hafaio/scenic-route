@@ -1,3 +1,4 @@
+import { GATE_KEYS } from "../routing/cost";
 import { FACTORS, type FactorKey } from "../routing/factors";
 import { DEFAULT_SETTINGS, type Settings } from "./store";
 
@@ -17,15 +18,21 @@ import { DEFAULT_SETTINGS, type Settings } from "./store";
 // exact ordering would need.
 
 // Everything the merge decides, as the paths `Settings.updatedAt` is keyed by. A field absent from
-// this list is not synced at all — which is the right answer for anything about THIS device.
+// this list is not synced at all — which is the right answer for anything about THIS device, and
+// silently wrong for anything else: the page says changes here reach your other devices, so a field
+// left out is that sentence lying.
+//
+// The gates are spread from GATE_KEYS rather than written out, for the reason the route cache
+// learned twice: a hand-written list of gates is a list that forgets the next one. This one had
+// already forgotten the crossing gate, so a reader who turned crossings loose on their phone found
+// them priced again on their laptop.
 const FIELDS = [
   "layerOrder",
   "hiddenLayers",
   "factorOrder",
   "hiddenFactors",
   "hiddenGates",
-  "allowFerries",
-  "allowSheds",
+  ...GATE_KEYS,
   "coverage",
 ] as const;
 
