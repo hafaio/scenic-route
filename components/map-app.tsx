@@ -90,10 +90,12 @@ import FollowToggle from "./follow-toggle";
 import type { MapTarget, PickMode } from "./map";
 import PinEditor from "./pin-editor";
 import RoutePanel from "./route-panel";
+import SettingsDialog from "./settings-dialog";
 import SignInDialog from "./sign-in-dialog";
 import Toolbar from "./toolbar";
 import UrlSync from "./url-sync";
 import { useHashFlag } from "./use-hash-flag";
+import { useSettings } from "./use-settings";
 
 // leaflet touches `window` at module load, so the map must be client-only
 const MapView = dynamic(() => import("./map"), {
@@ -277,7 +279,9 @@ export default function MapApp() {
   );
   const [signingIn, setSigningIn] = useState<boolean>(false);
   // Bound to the URL hash so About is deep-linkable (#about) and the back button closes it.
+  const settings = useSettings();
   const [aboutOpen, setAboutOpen] = useHashFlag("about");
+  const [settingsOpen, setSettingsOpen] = useHashFlag("settings");
   const [locationError, setLocationError] = useState<
     "denied" | "unavailable" | null
   >(null);
@@ -673,6 +677,19 @@ export default function MapApp() {
     // Francisco. Null is the honest answer until this city's own graph lands.
     setRoutingGraph(null);
   }, [city]);
+
+  // Taking a layer out of the menu turns it off, the same way switching city does: a layer drawn on
+  // the map with no row to turn it off by is a state the reader cannot get out of. Putting it back in
+  // the menu leaves it off rather than lighting it again — hiding is a decision about the menu, and
+  // guessing that it was also a decision to look at the layer again would be putting something on the
+  // map nobody asked for.
+  useEffect(() => {
+    const hidden = new Set(settings.hiddenLayers);
+    setActiveOverlays((current) => {
+      const kept = new Set([...current].filter((id) => !hidden.has(id)));
+      return kept.size === current.size ? current : kept;
+    });
+  }, [settings.hiddenLayers]);
 
   // stable identity for a long-lived map listener; functional updater keeps disengage idempotent
   const handleDisengageFollow = useCallback(() => {
@@ -1628,6 +1645,7 @@ export default function MapApp() {
           onSignOut={handleSignOut}
           onRefreshClaims={handleRefreshClaims}
           onAbout={() => setAboutOpen(true)}
+          onSettings={() => setSettingsOpen(true)}
           onLogHere={handleLogHere}
           logHereDisabled={userLocation === null}
           logHereBusy={logging}
@@ -1753,6 +1771,9 @@ export default function MapApp() {
         ) : null}
         {signingIn ? <SignInDialog onClose={handleCloseSignIn} /> : null}
         {aboutOpen ? <AboutDialog onClose={() => setAboutOpen(false)} /> : null}
+        {settingsOpen ? (
+          <SettingsDialog onClose={() => setSettingsOpen(false)} />
+        ) : null}
       </main>
     </CityProvider>
   );
