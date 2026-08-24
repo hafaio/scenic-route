@@ -14,9 +14,13 @@
 // the time the next line runs.
 
 const DB_NAME = "scenic-route-sw";
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const ENTRIES = "entries";
 const TOTALS = "totals";
+// The worker's own settings, as against its accounting. Kept here rather than in a cache because it
+// has to outlive a deploy: `wipe()` empties the two stores above by name and leaves this one, which
+// is the point — the reader's cap is not something a release gets to forget.
+const CONFIG = "config";
 // Oldest-read first within one store, which is the order an eviction walks.
 const BY_AGE = "by-age";
 
@@ -37,19 +41,37 @@ let opening: Promise<IDBDatabase> | null = null;
 function open(): Promise<IDBDatabase> {
   opening ??= new Promise<IDBDatabase>((resolve, reject) => {
     const request = indexedDB.open(DB_NAME, DB_VERSION);
+    // Additive: a version bump creates what is missing and leaves what is there. Dropping the
+    // stores and rebuilding them would throw away the accounting for caches that survived the
+    // upgrade, and an unaccounted cache is one nothing can evict from until it has been refilled.
     request.onupgradeneeded = () => {
       const db = request.result;
-      for (const name of [...db.objectStoreNames]) {
-        db.deleteObjectStore(name);
+      if (!db.objectStoreNames.contains(ENTRIES)) {
+        db.createObjectStore(ENTRIES, {
+          keyPath: ["store", "url"],
+        }).createIndex(BY_AGE, ["store", "at"]);
       }
-      const entries = db.createObjectStore(ENTRIES, {
-        keyPath: ["store", "url"],
-      });
-      entries.createIndex(BY_AGE, ["store", "at"]);
-      db.createObjectStore(TOTALS, { keyPath: "store" });
+      if (!db.objectStoreNames.contains(TOTALS)) {
+        db.createObjectStore(TOTALS, { keyPath: "store" });
+      }
+      if (!db.objectStoreNames.contains(CONFIG)) {
+        db.createObjectStore(CONFIG, { keyPath: "key" });
+      }
+    };
+    // The page reads this book too (the settings page's "kept" figure), so two agents now hold
+    // connections to it. Same version, they coexist; a version bump does not — an open connection
+    // blocks the upgrade, and without these two the pending open would simply never settle and the
+    // holder would never let go.
+    request.onblocked = () => {
+      reject(new Error("the ledger is open elsewhere at an older version"));
     };
     request.onsuccess = () => {
-      resolve(request.result);
+      const db = request.result;
+      db.onversionchange = () => {
+        db.close();
+        opening = null;
+      };
+      resolve(db);
     };
     request.onerror = () => {
       reject(request.error);
@@ -197,8 +219,45 @@ export async function overflowing(
   return doomed;
 }
 
-// Everything, for a deploy: activate deletes every cache not carrying the new version, and the book
-// is then about caches that no longer exist.
+// What each store is holding, for the page to report. Read straight out of the book rather than
+// asked of the worker, because it is ordinary same-origin IndexedDB and a worker that has been
+// stopped between requests would have to be woken to answer.
+export async function totals(): Promise<Record<string, number>> {
+  const db = await open();
+  const transaction = db.transaction(TOTALS, "readonly");
+  const all = transaction.objectStore(TOTALS).getAll();
+  const held: Record<string, number> = {};
+  all.onsuccess = () => {
+    for (const { store, bytes } of all.result as Total[]) {
+      held[store] = bytes;
+    }
+  };
+  await finished(transaction);
+  return held;
+}
+
+// One of the worker's own settings, which survive a deploy where the accounting does not.
+export async function readConfig(key: string): Promise<unknown> {
+  const db = await open();
+  const transaction = db.transaction(CONFIG, "readonly");
+  const request = transaction.objectStore(CONFIG).get(key);
+  let value: unknown;
+  request.onsuccess = () => {
+    value = (request.result as { value?: unknown } | undefined)?.value;
+  };
+  await finished(transaction);
+  return value;
+}
+
+export async function writeConfig(key: string, value: unknown): Promise<void> {
+  const db = await open();
+  const transaction = db.transaction(CONFIG, "readwrite");
+  transaction.objectStore(CONFIG).put({ key, value });
+  await finished(transaction);
+}
+
+// The accounting only, for a deploy: activate deletes every cache not carrying the new version, and
+// the book is then about caches that no longer exist. The config store is deliberately not touched.
 export async function wipe(): Promise<void> {
   const db = await open();
   const transaction = db.transaction([ENTRIES, TOTALS], "readwrite");

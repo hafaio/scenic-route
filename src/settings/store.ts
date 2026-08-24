@@ -2,6 +2,7 @@
 
 import { OVERLAYS, type OverlayId } from "../overlays/registry";
 import { FACTORS, type FactorKey } from "../routing/factors";
+import { COVERAGE, DEFAULT_COVERAGE } from "./offline";
 
 // The reader's own preferences, as one versioned document rather than the scatter of keys the app
 // grew — every slider and toggle wrote its own. One document is what makes the settings page
@@ -29,6 +30,10 @@ export interface Settings {
   // Factors the reader has taken out of the route panel: no slider and no summary chip. Their
   // weights still price the route, so the panel counts the non-zero ones and says so.
   hiddenFactors: readonly FactorKey[];
+  // How much of the map to keep for offline use, as one of the coverage options in ./offline.ts. The
+  // service worker is the one that enforces it and holds its own copy, since it runs when no page
+  // does; this is the reader's side of that, and components/service-worker.tsx carries it across.
+  coverage: string;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -38,13 +43,16 @@ export const DEFAULT_SETTINGS: Settings = {
   allowFerries: true,
   allowSheds: true,
   hiddenFactors: [],
+  coverage: DEFAULT_COVERAGE,
 };
 
 const REGISTRY_ORDER: readonly OverlayId[] = OVERLAYS.map(({ id }) => id);
 
 // Where each weight lived before this document existed, and where the two gates did. Folded in on
-// the first read that finds no weights in the document, then left alone rather than deleted: a
-// reader who goes back to a build that only knows these keys still finds their settings in them.
+// the first read that finds no weights in the document, then left alone rather than deleted —
+// removing them would be a destructive write on behalf of a reader who has not asked for anything,
+// and they cost a few dozen bytes. They are a snapshot of migration day, not a live mirror: nothing
+// writes them any more.
 const LEGACY_WEIGHT_KEYS: Record<FactorKey, string> = {
   tree: "scenic-route:tree-weight",
   ferry: "scenic-route:ferry-weight",
@@ -61,28 +69,39 @@ const LEGACY_WEIGHT_KEYS: Record<FactorKey, string> = {
 const LEGACY_FERRY_GATE = "scenic-route:allow-ferries";
 const LEGACY_SHED_GATE = "scenic-route:allow-sheds";
 
-function isOverlayIds(value: unknown): value is OverlayId[] {
-  const known = new Set<string>(REGISTRY_ORDER);
-  return Array.isArray(value) && value.every((id) => known.has(id as string));
-}
-
+// Every list and map read back out of the document is filtered PER ENTRY rather than accepted or
+// rejected whole. An id this build does not know is the ordinary consequence of the reader having
+// arranged their settings on a newer one — a release adds an overlay, they open a tab still running
+// the old build — and throwing the whole field away over one of them would undo everything they set.
+const OVERLAY_IDS = new Set<string>(REGISTRY_ORDER);
 const FACTOR_KEYS = new Set<string>(FACTORS.map(({ key }) => key));
 
-function isFactorKeys(value: unknown): value is FactorKey[] {
-  return Array.isArray(value) && value.every((key) => FACTOR_KEYS.has(key));
+function overlayIds(value: unknown): OverlayId[] {
+  return Array.isArray(value)
+    ? (value.filter(
+        (id) => typeof id === "string" && OVERLAY_IDS.has(id),
+      ) as OverlayId[])
+    : [];
 }
 
-function isWeights(
-  value: unknown,
-): value is Partial<Record<FactorKey, number>> {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    !Array.isArray(value) &&
-    Object.entries(value).every(
-      ([key, weight]) => FACTOR_KEYS.has(key) && Number.isFinite(weight),
-    )
-  );
+function factorKeys(value: unknown): FactorKey[] {
+  return Array.isArray(value)
+    ? (value.filter(
+        (key) => typeof key === "string" && FACTOR_KEYS.has(key),
+      ) as FactorKey[])
+    : [];
+}
+
+function factorWeights(value: unknown): Partial<Record<FactorKey, number>> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return {};
+  } else {
+    return Object.fromEntries(
+      Object.entries(value).filter(
+        ([key, weight]) => FACTOR_KEYS.has(key) && Number.isFinite(weight),
+      ),
+    );
+  }
 }
 
 interface LegacyPrefs {
@@ -122,19 +141,25 @@ export function settingsFrom(
   legacy: (key: string) => string | null,
 ): { settings: Settings; migrated: boolean } {
   const { layerOrder, hiddenLayers, weights, hiddenFactors } = stored;
-  // No weights in the document is what says it predates route preferences, and only then do the old
-  // keys get a say — once the document carries weights it is the only thing that does.
-  const folded = isWeights(weights) ? null : legacyPrefs(legacy);
+  // The ABSENCE of a weights field is what says the document predates route preferences, and only
+  // then do the old keys get a say. Not "the field failed to validate": a document that carries
+  // weights this build cannot read is a NEWER one, and folding a snapshot of the pre-document keys
+  // over it — then writing that back — would replace what the reader set with what they set before
+  // any of this existed.
+  const folded = weights === undefined ? legacyPrefs(legacy) : null;
   return {
     settings: {
-      layerOrder: isOverlayIds(layerOrder) ? layerOrder : [],
-      hiddenLayers: isOverlayIds(hiddenLayers) ? hiddenLayers : [],
-      weights: folded ? folded.weights : (weights ?? {}),
+      layerOrder: overlayIds(layerOrder),
+      hiddenLayers: overlayIds(hiddenLayers),
+      weights: folded ? folded.weights : factorWeights(weights),
       allowFerries: folded
         ? folded.allowFerries
         : stored.allowFerries !== false,
       allowSheds: folded ? folded.allowSheds : stored.allowSheds !== false,
-      hiddenFactors: isFactorKeys(hiddenFactors) ? hiddenFactors : [],
+      hiddenFactors: factorKeys(hiddenFactors),
+      coverage: COVERAGE.some(({ id }) => id === stored.coverage)
+        ? (stored.coverage as string)
+        : DEFAULT_COVERAGE,
     },
     migrated: folded?.found ?? false,
   };
