@@ -29,6 +29,7 @@ const SOURCE_DIR: Record<OverlayId, string | null> = {
   commercial: "dining",
   industrial: "industrial",
   historic: "historic",
+  legacy: "legacy",
   shade: "buildings",
   elevation: null,
   scaffolding: null,

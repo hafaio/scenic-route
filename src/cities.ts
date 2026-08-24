@@ -38,6 +38,7 @@ const OVERLAYS_BY_CITY: Record<string, readonly OverlayId[]> = {
     "highways",
     "industrial",
     "historic",
+    "legacy",
     "commercial",
     "shade",
     "scaffolding",
@@ -56,6 +57,7 @@ const OVERLAYS_BY_CITY: Record<string, readonly OverlayId[]> = {
     "highways",
     "industrial",
     "historic",
+    "legacy",
     "shade",
   ],
 };
