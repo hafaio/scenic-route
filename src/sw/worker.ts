@@ -1,4 +1,12 @@
-import { forget, overflowing, record, touch, wipe } from "./ledger";
+import {
+  forget,
+  overflowing,
+  readConfig,
+  record,
+  touch,
+  wipe,
+  writeConfig,
+} from "./ledger";
 import {
   type Filed,
   fileRequest,
@@ -36,6 +44,10 @@ interface FetchEventLike extends ExtendableEventLike {
   respondWith(response: Response | Promise<Response>): void;
 }
 
+interface MessageEventLike extends ExtendableEventLike {
+  data: unknown;
+}
+
 // `self` types as a Window under the app's dom lib, so the worker scope is named through globalThis
 // instead of pulling the conflicting webworker lib into the build — the same dodge src/tiles/worker.ts
 // uses.
@@ -47,6 +59,10 @@ const scope = globalThis as unknown as {
   addEventListener(
     type: "fetch",
     handler: (event: FetchEventLike) => void,
+  ): void;
+  addEventListener(
+    type: "message",
+    handler: (event: MessageEventLike) => void,
   ): void;
   registration: { scope: string };
   clients: { claim(): Promise<void> };
@@ -61,10 +77,44 @@ const scope = globalThis as unknown as {
 // to wander without ever evicting ground the reader is still using. Routing is generous for the same
 // reason from the other end: it holds one graph per city plus one day of bins, about 62 MB for both
 // cities together, and evicting either mid-walk is exactly what the split exists to prevent.
+// The overlay figure here is only the starting point: the reader's own, once they have chosen one,
+// is in the book (OVERLAY_CAP). Routing's is not offered as a setting at all.
 const CAPS: Partial<Record<Store, number>> = {
   routing: 128 * 1024 * 1024,
   overlay: 1024 * 1024 * 1024,
 };
+
+// The reader's overlay cap, read from the book once and then held: it is asked for on the way into
+// every cache write, and the worker is stopped and restarted often enough that re-reading it each
+// time would put an IndexedDB round trip on that path.
+//
+// Three states, and they have to stay three: `undefined` is "not read yet", which is the only one
+// the built-in figure covers; `null` is the reader choosing NO cap, which the built-in figure would
+// silently override; and a number is theirs. Collapsing the first two makes "everything I look at"
+// mean "one gigabyte, permanently".
+const OVERLAY_CAP = "overlay-cap";
+let overlayCap: number | null | undefined;
+// The page's message is what STARTS a stopped worker, so it routinely arrives before this read
+// comes back — and the value it comes back with is then the one from before that message. Once a
+// message has set the cap, the read has nothing left to say.
+let capFromPage = false;
+const capLoaded = readConfig(OVERLAY_CAP)
+  .then((stored) => {
+    // Nothing written down at all leaves it `undefined`, which is the built-in figure. A stored
+    // `null` is the reader's "no cap" and is not the same answer.
+    if (!capFromPage && stored !== undefined) {
+      overlayCap = typeof stored === "number" ? stored : null;
+    }
+  })
+  .catch(() => undefined);
+
+function capFor(which: Store): number {
+  if (which === "overlay" && overlayCap !== undefined) {
+    return overlayCap ?? Number.POSITIVE_INFINITY;
+  } else {
+    return CAPS[which] ?? Number.POSITIVE_INFINITY;
+  }
+}
 
 // How stale an entry's read time may be before a hit is worth writing down. A pan asks for dozens of
 // tiles at once and every one of them is a hit; recording each would put the eviction order's own
@@ -114,6 +164,45 @@ scope.addEventListener("activate", (event) => {
     })(),
   );
 });
+
+// The page's half of the two settings the worker owns. It is told rather than asked: the worker is
+// stopped between requests, so anything it had to be woken to answer would be a round trip on the
+// settings page's first paint. See components/service-worker.tsx.
+scope.addEventListener("message", (event) => {
+  const message = event.data as
+    | { type: "overlay-cap"; bytes: number | null }
+    | { type: "clear-overlays" }
+    | undefined;
+  if (message?.type === "overlay-cap") {
+    event.waitUntil(setOverlayCap(message.bytes));
+  } else if (message?.type === "clear-overlays") {
+    event.waitUntil(clearOverlays());
+  }
+});
+
+// A cap the reader lowered takes effect now rather than at the next tile: the point of choosing a
+// smaller one is usually to get the space back. `null` is "no cap", which is stored as such so it
+// survives a restart — falling back to the built-in figure would silently re-impose one.
+async function setOverlayCap(bytes: number | null): Promise<void> {
+  capFromPage = true;
+  overlayCap = bytes;
+  await writeConfig(OVERLAY_CAP, bytes).catch(() => {});
+  await evict("overlay", capFor("overlay"));
+}
+
+// Only the worker can do this: the cache carries the deploy's own sha in its name, which the page
+// has no way to know.
+async function clearOverlays(): Promise<void> {
+  const cache = await caches.open(STORES.overlay);
+  const keys = await cache.keys();
+  for (const request of keys) {
+    await cache.delete(request);
+  }
+  await forget(
+    "overlay",
+    keys.map(({ url }) => url),
+  ).catch(() => {});
+}
 
 scope.addEventListener("fetch", (event) => {
   const { request } = event;
@@ -209,7 +298,8 @@ async function store(
   // Read out as a blob first, so a retry has something to build a second Response from: a Response
   // whose body a failed `put` already touched cannot be cloned.
   const body = await response.blob();
-  const cap = CAPS[which] ?? Number.POSITIVE_INFINITY;
+  await capLoaded;
+  const cap = capFor(which);
   const copy = (): Response =>
     new Response(body, {
       status: response.status,

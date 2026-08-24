@@ -100,3 +100,52 @@ test("a reader with neither gets the defaults, and nothing is written", () => {
   expect(settings.hiddenFactors).toEqual([]);
   expect(migrated).toBe(false);
 });
+
+// A document written by a NEWER build is the case these two guard: the reader arranges their
+// settings on a release that has one more overlay or one more factor, then opens a tab still running
+// this one. Rejecting a whole field over the one entry this build cannot name would undo everything
+// they set, and folding the pre-document keys back over their weights — then writing that — would
+// replace what they chose with a snapshot of what they chose before any of it existed.
+
+test("an id this build does not know costs its own place, not the whole order", () => {
+  const { settings } = settingsFrom(
+    {
+      layerOrder: ["genus", "moonlight", "canopy"] as OverlayId[],
+      hiddenLayers: ["moonlight", "shade"] as OverlayId[],
+    },
+    () => null,
+  );
+  expect(settings.layerOrder).toEqual(["genus", "canopy"] as OverlayId[]);
+  expect(settings.hiddenLayers).toEqual(["shade"] as OverlayId[]);
+});
+
+test("weights a newer build wrote survive a factor this one cannot name", () => {
+  const legacy = (key: string): string | null =>
+    key === "scenic-route:tree-weight" ? "0.05" : null;
+  const { settings, migrated } = settingsFrom(
+    { weights: { tree: 0.9, moonlight: 0.5 } as Record<string, number> },
+    legacy,
+  );
+  expect(settings.weights).toEqual({ tree: 0.9 });
+  expect(migrated).toBe(false); // nothing folded, so nothing is written back over them
+});
+
+test("the pre-document keys are folded in exactly once", () => {
+  const legacy = (key: string): string | null =>
+    ({
+      "scenic-route:tree-weight": "0.4",
+      "scenic-route:allow-sheds": "false",
+    })[key] ?? null;
+
+  const first = settingsFrom({}, legacy);
+  expect(first.migrated).toBe(true);
+  expect(first.settings.weights).toEqual({ tree: 0.4 });
+  expect(first.settings.allowSheds).toBe(false);
+
+  // The old keys are never deleted, so the only thing that stops a second fold is the document now
+  // carrying weights — including a document whose weights are all at their defaults, `{}`.
+  const second = settingsFrom({ weights: {}, allowSheds: true }, legacy);
+  expect(second.migrated).toBe(false);
+  expect(second.settings.weights).toEqual({});
+  expect(second.settings.allowSheds).toBe(true);
+});

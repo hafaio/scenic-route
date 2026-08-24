@@ -1,7 +1,7 @@
 "use client";
 
 import type { ReactNode } from "react";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { FiEye, FiEyeOff, FiX } from "react-icons/fi";
 import {
   MdConstruction,
@@ -21,8 +21,11 @@ import {
   FactorSlider,
   factorReading,
 } from "../src/routing/factors";
+import { COVERAGE, formatBytes } from "../src/settings/offline";
 import { mergeLayerOrder, updateSettings } from "../src/settings/store";
+import { totals } from "../src/sw/ledger";
 import { useCity } from "./city-context";
+import { clearOfflineMaps } from "./service-worker";
 import { useSettings } from "./use-settings";
 
 // The reader's preferences. Opened at `#settings`, like the About dialog, so it is deep-linkable and
@@ -100,17 +103,15 @@ function LayerRows() {
   const shiftOf = (index: number): number => {
     if (!drag) {
       return 0;
-    }
-    if (index === drag.from) {
+    } else if (index === drag.from) {
       return drag.offset;
-    }
-    if (drag.to > drag.from && index > drag.from && index <= drag.to) {
+    } else if (drag.to > drag.from && index > drag.from && index <= drag.to) {
       return -ROW_HEIGHT;
-    }
-    if (drag.to < drag.from && index >= drag.to && index < drag.from) {
+    } else if (drag.to < drag.from && index >= drag.to && index < drag.from) {
       return ROW_HEIGHT;
+    } else {
+      return 0;
     }
-    return 0;
   };
 
   return (
@@ -330,6 +331,96 @@ function FactorRows({
   );
 }
 
+// How much of the map to keep, and how much is kept. The figure comes from the worker's own book
+// (src/sw/ledger.ts) rather than from the worker, which is stopped between requests: the book is
+// ordinary same-origin IndexedDB, so the page can read it without waking anything.
+function OfflineSection() {
+  const { coverage } = useSettings();
+  const [held, setHeld] = useState<number | null>(null);
+
+  const measure = useCallback(() => {
+    void totals()
+      .then((stores) => {
+        // The overlay store only. The routing graphs are held under their own cap, none of these
+        // options touch them and Clear does not either, so counting them here would answer a
+        // question this section says it is not asking.
+        setHeld(stores.overlay ?? 0);
+      })
+      .catch(() => {
+        setHeld(null);
+      });
+  }, []);
+
+  useEffect(measure, [measure]);
+
+  // Empty either way: nothing cached yet, or the book could not be read. The reader can act on
+  // neither, and "nothing kept yet" is true of both.
+  const kept = held === null ? "" : formatBytes(held);
+
+  return (
+    <div className="mt-7">
+      <p className="text-[11px] uppercase tracking-wide text-slate-400 dark:text-slate-500">
+        Offline maps
+      </p>
+      <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+        Ground you have looked at is kept, so a walk works with no signal. The
+        routes themselves are always kept and are not part of this.
+      </p>
+      <ul className="mt-3">
+        {COVERAGE.map((option) => (
+          <li key={option.id}>
+            <label className="flex w-full cursor-pointer items-center gap-3 rounded-xl px-2 py-2 hover:bg-slate-50 dark:hover:bg-slate-700/60">
+              {/* The dot beside it is the one that shows; a native radio cannot be styled to match
+                  the rest of the page, and swapping it for a button loses the arrow-key group. */}
+              <input
+                type="radio"
+                name="offline-coverage"
+                value={option.id}
+                checked={option.id === coverage}
+                onChange={() => updateSettings({ coverage: option.id })}
+                className="peer sr-only"
+              />
+              <span
+                aria-hidden="true"
+                className={`grid h-4 w-4 shrink-0 place-items-center rounded-full border ${
+                  option.id === coverage
+                    ? "border-brand-500"
+                    : "border-slate-300 dark:border-slate-600"
+                } peer-focus-visible:ring-2 peer-focus-visible:ring-brand-500`}
+              >
+                {option.id === coverage ? (
+                  <span className="h-2 w-2 rounded-full bg-brand-500" />
+                ) : null}
+              </span>
+              <span className="min-w-0 flex-1 truncate text-sm text-slate-700 dark:text-slate-200">
+                {option.label}
+              </span>
+              <span className="shrink-0 text-xs text-slate-400 dark:text-slate-500">
+                {option.detail}
+              </span>
+            </label>
+          </li>
+        ))}
+      </ul>
+      <div className="mt-2 flex items-center justify-between px-2 text-xs text-slate-500 dark:text-slate-400">
+        <span>{kept === "" ? "Nothing kept yet" : `${kept} kept`}</span>
+        <button
+          type="button"
+          onClick={() => {
+            clearOfflineMaps();
+            // The worker deletes in the background and the book is what this reads, so the figure is
+            // taken again a moment later rather than assumed to be zero.
+            window.setTimeout(measure, 600);
+          }}
+          className="font-medium text-brand-600 hover:underline dark:text-brand-400"
+        >
+          Clear stored maps
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export default function SettingsDialog({
   weights,
   onWeight,
@@ -422,6 +513,8 @@ export default function SettingsDialog({
             />
           </div>
         </div>
+
+        <OfflineSection />
       </div>
     </div>
   );
