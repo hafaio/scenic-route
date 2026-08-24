@@ -258,6 +258,7 @@ in its own band.
 | ferries | the two NYC ferry GTFS feeds — Staten Island Ferry (NYC DOT) and NYC Ferry (Hornblower, via Connexionz) | consolidated to a time-independent ferry graph, a committed source, magic `FERR` — OSM- and canopy-independent, read by a later phase's routing graph, not the cover pipeline; see below and "Binary layouts" |
 | subway | the MTA's subway GTFS feed, `https://rrgtfsfeeds.s3.amazonaws.com/gtfs_subway.zip` | the 29 routes as 93 polylines (every shape variant the feed runs that draws track nothing else does) and the 496 stations, with the colours and names the MTA publishes for each route and, per station, the set of routes that genuinely serve it and the complex `transfers.txt` puts it in; a committed source, magic `SBWY` — **display only**, it enters no routing input (this is a walking router and nobody walks the subway); see below and "Binary layouts" |
 | transit (San Francisco) | SFMTA's Muni GTFS, `https://muni-gtfs.apps.sfmta.com/data/muni_gtfs-current.zip`, and BART's, `https://www.bart.gov/dev/schedules/google_transit.zip` — both keyless | Muni's rail (the six Metro lines, the F streetcar, the three cable cars) and the four BART lines that run through the city, as 42 polylines clipped to the city's land, and the 268 stations (no complexes: neither feed publishes a transfer between two of its stations), in the **same `SBWY`** blob New York's subway ships as; **display only**, it enters no routing input; see below |
+| legacy | SF Legacy Business Registry (ArcGIS, Office of Small Business) and NY State Historic Business Preservation Registry (ArcGIS, State Parks) | businesses trading 50+ years, at their register's own point; a committed POI source, magic `LGCY` — overlay only, no per-edge byte; see "Binary layouts" |
 | landmarks | NYC LPC Individual Landmark Sites, Socrata `buis-pvji` | ~1.5k designated historic/touristy sites, taken at their WGS84 centroid; a committed POI source, magic `LMRK` — fanned out into a per-edge routing discount, not the cover pipeline; see "Binary layouts" |
 | art | NYC PDC Outdoor Public Art Inventory (Socrata `2pg3-gcaa`) + OSM `tourism=artwork` via Overpass | public art and murals (OSM carries the murals the PDC set is thin on), deduped by proximity; a committed POI source, magic `ARTW` — its own routing discount, distinct scenery from landmarks; see "Binary layouts" |
 | highways | OSM limited-access highways (`motorway`/`trunk` + ramps) and above-ground rail (surface, open cut, or elevated — anything not `tunnel`), via Overpass | the lines walking near is unpleasant, as polylines; a committed source, magic `HWAY` — proximity to it is a per-edge routing *penalty*; never itself routed; see "Binary layouts" |
@@ -1318,6 +1319,29 @@ edges it reaches — so the router mildly prefers routes that pass near them; it
 points from the header and **ignores the name blob**, which is client-only (the map overlay draws
 the names as labels). The blobs are served verbatim to `public/{landmarks,art}/<id>.bin` for the
 overlay.
+
+**`data/legacy/<id>.bin` (`LGCY`)** is the same point layout again: businesses that have been trading
+fifty years or more, named by the register's own business name and nothing else. The founding year
+decides whether a business is in the file at all and then goes no further — a screenful of dates
+reads as a database where the names read as a neighbourhood. Overlay only for now: no per-edge byte,
+so the router does not yet prefer walking past them.
+
+The sources are **curated registers**, not licence dates, and that took a survey to settle. San
+Francisco's is the Office of Small Business's **Legacy Business Registry** (its own ArcGIS layer,
+not on DataSF's Socrata; 537 locations, an establishment date on every one, of which 271 are 50+),
+and New York's is New York **State**'s **Historic Business Preservation Registry** (321 statewide, 50
+inside the city's land mask; the city has no register of its own, only a Council bill pending since
+2018). The licence-date version of this layer is not weak but impossible, and each of these is a
+measured fact rather than a suspicion: NYC's DCWP file covers regulated trades — home-improvement
+contractors, tobacco dealers, sightseeing guides, not diners — and holds nothing before 1994 except
+102 sentinel rows dated 1900; the State Liquor Authority's `originalissuedate` has a statewide
+*minimum of 2017* and is 96% dated 2023 or later, because licensing changed systems and "original
+issue" reset with it, and the older deep-dated list is retired and answers 403; and OpenStreetMap's
+`start_date` is on 212 of 46,396 NYC shop and food POIs. So the map claims only what a register
+claims — that a body researched the business and voted it on — and the About dialog says whose
+register and on what terms, because the two differ: San Francisco's own bar is 20–30 years and this
+filters it to 50, while New York's is 50 by statute and entered by legislator nomination, so a
+business missing from it has not been nominated rather than being young.
 
 **`data/dining/<id>.bin` (`DINE`)** and **`data/openstreets/<id>.bin` (`OSTR`)** use the same point
 layout (name blob empty), for the commercial overlay's "cute" signals. **`data/landuse/<id>.bin`

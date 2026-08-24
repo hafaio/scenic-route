@@ -77,6 +77,7 @@ export type OverlayId =
   | "commercial"
   | "industrial"
   | "historic"
+  | "legacy"
   | "shade"
   | "scaffolding"
   | "elevation";
@@ -102,6 +103,11 @@ export interface OverlayDef {
 // The dot colours match the route panel's scenery sliders (landmark amber, art fuchsia), so the map
 // and the controls read as one palette.
 const LANDMARK_COLOR = "#f59e0b"; // amber-500
+// A deeper, browner gold than the landmark amber, because the two sit near each other on the map and
+// price different things: a landmark is a designated BUILDING, these are businesses still trading in
+// one. Distinct from the commercial overlay's violet for the same reason — that is where the shops
+// are, this is which of them have been there fifty years.
+const LEGACY_COLOR = "#a16207"; // yellow-700
 const ART_COLOR = "#d946ef"; // fuchsia-500
 const FERRY_COLOR = "#2563eb"; // blue-600, the route layer's ferry-leg colour
 // The subway draws each route in the MTA's own published colour (in subway.ts); only its menu glyph
@@ -165,6 +171,24 @@ export const OVERLAYS: readonly OverlayDef[] = [
       <MdMapsHomeWork className="h-4 w-4 text-indigo-700" aria-hidden="true" />
     ),
     render: () => <HistoricLayer />,
+  },
+  {
+    id: "legacy",
+    // Just "Businesses". Every one of these has been trading fifty years — that is the whole entry
+    // condition — so saying so in the label would be labelling the only kind there is.
+    label: "Businesses",
+    icon: (
+      <MdStorefront className="h-4 w-4 text-yellow-700" aria-hidden="true" />
+    ),
+    render: () => (
+      <PoiLayer
+        overlay="legacy"
+        dir="legacy"
+        magic="LGCY"
+        color={LEGACY_COLOR}
+        labelAnchor="top"
+      />
+    ),
   },
   {
     id: "landmarks",
