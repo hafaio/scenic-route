@@ -10,8 +10,8 @@ import {
   frameFor,
   MAX_SHADE_ALPHA,
   type PolygonSink,
-  SHADE_RGB,
   type SweptGround,
+  shadeRgb,
   TILE_SIZE,
 } from "./sweep";
 
@@ -36,8 +36,12 @@ const SAMPLES = 4;
 // rebuilding through; a driver that cannot hold a context is not worth retrying every tile.
 const REBUILDS = 3;
 
-// The shade colour the fills carry, on the 0..1 the shaders want.
-const SLATE = SHADE_RGB.map((channel) => channel / 255);
+// The shade colour the fills carry, on the 0..1 the shaders want. Read per tile rather than once:
+// it is the theme's, and a theme flip redraws every tile.
+function slate(): [number, number, number] {
+  const [red, green, blue] = shadeRgb();
+  return [red / 255, green / 255, blue / 255];
+}
 
 // Terminates a polygon in the index buffer, so one drawElements covers a whole layer.
 const RESTART = 0xffffffff;
@@ -332,7 +336,7 @@ class Sweeper {
     const { chunks, decks, samples, maxShadowMeters } = ground;
     const frame = frameFor(coords);
     const devicePixel = TILE_SIZE / this.size;
-    const [red, green, blue] = SLATE;
+    const [red, green, blue] = slate();
 
     this.crowns.reset();
     // Trunks ride with the crowns; see the note in src/tiles/sweep.ts.

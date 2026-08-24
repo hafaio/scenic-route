@@ -838,6 +838,18 @@ of *these* streets are the hills. The relief channel multiplies the tint it pick
 matches `HILLSHADE_MAX` in the pass, which is above 1 because a lit face is brightened rather than
 only darkened.
 
+There are two palettes, and both are authored. The dark one used to be the light one run through
+`invert(1) hue-rotate(180deg)` in CSS, which is not a design: it put near-black streets on a brown
+ground and made the canopy ramp get *darker* as cover rose, on a map where dark means empty. Each
+ramp is now picked for the ground it is drawn on — the night ramps are greyer at the same lightness,
+because saturation reads far stronger against a dark ground, and they climb rather than fall, because
+what has to grow with the value is contrast against what is underneath. The basemap's two colour
+dictionaries sit in `src/basemap/flavor.ts` beside them.
+
+The theme is a value the whole map reads: the layers take it from the `dark` class on `<html>`
+(`src/theme/current.ts`, the same thing the stylesheet reads), hand it to the tile worker as a
+message, and redraw. Nothing is rebuilt and nothing is refetched.
+
 ## Running it
 
 ```sh
@@ -1016,7 +1028,7 @@ reach the chunk pass before the graph that computes it has run. It also opens ea
 different grids over different bounds, but San Francisco's 1.77 GB of tiles are then indexed once.
 
 The plan file carries what the nine argv lists carried, including the one thing that has to come
-from TypeScript because the client inverts the very same module: the per-city sun-position grid
+from TypeScript because the client imports the very same module: the per-city sun-position grid
 (`scripts/shade-schedule.ts`).
 **Unknown keys are rejected** — a misspelled directory would otherwise write a pyramid nothing
 serves and report success.

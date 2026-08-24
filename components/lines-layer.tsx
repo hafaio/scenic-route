@@ -11,8 +11,8 @@ import { useCity } from "./city-context";
 
 // A line overlay: the committed highway/rail nuisance lines (magic HWAY) or the ferry route segments
 // (magic FERR), drawn as coloured canvas polylines at every zoom. Like the POI dots they ride in a
-// dedicated pane so the dark-mode tile-pane invert leaves their colour true. The decoding and the
-// drawing live in the tile worker (src/tiles/lines.ts).
+// pane of their own, above every areal wash: a line is a thing on the ground rather than the ground.
+// The decoding and the drawing live in the tile worker (src/tiles/lines.ts).
 
 const PANE_NAME = "scenic-lines";
 const PANE_Z_INDEX = 290; // below the POI dots (300), above the canopy fill

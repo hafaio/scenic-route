@@ -8,10 +8,9 @@ import WorkerTileLayer from "../src/tiles/layer";
 import manifest from "../src/tree-cover/manifest.json";
 import { useCity } from "./city-context";
 
-// The manufacturing and industrial tax lots (magic INDL), filled. Like the lines it rides in a
-// dedicated pane so the dark-mode tile-pane invert leaves the fill's colour true, and it sits under
-// them: it is an areal wash, and a highway or a ferry line drawn beneath it would be lost. The
-// decoding and the drawing live in the tile worker (src/tiles/industrial.ts).
+// The manufacturing and industrial tax lots (magic INDL), filled. Like the lines it rides in a pane
+// of its own, and under them: it is an areal wash, and a highway or a ferry line drawn beneath it
+// would be lost. The decoding and the drawing live in the tile worker (src/tiles/industrial.ts).
 
 const PANE_NAME = "scenic-industrial";
 const PANE_Z_INDEX = 270; // its own rung, under the shade wash (275) and the commercial band (280)

@@ -2,7 +2,9 @@
 
 import { useEffect } from "react";
 import { useMap } from "react-leaflet";
+import { FLAVORS } from "../src/basemap/flavor";
 import { basemapLayer } from "../src/basemap/layer";
+import { useMapTheme } from "./use-map-theme";
 
 // The Protomaps basemap, mounted imperatively because `leafletLayer` builds a configured GridLayer
 // rather than exposing a react-leaflet component. It goes in Leaflet's own default tile pane, under
@@ -57,16 +59,20 @@ export default function Basemap({
   onLost: (lost: boolean) => void;
 }) {
   const map = useMap();
+  const theme = useMapTheme();
 
   useEffect(() => {
-    const layer = basemapLayer();
+    // Rebuilt rather than restyled: protomaps-leaflet resolves its paint rules once, when the layer
+    // is constructed, so a flavor swap is a new layer. It costs a redraw of what is on screen, which
+    // is what a theme change is.
+    const layer = basemapLayer(FLAVORS[theme]);
     watchTiles(layer, onLost);
     layer.addTo(map);
     return () => {
       onLost(false);
       layer.remove();
     };
-  }, [map, onLost]);
+  }, [map, onLost, theme]);
 
   return null;
 }

@@ -12,7 +12,7 @@ import { useCity } from "./city-context";
 // A point-of-interest overlay: the committed POI points (landmarks, public art) drawn as coloured
 // canvas dots at every zoom. Unlike the tree dots there is no raster pyramid below — a few thousand
 // points draw live cheaply — so one canvas GridLayer covers the whole zoom range. The dots ride in a
-// dedicated pane so the dark-mode tile-pane invert leaves their colour true (as the genus dots do).
+// dedicated pane, which is how a layer takes a place between the tile pane and the overlay pane.
 // The decoding and the drawing live in the tile worker (src/tiles/poi.ts).
 
 const PANE_NAME = "poi";
@@ -38,7 +38,7 @@ export default function PoiLayer({
   const active = useCity();
 
   useEffect(() => {
-    // A dedicated pane, so the dark-mode tile-pane invert leaves the dot colours true.
+    // A pane of its own, so the dots sit over every wash rather than among them.
     if (!map.getPane(PANE_NAME)) {
       const pane = map.createPane(PANE_NAME);
       pane.style.zIndex = String(PANE_Z_INDEX);

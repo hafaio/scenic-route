@@ -447,8 +447,8 @@ function drawLines(
 
 // Below BULLET_ZOOM a station is a white disc ringed in its routes' colour, the symbol the MTA's own
 // map uses; from BULLET_ZOOM it is the routes themselves. Either way it is the one thing on the
-// layer that has to read the same over a dark map as a light one, since the pane escapes the
-// dark-mode invert. Below STATION_MIN_ZOOM there is no marker at all: at z12 91 of New York's
+// layer whose colours are the MTA's rather than the theme's, so it has to read over a dark map and a
+// light one alike. Below STATION_MIN_ZOOM there is no marker at all: at z12 91 of New York's
 // markers sit within 6 px of another and at z11 156 do, so they stop being stations and become a
 // smear over the lines that already say where the system runs. At z13 that is down to 4.
 function drawStations(

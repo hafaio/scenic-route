@@ -1,8 +1,9 @@
 // The genus overlay's colour key, shared by the tile builder and the legend so a tree on the map
 // and its swatch read as one palette. Each tree is drawn as a disc in its genus's colour. This
 // module is purely positional: ids 0..10 are the 11 commonest genera, ranked by count in the
-// pipeline, and id 11 is "Other". Only the light palette exists — dark mode leaves the genus pane
-// un-inverted, so these are the colours the map and the legend both show.
+// pipeline, and id 11 is "Other". One palette, not two: these are categorical, and a colour that
+// means "London plane" has to keep meaning it in both themes, so the map and the legend show these
+// exact hues whichever theme is on.
 
 import type { Rgb } from "../theme/palette";
 

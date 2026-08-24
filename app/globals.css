@@ -83,18 +83,21 @@
   animation: scenic-pulse 1.8s ease-out infinite;
 }
 
-/* CartoDB doesn't ship a dark variant of Voyager. Inverting + hue-rotating the
-   tile pane gives a dark map that keeps Voyager's full road/label detail.
-   Scoped to .leaflet-tile-pane so markers and tooltips render normally. */
-.dark .leaflet-tile-pane {
-  filter: invert(1) hue-rotate(180deg) brightness(0.95) contrast(0.95);
+/* Leaflet paints the gaps between tiles — the ones a zoom opens up before the new level arrives —
+   with the container's own background, which is its light grey by default and flashes on a dark map.
+   Made transparent rather than given a colour of its own, so what shows through is the page's, which
+   Tailwind already themes; the alternative is a third place the map's ground colour is written down.
+   */
+.leaflet-container {
+  background: transparent;
 }
-/* Leaflet paints not-yet-loaded areas with the container's background, which sits outside
-   the filtered pane — so in dark mode it has to be given the inverted grey itself, or
-   zooming flashes light patches between the dark tiles. */
-.dark .leaflet-container {
-  background: #222222;
-}
+
+/* Nothing here darkens the map. Every layer in the tile pane draws itself in the theme's own
+   colours — the basemap from src/basemap/flavor.ts, the value overlays through the palette in
+   src/theme/palette.ts — and the container's background is set from the same flavor in
+   components/basemap.tsx, where the colour it has to match is written down. This used to be an
+   invert + hue-rotate over the whole pane, which is why dark mode had near-black streets on a
+   brown ground: inverting a style turns its most important lines into its least visible ones. */
 
 /* While a route field has armed map-pick, the whole map reads as a target. */
 .leaflet-container.scenic-picking,

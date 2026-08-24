@@ -1,3 +1,4 @@
+import type { ThemeName } from "../theme/palette";
 import type { ShedDecks } from "./shed-decks";
 
 // The messages between the map's tile layers and the rasterizing worker. Every canvas overlay that
@@ -132,6 +133,14 @@ export interface ShadePrefetchMessage {
   coords: TileCoords[]; // the source tiles covering the view, at their baked zoom
 }
 
+// Which theme the map is drawing in. Sent whenever the reader flips the toggle rather than riding
+// along with every draw: one small fact shared by every layer, and the layers redraw themselves
+// straight after, so the change reaches the tiles on screen without being copied into each of them.
+export interface ThemeMessage {
+  type: "theme";
+  theme: ThemeName;
+}
+
 // The sidewalk-shed decks the swept tiles cast, sent whenever the picked date moves the standing set
 // rather than riding along with every draw. They are built from the routing graph, which lives on the
 // main thread and is far too big to hand the worker a second copy of; a day's are ~440 KB.
@@ -145,7 +154,8 @@ export type ToWorker =
   | DrawMessage
   | CancelMessage
   | ShadePrefetchMessage
-  | ShedDecksMessage;
+  | ShedDecksMessage
+  | ThemeMessage;
 
 export interface DoneMessage {
   type: "done";

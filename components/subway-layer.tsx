@@ -9,9 +9,8 @@ import manifest from "../src/tree-cover/manifest.json";
 import { useCity } from "./city-context";
 
 // The subway overlay: the MTA's route geometry in its published colours, with a marker at every
-// station. Like the ferry lines and the POI dots it rides in a dedicated pane so the dark-mode
-// tile-pane invert leaves the route colours — and the white station discs — true. The decoding and
-// the drawing live in the tile worker (src/tiles/subway.ts).
+// station. Like the ferry lines and the POI dots it rides in a pane of its own, above every areal
+// wash. The decoding and the drawing live in the tile worker (src/tiles/subway.ts).
 
 const PANE_NAME = "scenic-subway";
 const PANE_Z_INDEX = 295; // above the ferry/highway lines (290), below the POI dots (300)

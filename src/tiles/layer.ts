@@ -1,6 +1,7 @@
 "use client";
 
 import L from "leaflet";
+import { currentTheme, subscribeTheme } from "../theme/current";
 import type {
   DoneMessage,
   ShadePrefetchMessage,
@@ -26,6 +27,28 @@ let worker: Worker | undefined;
 const pending = new Map<number, PendingTile>();
 let nextTileKey = 0;
 
+// Every worker-drawn layer on the map. The theme is not a per-layer fact, so the flip is handled
+// once here rather than by each of them subscribing: tell the worker, then ask every layer for its
+// tiles again. Leaflet keeps a drawn tile forever otherwise — it has no idea the pixels went stale.
+const layers = new Set<WorkerTileLayer>();
+
+function repaintForTheme(): void {
+  // Told through the existing worker rather than `tileWorker()`, which would START one for a map
+  // that has none of these layers on it. A worker that does not exist yet is told the theme as it
+  // starts, and this must reach one that does even when nothing is drawn through it right now — the
+  // worker outlives the layers, so an overlay switched off across a flip and back on afterwards
+  // would otherwise paint in the theme the page loaded in.
+  if (worker) {
+    const message: ToWorker = { type: "theme", theme: currentTheme() };
+    worker.postMessage(message);
+  }
+  for (const layer of layers) {
+    layer.redraw();
+  }
+}
+
+subscribeTheme(repaintForTheme);
+
 function tileWorker(): Worker {
   if (!worker) {
     const started = new Worker(new URL("./worker.ts", import.meta.url), {
@@ -43,6 +66,10 @@ function tileWorker(): Worker {
     // those against its own chunk URL, so it gets the document's base to resolve them against.
     const init: ToWorker = { type: "init", base: document.baseURI };
     started.postMessage(init);
+    // Before any draw, so the first tile is painted in the theme the page loaded in rather than in
+    // the light default and then again a moment later.
+    const theme: ToWorker = { type: "theme", theme: currentTheme() };
+    started.postMessage(theme);
     worker = started;
   }
   return worker;
@@ -74,6 +101,12 @@ export default class WorkerTileLayer extends L.GridLayer {
     this.on({
       tileunload: ({ tile }) => {
         this.discard(tile);
+      },
+      add: () => {
+        layers.add(this);
+      },
+      remove: () => {
+        layers.delete(this);
       },
     });
   }

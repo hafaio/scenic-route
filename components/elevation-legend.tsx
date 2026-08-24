@@ -1,8 +1,9 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { PALETTE } from "../src/theme/palette";
+import { PALETTES, type ThemeName } from "../src/theme/palette";
 import { useCity } from "./city-context";
+import { useMapTheme } from "./use-map-theme";
 
 // The key for the elevation overlay. The tint is stretched over each city's own height range, so a
 // reader looking at the map alone can see which streets are higher and not by how much — the range
@@ -14,11 +15,20 @@ interface Range {
   highMeters: number;
 }
 
-const RAMP = PALETTE.elevation.stops;
-const BAR = RAMP.map(
-  ({ red, green, blue }, index) =>
-    `rgb(${red} ${green} ${blue}) ${(100 * index) / (RAMP.length - 1)}%`,
-).join(", ");
+function bar(theme: ThemeName): string {
+  const ramp = PALETTES[theme].elevation.stops;
+  return ramp
+    .map(
+      ({ red, green, blue }, index) =>
+        `rgb(${red} ${green} ${blue}) ${(100 * index) / (ramp.length - 1)}%`,
+    )
+    .join(", ");
+}
+
+const BARS: Record<ThemeName, string> = {
+  light: bar("light"),
+  dark: bar("dark"),
+};
 
 const ranges = new Map<string, Promise<Range | null>>();
 
@@ -42,6 +52,7 @@ const feet = (meters: number): number => Math.round(meters / 0.3048);
 
 export default function ElevationLegend(): React.ReactElement | null {
   const active = useCity();
+  const theme = useMapTheme();
   const [range, setRange] = useState<Range | null>(null);
 
   useEffect(() => {
@@ -67,7 +78,7 @@ export default function ElevationLegend(): React.ReactElement | null {
       </div>
       <div
         className="h-2 w-40 rounded-full"
-        style={{ background: `linear-gradient(to right, ${BAR})` }}
+        style={{ background: `linear-gradient(to right, ${BARS[theme]})` }}
       />
       <div className="mt-1 flex justify-between font-medium text-[11px] text-slate-600 tabular-nums dark:text-slate-300">
         <span>{feet(range.lowMeters)} ft</span>

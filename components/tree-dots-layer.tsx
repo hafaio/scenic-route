@@ -19,7 +19,7 @@ import { useCity } from "./city-context";
 
 const MIN_ZOOM = 15; // the handoff: raster tiles below, live dots at and above
 const MAX_ZOOM = 20;
-const PANE_NAME = "genus"; // shares the raster layer's non-inverted pane, so dark mode leaves it true-coloured
+const PANE_NAME = "genus"; // shares the raster layer's pane, so the dots sit exactly where the field does
 const PANE_Z_INDEX = 250;
 
 export default function TreeDotsLayer() {
@@ -27,8 +27,8 @@ export default function TreeDotsLayer() {
   const active = useCity();
 
   useEffect(() => {
-    // Share the raster layer's dedicated pane so the categorical dots escape the dark-mode
-    // tile-pane invert exactly as the raster tiles do; create it if the raster layer has not.
+    // Share the raster layer's dedicated pane, so the dots hand off from the field at exactly the
+    // depth it was drawn at; create it if the raster layer has not.
     if (!map.getPane(PANE_NAME)) {
       const pane = map.createPane(PANE_NAME);
       pane.style.zIndex = String(PANE_Z_INDEX);

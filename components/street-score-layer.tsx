@@ -16,8 +16,8 @@ import { useCity } from "./city-context";
 const MIN_ZOOM = 13;
 const MAX_ZOOM = 20;
 
-// Above the fill (zIndex 2) but still in the tile pane, so the dark-mode pane filter in
-// globals.css inverts the lines along with everything under them.
+// Above the fill (zIndex 2) and still in the tile pane: the lines read the same canopy ramp the
+// fill does, so they belong with it rather than in a pane of their own.
 const Z_INDEX = 3;
 
 export default function StreetScoreLayer() {
