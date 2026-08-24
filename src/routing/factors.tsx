@@ -206,6 +206,17 @@ export function factorReading(factor: Factor, weight: number): string {
 
 // A factor's slider, tracked in its own colour. The two pages show the same weight, so they show it
 // through the same control rather than through two that have to be kept in step.
+// The steps a slider moves in, as percentages. Twenty positions either way rather than a hundred:
+// nobody is choosing between 63% and 64% tree cover, and a coarse step is what makes the same drag
+// land on the same number twice. The signed one is coarser still because it spends its travel on two
+// directions, so 10% keeps its two halves the same twenty steps the others get.
+const STEP = 5;
+const SIGNED_STEP = 10;
+
+export function stepFor(factor: Factor): number {
+  return factor.signed ? SIGNED_STEP : STEP;
+}
+
 export function FactorSlider({
   id,
   factor,
@@ -228,6 +239,7 @@ export function FactorSlider({
       type="range"
       min={factor.signed ? -100 : 0}
       max={100}
+      step={stepFor(factor)}
       value={value}
       disabled={disabled}
       onChange={(event) =>
