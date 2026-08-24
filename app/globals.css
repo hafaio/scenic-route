@@ -99,6 +99,24 @@
    invert + hue-rotate over the whole pane, which is why dark mode had near-black streets on a
    brown ground: inverting a style turns its most important lines into its least visible ones. */
 
+/* A row of value chips: one line, however many there are, scrolled sideways rather than wrapped.
+   There are eleven scenic factors now and a wrapped second line pushes the map controls around every
+   time one is switched on. The scrollbar is hidden because the row is a summary rather than a
+   surface to navigate — the chips themselves are the affordance that there is more of it. */
+.chip-row {
+  display: flex;
+  align-items: center;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
+}
+.chip-row::-webkit-scrollbar {
+  display: none;
+}
+.chip-row > * {
+  flex-shrink: 0;
+}
+
 /* While a route field has armed map-pick, the whole map reads as a target. */
 .leaflet-container.scenic-picking,
 .leaflet-container.scenic-picking .leaflet-grab,
