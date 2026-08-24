@@ -45,6 +45,10 @@ export interface Settings {
   // service worker is the one that enforces it and holds its own copy, since it runs when no page
   // does; this is the reader's side of that, and components/service-worker.tsx carries it across.
   coverage: string;
+  // When each field was last changed on some device, keyed by path — the field's own name, or
+  // `weights.<factor>` for one slider. Not a preference itself: it is what lets two signed-in
+  // devices merge rather than one of them winning wholesale. See ./sync.ts.
+  updatedAt: Readonly<Record<string, number>>;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -57,6 +61,7 @@ export const DEFAULT_SETTINGS: Settings = {
   hiddenFactors: [],
   hiddenGates: [],
   coverage: DEFAULT_COVERAGE,
+  updatedAt: {},
 };
 
 const REGISTRY_ORDER: readonly OverlayId[] = OVERLAYS.map(({ id }) => id);
@@ -113,6 +118,16 @@ function gateKeys(value: unknown): GateKey[] {
         (key) => typeof key === "string" && GATE_KEYS.has(key),
       ) as GateKey[])
     : [];
+}
+
+function stamps(value: unknown): Record<string, number> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return {};
+  } else {
+    return Object.fromEntries(
+      Object.entries(value).filter(([, at]) => Number.isFinite(at)),
+    );
+  }
 }
 
 function factorWeights(value: unknown): Partial<Record<FactorKey, number>> {
@@ -185,6 +200,7 @@ export function settingsFrom(
       coverage: COVERAGE.some(({ id }) => id === stored.coverage)
         ? (stored.coverage as string)
         : DEFAULT_COVERAGE,
+      updatedAt: stamps(stored.updatedAt),
     },
     migrated: folded?.found ?? false,
   };
@@ -212,6 +228,13 @@ function document(raw: string | null): Partial<Settings> {
   } catch {
     return {};
   }
+}
+
+// A document from somewhere other than this device's localStorage — Firestore — validated by exactly
+// the same rules. `legacy` answers nothing: the pre-document keys are this device's history and have
+// no business in what another one sent.
+export function settingsFromDocument(stored: Partial<Settings>): Settings {
+  return settingsFrom(stored, () => null).settings;
 }
 
 // Anything unreadable reads as the defaults rather than throwing: a preference is not worth a blank
@@ -269,8 +292,43 @@ export function settings(): Settings {
   return current;
 }
 
-export function updateSettings(patch: Partial<Settings>): void {
-  current = { ...current, ...patch };
+// Every change is stamped, so a device that has been offline can be merged rather than overwritten.
+// Weights are stamped per factor: two devices tuning two different sliders is the ordinary case, and
+// stamping the whole map would make one of them lose the other's.
+function stamped(patch: Partial<Settings>, at: number): Record<string, number> {
+  const marks: Record<string, number> = {};
+  for (const [field, value] of Object.entries(patch)) {
+    if (field === "updatedAt") {
+    } else if (field === "weights") {
+      for (const [key, weight] of Object.entries(value as object)) {
+        if (weight !== current.weights[key as FactorKey]) {
+          marks[`weights.${key}`] = at;
+        }
+      }
+    } else {
+      marks[field] = at;
+    }
+  }
+  return marks;
+}
+
+export function updateSettings(
+  patch: Partial<Settings>,
+  at = Date.now(),
+): void {
+  current = {
+    ...current,
+    ...patch,
+    updatedAt: { ...current.updatedAt, ...stamped(patch, at) },
+  };
+  write(current);
+  announce();
+}
+
+// A merged document arriving from another device. Already stamped, so it replaces rather than being
+// stamped again — restamping would make every sign-in look like a fresh edit to every other device.
+export function adoptSettings(next: Settings): void {
+  current = next;
   write(current);
   announce();
 }

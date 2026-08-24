@@ -491,12 +491,14 @@ export default function SettingsDialog({
   onWeight,
   onAllowFerries,
   onAllowSheds,
+  syncingAs,
   onClose,
 }: {
   weights: RouteWeights;
   onWeight: (key: FactorKey, weight: number) => void;
   onAllowFerries: (allow: boolean) => void;
   onAllowSheds: (allow: boolean) => void;
+  syncingAs: string | null; // the signed-in address, or null on a device that is only ever local
   onClose: () => void;
 }) {
   useEffect(() => {
@@ -569,6 +571,12 @@ export default function SettingsDialog({
         </div>
 
         <OfflineSection />
+
+        <div className="mt-7 border-t border-slate-200/60 pt-4 text-xs text-slate-500 dark:border-slate-700/60 dark:text-slate-400">
+          {syncingAs === null
+            ? "These settings are kept on this device. Sign in and they follow you to your others."
+            : `Synced with ${syncingAs}. Changes here reach your other devices, and theirs reach this one.`}
+        </div>
       </div>
     </div>
   );
