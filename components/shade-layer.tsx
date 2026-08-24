@@ -180,7 +180,7 @@ export default function ShadeLayer() {
   const city = useCity();
 
   useEffect(() => {
-    // A dedicated pane, so the dark-mode tile-pane invert leaves the slate tint true.
+    // A pane of its own, so the wash sits above the canopy fill and below the commercial band.
     if (!map.getPane(PANE_NAME)) {
       const pane = map.createPane(PANE_NAME);
       pane.style.zIndex = String(PANE_Z_INDEX);

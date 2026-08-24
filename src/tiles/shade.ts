@@ -1,4 +1,3 @@
-import { PALETTE } from "../theme/palette";
 import {
   acquire,
   assemble,
@@ -12,6 +11,7 @@ import type { ShadeParams, ShadePrefetchMessage, TileCoords } from "./protocol";
 import type { TileRenderer } from "./renderer";
 import { drawSweep, type SweptGround, sweptGround } from "./sweep";
 import { drawSweepGl } from "./sweep-gl";
+import { palette } from "./theme";
 import { drawRamped } from "./theme-gl";
 
 // The baked shade pyramids, magnified through src/tiles/magnify.ts rather than by the browser and
@@ -166,7 +166,7 @@ export const shadeRenderer: TileRenderer<ShadeParams, ShadeSource> = {
         drawSweep(context, source.swept, coords, params, ratio);
       }
     } else {
-      drawRamped(context, source.baked, PALETTE.shade, ratio);
+      drawRamped(context, source.baked, palette().shade, ratio);
     }
   },
 };

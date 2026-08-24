@@ -10,8 +10,7 @@ import { useCity } from "./city-context";
 
 // The "commercial" overlay: charming low-rise retail strips, highlighted a whole block at a time.
 // The signals, the client-side gate and the drawing live in the tile worker
-// (src/tiles/commercial.ts). It rides in a dedicated pane so the dark-mode tile-pane invert leaves
-// the violet true (as the POI dots do).
+// (src/tiles/commercial.ts). It rides in a pane of its own, above the washes and below the dots.
 
 const PANE_NAME = "commercial-blocks";
 const PANE_Z_INDEX = 280; // above the canopy fill, below the POI dots (300) and scenic lines (290)
@@ -25,7 +24,8 @@ export default function DiningLayer() {
   const active = useCity();
 
   useEffect(() => {
-    // A dedicated pane, so the dark-mode tile-pane invert leaves the violet true.
+    // A pane of its own: the tile pane carries one z-index for everything in it, so a layer that
+    // has to sit above the washes and below the dots needs its own.
     if (!map.getPane(PANE_NAME)) {
       const pane = map.createPane(PANE_NAME);
       pane.style.zIndex = String(PANE_Z_INDEX);

@@ -1,6 +1,5 @@
 import { DECK_HEIGHT_METERS } from "../routing/sheds";
 import { DISK_SAMPLES, type SunSample, sunSamples } from "../shade/sun";
-import { PALETTE } from "../theme/palette";
 import {
   type CasterChunk,
   casterManifest,
@@ -15,6 +14,7 @@ import {
   type ShedDecks,
   traceDeck,
 } from "./shed-decks";
+import { palette } from "./theme";
 
 // The other half of the shade overlay: past the baked pyramid's deepest level the shadows are
 // GENERATED here, from the caster chunks (src/tiles/casters.ts), rather than magnified out of a raster
@@ -32,16 +32,14 @@ const DEGREES = Math.PI / 180;
 
 // The shadow's own colour, which is the palette's single stop for the shade layer and not a fact
 // about the pyramid: the swept tiles and the baked ones are two ways of computing the same fraction
-// of lost light, so both take their colour from the same place.
-export const SHADE_RGB: readonly [number, number, number] = [
-  PALETTE.shade.stops[0].red,
-  PALETTE.shade.stops[0].green,
-  PALETTE.shade.stops[0].blue,
-];
+// of lost light, so both take their colour from the same place, and both follow the theme.
+export function shadeRgb(): readonly [number, number, number] {
+  const [{ red, green, blue }] = palette().shade.stops;
+  return [red, green, blue];
+}
 // Keep in sync with MAX_SHADE_ALPHA in crates/tiler/src/shade.rs: the scale the pyramid's alphas are
 // baked at, and what the sweep matches so the handoff between them does not step.
 export const MAX_SHADE_ALPHA = 190;
-const SHADE_CSS = SHADE_RGB.join(", ");
 
 // Where a crown starts, as a share of the tree's height: the foliage runs from there to the full
 // height and its shadow is the union over that range — a long smear at a low sun rather than the
@@ -864,8 +862,9 @@ export function drawSweep(
   if (!shade) {
     return;
   }
+  const slate = shadeRgb().join(", ");
   shade.globalCompositeOperation = "lighter";
-  shade.fillStyle = `rgba(${SHADE_CSS}, ${1 / samples.length})`;
+  shade.fillStyle = `rgba(${slate}, ${1 / samples.length})`;
   for (const { path } of shadows) {
     shade.fill(path);
   }
@@ -874,7 +873,7 @@ export function drawSweep(
   // building's shadow, which comes out LIGHTER rather than darker.
   if (shedsDrawn > 0) {
     shade.globalCompositeOperation = "source-over";
-    shade.fillStyle = `rgb(${SHADE_CSS})`;
+    shade.fillStyle = `rgb(${slate})`;
     shade.fill(sheds);
   }
   shade.globalCompositeOperation = "destination-out";
@@ -883,7 +882,7 @@ export function drawSweep(
 
   const crown = crownsDrawn > 0 ? layer(1, size, ratio) : null;
   if (crown) {
-    crown.fillStyle = `rgb(${SHADE_CSS})`;
+    crown.fillStyle = `rgb(${slate})`;
     crown.fill(crowns);
     crown.globalCompositeOperation = "destination-out";
     crown.fill(bases);

@@ -23,8 +23,8 @@ const MIN_NATIVE_ZOOM = 9; // the pyramid's coarsest zoom; below it Leaflet shri
 const MAX_NATIVE_ZOOM = 15; // the finest; above it the worker magnifies from this level
 const MAX_ZOOM = 20;
 
-// In the shared tile pane, so the dark-mode pane filter in globals.css inverts the overlay
-// along with the map under it.
+// In the shared tile pane, directly over the basemap: the canopy is a wash on the ground rather
+// than a thing standing on it.
 const Z_INDEX = 2;
 
 export default function CanopyLayer() {

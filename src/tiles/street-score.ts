@@ -2,11 +2,17 @@ import {
   decodeStreetChunk,
   type StreetSegment as Segment,
 } from "../streets/chunk";
-import { PALETTE, ROAD_OPACITY, rampCss } from "../theme/palette";
+import {
+  PALETTES,
+  ROAD_OPACITY,
+  rampCss,
+  type ThemeName,
+} from "../theme/palette";
 import { resolveUrl } from "./base-url";
 import { projectX, projectY, unproject } from "./mercator";
 import type { StreetScoreParams, TileCoords } from "./protocol";
 import type { TileRenderer } from "./renderer";
+import { themeName } from "./theme";
 
 // One chunk per z12 tile, fetched lazily. layout: scripts/README.md
 // Relative, so it picks up the basePath the deploy injects; the app is a single-route SPA.
@@ -28,13 +34,23 @@ const WIDTH_PER_ZOOM = 1.32;
 // gradient along a road still reads as continuous.
 const LEVEL_BITS = 3;
 const LEVELS = 256 >> LEVEL_BITS;
-const COLORS: readonly string[] = Array.from({ length: LEVELS }, (_, level) =>
-  rampCss(
-    PALETTE.canopy,
-    ((level << LEVEL_BITS) + (1 << (LEVEL_BITS - 1))) / 255,
-    ROAD_OPACITY,
-  ),
-);
+
+// Both themes' levels, built once each: a theme flip redraws every tile, and rebuilding 32 CSS
+// strings per tile to answer a question that has two answers is not worth doing.
+const COLORS: Record<ThemeName, readonly string[]> = {
+  light: levels("light"),
+  dark: levels("dark"),
+};
+
+function levels(theme: ThemeName): readonly string[] {
+  return Array.from({ length: LEVELS }, (_unused, level) =>
+    rampCss(
+      PALETTES[theme].canopy,
+      ((level << LEVEL_BITS) + (1 << (LEVEL_BITS - 1))) / 255,
+      ROAD_OPACITY[theme],
+    ),
+  );
+}
 
 const chunks = new Map<string, Promise<Segment[]>>();
 
@@ -221,10 +237,11 @@ function draw(
     }
   }
 
+  const colors = COLORS[themeName()];
   for (let level = 1; level < LEVELS; level++) {
     const path = paths[level];
     if (path) {
-      context.strokeStyle = COLORS[level];
+      context.strokeStyle = colors[level];
       context.stroke(path);
     }
   }

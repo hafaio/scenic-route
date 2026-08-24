@@ -13,6 +13,7 @@ import { shadeRenderer, warm as warmShade } from "./shade";
 import { streetScoreRenderer } from "./street-score";
 import { subwayRenderer } from "./subway";
 import { setShedDecks } from "./sweep";
+import { setWorkerTheme } from "./theme";
 import { treeDotsRenderer } from "./tree-dots";
 
 // The tile rasterizer. Projecting every street vertex, tree or POI in a tile and issuing the canvas
@@ -107,6 +108,8 @@ scope.onmessage = ({ data: message }) => {
     warmShade(message);
   } else if (message.type === "shed-decks") {
     setShedDecks(message.decks);
+  } else if (message.type === "theme") {
+    setWorkerTheme(message.theme);
   } else if (message.type === "cancel") {
     // Also where a painted tile is released: its watcher holds the canvas and the decoded data, and
     // Leaflet unloads tiles on every pan.

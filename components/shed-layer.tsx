@@ -106,7 +106,7 @@ export default function ShedLayer() {
   const city = useCity();
 
   useEffect(() => {
-    // A dedicated pane, so the dark-mode tile-pane invert leaves the orange true.
+    // A pane of its own, so the decks sit over the washes rather than among them.
     if (!map.getPane(PANE_NAME)) {
       const pane = map.createPane(PANE_NAME);
       pane.style.zIndex = String(PANE_Z_INDEX);

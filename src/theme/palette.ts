@@ -5,6 +5,13 @@
 // carries the fraction of light a pixel has lost. None of them carries a colour. What those values
 // look like is decided here and applied by one shader (src/tiles/theme-gl.ts) as the tile is drawn,
 // which is what makes a palette a value rather than a rebuild.
+//
+// There are two palettes and both are AUTHORED. The dark one used to be the light one run through
+// `invert(1) hue-rotate(180deg)` in CSS, which is not a design: it gave streets that came out
+// near-black on brown ground and a canopy ramp that got darker as the cover got denser, on a map
+// where dark means empty. Each ramp below is picked for the ground it is drawn on.
+
+export type ThemeName = "light" | "dark";
 
 export interface Rgb {
   red: number;
@@ -48,30 +55,67 @@ function stops(...hexes: string[]): readonly Rgb[] {
   }));
 }
 
-// A single-hue sequential teal/mint ramp, light to dark and strictly monotonic in lightness, so more
-// green always reads as more trees. Deliberately mintier (bluer) than the brand emerald the route
-// line draws in, so a route over canopy reads apart from the greenery under it.
-const CANOPY_STOPS = stops(
-  "#ccfbf1",
-  "#99f6e4",
-  "#5eead4",
-  "#2dd4bf",
-  "#14b8a6",
-  "#0d9488",
-  "#0f766e",
-);
+// A single-hue sequential teal/mint ramp, strictly monotonic in lightness so more green always reads
+// as more trees. Deliberately mintier (bluer) than the brand emerald the route line draws in, so a
+// route over canopy reads apart from the greenery under it.
+//
+// The direction is the ground's, not the ramp's: what has to grow with cover is CONTRAST against
+// what is underneath. On paper-white land that means getting darker, and on a night ground it means
+// getting brighter — a ramp that darkened on a dark map would make the leafiest streets the ones
+// that disappeared. Its faint end still has to lift off the ground, though, and the faint end is
+// most of the city, so it starts well clear of black rather than at the darkest teal.
+//
+// The night ramp is also a good deal greyer than the day one at the same lightness. Saturation reads
+// far stronger against a dark ground than a light one, and Tailwind's teals — picked to hold their
+// own on white — come out as neon on a night map, which is a lot of shouting for a field that covers
+// most of the city.
+const CANOPY_STOPS: Record<ThemeName, readonly Rgb[]> = {
+  light: stops(
+    "#ccfbf1",
+    "#99f6e4",
+    "#5eead4",
+    "#2dd4bf",
+    "#14b8a6",
+    "#0d9488",
+    "#0f766e",
+  ),
+  dark: stops(
+    "#1c4b47",
+    "#23625c",
+    "#2d7a71",
+    "#3a9488",
+    "#4dada0",
+    "#6cc6b8",
+    "#94ded1",
+  ),
+};
 
 // The hypsometric ramp a paper topographic map tints its contour bands with, low to high.
 // Interpolated rather than banded, so a city with 100 m of range does not come out as three flat
 // steps.
-const ELEVATION_STOPS = stops(
-  "#568460", // valley green
-  "#8ca870", // low slope
-  "#c4be82", // tan
-  "#d6b07a", // ochre
-  "#ba8a68", // brown
-  "#966c5c", // summit
-);
+//
+// The dark set keeps the same greens-to-browns story at about half the lightness, and no darker: the
+// relief channel multiplies these down to nearly black on a face turned away from the light, which
+// is how a relief map reads a steep slope, and a tint that started dark would have no room left to
+// do it in.
+const ELEVATION_STOPS: Record<ThemeName, readonly Rgb[]> = {
+  light: stops(
+    "#568460", // valley green
+    "#8ca870", // low slope
+    "#c4be82", // tan
+    "#d6b07a", // ochre
+    "#ba8a68", // brown
+    "#966c5c", // summit
+  ),
+  dark: stops(
+    "#4a6152", // valley green
+    "#5c6f4e", // low slope
+    "#7a7654", // olive
+    "#8f7452", // tan
+    "#9c6f56", // ochre
+    "#a2705f", // summit
+  ),
+};
 
 // Cover is a fraction and most of the city lands low — mean cover over land is single digits, leafy
 // streets 30-60% — so the ramp is stretched over the part of [0, 1] the city actually occupies.
@@ -85,58 +129,74 @@ export interface Palette {
   shade: Ramp;
 }
 
-export const PALETTE: Palette = {
-  // Cover in alpha, nothing in RGB (crates/tiler/src/canopy.rs). The alpha curve is concave because
-  // the useful signal IS the low end: a block that shades 15% of its ground reads as tree-lined, and
-  // telling that from bare ground is most of what the map is for. Exactly-zero cover stays fully
-  // transparent, so "no trees" is blank and any real canopy lifts clear of it.
-  canopy: {
-    stops: CANOPY_STOPS,
-    value: "alpha",
-    valueFull: COVER_FULL,
-    alpha: "alpha",
-    alphaFull: COVER_FULL,
-    alphaCurve: 0.5,
-    maxAlpha: 0.62,
-    relief: null,
-    reliefScale: 1,
-  },
-  // Height in red, the relief shade in green, how much of the pixel stands on ground in alpha
-  // (crates/tiler/src/elevation.rs). The relief is what makes the form read at a glance; without it
-  // a smooth hypsometric ramp looks like fog. Its scale is the most the shade can reach, which is
-  // over 1 because a lit face is brightened rather than only darkened, and it matches HILLSHADE_MAX
-  // in the pass. The opacity is low enough that the basemap under it stays legible — street names,
-  // park fills, the water — since the terrain covers every pixel of the city and anything it buries
-  // is buried everywhere.
-  elevation: {
-    stops: ELEVATION_STOPS,
-    value: "red",
-    valueFull: 1,
-    alpha: "alpha",
-    alphaFull: 1,
-    alphaCurve: 1,
-    maxAlpha: 170 / 255,
-    relief: "green",
-    reliefScale: 1.15,
-  },
-  // The fraction of light lost in alpha, already scaled by the sun's intensity when the pyramid was
-  // baked (crates/tiler/src/shade.rs). One colour, so the value only sets how much of it there is.
-  shade: {
-    stops: stops("#334155"), // slate-700, a cool shadow
-    value: "alpha",
-    valueFull: 1,
-    alpha: "alpha",
-    alphaFull: 1,
-    alphaCurve: 1,
-    maxAlpha: 1,
-    relief: null,
-    reliefScale: 1,
-  },
+function paletteFor(theme: ThemeName): Palette {
+  return {
+    // Cover in alpha, nothing in RGB (crates/tiler/src/canopy.rs). The alpha curve is concave because
+    // the useful signal IS the low end: a block that shades 15% of its ground reads as tree-lined, and
+    // telling that from bare ground is most of what the map is for. Exactly-zero cover stays fully
+    // transparent, so "no trees" is blank and any real canopy lifts clear of it.
+    canopy: {
+      stops: CANOPY_STOPS[theme],
+      value: "alpha",
+      valueFull: COVER_FULL,
+      alpha: "alpha",
+      alphaFull: COVER_FULL,
+      alphaCurve: 0.5,
+      // Slightly less of it at night. The wash is the lit thing on a dark ground rather than ink on
+      // a pale one, so the same opacity carries much further.
+      maxAlpha: theme === "dark" ? 0.58 : 0.62,
+      relief: null,
+      reliefScale: 1,
+    },
+    // Height in red, the relief shade in green, how much of the pixel stands on ground in alpha
+    // (crates/tiler/src/elevation.rs). The relief is what makes the form read at a glance; without it
+    // a smooth hypsometric ramp looks like fog. Its scale is the most the shade can reach, which is
+    // over 1 because a lit face is brightened rather than only darkened, and it matches HILLSHADE_MAX
+    // in the pass. The opacity is low enough that the basemap under it stays legible — street names,
+    // park fills, the water — since the terrain covers every pixel of the city and anything it buries
+    // is buried everywhere.
+    elevation: {
+      stops: ELEVATION_STOPS[theme],
+      value: "red",
+      valueFull: 1,
+      alpha: "alpha",
+      alphaFull: 1,
+      alphaCurve: 1,
+      maxAlpha: theme === "dark" ? 0.72 : 170 / 255,
+      relief: "green",
+      reliefScale: 1.15,
+    },
+    // The fraction of light lost in alpha, already scaled by the sun's intensity when the pyramid was
+    // baked (crates/tiler/src/shade.rs). One colour, so the value only sets how much of it there is.
+    shade: {
+      // A cool slate on paper, and a blue-black at night — a shadow has to be darker than the
+      // ground it falls on, and the night ground is already darker than the daytime slate.
+      stops: stops(theme === "dark" ? "#060a12" : "#334155"),
+      value: "alpha",
+      valueFull: 1,
+      alpha: "alpha",
+      alphaFull: 1,
+      alphaCurve: 1,
+      maxAlpha: 1,
+      relief: null,
+      reliefScale: 1,
+    },
+  };
+}
+
+export const PALETTES: Record<ThemeName, Palette> = {
+  light: paletteFor("light"),
+  dark: paletteFor("dark"),
 };
 
-// Same colour, same quantity — but a 2 px line has far less area to make its colour with than the
-// field under it, so it takes a little more opacity to hold its own against it.
-export const ROAD_OPACITY = 1.2;
+// The street lines' opacity against the field's. On paper a 2 px line has far less area to make its
+// colour with than the field under it, so it takes a little more to hold its own. At night it takes
+// LESS: a light line on a dark ground already reads as the lit thing, and given the day figure it
+// blooms into a neon scribble over the whole city.
+export const ROAD_OPACITY: Record<ThemeName, number> = {
+  light: 1.2,
+  dark: 0.9,
+};
 
 // One point on a ramp: the colour a value picks, and how much of it there is. The shader computes
 // exactly this per pixel; this is for the parts of the app that draw a ramp in CSS rather than in a

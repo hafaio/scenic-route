@@ -13,7 +13,7 @@ import { useCity } from "./city-context";
 
 // The genus overlay's key: the 12 ranked genera (in id order) plus the "Other" bucket, each a
 // true-colour swatch beside its common name. Swatches use the same palette the tiles draw with
-// and sit in a non-inverted pane, so they read as true colour in both light and dark mode. Each
+// and are drawn in their own colours, which are categorical and the same in both themes. Each
 // row is a toggle: clicking it hides or shows that genus across both halves of the overlay (the
 // raster tiles and the live dots), which read the same selection store.
 export default function TreeLegend() {

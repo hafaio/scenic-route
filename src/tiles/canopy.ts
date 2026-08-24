@@ -1,7 +1,7 @@
-import { PALETTE } from "../theme/palette";
 import { assemble, cutFor, type Patch } from "./magnify";
 import type { CanopyParams, TileCoords } from "./protocol";
 import type { TileRenderer } from "./renderer";
+import { palette } from "./theme";
 import { drawRamped } from "./theme-gl";
 
 // The baked canopy pyramid, magnified through src/tiles/magnify.ts rather than by the browser.
@@ -30,6 +30,6 @@ async function load(
 export const canopyRenderer: TileRenderer<CanopyParams, Patch | null> = {
   load,
   draw(context, patch, _coords, _params, ratio) {
-    drawRamped(context, patch, PALETTE.canopy, ratio);
+    drawRamped(context, patch, palette().canopy, ratio);
   },
 };
