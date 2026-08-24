@@ -1353,6 +1353,7 @@ export default function MapApp() {
     setShelterWeight(route.weights.shelter);
     setAllowFerries(route.weights.allowFerries);
     setAllowSheds(route.weights.allowSheds);
+    setFewerCrossings(route.weights.fewerCrossings);
     if (route.customHour !== null) {
       setCustomHour(route.customHour);
     }

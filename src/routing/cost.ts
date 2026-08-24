@@ -278,6 +278,18 @@ export const SHED_AVOID_PENALTY = 20;
 export const SIDE_TIE_BYTES = 12;
 
 // The full cost context a search runs against: the scenic weights and the two gates.
+// The switches, as data. Everything that has to enumerate them — the cache's staleness check, the
+// settings page, the panel's header — reads this rather than writing the list out again, because a
+// list written out again is a list that can miss one. It has: the crossing gate was added and the
+// route cache went on comparing the other two, so flipping it changed nothing on screen.
+export const GATE_KEYS = [
+  "allowFerries",
+  "allowSheds",
+  "fewerCrossings",
+] as const;
+
+export type GateKey = (typeof GATE_KEYS)[number];
+
 export interface RouteWeights {
   tree: number;
   ferry: number;
