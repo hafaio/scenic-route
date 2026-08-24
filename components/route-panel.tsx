@@ -589,27 +589,32 @@ export default function RoutePanel({
                 aria-hidden="true"
               />
             ) : (
-              <span className="flex items-center gap-2">
-                {factors.map((factor) => (
-                  <span
-                    key={factor.key}
-                    className={`flex items-center gap-0.5 text-[11px] font-semibold tabular-nums ${
-                      factor.disabled || factor.lost
-                        ? "opacity-40"
-                        : factor.tint
-                    }`}
-                  >
-                    <factor.Icon className="h-3.5 w-3.5" aria-hidden={true} />
-                    {factorPercent(factor, factor.weight)}
-                  </span>
-                ))}
-                <FiChevronDown
-                  className="ml-0.5 h-4 w-4 text-slate-400"
-                  aria-hidden="true"
-                />
-              </span>
+              <FiChevronDown
+                className="h-4 w-4 text-slate-400"
+                aria-hidden="true"
+              />
             )}
           </button>
+
+          {/* The collapsed peek, on its own row rather than beside the heading: it is eleven chips
+              wide at most, and sharing a line with the heading left it about a third of the panel to
+              do that in. Outside the button, too, so a sideways drag scrolls it rather than
+              expanding the section. */}
+          {sceneryOpen ? null : (
+            <div className="chip-row mt-1 gap-2">
+              {factors.map((factor) => (
+                <span
+                  key={factor.key}
+                  className={`flex items-center gap-0.5 text-[11px] font-semibold tabular-nums ${
+                    factor.disabled || factor.lost ? "opacity-40" : factor.tint
+                  }`}
+                >
+                  <factor.Icon className="h-3.5 w-3.5" aria-hidden={true} />
+                  {factorPercent(factor, factor.weight)}
+                </span>
+              ))}
+            </div>
+          )}
 
           {sceneryOpen ? (
             <div className="mt-2 space-y-3">
@@ -697,7 +702,7 @@ export default function RoutePanel({
               </p>
             ))}
             {factorChips.length > 0 ? (
-              <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1">
+              <div className="chip-row mt-1.5 gap-x-3">
                 {factorChips.map((factor) => (
                   <span
                     key={factor.key}
