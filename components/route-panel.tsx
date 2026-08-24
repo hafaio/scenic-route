@@ -40,9 +40,12 @@ import {
   FactorSlider,
   factorPercent,
   factorReading,
+  GATES,
+  type GateKey,
 } from "../src/routing/factors";
 import type { NavProgress } from "../src/routing/nav-progress";
 import type { RouteFactors } from "../src/routing/search";
+import { factorRunOrder } from "../src/settings/store";
 import LocationField from "./location-field";
 import { useSettings } from "./use-settings";
 
@@ -259,7 +262,17 @@ export default function RoutePanel({
   onSettings,
   onClose,
 }: RoutePanelProps) {
-  const hidden = new Set(useSettings().hiddenFactors);
+  const { factorOrder, hiddenFactors, hiddenGates } = useSettings();
+  const hidden = new Set(hiddenFactors);
+  const hiddenGate = new Set(hiddenGates);
+  const gateOpen: Record<GateKey, boolean> = {
+    allowFerries,
+    allowSheds,
+  };
+  const gateHere: Record<GateKey, boolean> = {
+    allowFerries: capabilities.ferries,
+    allowSheds: capabilities.sheds,
+  };
   // The highlighted maneuver row is scrolled into view whenever the next maneuver advances.
   const highlightRef = useRef<HTMLLIElement | null>(null);
   const nextIndex = progress ? progress.nextManeuver : null;
@@ -342,10 +355,13 @@ export default function RoutePanel({
       disabled: !allowFerries,
     },
   };
-  const allFactors: PanelFactor[] = FACTORS.map((factor) => ({
-    ...factor,
-    ...factorState[factor.key],
-  }));
+  // In the reader's order (src/settings/store.ts), which is the same list the settings page shows.
+  const allFactors: PanelFactor[] = factorRunOrder(factorOrder).flatMap(
+    (key) => {
+      const factor = FACTORS.find((entry) => entry.key === key);
+      return factor ? [{ ...factor, ...factorState[key] }] : [];
+    },
+  );
   // Every scenic factor gets a summary chip — the slider's own icon and tint with the route's mean
   // intensity for it — shown regardless of weight, for reference. Ferry is presence-only (the "· ferry"
   // suffix), so it stays out of the chip row. Shelter stays out too, and deliberately: a percentage
@@ -362,13 +378,20 @@ export default function RoutePanel({
   // the line on the map, and nothing else on screen would say so. A factor the panel would have
   // greyed out is not — a closed gate has taken its edges out of the graph, and lost data is priced
   // as nothing — so counting one would name an influence that is not there.
-  const hiddenApplying = offered.filter(
-    (factor) =>
-      hidden.has(factor.key) &&
-      factor.weight !== 0 &&
-      !factor.disabled &&
-      factor.lost === undefined,
-  ).length;
+  const hiddenApplying =
+    offered.filter(
+      (factor) =>
+        hidden.has(factor.key) &&
+        factor.weight !== 0 &&
+        !factor.disabled &&
+        factor.lost === undefined,
+    ).length +
+    // A gate is either open or shut rather than weighted, so what counts is a SHUT one the reader
+    // cannot see: it is still keeping ferries or sheds out of every route.
+    GATES.filter(
+      (gate) =>
+        hiddenGate.has(gate.key) && !gateOpen[gate.key] && gateHere[gate.key],
+    ).length;
 
   const factorChips = factors.filter(
     (factor) => factor.key !== "ferry" && factor.key !== "shelter",
@@ -448,7 +471,7 @@ export default function RoutePanel({
             Walking directions
           </p>
           <div className="flex items-center gap-1">
-            {capabilities.ferries && (
+            {capabilities.ferries && !hiddenGate.has("allowFerries") && (
               <button
                 type="button"
                 onClick={() => onAllowFerries(!allowFerries)}
@@ -468,7 +491,7 @@ export default function RoutePanel({
                 <MdDirectionsBoat />
               </button>
             )}
-            {capabilities.sheds && (
+            {capabilities.sheds && !hiddenGate.has("allowSheds") && (
               <button
                 type="button"
                 onClick={() => onAllowSheds(!allowSheds)}
