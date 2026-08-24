@@ -1,10 +1,14 @@
-import { assemble, cutFor, draw, type Patch } from "./magnify";
+import { PALETTE } from "../theme/palette";
+import { assemble, cutFor, type Patch } from "./magnify";
 import type { CanopyParams, TileCoords } from "./protocol";
 import type { TileRenderer } from "./renderer";
+import { drawRamped } from "./theme-gl";
 
-// The baked canopy pyramid, magnified through src/tiles/magnify.ts rather than by the browser. Every
-// channel of a canopy tile carries the emerald ramp, so there is nothing to composite or quantise: the
-// tile's ground is assembled out of one pyramid and resampled once.
+// The baked canopy pyramid, magnified through src/tiles/magnify.ts rather than by the browser.
+//
+// A canopy tile carries the covered fraction of ground under trees in its alpha and nothing at all in
+// its colour, so the tile's ground is assembled out of one pyramid, resampled once as a FIELD, and
+// coloured by the palette's ramp on the way onto the tile (./theme-gl.ts).
 
 async function load(
   { url, maxNativeZoom }: CanopyParams,
@@ -25,5 +29,7 @@ async function load(
 
 export const canopyRenderer: TileRenderer<CanopyParams, Patch | null> = {
   load,
-  draw,
+  draw(context, patch, _coords, _params, ratio) {
+    drawRamped(context, patch, PALETTE.canopy, ratio);
+  },
 };
