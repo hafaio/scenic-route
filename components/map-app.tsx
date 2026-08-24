@@ -79,6 +79,10 @@ import {
   updateSettings,
 } from "../src/settings/store";
 import {
+  startSettingsSync,
+  stopSettingsSync,
+} from "../src/settings/sync-session";
+import {
   type Camera,
   decodeRoute,
   decodeView,
@@ -478,6 +482,20 @@ export default function MapApp() {
     });
     return unsubscribe;
   }, []);
+
+  // Settings follow the reader between their devices for as long as they are signed in. Keyed on the
+  // uid alone, not on the auth object, which is replaced on every token refresh and would otherwise
+  // tear the subscription down and build it up again each time.
+  const syncingUid = auth.kind === "signedIn" ? auth.info.user.uid : null;
+  useEffect(() => {
+    if (syncingUid === null) {
+      stopSettingsSync();
+      return undefined;
+    } else {
+      startSettingsSync(syncingUid);
+      return stopSettingsSync;
+    }
+  }, [syncingUid]);
 
   const locationHint =
     locationError === "denied"
@@ -1805,6 +1823,7 @@ export default function MapApp() {
             onWeight={handleWeight}
             onAllowFerries={handleAllowFerries}
             onAllowSheds={handleAllowSheds}
+            syncingAs={auth.kind === "signedIn" ? auth.info.user.email : null}
             onClose={() => setSettingsOpen(false)}
           />
         ) : null}

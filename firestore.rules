@@ -7,6 +7,14 @@ service cloud.firestore {
       return request.auth != null && request.auth.token.admin == true;
     }
 
+    // One settings document per reader, theirs alone. No admin claim: settings are a convenience
+    // for anyone signed in, where pins are the app's editable content. The app is local-first, so
+    // nothing here is authoritative — losing this document costs a reader their other devices'
+    // preferences, not their own.
+    match /settings/{uid} {
+      allow read, write: if request.auth != null && request.auth.uid == uid;
+    }
+
     // Shared pin collection. All admins read & write the same set; the admin
     // claim is set via the Firebase Admin SDK (see scripts/set-admin.ts).
     match /pins/{pinId} {

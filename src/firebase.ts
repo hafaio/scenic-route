@@ -23,6 +23,7 @@ import {
   persistentMultipleTabManager,
   query,
   serverTimestamp,
+  setDoc,
   updateDoc,
 } from "firebase/firestore";
 import { type Pin, type PinDraft, pinConverter } from "./pin";
@@ -116,6 +117,40 @@ export async function refreshClaims(): Promise<void> {
     return;
   }
   await user.getIdToken(true);
+}
+
+// One document per signed-in reader, holding their settings (src/settings/sync.ts). Separate from
+// the pins collection in every way that matters: it is per-uid rather than shared, it needs no admin
+// claim, and it is a convenience — the app works signed out and keeps working if this never loads.
+const SETTINGS = "settings";
+
+function settingsDoc(uid: string) {
+  return doc(ensureDb(), SETTINGS, uid);
+}
+
+// The reader's stored settings, and every later change another device makes. `undefined` where they
+// have never synced, which is the first sign-in and is not an error.
+export function watchSettings(
+  uid: string,
+  callback: (document: unknown | undefined) => void,
+  onError?: (error: FirestoreError) => void,
+): () => void {
+  return onSnapshot(
+    settingsDoc(uid),
+    (snapshot) => {
+      callback(snapshot.data());
+    },
+    (error) => {
+      onError?.(error);
+    },
+  );
+}
+
+export async function writeSettings(
+  uid: string,
+  document: object,
+): Promise<void> {
+  await setDoc(settingsDoc(uid), document);
 }
 
 function rawPinsCollection(): CollectionReference {
