@@ -68,6 +68,10 @@ jobs:
         with:
           path: .git/lfs
           key: lfs-${{ hashFiles('data/**') }}
+          # A partial hit is worth having: adding one dataset changes the key, but the objects
+          # already in .git/lfs still count, and `git lfs pull` then fetches only the new one.
+          restore-keys: |
+            lfs-
       - if: inputs.upload-pages
         run: git lfs pull
 
