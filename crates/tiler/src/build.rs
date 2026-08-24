@@ -13,10 +13,9 @@
 //! the lines that pass writes. Here each stage is a function over values, so a stranded set cannot
 //! be handed to the chunk pass before the graph that computes it has run.
 //!
-//! The plan carries what those argv lists carried, including the two things that must come from
-//! TypeScript because the client imports the very same modules — the colour ramp
-//! (src/tree-cover/ramp.ts) and the per-city sun-position grid (scripts/shade-schedule.ts). Its
-//! schema is documented in scripts/README.md.
+//! The plan carries what those argv lists carried, including the one thing that must come from
+//! TypeScript because the client imports the very same module — the per-city sun-position grid
+//! (scripts/shade-schedule.ts). Its schema is documented in scripts/README.md.
 //!
 //! `tiler graph-inputs` is here for the same reason: which sources a city hands `graph::run`, and
 //! under which flags, is decided in this file, so the stamp the shed guard gates on is taken from
@@ -235,8 +234,6 @@ pub struct Plan {
     /// entries under it. Gitignored build glue rather than output — a build that finds it empty
     /// computes everything, which is what every build did before it existed.
     graph_cache: PathBuf,
-    /// The 256-step RGBA table of src/tree-cover/ramp.ts, 1024 bytes.
-    ramp: Vec<u8>,
     cities: Vec<PlanCity>,
 }
 
@@ -269,18 +266,6 @@ impl Plan {
                 Ok((city, planned))
             })
             .collect()
-    }
-
-    fn check_ramp(&self) -> Fallible<()> {
-        if self.ramp.len() == 256 * 4 {
-            Ok(())
-        } else {
-            Err(format!(
-                "the plan's ramp is {} bytes, not the 1024 of a 256-step RGBA table",
-                self.ramp.len()
-            )
-            .into())
-        }
     }
 
     /// Every `.rs` entry of the code map, rehashed over the module's TOKEN stream in place of its
@@ -886,11 +871,9 @@ impl<'a> Stamps<'a> {
         Ok(hex(&digest.finalize()))
     }
 
-    /// Pass 6. The colour ramp is a TypeScript module the client imports, so it reaches the tiler
-    /// as the 1024 bytes the plan carries and reaches this stamp the same way.
+    /// Pass 6.
     fn canopy(&mut self, cities: &[(&City, &PlanCity)]) -> Fallible<String> {
         let mut digest = self.open("canopy");
-        field(&mut digest, &self.plan.ramp);
         for (city, _) in cities {
             if let Some(layer) = &city.field.canopy {
                 let inputs = vec![
@@ -1418,7 +1401,6 @@ pub fn run(plan_file: &Path, jobs: Option<usize>, selection: &Selection) -> Fall
     plan.hash_source_tokens();
     let manifest: Manifest = serde_json::from_slice(&fs::read(&plan.manifest)?)?;
     let cities = plan.pair(&manifest)?;
-    plan.check_ramp()?;
     selection.check(&manifest)?;
     handoffs(&plan, &cities, selection)?;
     // A partial build sweeps nothing. What the reconcile takes away is output for a city the
@@ -1730,7 +1712,6 @@ pub fn run(plan_file: &Path, jobs: Option<usize>, selection: &Selection) -> Fall
             canopy_pass.restart()?;
             canopy::run(&canopy::Args {
                 manifest: plan.manifest.clone(),
-                ramp: plan.ramp.clone(),
                 data: plan.data.clone(),
                 tiles: plan.canopy_tiles.clone(),
             })?;
@@ -2059,8 +2040,7 @@ mod tests {
       ]
     }"#;
 
-    /// A plan over that manifest. `ramp` is written short here and padded by `plan`, since a literal
-    /// 1024 numbers says nothing a length check does not.
+    /// A plan over that manifest.
     fn plan_json(cities: &str) -> String {
         format!(
             r#"{{
@@ -2076,7 +2056,6 @@ mod tests {
               "genusFieldTiles": "public/tiles/genus-field",
               "routing": "public/routing",
               "graphCache": ".build/graph-cache",
-              "ramp": [],
               "cities": {cities}
             }}"#
         )
@@ -2084,7 +2063,6 @@ mod tests {
 
     fn plan(cities: &str) -> Plan {
         let mut plan: Plan = serde_json::from_str(&plan_json(cities)).expect("a plan");
-        plan.ramp = vec![0u8; 256 * 4];
         plan.code = code_map();
         plan
     }
@@ -2174,14 +2152,6 @@ mod tests {
             .expect("an unknown plan key");
 
         assert!(error.to_string().contains("castors"), "{error}");
-    }
-
-    #[test]
-    fn a_ramp_that_is_not_a_256_step_table_is_rejected() {
-        let mut plan = plan(BOTH);
-        plan.ramp = vec![0u8; 3 * 256];
-
-        assert!(plan.check_ramp().is_err());
     }
 
     #[test]

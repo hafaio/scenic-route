@@ -1,8 +1,10 @@
 //! The canopy pass: rasterizes data/canopy/<id>.bin — the measured 2017 LiDAR tree canopy,
 //! magic CNPY, ~1.08 M polygons — into a per-pixel coverage pyramid at
-//! public/tiles/canopy/{z}/{x}/{y}.webp, blurred and coloured by the shared ramp. This is the
-//! map's cover fill; the routing graph reads the same canopy through `densities`, so the block
-//! fill, the street lines and the routes all speak of one measured field. See scripts/README.md.
+//! public/tiles/canopy/{z}/{x}/{y}.webp, blurred and written as a VALUE: the covered fraction of
+//! ground lands in the tile's alpha channel and nothing here is coloured. The emerald ramp lives
+//! only on the client, which applies it to the stored byte in a shader. This is the map's cover
+//! fill; the routing graph reads the same canopy through `densities`, so the block fill, the
+//! street lines and the routes all speak of one measured field. See scripts/README.md.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -15,9 +17,9 @@ use crate::binfmt::{self, CANOPY_FORMAT, LAND_FORMAT};
 use crate::geometry::{self, PolygonGrid, PolygonSet, Projection, round_half_up};
 use crate::manifest::{Bounds, City, Manifest};
 use crate::raster::{
-    EQUATOR_METERS_PER_PIXEL, LandMask, MAX_ZOOM, MIN_ALPHA, MIN_FEATHER_PIXELS, MIN_ZOOM,
-    TILE_SIZE, Tile, encode_webp, lat_to_pixel_y, lng_to_pixel_x, pixel_x_to_lng, pixel_y_to_lat,
-    plan_tiles, rasterize_land,
+    EQUATOR_METERS_PER_PIXEL, LandMask, MAX_ZOOM, MIN_FEATHER_PIXELS, MIN_ZOOM, TILE_SIZE, Tile,
+    encode_webp, lat_to_pixel_y, lng_to_pixel_x, pixel_x_to_lng, pixel_y_to_lat, plan_tiles,
+    rasterize_land,
 };
 
 // The pixel is fraction-of-ground-under-canopy, so the polygon fill is antialiased by
@@ -33,10 +35,6 @@ const FILL_SIGMA_METERS: f64 = 15.0;
 
 pub struct Args {
     pub manifest: PathBuf,
-    /// The 256-step RGBA lookup table of src/tree-cover/ramp.ts, 1024 bytes. It comes from the
-    /// caller rather than from a table here because the client's street layer imports that very
-    /// module, which is what makes the block fill and the street lines one colour function.
-    pub ramp: Vec<u8>,
     pub data: PathBuf,
     pub tiles: PathBuf,
 }
@@ -251,19 +249,23 @@ fn coverage(canopy: &Canopy, tile: &Tile, want_stats: bool) -> (Option<Vec<f32>>
     )
 }
 
-/// Colour a tile's pixels from the canopy fraction through the shared ramp LUT. Fraction is a
-/// covered fraction in [0, 1], exactly what the ramp is defined over.
-fn paint(pixels: &mut [u8], fraction: &[f32], ramp: &[u8]) -> bool {
+/// Write the canopy fraction itself into the tile's alpha channel, RGB left at zero, for the
+/// client to colour. This is an EXACT re-encoding of what the pass used to bake, not a new
+/// quantisation: the ramp LUT was indexed by `round_half_up(cover * 255.0)`, the identical 8-bit
+/// step of the identical fraction, so applying that ramp to the stored byte reproduces the old
+/// tiles pixel for pixel. The old `ramp[stop + 3] < MIN_ALPHA` skip is reproduced by `alpha == 0`,
+/// since the ramp's alpha only falls under MIN_ALPHA at cover 0.
+fn paint(pixels: &mut [u8], fraction: &[f32]) -> bool {
     let mut painted = false;
     for (pixel, value) in fraction.iter().enumerate() {
         if *value <= 0.0 {
             continue;
         }
-        let stop = round_half_up(f64::from(*value) * 255.0) as usize * 4;
-        if ramp[stop + 3] < MIN_ALPHA {
+        let alpha = round_half_up(f64::from(*value) * 255.0) as u8;
+        if alpha == 0 {
             continue;
         }
-        pixels[pixel * 4..pixel * 4 + 4].copy_from_slice(&ramp[stop..stop + 4]);
+        pixels[pixel * 4 + 3] = alpha;
         painted = true;
     }
     painted
@@ -271,7 +273,6 @@ fn paint(pixels: &mut [u8], fraction: &[f32], ramp: &[u8]) -> bool {
 
 fn render(
     canopies: &[Option<Canopy>],
-    ramp: &[u8],
     blank: &[u8],
     directory: &Path,
     tile: &Tile,
@@ -287,11 +288,14 @@ fn render(
             land_pixels += pixels_on_land;
             canopy_sum += sum;
             if let Some(fraction) = fraction {
-                painted |= paint(&mut pixels, &fraction, ramp);
+                painted |= paint(&mut pixels, &fraction);
             }
         }
     }
 
+    // Lossy, even though the tile is data now: WebP's lossy mode compresses the ALPHA plane
+    // losslessly, so the cover byte survives exactly, and the RGB it does quantise is a constant
+    // zero plane that costs almost nothing.
     let rendered = if painted {
         Some(encode_webp(&pixels)?)
     } else {
@@ -317,15 +321,6 @@ fn render(
 pub fn run(args: &Args) -> Fallible<()> {
     let started = Instant::now();
     let manifest: Manifest = serde_json::from_slice(&fs::read(&args.manifest)?)?;
-    let ramp = &args.ramp;
-    if ramp.len() != 256 * 4 {
-        return Err(format!(
-            "the ramp is {} bytes, not the 1024 of a 256-step RGBA ramp",
-            ramp.len()
-        )
-        .into());
-    }
-
     let canopies: Vec<Option<Canopy>> = manifest
         .cities
         .iter()
@@ -358,7 +353,7 @@ pub fn run(args: &Args) -> Fallible<()> {
     );
     let stats = plan
         .par_iter()
-        .map(|tile| render(&canopies, ramp, &blank, &args.tiles, tile))
+        .map(|tile| render(&canopies, &blank, &args.tiles, tile))
         .try_reduce(Stats::default, |left, right| Ok(left + right))?;
 
     let mean = if stats.land_pixels > 0 {

@@ -1,9 +1,9 @@
+import { PALETTE } from "../theme/palette";
 import {
   acquire,
   assemble,
   type Cut,
   cutFor,
-  draw,
   type Patch,
   release,
   tileUrl,
@@ -12,9 +12,11 @@ import type { ShadeParams, ShadePrefetchMessage, TileCoords } from "./protocol";
 import type { TileRenderer } from "./renderer";
 import { drawSweep, type SweptGround, sweptGround } from "./sweep";
 import { drawSweepGl } from "./sweep-gl";
+import { drawRamped } from "./theme-gl";
 
 // The baked shade pyramids, magnified through src/tiles/magnify.ts rather than by the browser and
-// composited here rather than stacked.
+// composited here rather than stacked. A shade tile carries only the fraction of light its pixel has
+// lost; the shadow's colour is the palette's and is applied on the way onto the tile (./theme-gl.ts).
 //
 // Building shadows and tree shadows are baked as two pyramids over the same ground, and both are read
 // here so the one shade layer can composite them per pixel. Two Leaflet layers would source-over
@@ -78,8 +80,8 @@ export function compositeAlpha(
   return Math.min(255, Math.round(buildings + tau * trees - both));
 }
 
-// The two patches merged into the one the tile is drawn from. Only alpha carries a shade tile, and
-// both pyramids paint the same slate, so the colour is taken from whichever of them painted the pixel.
+// The two patches merged into the one the tile is drawn from. Only alpha carries anything: the
+// pyramids' colour plane is dead weight left over from when the slate was baked, and is not read.
 function merge(
   buildings: OffscreenCanvas | null,
   trees: OffscreenCanvas | null,
@@ -98,11 +100,6 @@ function merge(
   const merged = context.getImageData(0, 0, size, size);
   const canopy = treeContext.getImageData(0, 0, size, size);
   for (let pixel = 0; pixel < merged.data.length; pixel += 4) {
-    if (merged.data[pixel + 3] === 0) {
-      merged.data[pixel] = canopy.data[pixel];
-      merged.data[pixel + 1] = canopy.data[pixel + 1];
-      merged.data[pixel + 2] = canopy.data[pixel + 2];
-    }
     merged.data[pixel + 3] = compositeAlpha(
       merged.data[pixel + 3],
       canopy.data[pixel + 3],
@@ -169,7 +166,7 @@ export const shadeRenderer: TileRenderer<ShadeParams, ShadeSource> = {
         drawSweep(context, source.swept, coords, params, ratio);
       }
     } else {
-      draw(context, source.baked);
+      drawRamped(context, source.baked, PALETTE.shade, ratio);
     }
   },
 };
