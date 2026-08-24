@@ -60,6 +60,7 @@ import {
   type RouteWeights,
 } from "../src/routing/cost";
 import { buildDirections } from "../src/routing/directions";
+import type { FactorKey } from "../src/routing/factors";
 import { computeFerrySchedule } from "../src/routing/ferry-schedule";
 import { loadGraph, type RoutingGraph } from "../src/routing/graph";
 import { navProgress } from "../src/routing/nav-progress";
@@ -73,6 +74,10 @@ import {
 import { computeEdgeShade } from "../src/routing/shade";
 import { computeEdgeSheds, setShedSun, shedDay } from "../src/routing/sheds";
 import { buildSnapIndex, type SnapIndex, snapPair } from "../src/routing/snap";
+import {
+  settings as storedSettings,
+  updateSettings,
+} from "../src/settings/store";
 import {
   type Camera,
   decodeRoute,
@@ -122,19 +127,6 @@ type RouteState =
   | { kind: "ready"; result: RouteResult; graph: RoutingGraph }
   | { kind: "error"; message: string };
 
-const TREE_WEIGHT_KEY = "scenic-route:tree-weight";
-const FERRY_WEIGHT_KEY = "scenic-route:ferry-weight";
-const SHADE_WEIGHT_KEY = "scenic-route:shade-weight";
-const SHELTER_WEIGHT_KEY = "scenic-route:shelter-weight";
-const FERRY_ALLOW_KEY = "scenic-route:allow-ferries";
-const SHED_ALLOW_KEY = "scenic-route:allow-sheds";
-const LANDMARK_WEIGHT_KEY = "scenic-route:landmark-weight";
-const ART_WEIGHT_KEY = "scenic-route:art-weight";
-const HIGHWAY_WEIGHT_KEY = "scenic-route:highway-weight";
-const HILL_WEIGHT_KEY = "scenic-route:hill-weight";
-const COMMERCIAL_WEIGHT_KEY = "scenic-route:commercial-weight";
-const INDUSTRIAL_WEIGHT_KEY = "scenic-route:industrial-weight";
-const HISTORIC_WEIGHT_KEY = "scenic-route:historic-weight";
 const OVERLAY_KEY = "scenic-route:overlay";
 const SEARCH_BIAS_KEY = "scenic-route:search-bias"; // "false" opts out of biasing search to the user
 const RESNAP_METERS = 25; // a followed location must drift this far before the route recomputes
@@ -168,46 +160,47 @@ function loadRouting(
   return request;
 }
 
-// The weights the sliders last persisted, each falling back to its default. These are what a URL key
+// The weights the settings document holds, each falling back to its default. These are what a URL key
 // overrides and what a missing one leaves in place.
 function storedWeights(): RouteWeights {
-  const read = (key: string, fallback: number, min: number, max: number) => {
-    const stored = window.localStorage.getItem(key);
-    const parsed = stored === null ? Number.NaN : Number.parseFloat(stored);
-    return Number.isFinite(parsed)
-      ? Math.min(max, Math.max(min, parsed))
-      : fallback;
+  const { weights, allowFerries, allowSheds } = storedSettings();
+  const read = (key: FactorKey, fallback: number, min: number, max: number) => {
+    const stored = weights[key];
+    return stored === undefined
+      ? fallback
+      : Math.min(max, Math.max(min, stored));
   };
   return {
-    tree: read(TREE_WEIGHT_KEY, DEFAULT_TREE_WEIGHT, 0, MAX_TREE_WEIGHT),
-    ferry: read(FERRY_WEIGHT_KEY, DEFAULT_FERRY_WEIGHT, 0, MAX_FERRY_WEIGHT),
-    landmark: read(LANDMARK_WEIGHT_KEY, DEFAULT_LANDMARK_WEIGHT, 0, 1),
-    art: read(ART_WEIGHT_KEY, DEFAULT_ART_WEIGHT, 0, 1),
-    highway: read(HIGHWAY_WEIGHT_KEY, DEFAULT_HIGHWAY_WEIGHT, 0, 1),
-    hill: read(HILL_WEIGHT_KEY, DEFAULT_HILL_WEIGHT, 0, MAX_HILL_WEIGHT),
-    commercial: read(COMMERCIAL_WEIGHT_KEY, DEFAULT_COMMERCIAL_WEIGHT, 0, 1),
+    tree: read("tree", DEFAULT_TREE_WEIGHT, 0, MAX_TREE_WEIGHT),
+    ferry: read("ferry", DEFAULT_FERRY_WEIGHT, 0, MAX_FERRY_WEIGHT),
+    landmark: read("landmark", DEFAULT_LANDMARK_WEIGHT, 0, 1),
+    art: read("art", DEFAULT_ART_WEIGHT, 0, 1),
+    highway: read("highway", DEFAULT_HIGHWAY_WEIGHT, 0, 1),
+    hill: read("hill", DEFAULT_HILL_WEIGHT, 0, MAX_HILL_WEIGHT),
+    commercial: read("commercial", DEFAULT_COMMERCIAL_WEIGHT, 0, 1),
     industrial: read(
-      INDUSTRIAL_WEIGHT_KEY,
+      "industrial",
       DEFAULT_INDUSTRIAL_WEIGHT,
       0,
       MAX_INDUSTRIAL_WEIGHT,
     ),
-    historic: read(HISTORIC_WEIGHT_KEY, DEFAULT_HISTORIC_WEIGHT, 0, 1),
+    historic: read("historic", DEFAULT_HISTORIC_WEIGHT, 0, 1),
     shade: read(
-      SHADE_WEIGHT_KEY,
+      "shade",
       DEFAULT_SHADE_WEIGHT,
       -MAX_SHADE_WEIGHT,
       MAX_SHADE_WEIGHT,
     ),
-    shelter: read(
-      SHELTER_WEIGHT_KEY,
-      DEFAULT_SHELTER_WEIGHT,
-      0,
-      MAX_SHELTER_WEIGHT,
-    ),
-    allowFerries: window.localStorage.getItem(FERRY_ALLOW_KEY) !== "false",
-    allowSheds: window.localStorage.getItem(SHED_ALLOW_KEY) !== "false",
+    shelter: read("shelter", DEFAULT_SHELTER_WEIGHT, 0, MAX_SHELTER_WEIGHT),
+    allowFerries,
+    allowSheds,
   };
+}
+
+// The panel's slider and the settings page's move the same value, so both persist through here. A
+// weight nobody has moved stays out of the document and keeps its built-in default.
+function persistWeight(key: FactorKey, weight: number): void {
+  updateSettings({ weights: { ...storedSettings().weights, [key]: weight } });
 }
 
 // The persisted overlay ids, or null when nothing was ever stored (which keeps the canopy default).
@@ -1072,68 +1065,102 @@ export default function MapApp() {
 
   const handleTreeWeight = useCallback((weight: number) => {
     setTreeWeight(weight);
-    window.localStorage.setItem(TREE_WEIGHT_KEY, String(weight));
+    persistWeight("tree", weight);
   }, []);
 
   const handleFerryWeight = useCallback((weight: number) => {
     setFerryWeight(weight);
-    window.localStorage.setItem(FERRY_WEIGHT_KEY, String(weight));
+    persistWeight("ferry", weight);
   }, []);
 
   const handleAllowFerries = useCallback((allow: boolean) => {
     setAllowFerries(allow);
-    window.localStorage.setItem(FERRY_ALLOW_KEY, String(allow));
+    updateSettings({ allowFerries: allow });
   }, []);
 
   const handleLandmarkWeight = useCallback((weight: number) => {
     setLandmarkWeight(weight);
-    window.localStorage.setItem(LANDMARK_WEIGHT_KEY, String(weight));
+    persistWeight("landmark", weight);
   }, []);
 
   const handleArtWeight = useCallback((weight: number) => {
     setArtWeight(weight);
-    window.localStorage.setItem(ART_WEIGHT_KEY, String(weight));
+    persistWeight("art", weight);
   }, []);
 
   const handleHillWeight = useCallback((weight: number) => {
     setHillWeight(weight);
-    window.localStorage.setItem(HILL_WEIGHT_KEY, String(weight));
+    persistWeight("hill", weight);
   }, []);
 
   const handleHighwayWeight = useCallback((weight: number) => {
     setHighwayWeight(weight);
-    window.localStorage.setItem(HIGHWAY_WEIGHT_KEY, String(weight));
+    persistWeight("highway", weight);
   }, []);
 
   const handleCommercialWeight = useCallback((weight: number) => {
     setCommercialWeight(weight);
-    window.localStorage.setItem(COMMERCIAL_WEIGHT_KEY, String(weight));
+    persistWeight("commercial", weight);
   }, []);
 
   const handleIndustrialWeight = useCallback((weight: number) => {
     setIndustrialWeight(weight);
-    window.localStorage.setItem(INDUSTRIAL_WEIGHT_KEY, String(weight));
+    persistWeight("industrial", weight);
   }, []);
 
   const handleHistoricWeight = useCallback((weight: number) => {
     setHistoricWeight(weight);
-    window.localStorage.setItem(HISTORIC_WEIGHT_KEY, String(weight));
+    persistWeight("historic", weight);
   }, []);
 
   const handleShadeWeight = useCallback((weight: number) => {
     setShadeWeight(weight);
-    window.localStorage.setItem(SHADE_WEIGHT_KEY, String(weight));
+    persistWeight("shade", weight);
   }, []);
 
   const handleShelterWeight = useCallback((weight: number) => {
     setShelterWeight(weight);
-    window.localStorage.setItem(SHELTER_WEIGHT_KEY, String(weight));
+    persistWeight("shelter", weight);
   }, []);
 
   const handleAllowSheds = useCallback((allow: boolean) => {
     setAllowSheds(allow);
-    window.localStorage.setItem(SHED_ALLOW_KEY, String(allow));
+    updateSettings({ allowSheds: allow });
   }, []);
+
+  // The settings page edits the same weights the panel does, and sends a key and a value rather than
+  // carrying a callback per factor.
+  const handleWeight = useCallback(
+    (key: FactorKey, weight: number) => {
+      const setters: Record<FactorKey, (weight: number) => void> = {
+        tree: handleTreeWeight,
+        ferry: handleFerryWeight,
+        landmark: handleLandmarkWeight,
+        art: handleArtWeight,
+        highway: handleHighwayWeight,
+        hill: handleHillWeight,
+        commercial: handleCommercialWeight,
+        industrial: handleIndustrialWeight,
+        historic: handleHistoricWeight,
+        shade: handleShadeWeight,
+        shelter: handleShelterWeight,
+      };
+      setters[key](weight);
+    },
+    [
+      handleTreeWeight,
+      handleFerryWeight,
+      handleLandmarkWeight,
+      handleArtWeight,
+      handleHighwayWeight,
+      handleHillWeight,
+      handleCommercialWeight,
+      handleIndustrialWeight,
+      handleHistoricWeight,
+      handleShadeWeight,
+      handleShelterWeight,
+    ],
+  );
 
   const handleToggleSearchBias = useCallback(() => {
     setShareLocationForSearch((share) => {
@@ -1757,6 +1784,7 @@ export default function MapApp() {
             onArmDest={handleArmDest}
             onToggleDirections={handleToggleDirections}
             onToggleMinimize={handleToggleMinimize}
+            onSettings={() => setSettingsOpen(true)}
             onClose={handleToggleRouting}
           />
         ) : null}
@@ -1772,7 +1800,13 @@ export default function MapApp() {
         {signingIn ? <SignInDialog onClose={handleCloseSignIn} /> : null}
         {aboutOpen ? <AboutDialog onClose={() => setAboutOpen(false)} /> : null}
         {settingsOpen ? (
-          <SettingsDialog onClose={() => setSettingsOpen(false)} />
+          <SettingsDialog
+            weights={weights}
+            onWeight={handleWeight}
+            onAllowFerries={handleAllowFerries}
+            onAllowSheds={handleAllowSheds}
+            onClose={() => setSettingsOpen(false)}
+          />
         ) : null}
       </main>
     </CityProvider>

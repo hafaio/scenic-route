@@ -1,12 +1,6 @@
 "use client";
 
-import {
-  type ComponentType,
-  type CSSProperties,
-  useEffect,
-  useRef,
-  useState,
-} from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   FiChevronDown,
   FiChevronUp,
@@ -15,6 +9,7 @@ import {
   FiLoader,
   FiNavigation,
   FiSearch,
+  FiSettings,
   FiX,
 } from "react-icons/fi";
 import {
@@ -22,46 +17,34 @@ import {
   MdArrowUpward,
   MdConstruction,
   MdDirectionsBoat,
-  MdDirectionsCar,
-  MdFactory,
   MdFlag,
-  MdMapsHomeWork,
   MdOutlineDirectionsWalk,
   MdPalette,
-  MdStorefront,
   MdSwapHoriz,
-  MdTerrain,
   MdTurnLeft,
   MdTurnRight,
   MdTurnSlightLeft,
   MdTurnSlightRight,
   MdUTurnLeft,
-  MdWaterDrop,
-  MdWbSunny,
 } from "react-icons/md";
-import { PiBoatFill, PiTreeEvergreenFill } from "react-icons/pi";
 import type { GeocodeResult, SearchBias } from "../src/geocode";
-import {
-  MAX_ART_WEIGHT,
-  MAX_COMMERCIAL_WEIGHT,
-  MAX_FERRY_WEIGHT,
-  MAX_HIGHWAY_WEIGHT,
-  MAX_HILL_WEIGHT,
-  MAX_HISTORIC_WEIGHT,
-  MAX_INDUSTRIAL_WEIGHT,
-  MAX_LANDMARK_WEIGHT,
-  MAX_SHADE_WEIGHT,
-  MAX_SHELTER_WEIGHT,
-  MAX_TREE_WEIGHT,
-} from "../src/routing/cost";
 import {
   formatDistance,
   formatDuration,
   type Maneuver,
 } from "../src/routing/directions";
+import {
+  FACTORS,
+  type Factor,
+  type FactorKey,
+  FactorSlider,
+  factorPercent,
+  factorReading,
+} from "../src/routing/factors";
 import type { NavProgress } from "../src/routing/nav-progress";
 import type { RouteFactors } from "../src/routing/search";
 import LocationField from "./location-field";
+import { useSettings } from "./use-settings";
 
 interface RoutePanelProps {
   startLabel: string | null; // null leaves the start empty (routing falls back to the live location)
@@ -144,19 +127,15 @@ interface RoutePanelProps {
   onArmDest: () => void;
   onToggleDirections: () => void;
   onToggleMinimize: () => void;
+  onSettings: () => void; // opens the settings page, where a hidden factor's slider still lives
   onClose: () => void;
 }
 
-// One scenic routing factor as the panel renders it: a chip when collapsed, a full slider when open.
-interface Factor {
-  key: string;
-  label: string;
-  Icon: ComponentType<{ className?: string; "aria-hidden"?: boolean }>;
+// What this render knows about a factor that its metadata cannot: where its weight stands, what
+// moving it does, and whether the control is live at all.
+interface FactorState {
   weight: number;
-  max: number;
   onChange: (weight: number) => void;
-  tint: string; // text colour for the icon and chip
-  color: string; // the slider's fill/thumb colour (a CSS hex; matches the map overlay)
   // Whether the active city has the data at all: false drops the factor from the panel entirely.
   // Distinct from `disabled`, which is a live control the reader has switched off.
   available?: boolean;
@@ -166,24 +145,10 @@ interface Factor {
   // otherwise just a control that has stopped working, and the route beside it is quietly priced
   // without the thing the slider claims to be asking for.
   lost?: string;
-  signed?: boolean; // a bipolar −max..max slider (sun ↔ shade) rather than one-sided 0..max
 }
 
-const percent = (factor: Factor): number =>
-  Math.round((factor.weight / factor.max) * 100);
-
-// The reading beside a factor's slider: a plain "%" for one-sided factors, a bipolar "sun / shade"
-// for the signed shade factor (0 reads as off).
-function factorReading(factor: Factor): string {
-  const value = percent(factor);
-  if (!factor.signed) {
-    return `${value}%`;
-  }
-  if (value === 0) {
-    return "off";
-  }
-  return value > 0 ? `${value}% sun` : `${-value}% shade`;
-}
+// One scenic routing factor as the panel renders it: a chip when collapsed, a full slider when open.
+type PanelFactor = Factor & FactorState;
 
 const METERS_PER_MILE = 1609.344;
 
@@ -291,8 +256,10 @@ export default function RoutePanel({
   onArmDest,
   onToggleDirections,
   onToggleMinimize,
+  onSettings,
   onClose,
 }: RoutePanelProps) {
+  const hidden = new Set(useSettings().hiddenFactors);
   // The highlighted maneuver row is scrolled into view whenever the next maneuver advances.
   const highlightRef = useRef<HTMLLIElement | null>(null);
   const nextIndex = progress ? progress.nextManeuver : null;
@@ -319,147 +286,89 @@ export default function RoutePanel({
       onToggleDirections();
     }
   };
-  const allFactors: Factor[] = [
-    {
-      key: "tree",
-      label: "Prefer tree cover",
-      Icon: PiTreeEvergreenFill,
-      weight: treeWeight,
-      max: MAX_TREE_WEIGHT,
-      onChange: onTreeWeight,
-      tint: "text-brand-600 dark:text-brand-400",
-      color: "#059669",
-    },
-    {
-      key: "shade",
-      label: "Prefer sun or shade",
-      Icon: MdWbSunny,
+  const factorState: Record<FactorKey, FactorState> = {
+    tree: { weight: treeWeight, onChange: onTreeWeight },
+    shade: {
       weight: shadeWeight,
-      max: MAX_SHADE_WEIGHT,
       onChange: onShadeWeight,
-      signed: true,
-      tint: "text-amber-600 dark:text-amber-400",
-      color: "#f59e0b",
       // The one factor that can go dark while the graph is perfectly healthy: the sun-position
       // fractions are their own artifact, refetched whenever the clock moves.
       lost: shadeDataLost
         ? "Shade data could not be loaded — this route ignores sun and shade."
         : undefined,
     },
-    {
-      key: "shelter",
-      label: "Prefer shelter",
-      Icon: MdWaterDrop,
+    shelter: {
       weight: shelterWeight,
-      max: MAX_SHELTER_WEIGHT,
       onChange: onShelterWeight,
-      tint: "text-sky-600 dark:text-sky-400",
-      color: "#0284c7",
+      available: capabilities.sheds,
     },
-    {
-      key: "landmark",
-      label: "Pass landmarks",
-      Icon: MdAccountBalance,
+    landmark: {
       weight: landmarkWeight,
-      max: MAX_LANDMARK_WEIGHT,
       onChange: onLandmarkWeight,
-      tint: "text-amber-600 dark:text-amber-400",
-      color: "#f59e0b",
       available: capabilities.landmarks,
     },
-    {
-      key: "art",
-      label: "Pass public art",
-      Icon: MdPalette,
+    art: {
       weight: artWeight,
-      max: MAX_ART_WEIGHT,
       onChange: onArtWeight,
-      tint: "text-fuchsia-600 dark:text-fuchsia-400",
-      color: "#d946ef",
       available: capabilities.art,
     },
-    {
-      key: "historic",
-      label: "Prefer historic areas",
-      // The overlay's own glyph and indigo — deliberately not the landmarks amber, which prices a
-      // different thing: passing one designated building, rather than walking inside a designated
-      // neighbourhood.
-      Icon: MdMapsHomeWork,
+    historic: {
       weight: historicWeight,
-      max: MAX_HISTORIC_WEIGHT,
       onChange: onHistoricWeight,
-      tint: "text-indigo-600 dark:text-indigo-400",
-      color: "#4338ca",
       available: capabilities.historic,
     },
-    {
-      key: "highway",
-      label: "Avoid highways",
-      Icon: MdDirectionsCar,
-      weight: highwayWeight,
-      max: MAX_HIGHWAY_WEIGHT,
-      onChange: onHighwayWeight,
-      tint: "text-rose-600 dark:text-rose-400",
-      color: "#ef4444",
-    },
-    {
-      key: "industrial",
-      label: "Avoid industrial areas",
-      Icon: MdFactory,
+    highway: { weight: highwayWeight, onChange: onHighwayWeight },
+    industrial: {
       weight: industrialWeight,
-      max: MAX_INDUSTRIAL_WEIGHT,
       onChange: onIndustrialWeight,
-      tint: "text-pink-600 dark:text-pink-400",
-      color: "#db2777",
       available: capabilities.industrial,
     },
-    {
-      key: "hill",
-      label: "Avoid hills",
-      Icon: MdTerrain,
+    hill: {
       weight: hillWeight,
-      max: MAX_HILL_WEIGHT,
       onChange: onHillWeight,
-      tint: "text-amber-700 dark:text-amber-500",
-      color: "#b45309",
       available: capabilities.relief,
     },
-    {
-      key: "commercial",
-      label: "Prefer commercial streets",
-      Icon: MdStorefront,
+    commercial: {
       weight: commercialWeight,
-      max: MAX_COMMERCIAL_WEIGHT,
       onChange: onCommercialWeight,
-      tint: "text-violet-600 dark:text-violet-400",
-      color: "#6d28d9",
       available: capabilities.commercial,
     },
-    {
-      key: "ferry",
-      label: "Prefer ferries",
-      Icon: PiBoatFill,
+    ferry: {
       weight: ferryWeight,
-      max: MAX_FERRY_WEIGHT,
       onChange: onFerryWeight,
-      tint: "text-blue-600 dark:text-blue-400",
-      color: "#2563eb",
       available: capabilities.ferries,
       // Present but inert while the gate is off — unlike absence, that is a state the reader chose
       // and can undo, so the control stays visible to say so.
       disabled: !allowFerries,
     },
-  ];
+  };
+  const allFactors: PanelFactor[] = FACTORS.map((factor) => ({
+    ...factor,
+    ...factorState[factor.key],
+  }));
   // Every scenic factor gets a summary chip — the slider's own icon and tint with the route's mean
   // intensity for it — shown regardless of weight, for reference. Ferry is presence-only (the "· ferry"
   // suffix), so it stays out of the chip row. Shelter stays out too, and deliberately: a percentage
   // beside a raindrop reads as a forecast of how dry you will stay, and the tree half of that number
   // is extrapolated from about four studied trees. It is a preference, not a prediction.
   // A factor the city has no data for is dropped outright rather than greyed. It would cost nothing
-  // and mean nothing here, and a disabled control still claims the city has the thing. Filtered once,
-  // at the source, so the sliders, the collapsed peek row and the summary chips cannot disagree
-  // about which factors this city has.
-  const factors = allFactors.filter((factor) => factor.available !== false);
+  // and mean nothing here, and a disabled control still claims the city has the thing. A factor the
+  // reader has hidden in Settings goes the same way, though its weight keeps pricing the route.
+  // Filtered once, at the source, so the sliders, the collapsed peek row and the summary chips cannot
+  // disagree about which factors this panel offers.
+  const offered = allFactors.filter((factor) => factor.available !== false);
+  const factors = offered.filter((factor) => !hidden.has(factor.key));
+  // Hiding is about the panel, not the route: a hidden factor at a non-zero weight is still bending
+  // the line on the map, and nothing else on screen would say so. A factor the panel would have
+  // greyed out is not — a closed gate has taken its edges out of the graph, and lost data is priced
+  // as nothing — so counting one would name an influence that is not there.
+  const hiddenApplying = offered.filter(
+    (factor) =>
+      hidden.has(factor.key) &&
+      factor.weight !== 0 &&
+      !factor.disabled &&
+      factor.lost === undefined,
+  ).length;
 
   const factorChips = factors.filter(
     (factor) => factor.key !== "ferry" && factor.key !== "shelter",
@@ -668,7 +577,7 @@ export default function RoutePanel({
                     }`}
                   >
                     <factor.Icon className="h-3.5 w-3.5" aria-hidden={true} />
-                    {percent(factor)}
+                    {factorPercent(factor, factor.weight)}
                   </span>
                 ))}
                 <FiChevronDown
@@ -684,6 +593,7 @@ export default function RoutePanel({
               {factors.map((factor) => (
                 <label
                   key={factor.key}
+                  htmlFor={`scenery-${factor.key}`}
                   className={`block ${
                     factor.disabled || factor.lost
                       ? "pointer-events-none opacity-40"
@@ -699,32 +609,16 @@ export default function RoutePanel({
                       {factor.label}
                     </span>
                     <span className="tabular-nums">
-                      {factorReading(factor)}
+                      {factorReading(factor, factor.weight)}
                     </span>
                   </span>
-                  <input
-                    type="range"
-                    min={factor.signed ? -100 : 0}
-                    max={100}
-                    value={percent(factor)}
+                  <FactorSlider
+                    id={`scenery-${factor.key}`}
+                    factor={factor}
+                    weight={factor.weight}
                     disabled={factor.disabled || factor.lost !== undefined}
-                    onChange={(event) =>
-                      factor.onChange(
-                        (Number.parseInt(event.target.value, 10) / 100) *
-                          factor.max,
-                      )
-                    }
-                    aria-label={factor.label}
-                    className="scenery-slider mt-1.5 w-full"
-                    style={
-                      {
-                        "--fill": factor.color,
-                        // A signed slider fills from the centre, so map −100..100 to a 0..100 track.
-                        "--pct": factor.signed
-                          ? `${(percent(factor) + 100) / 2}%`
-                          : `${percent(factor)}%`,
-                      } as CSSProperties
-                    }
+                    onChange={factor.onChange}
+                    className="mt-1.5 w-full"
                   />
                   {factor.lost ? (
                     <span className="mt-1 block text-[11px] text-slate-500 dark:text-slate-400">
@@ -734,6 +628,19 @@ export default function RoutePanel({
                 </label>
               ))}
             </div>
+          ) : null}
+
+          {hiddenApplying > 0 ? (
+            <button
+              type="button"
+              onClick={onSettings}
+              className="mt-2 flex items-center gap-1.5 text-[11px] text-slate-400 underline-offset-2 hover:underline dark:text-slate-500"
+            >
+              <FiSettings className="h-3 w-3" aria-hidden="true" />
+              {hiddenApplying === 1
+                ? "1 hidden preference still applies"
+                : `${hiddenApplying} hidden preferences still apply`}
+            </button>
           ) : null}
         </div>
 
