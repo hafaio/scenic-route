@@ -103,11 +103,16 @@ export interface OverlayDef {
 // The dot colours match the route panel's scenery sliders (landmark amber, art fuchsia), so the map
 // and the controls read as one palette.
 const LANDMARK_COLOR = "#f59e0b"; // amber-500
-// A deeper, browner gold than the landmark amber, because the two sit near each other on the map and
-// price different things: a landmark is a designated BUILDING, these are businesses still trading in
-// one. Distinct from the commercial overlay's violet for the same reason — that is where the shops
-// are, this is which of them have been there fifty years.
-const LEGACY_COLOR = "#a16207"; // yellow-700
+// A mustard gold, distinct from the landmark amber because the two sit near each other on the map
+// and price different things: a landmark is a designated BUILDING, these are businesses still
+// trading in one. Distinct from the commercial overlay's violet for the same reason — that is where
+// the shops are, this is which of them have been there fifty years.
+//
+// A step lighter than the yellow-700 it started as, and the reason is the LABEL rather than the
+// dot: names are drawn in the dot's own colour over a black halo (src/tiles/labels.ts), and a dark
+// fill on a dark halo comes out as mud. The other POI colours are already light enough to carry
+// that; this one was not.
+const LEGACY_COLOR = "#ca8a04"; // yellow-600
 const ART_COLOR = "#d946ef"; // fuchsia-500
 const FERRY_COLOR = "#2563eb"; // blue-600, the route layer's ferry-leg colour
 // The subway draws each route in the MTA's own published colour (in subway.ts); only its menu glyph
@@ -178,7 +183,7 @@ export const OVERLAYS: readonly OverlayDef[] = [
     // condition — so saying so in the label would be labelling the only kind there is.
     label: "Businesses",
     icon: (
-      <MdStorefront className="h-4 w-4 text-yellow-700" aria-hidden="true" />
+      <MdStorefront className="h-4 w-4 text-yellow-600" aria-hidden="true" />
     ),
     render: () => (
       <PoiLayer

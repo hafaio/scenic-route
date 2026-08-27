@@ -402,7 +402,7 @@ function OfflineSection() {
       </p>
       <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
         Ground you have looked at is kept, so a walk works with no signal. The
-        routes themselves are always kept and are not part of this.
+        routes themselves are always kept.
       </p>
       <ul className="mt-3">
         {COVERAGE.map((option) => (
