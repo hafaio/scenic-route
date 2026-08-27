@@ -9,19 +9,34 @@ interface AboutDialogProps {
   onClose: () => void;
 }
 
-// One row in the data-provenance list: what a layer is, and where it comes from.
+// One row in the data-provenance list: what a layer is, and where it comes from. `licence` is the
+// text of a licence this app has to hand over rather than merely name, shipped under public/licenses
+// and linked from the row so it is reachable rather than merely present.
 interface DataSource {
   label: string;
   detail: string;
+  licence?: string;
 }
 
-function Source({ label, detail }: DataSource) {
+function Source({ label, detail, licence }: DataSource) {
   return (
     <li className="flex flex-col">
       <span className="font-medium text-slate-700 dark:text-slate-200">
         {label}
       </span>
-      <span className="text-slate-500 dark:text-slate-400">{detail}</span>
+      {licence === undefined ? (
+        <span className="text-slate-500 dark:text-slate-400">{detail}</span>
+      ) : (
+        // Relative, so it resolves under whatever base path the deploy injects.
+        <a
+          href={licence}
+          target="_blank"
+          rel="noreferrer"
+          className="text-slate-500 underline decoration-slate-300 underline-offset-2 hover:text-slate-700 dark:text-slate-400 dark:decoration-slate-600 dark:hover:text-slate-200"
+        >
+          {detail}
+        </a>
+      )}
     </li>
   );
 }
@@ -130,6 +145,30 @@ const CITY_SOURCES: Record<string, readonly DataSource[]> = {
 
 // Read by every city's map, so they sit under the city's own rather than being repeated in each.
 const SHARED_SOURCES: readonly DataSource[] = [
+  // None of the Overture places theme is OpenStreetMap — it is Meta, Microsoft, Foursquare and
+  // AllThePlaces — and CDLA-Permissive-2.0 asks that its text travel with the data rather than be
+  // cited, so it does.
+  //
+  // The search index it goes into is NOT Overture alone, and both entries below say so. Alongside
+  // the places it carries the names and points of the alleys, footbridges and park paths ADDR has no
+  // addresses on, and those come out of the routing graph, which is an OSM extract. That makes
+  // public/search a derivative database under ODbL, credited here as one. The permissive licence is
+  // untroubled by the company — it carries no share-alike of its own — but OSM is owed the credit
+  // either way, and a file that quietly contains it while claiming not to is the worse outcome.
+  {
+    label: "Places",
+    detail: "Overture Maps Foundation (CDLA-Permissive-2.0)",
+    licence: "licenses/CDLA-Permissive-2.0.txt",
+  },
+  {
+    label: "Alley & park path names",
+    detail: "OpenStreetMap contributors (ODbL)",
+  },
+  {
+    label: "Place listings from Foursquare",
+    detail: "© Foursquare Labs, Inc. (Apache-2.0) — NOTICE",
+    licence: "licenses/foursquare-places-NOTICE.txt",
+  },
   {
     label: "Paths & street trees",
     detail: "OpenStreetMap contributors (ODbL)",

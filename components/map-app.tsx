@@ -133,7 +133,6 @@ type RouteState =
   | { kind: "error"; message: string };
 
 const OVERLAY_KEY = "scenic-route:overlay";
-const SEARCH_BIAS_KEY = "scenic-route:search-bias"; // "false" opts out of biasing search to the user
 const RESNAP_METERS = 25; // a followed location must drift this far before the route recomputes
 // Street level, where the first fix frames you. Matches what the map's own follow camera zooms to.
 const LOCATED_ZOOM = 16;
@@ -357,10 +356,6 @@ export default function MapApp() {
   // that run, but the sailing you catch moves with the clock inside that day, so this rebuilds on
   // every tick rather than only when the date changes.
   const ferryContextRef = useRef<string>("");
-  // Whether to send the live location to the geocoder so nearby results rank first. On by default;
-  // the toolbar menu toggle opts out, and it persists to localStorage below.
-  const [shareLocationForSearch, setShareLocationForSearch] =
-    useState<boolean>(true);
   // The decoded graph, kept so directions can be rebuilt from a route without a re-fetch.
   const [routingGraph, setRoutingGraph] = useState<RoutingGraph | null>(null);
   // The landmark and public-art points, loaded once directions are in use, so the turn-by-turn can
@@ -461,13 +456,6 @@ export default function MapApp() {
     }
     return subscribeRouteTime(() => setRouteTimeTick((tick) => tick + 1));
   }, [shadeWeight, shelterWeight, allowSheds, allowFerries]);
-
-  useEffect(() => {
-    const stored = window.localStorage.getItem(SEARCH_BIAS_KEY);
-    if (stored !== null) {
-      setShareLocationForSearch(stored !== "false");
-    }
-  }, []);
 
   useEffect(() => {
     const unsubscribe = watchAuth((info) => {
@@ -1209,23 +1197,6 @@ export default function MapApp() {
     ],
   );
 
-  const handleToggleSearchBias = useCallback(() => {
-    setShareLocationForSearch((share) => {
-      const next = !share;
-      window.localStorage.setItem(SEARCH_BIAS_KEY, String(next));
-      return next;
-    });
-  }, []);
-
-  // The point handed to the geocoder to rank nearby results, or null when opted out or unlocated.
-  const searchBias = useMemo(
-    () =>
-      shareLocationForSearch && userLocation
-        ? { lat: userLocation.lat, lng: userLocation.lng }
-        : null,
-    [shareLocationForSearch, userLocation],
-  );
-
   const handleDestSelect = useCallback((result: GeocodeResult) => {
     setDest({ lat: result.lat, lng: result.lng, label: result.displayName });
     setPickTarget(null);
@@ -1730,8 +1701,6 @@ export default function MapApp() {
           logHereDisabled={userLocation === null}
           logHereBusy={logging}
           logHereHint={locationHint}
-          shareLocationForSearch={shareLocationForSearch}
-          onToggleSearchBias={handleToggleSearchBias}
           onSelectCity={handleSelectCity}
           composeShareUrl={composeShareUrl}
         />
@@ -1781,7 +1750,6 @@ export default function MapApp() {
             destSet={dest !== null}
             needsStart={(manualStart ?? routableLocation) === null}
             hasLiveLocation={routableLocation !== null}
-            searchBias={searchBias}
             pickTarget={effectivePickTarget}
             status={routeState.kind}
             errorMessage={
