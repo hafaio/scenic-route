@@ -16,6 +16,7 @@ import { readFileSync } from "node:fs";
 import { gunzipSync } from "node:zlib";
 import manifest from "../tree-cover/manifest.json";
 import { type AddressIndex, decodeAddresses } from "./addresses";
+import { reverseCity } from "./reverse";
 import { type DocKind, tokenize } from "./search-format";
 import {
   decodeSearchIndex,
@@ -157,7 +158,7 @@ const NYC_GOLDEN: readonly Golden[] = [
     at: { lat: 40.71462, lng: -73.95345 },
     within: 1000,
     kind: "neighborhood",
-    why: "the neighbourhood, which is the hole that made the geocoder look necessary",
+    why: "the neighbourhood, which is the hole that made a network geocoder look necessary",
   },
   {
     query: "312 Court St",
@@ -223,6 +224,24 @@ const NYC_GOLDEN: readonly Golden[] = [
     within: 150,
     kind: "place",
     why: "and so does half a name spelt as it sounds",
+  },
+  {
+    query: "fifth avenue",
+    from: UNION_SQUARE,
+    name: "5th Avenue",
+    at: { lat: 40.77037, lng: -73.96849 },
+    within: 6000,
+    kind: "street",
+    why: "the avenue is indexed under the word it is spoken with, not only its digits",
+  },
+  {
+    query: "fifth ave",
+    from: UNION_SQUARE,
+    name: "5th Avenue",
+    at: { lat: 40.77037, lng: -73.96849 },
+    within: 6000,
+    kind: "street",
+    why: "and the spelt-out name answers before it is finished",
   },
 ];
 
@@ -310,4 +329,15 @@ test("the map centre picks the branch, not the city", () => {
   // spatial input the search has. Nothing here knows where the device is, and nothing needs to.
   expect(metersApart(branch(BRYANT_PARK), BRYANT_PARK)).toBeLessThan(500);
   expect(metersApart(branch(DUMBO), DUMBO)).toBeLessThan(500);
+});
+
+test("sf: a pin is named with something the box could have found", () => {
+  const hit = reverseCity(sf.index, sf.addresses, {
+    lat: 37.77317,
+    lng: -122.4275,
+  });
+  expect(hit).not.toBeNull();
+  const said = `the pin was called ${hit?.kind} "${hit?.name}"`;
+  expect(hit?.name, said).toBe("323 Buchanan Street");
+  expect(tokenize(hit?.name ?? ""), said).not.toHaveLength(0);
 });

@@ -1,8 +1,8 @@
 // SRCH: every name in a city, indexed for a search box that has no network.
 //
-// The geocoder answers "Joe's Pizza" and needs a round trip to do it, and the three searches that
-// used to ship offline — street names off the routing graph, stations, house numbers out of ADDR —
-// each scanned their own list with their own ranking. This is one index over all of it, those three
+// Naming a place used to mean a round trip to a public geocoder, and the three searches that did
+// ship offline — street names off the routing graph, stations, house numbers out of ADDR — each
+// scanned their own list with their own ranking. This is one index over all of it, those three
 // included, plus the curated points the app draws and could not search: a sorted token dictionary, a
 // posting list per token, and a document table of names and coordinates.
 //

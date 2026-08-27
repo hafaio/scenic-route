@@ -28,11 +28,6 @@ const FEED_DIRS = ["sheds/", "ferry-schedule/"];
 const BASEMAP_HOST = "api.protomaps.com";
 const BASEMAP_TILE = /^\/tiles\/v\d+\/(\d+)\/(\d+)\/(\d+)\.[a-z]+$/;
 
-// The one host src/geocode.ts still calls: Nominatim names a point picked off the map. The search
-// box needs no host at all — it answers from the city's own index, a file under the scope and filed
-// further down.
-const GEOCODER_HOST = "nominatim.openstreetmap.org";
-
 // A city's extent, in degrees. Passed in rather than imported so the rule stays a pure function of
 // its inputs and the worker decides where the manifest comes from.
 export interface CityBounds {
@@ -119,20 +114,6 @@ export function fileRequest(
           cacheKey: `${target.origin}/${path}`,
         }
       : null;
-  }
-  if (target.host === GEOCODER_HOST) {
-    // A point already named still has a name with no signal. Network first, so a live answer always
-    // wins and the cache is only ever the fallback. Filed under `overlay` because it is convenience
-    // that may be evicted, never under `routing`, which holds what a walk cannot proceed without.
-    //
-    // Caching this is not merely allowed: Nominatim's usage policy REQUIRES results to be cached,
-    // and it is OpenStreetMap underneath, which this app already credits.
-    return {
-      path: `geocode/${target.host}${target.pathname}${target.search}`,
-      store: "overlay",
-      fresh: true,
-      cacheKey: target.href,
-    };
   }
   if (target.host === FEED_HOST) {
     const dir = target.pathname.startsWith(FEED_PREFIX)

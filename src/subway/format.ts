@@ -5,9 +5,9 @@ import type { Cursor } from "../tiles/varint";
 // their 93 drawn shape variants and the 496 stations, with the colours and names the feed publishes.
 // Display only — nothing here reaches the routing graph, because nobody walks the subway.
 //
-// Decoded here rather than in the tile worker because the station list has a second reader: address
-// search offers stations alongside the geocoder's results (../subway/stations), and both would
-// otherwise carry their own copy of the byte offsets.
+// Decoded here rather than in the tile worker because the station list has a second reader: the
+// search index folds stations in at build time (scripts/search-index.ts), and both would otherwise
+// carry their own copy of the byte offsets.
 
 const MAGIC = "SBWY";
 const FORMAT = 3;

@@ -1,10 +1,8 @@
 // The city's own address file (ADDR, ./address-format.ts), read: the street table, and one street's
 // run of house numbers decoded on demand.
 //
-// The geocoder answers "123 Broadway" and needs a network to do it. This is that same question
-// answered from data that already shipped — and answered better even with signal, because Photon's
-// reply to a house number on a long street is regularly a point at the wrong end of it. WHICH street
-// a query names is the search index's job (./search-query.ts): a street is a document there, so a
+// "123 Broadway" answered from data that already shipped, with no network at all. WHICH street a
+// query names is the search index's job (./search-query.ts): a street is a document there, so a
 // house number is a name match followed by the one run decode below.
 //
 // Only the streets a query names are ever decoded. New York is ~6 MB of address runs; turning all of
@@ -34,6 +32,16 @@ export interface Address {
   lng: number;
 }
 
+// The corners of what a street covers, in the same hundred-thousandths of a degree the addresses are
+// delta-encoded in. A street with no addresses at all reports the origin, which is an ocean away from
+// either city and so never a candidate for anything.
+export interface StreetBounds {
+  minLat: number;
+  maxLat: number;
+  minLng: number;
+  maxLng: number;
+}
+
 // The file as it is held for the session: the decompressed bytes, the two string blobs, and per
 // street its name, its place and where its run of addresses begins. The last entry of `starts` is
 // the end of the last run.
@@ -48,6 +56,14 @@ export interface AddressIndex {
   streetName: Uint32Array;
   streetPlace: Uint32Array;
   starts: Uint32Array;
+  // Per street, the box its addresses fall in. Free to record — the load pass already steps over
+  // every address to find where the next street starts — and it is what lets a point be turned back
+  // into an address without decoding the whole file: a street whose box is 300 m away has no address
+  // nearer than that, so its run is never read. Four bytes a street: 150 KB in New York.
+  minLatUnits: Int32Array;
+  maxLatUnits: Int32Array;
+  minLngUnits: Int32Array;
+  maxLngUnits: Int32Array;
   bytes: Uint8Array;
 }
 
@@ -57,11 +73,12 @@ function readRun(
   bytes: Uint8Array,
   cursor: Cursor,
   into: Address[] | null,
-): void {
+): StreetBounds {
   const count = readUnsignedVarint(bytes, cursor);
   let major = 0;
   let latUnits = 0;
   let lngUnits = 0;
+  const bounds: StreetBounds = { minLat: 0, maxLat: 0, minLng: 0, maxLng: 0 };
   for (let index = 0; index < count; index += 1) {
     const packed = readUnsignedVarint(bytes, cursor);
     // The low bit says a minor number or a letter suffix rides in the next varint.
@@ -69,12 +86,24 @@ function readRun(
     major += unzigzag(Math.floor(packed / 2));
     latUnits += readVarint(bytes, cursor);
     lngUnits += readVarint(bytes, cursor);
+    if (index === 0) {
+      bounds.minLat = latUnits;
+      bounds.maxLat = latUnits;
+      bounds.minLng = lngUnits;
+      bounds.maxLng = lngUnits;
+    } else {
+      bounds.minLat = Math.min(bounds.minLat, latUnits);
+      bounds.maxLat = Math.max(bounds.maxLat, latUnits);
+      bounds.minLng = Math.min(bounds.minLng, lngUnits);
+      bounds.maxLng = Math.max(bounds.maxLng, lngUnits);
+    }
     into?.push({
       number: { major, ...unpackExtra(extra) },
       lat: latUnits / COORD_SCALE,
       lng: lngUnits / COORD_SCALE,
     });
   }
+  return bounds;
 }
 
 // One "\n"-joined blob. Empty is no entries at all rather than one empty string, which is what a
@@ -101,11 +130,19 @@ export function decodeAddresses(bytes: Uint8Array): AddressIndex {
   const streetName = new Uint32Array(streetCount);
   const streetPlace = new Uint32Array(streetCount);
   const starts = new Uint32Array(streetCount + 1);
+  const minLatUnits = new Int32Array(streetCount);
+  const maxLatUnits = new Int32Array(streetCount);
+  const minLngUnits = new Int32Array(streetCount);
+  const maxLngUnits = new Int32Array(streetCount);
   for (let street = 0; street < streetCount; street += 1) {
     streetName[street] = readUnsignedVarint(bytes, cursor);
     streetPlace[street] = readUnsignedVarint(bytes, cursor);
     starts[street] = cursor.offset;
-    readRun(bytes, cursor, null);
+    const bounds = readRun(bytes, cursor, null);
+    minLatUnits[street] = bounds.minLat;
+    maxLatUnits[street] = bounds.maxLat;
+    minLngUnits[street] = bounds.minLng;
+    maxLngUnits[street] = bounds.maxLng;
   }
   starts[streetCount] = cursor.offset;
   return {
@@ -115,6 +152,10 @@ export function decodeAddresses(bytes: Uint8Array): AddressIndex {
     streetName,
     streetPlace,
     starts,
+    minLatUnits,
+    maxLatUnits,
+    minLngUnits,
+    maxLngUnits,
     bytes,
   };
 }
