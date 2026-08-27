@@ -119,7 +119,7 @@ test("a place with no address takes its borough from the boundary it is inside",
       }),
     ],
     addresses,
-    areas,
+    { areas },
   );
   const borough = (name: string) =>
     docs.find((doc) => doc.name === name)?.placeIndex;
@@ -272,4 +272,200 @@ test("the encoder reports the corpus it wrote", () => {
   expect(encoded.bytes.byteLength).toBeLessThan(
     encoded.bytes.buffer.byteLength,
   );
+});
+
+// The curated sets: one document each, with the tier their own source earns them rather than an
+// Overture category they have none of.
+test("a named point is a document of its own kind", () => {
+  const addresses = addressFile([
+    address("COURT ST", "Brooklyn", "312", BROOKLYN),
+  ]);
+  const { docs, summary } = buildDocs([], addresses, {
+    sets: [
+      {
+        kind: "station",
+        source: "subway",
+        prominence: 240,
+        priority: 0,
+        points: [
+          { name: "Borough Hall", detail: "2/3/4/5/R", ...BROOKLYN },
+          { name: "!!!", ...BROOKLYN },
+        ],
+      },
+    ],
+  });
+  const station = docs.find((doc) => doc.name === "Borough Hall");
+  expect(station?.kind).toBe("station");
+  expect(station?.prominence).toBe(240);
+  // The routes ride in the category slot, which is what a station result reads with.
+  expect(station?.category).toBe("2/3/4/5/R");
+  // A name with no searchable word is nothing a search can reach, so it is not a document.
+  expect(summary.points).toBe(1);
+});
+
+test("one place two sources name is one document, and the curated one is what stays", () => {
+  const addresses = addressFile([
+    address("COURT ST", "Brooklyn", "312", BROOKLYN),
+  ]);
+  const nearby = { lat: BROOKLYN.lat + 0.0005, lng: BROOKLYN.lng };
+  const { docs, summary } = buildDocs(
+    [
+      placeRow({
+        name: "Borough Hall",
+        category: "landmark_and_historical_building",
+        street: "COURT ST",
+        houseNumber: parseHouseNumber("312"),
+      }),
+      placeRow({ name: "Borough Hall", ...QUEENS }),
+    ],
+    addresses,
+    {
+      sets: [
+        {
+          kind: "station",
+          source: "subway",
+          prominence: 240,
+          priority: 0,
+          points: [{ name: "Borough Hall", detail: "2/3/4/5/R", ...nearby }],
+        },
+      ],
+    },
+  );
+  const kept = docs.filter((doc) => doc.name === "Borough Hall");
+  expect(kept.map((doc) => doc.kind)).toEqual(["place", "station"]);
+  expect(summary.duplicates).toBe(1);
+  // What the dropped row knew and the station did not: the door it stands at, and the borough.
+  const station = kept.find((doc) => doc.kind === "station");
+  expect(station?.number).toEqual(parseHouseNumber("312"));
+  expect(station?.placeIndex).toBe(0);
+  // And what it already knew stays its own: the routes are not overwritten by an Overture slug.
+  expect(station?.category).toBe("2/3/4/5/R");
+  // The one in Queens is a different place with the same name, and is not a duplicate of anything.
+  expect(docs.some((doc) => doc.lat === QUEENS.lat)).toBe(true);
+});
+
+test("a dining point behind an Overture row of the same name is the one that goes", () => {
+  const addresses = addressFile([
+    address("COURT ST", "Brooklyn", "312", BROOKLYN),
+  ]);
+  const { docs } = buildDocs(
+    [placeRow({ name: "Killmeyer's", category: "bar" })],
+    addresses,
+    {
+      sets: [
+        {
+          kind: "place",
+          source: "dining",
+          prominence: 120,
+          priority: 2,
+          points: [{ name: "Killmeyer's", ...BROOKLYN }],
+        },
+      ],
+    },
+  );
+  const kept = docs.filter((doc) => doc.name === "Killmeyer's");
+  expect(kept).toHaveLength(1);
+  expect(kept[0].category).toBe("bar");
+});
+
+test("a district takes the borough of the shop on its corner and not the shop's door", () => {
+  const addresses = addressFile([
+    address("COURT ST", "Brooklyn", "312", BROOKLYN),
+  ]);
+  const nearby = { lat: BROOKLYN.lat + 0.0005, lng: BROOKLYN.lng };
+  const { docs } = buildDocs(
+    [
+      placeRow({
+        name: "Bay Ridge",
+        category: "banks",
+        street: "COURT ST",
+        houseNumber: parseHouseNumber("312"),
+      }),
+    ],
+    addresses,
+    {
+      sets: [
+        {
+          kind: "neighborhood",
+          source: "neighborhoods",
+          prominence: 150,
+          priority: 0,
+          points: [{ name: "Bay Ridge", ...nearby }],
+        },
+      ],
+    },
+  );
+  const kept = docs.filter((doc) => doc.name === "Bay Ridge");
+  expect(kept.map((doc) => doc.kind)).toEqual(["neighborhood"]);
+  expect(kept[0].placeIndex).toBe(0);
+  // A district is not a bank and has no front door, so neither the category nor the number the bank
+  // stands at follows the name.
+  expect(kept[0].category).toBe(null);
+  expect(kept[0].streetIndex).toBe(-1);
+  expect(kept[0].number).toBe(null);
+});
+
+test("the higher of two sources' tiers is what the one document keeps", () => {
+  const addresses = addressFile([
+    address("COURT ST", "Brooklyn", "312", BROOKLYN),
+  ]);
+  const nearby = { lat: BROOKLYN.lat + 0.0005, lng: BROOKLYN.lng };
+  const { docs } = buildDocs(
+    [placeRow({ name: "Nolan Park", category: "park" })],
+    addresses,
+    {
+      sets: [
+        {
+          kind: "neighborhood",
+          source: "neighborhoods",
+          prominence: 150,
+          priority: 0,
+          points: [{ name: "Nolan Park", ...nearby }],
+        },
+      ],
+    },
+  );
+  const kept = docs.filter((doc) => doc.name === "Nolan Park");
+  // Each tier is what its own source can vouch for: the district that survived is also the park the
+  // row it replaced knew about.
+  expect(kept.map((doc) => doc.kind)).toEqual(["neighborhood"]);
+  expect(kept[0].prominence).toBe(prominenceOf("park", false));
+});
+
+test("a street the graph names and the address file does not is still a document", () => {
+  const addresses = addressFile([
+    address("COURT ST", "Brooklyn", "312", BROOKLYN),
+  ]);
+  const { docs, summary } = buildDocs([], addresses, {
+    streets: [{ name: "Bow Bridge", tokens: ["bow", "bridge"], ...BROOKLYN }],
+  });
+  const bridge = docs.find((doc) => doc.name === "Bow Bridge");
+  expect(bridge?.kind).toBe("street");
+  // No addresses on it, so no ordinal and no house number to resolve — a name and a point.
+  expect(bridge?.streetIndex).toBe(-1);
+  expect(summary.graphStreets).toBe(1);
+});
+
+test("a document's token count is the words of its name, however often one repeats", () => {
+  const addresses = addressFile([
+    address("COURT ST", "Brooklyn", "312", BROOKLYN),
+  ]);
+  const { docs } = buildDocs(
+    [placeRow({ name: "Boutique Boutique" }), placeRow({ name: "Boutique" })],
+    addresses,
+  );
+  const index = decodeSearchIndex(encodeSearch(docs).bytes);
+  const doc = docs.findIndex(({ name }) => name === "Boutique Boutique");
+  expect(unpackTokenInfo(index.tokenInfo[doc]).tokenCount).toBe(2);
+  // Which is what keeps the repeated word from reading as a whole name covered: one typed word is
+  // half of "Boutique Boutique" and the whole of "Boutique", and the shorter name is the better
+  // answer to it.
+  const found = searchNames(index, {
+    text: "boutique",
+    centre: BROOKLYN,
+    limit: 5,
+  });
+  const textOf = (name: string): number =>
+    found.find((hit) => hit.name === name)?.text ?? Number.NaN;
+  expect(textOf("Boutique Boutique")).toBeLessThan(textOf("Boutique"));
 });

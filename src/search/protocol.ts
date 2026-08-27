@@ -20,9 +20,6 @@ export interface QueryMessage {
   // Where results are measured from: what the map is centred on.
   centre: { lat: number; lng: number };
   limit: number;
-  // Which kinds of document may be answered with, since streets and stations still ride their own
-  // paths into the search box and would otherwise be listed twice.
-  kinds?: readonly DocKind[];
 }
 
 export type ToSearchWorker = InitMessage | QueryMessage;
@@ -36,7 +33,11 @@ export interface IndexHit {
   lat: number;
   lng: number;
   score: number;
-  category: string | null; // the Overture slug, for the glyph
+  // The Overture slug, or the routes a station serves — which is what a station result reads with.
+  category: string | null;
+  // Whether the house number asked for is the one found. Null for every answer that was not asked a
+  // number: this is the flag that says a row is a door rather than a name.
+  exact: boolean | null;
 }
 
 export interface ReadyMessage {

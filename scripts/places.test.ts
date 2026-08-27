@@ -7,6 +7,7 @@ import {
   type PlaceAddressIndex,
   type PlacedAddress,
   splitAddress,
+  toNeighborhoods,
 } from "./places";
 
 // Somewhere for the addresses of a test that is not about where they are. A place looked up `here`
@@ -146,4 +147,20 @@ test("picks the borough's own house out of the streets that share a name", () =>
     addresses,
   );
   expect(far?.meters).toBeGreaterThan(7000);
+});
+
+test("one district written down twice is one row, and a community board is none", () => {
+  const kept = toNeighborhoods([
+    { name: "Herald Square", lat: 40.7503, lng: -73.9878 },
+    { name: "Herald Square", lat: 40.7495, lng: -73.988 },
+    { name: "Manhattan Community Board 5", lat: 40.75, lng: -73.98 },
+    // Two real places of one name: Chelsea in Manhattan and Chelsea in Staten Island.
+    { name: "Chelsea", lat: 40.7465, lng: -74.0015 },
+    { name: "Chelsea", lat: 40.6007, lng: -74.1949 },
+  ]);
+  expect(kept.map((row) => row.name)).toEqual([
+    "Chelsea",
+    "Chelsea",
+    "Herald Square",
+  ]);
 });

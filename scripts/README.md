@@ -1968,6 +1968,21 @@ the names stop being things anyone would type — a phone number where the name 
 shopfront — and the cut is the visible choice `MIN_CONFIDENCE` is there to make: it takes New York
 from 389,043 to **309,968** and San Francisco from 57,783 to **49,520**.
 
+### `data/places/<city>-neighborhoods.jsonl` — the parts of a city (derived, gitignored)
+
+Written by the same run, out of the same `divisions` theme the city outline comes from — the
+`division` points inside the outline rather than the `division_area` polygon around it, so this costs
+one more read of a file already being read and no new source. `{ name, lat, lng }` a line.
+
+Three subtypes are read together, because the tier is about how the sources nest and not about how
+well known the name is: a **macrohood** is Brooklyn or the Mission, a **neighborhood** is Park Slope
+or Noe Valley, and a **microhood** is Williamsburg, Harlem and Times Square — leave the last out and
+the city loses the names most likely to be typed. Two filters run: a name reading `Community Board 5`
+or `Community District 17` is an administrative unit nobody walks to, and a name filed twice within
+**2 km** is one district written down twice (Herald Square, Union Square, Hayes Valley and Fresh
+Meadows are the four; the next-nearest pair sharing a name is Chelsea against Chelsea, ten kilometres
+apart, and both of those are real). That leaves **368** in New York and **95** in San Francisco.
+
 The join is against `public/addresses/<city>.bin.gz` **as it shipped**, read back and decoded rather
 than re-fetched from the city, so a place joins to the spelling the client will look up or it does
 not join at all. Overture writes a US address as one line with the house number first ("178
@@ -2019,34 +2034,64 @@ attribution string is compelled.
 ### `public/search/<city>.bin.gz` — the offline search index, magic `SRCH` (v1, derived, **committed**)
 
 One index over every name in a city, so the search box answers with no network. `bun run
-update-search-index` (`scripts/search-index.ts`) reads `data/places/<city>.jsonl` and
-`public/addresses/<city>.bin.gz` — both already on disk, so this is seconds rather than a download —
-and writes a sorted token dictionary, a posting list per token and a table of names and coordinates.
+update-search-index` (`scripts/search-index.ts`) reads every name the app already ships — all of it
+on disk, so this is seconds rather than a download — and writes a sorted token dictionary, a posting
+list per token and a table of names and coordinates:
+
+| source | what it contributes |
+| --- | --- |
+| `data/places/<city>.jsonl` | the Overture places, 309,968 in New York and 49,520 in San Francisco |
+| `public/addresses/<city>.bin.gz` | a **street** per ADDR `(name, place)` pair, carrying its ordinal |
+| `public/routing/<city>.bin` | the street names ADDR has none: 2,551 alleys, footbridges and park paths in New York, 701 in San Francisco |
+| `data/subway/<city>.bin` | the stations, merged per complex as the overlay merges them, with the routes they serve |
+| `data/landmarks`, `data/art`, `data/legacy`, `data/dining` | the curated points — designated landmarks, public art, fifty-year-old businesses, outdoor dining |
+| `data/places/<city>-neighborhoods.jsonl` | the parts of the city a reader names instead of a door: 368 in New York, 95 in San Francisco |
+
 It also reads New York's **borough boundaries** (Socrata `gthc-hcne`, the same rows the land mask is
 built from, through `scripts/land.ts`) to name the borough of the 53,507 places that never joined an
-address: a park has no front door, and nothing in the Overture row says which borough it is in.
-The format is frozen in `src/search/search-format.ts`, which the builder and `src/search/search-query.ts`
-share: they must tokenize identically, or a name is indexed one way and searched the other.
+address, and of every curated point: a park has no front door, and nothing in the Overture row says
+which borough it is in. The format is frozen in `src/search/search-format.ts`, which the builder and
+`src/search/search-query.ts` share: they must tokenize identically, or a name is indexed one way and
+searched the other.
+
+Because it reads the routing graph, this runs **after** `bun run build-tiles` has written one; it
+fails rather than quietly dropping three thousand street names.
+
+**One place is one document.** An Overture row and a curated point that share every word of their
+names within **150 m** are the same station, landmark or old shop, and the curated one is what stays
+— it carries the better tier and the city's own spelling — while inheriting the doorway, borough and
+category the Overture row knew and it did not, and the **higher of the two tiers**, since each source
+vouches for what it knows: the bank named Bay Ridge stands in the neighbourhood of that name, and the
+plaza called Nolan Park is a park. A **neighborhood** takes the borough and the tier and nothing else:
+a district is not a bank and has no front door, whatever the shop on its corner has. Dining points
+sit the other side of the rule: a dining row is the same restaurant with no category and no address,
+so Overture's copy wins. Only across sources; two Overture rows of one name a block apart are two
+branches of a chain at least as often as they are one shop written down twice. 1,877 documents are
+dropped this way in New York and 252 in San Francisco, and every pair is logged.
 
 **Addresses are not in it, and that is why it is small.** Tokenizing New York's 967,230 addresses
 would put `street` and `avenue` into a million documents each, and every way of coping with a posting
 list that size — stop words, caps, tiered lists — degrades exactly the queries addresses exist to
 answer. Instead a **street is one document** (9,387 in New York, 2,070 in San Francisco, one per ADDR
 `(name, place)` pair) carrying its ADDR ordinal, and a house number is resolved after the match by
-decoding that one street's run, the way `src/search/addresses.ts` already does. With addresses out,
-**no posting list exceeds 13,871 entries** (`inc`, New York) and **no two-character prefix expands
-past 30,150 postings** (`co`, over 1,808 dictionary tokens) — measured, not estimated, and the reason
+decoding that one street's run, the way `src/search/addresses.ts` reads it. With addresses out,
+**no posting list exceeds 13,872 entries** (`inc`, New York) and **no two-character prefix expands
+past 31,678 postings** (`st`, over 1,133 dictionary tokens) — measured, not estimated, and the reason
 nothing in the query path needs a cap.
 
 | | New York | San Francisco |
 | --- | --- | --- |
-| documents | 319,355 (309,968 places, 9,387 streets) | 51,590 (49,520 + 2,070) |
-| distinct tokens | 100,680 | 29,749 |
-| postings | 1,025,288 | 160,980 |
-| largest posting list | `inc` 13,871 | `san` 2,860 |
-| heaviest 2-char prefix | `co` 30,150 | `st` 5,616 |
-| raw | 12.72 MB | 2.14 MB |
-| **gzipped** | **7.50 MB** | **1.25 MB** |
+| documents | 325,838 | 54,093 |
+| — places | 310,472 | 49,268 |
+| — streets | 11,938 | 2,771 |
+| — landmarks, art, stations, legacy | 1,458 / 1,088 / 464 / 50 | 360 / 1,111 / 217 / 271 |
+| — neighborhoods | 368 | 95 |
+| distinct tokens | 101,221 | 30,477 |
+| postings | 1,050,380 | 169,421 |
+| largest posting list | `inc` 13,872 | `san` 2,909 |
+| heaviest 2-char prefix | `st` 31,678 | `st` 6,186 |
+| raw | 12.94 MB | 2.23 MB |
+| **gzipped** | **7.62 MB** | **1.30 MB** |
 
 | offset | type | field |
 | --- | --- | --- |
@@ -2064,7 +2109,7 @@ Then that many documents, in **Hilbert order** over their quantized coordinates:
 | kindFlags | u8: kind in the low four bits, `hasStreet` 0x10, `hasNumber` 0x20 |
 | tokenInfo | u8: token count capped at 15 in the high nibble, ADDR place index **plus one** in the low nibble |
 | prominence | u8 |
-| category | varint, index into the blob **plus one**; 0 where the document has none |
+| category | varint, index into the blob **plus one**; 0 where the document has none — the Overture slug for a place, the routes for a station |
 | latitude, longitude | zigzag varint deltas from the previous document, units of 1e-5° |
 | streetIndex | varint, only when `hasStreet` |
 | number | varint `major * 2 + hasExtra`, then `minor * 32 + suffix`, only when `hasNumber` — exactly as ADDR packs one |
@@ -2104,12 +2149,29 @@ A street is indexed under **both its spellings plus its ordinal words**: `5 AVE`
 it, `5th Avenue` as the client shows it, and `fifth` from a baked table that spells a number up to
 999 as the words it would be typed as ("two hundred seventy first" for New York's West 271st). Prefix
 matching already makes "st" find "street", so nothing needs an abbreviation table in that direction.
+Those extra spellings are indexed but not counted as words of the name — the token-count nibble holds
+the DISPLAY name's word count — or the coverage term would dock a street for being findable.
 
 `prominence` is baked so that tuning the ranking is a rebuild rather than a redesign: transit 240,
-landmarks 210, parks and plazas 200, museums and attractions 190, schools and churches 150, food and
-retail 120, streets 110, generic services 80, and the `professional_services` / contractor / LLC tier
-40, matched off the Overture slug in `scripts/search-index.ts`. The tiers are judgment, not
-measurement; the golden-query file that settles them is not written yet.
+parks and plazas 235, museums and attractions 220, theatres and playgrounds 195, designated landmarks
+210, legacy businesses 180, streets and civic buildings 170, public art, neighborhoods and kerbside
+transit stops 150, food and retail 120, generic services 80, and the `professional_services` /
+contractor / LLC tier 40. A place's tier is matched off its Overture slug; a curated point takes its set's. Two rules
+read more than the slug: an open space carrying a **house number** is a storefront named after the
+park rather than the park, and drops to 80; and a station named after the corner it stands on —
+"Judah St & 40th Ave", 182 of San Francisco's 217 Muni stops — is a kerb with a sign on it and takes
+the stop tier. The tiers are judgment, not measurement; the golden-query file that settles them is
+not written yet.
+
+One thing at query time overrides a tier. A **street or a neighborhood whose whole name was typed
+and nothing else** is scored at the top of the scale and on the flatter distance curve a house number
+pays, because both are names that cover ground and are filed at a single averaged point: "Court St"
+is Court Street rather than the courthouse, the post office and the station named after it, and
+"Williamsburg" is the neighbourhood rather than the Montessori school in it. Three things have to
+hold for that, each ruling out a name the same words also reach — every word of the query lands on a
+distinct word of the name with none of the name left over (not Court Street Bagels), the query starts
+where the name starts (not Stable Court), and nothing but the word still being typed is an unfinished
+prefix (5th Avenue, not 57th). `src/search/search-query.ts` holds it.
 
 ### `public/streets/{x}/{y}.bin` — the chunks (derived, gitignored)
 

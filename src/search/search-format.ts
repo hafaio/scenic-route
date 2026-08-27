@@ -1,9 +1,10 @@
 // SRCH: every name in a city, indexed for a search box that has no network.
 //
 // The geocoder answers "Joe's Pizza" and needs a round trip to do it, and the three searches that
-// already ship offline — street names off the routing graph, stations, house numbers out of ADDR —
-// each scan their own list with their own ranking. This is one index over all of it: a sorted token
-// dictionary, a posting list per token, and a document table of names and coordinates.
+// used to ship offline — street names off the routing graph, stations, house numbers out of ADDR —
+// each scanned their own list with their own ranking. This is one index over all of it, those three
+// included, plus the curated points the app draws and could not search: a sorted token dictionary, a
+// posting list per token, and a document table of names and coordinates.
 //
 // ADDRESSES ARE NOT IN IT, and that is the whole reason it is small. Tokenizing New York's 967,230
 // addresses would put `street` and `avenue` into a million documents each, and every way of coping
@@ -23,18 +24,22 @@
 //   "SRCH"                      magic, 4 bytes
 //   format                      1 byte
 //   categoryBytes               length of the category blob
-//   <categories>                Overture category slugs, "\n"-joined, UTF-8; the client maps these
-//                               to glyphs
+//   <categories>                what a document is, "\n"-joined, UTF-8: the Overture slug for a
+//                               place, the routes a station serves
 //   docCount
 //   per doc, in Hilbert order over its quantized coordinates:
 //     nameLen                   the display name, UTF-8, original case and punctuation
 //     <name>
 //     kindFlags                 1 byte: kind (low 4 bits) | hasStreet (0x10) | hasNumber (0x20)
-//     tokenInfo                 1 byte: name token count capped at 15 (high 4 bits)
+//     tokenInfo                 1 byte: the DISPLAY name's word count, capped at 15 (high 4 bits) —
+//                               which is neither the number of tokens the doc is indexed under, since
+//                               a street is indexed under every spelling of itself, nor the number of
+//                               DISTINCT words it has, since "Boutique Boutique" is a two-word name
+//                               that one typed word covers half of
 //                               | ADDR place index plus one (low 4 bits), 0 where the doc has no
 //                               place — an unjoined place, or a city that is one place
 //     prominence                1 byte, how much a name outranks another on an equal match
-//     category                  index into <categories> plus one; 0 where the doc has no category
+//     category                  index into <categories> plus one; 0 where the doc has none
 //     latDelta, lngDelta        zigzag, units of 1e-5°, from the previous doc
 //     streetIndex               only when hasStreet: ordinal into the ADDR street table
 //     number                    only when hasNumber: major * 2 + hasExtra
@@ -130,6 +135,10 @@ export function packKindFlags(
 export function unpackKind(kindFlags: number): DocKind {
   return DOC_KINDS[kindFlags & KIND_MASK];
 }
+
+// How many places the low nibble of `tokenInfo` can name, which is one short of the sixteen it can
+// hold because zero is "no place". New York files five boroughs and San Francisco none.
+export const MAX_PLACES = 15;
 
 // `placeIndex` is the ADDR place index plus one, so that zero can mean "no place": San Francisco is
 // one place and labels nothing, and a New York place that never joined to an address has no borough

@@ -1,12 +1,17 @@
 // `bun run update-search-index`: the SRCH artifact, one per city — every name a search box gets
 // typed at, in a form a device with no network can answer prefix queries against.
 //
-// Two inputs, both already on disk. `data/places/<city>.jsonl` is the Overture read that
+// Every input is already on disk. `data/places/<city>.jsonl` is the Overture read that
 // scripts/places.ts does, 309,968 named places in New York and 49,520 in San Francisco. The ADDR
 // file is read back as it shipped, and supplies the other kind of document: a STREET, one per (name,
 // place) pair, carrying its ordinal so a house number can be resolved afterwards out of that one
 // street's run. Addresses themselves are never tokenized — see src/search/search-format.ts for why
 // that is the decision the whole size of this file rests on.
+//
+// The rest are the names the app already ships and could not search: the routing graph's own street
+// names (the alleys, footbridges and park paths ADDR has no addresses on), the subway stations, and
+// the curated point sets — landmarks, public art, legacy businesses, outdoor dining. Each of those
+// had its own list and its own ranking, or no search at all; here they are documents like any other.
 //
 // Written to public/search/<city>.bin.gz and committed, like ADDR and the ferry timetable: nothing
 // in a build or a deploy writes it. Gzipped on disk because Pages serves .bin uncompressed.
@@ -16,6 +21,9 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { constants, gunzipSync, gzipSync } from "node:zlib";
+import { decodeGraph, type GraphIdentity } from "../src/routing/graph";
+import { decodePois } from "../src/routing/pois";
+import { prettifyStreetName } from "../src/routing/street-names";
 import {
   COORD_SCALE,
   type HouseNumber,
@@ -39,13 +47,20 @@ import {
   SEARCH_MAGIC,
   tokenize,
 } from "../src/search/search-format";
+import {
+  decodeSubway,
+  mergeStations,
+  stationRoutes,
+} from "../src/subway/format";
 import { writeVarint, zigzag } from "./geometry";
 import { fetchNycBoroughs } from "./land";
 import { buildLandTest } from "./land-filter";
 
 const ROOT = join(import.meta.dirname, "..");
-const PLACES_DIR = join(ROOT, "data", "places");
+const DATA_DIR = join(ROOT, "data");
+const PLACES_DIR = join(DATA_DIR, "places");
 const ADDRESS_DIR = join(ROOT, "public", "addresses");
+const GRAPH_DIR = join(ROOT, "public", "routing");
 const SEARCH_DIR = join(ROOT, "public", "search");
 
 const CITIES = ["nyc", "sf"] as const;
@@ -252,7 +267,38 @@ const AREA_PROMINENCE: readonly number[] = [235, 195];
 // Manor Apartments", "215 East Eighty One Street Condo" — not landmarks. It used to be the second
 // highest tier in the file.
 const DEFAULT_PROMINENCE = 80;
-const STREET_PROMINENCE = 110;
+const STREET_PROMINENCE = 170;
+
+// The curated sets, which have no Overture category to be read off and so carry a tier of their own.
+// A station is what the transit tier above is for; a designated landmark sits just under the museums
+// because the register holds as many private houses as it does cathedrals; a business a city has
+// certified as fifty years old is a destination and a modest one; a sculpture is named, findable and
+// small. Dining points are restaurants and rank as the shops do.
+const STATION_PROMINENCE = 240;
+// A stop named after the corner it stands on rather than after a place: San Francisco files 182 of
+// its 217 Muni stops as "Judah St & 40th Ave", which is a kerb with a sign on it and not where a
+// journey ends. New York names none of its stations this way. The same lesson as `gas_station` in
+// the tiers above — the name is what says which kind of thing this is.
+const STOP_PROMINENCE = 150;
+const CORNER_NAME = /&/;
+const LANDMARK_PROMINENCE = 210;
+const LEGACY_PROMINENCE = 180;
+const ART_PROMINENCE = 150;
+const DINING_PROMINENCE = 120;
+// A part of the city rather than a thing in it. Ranked with the sculptures and the schools on
+// purpose: "Williamsburg" is what a reader types when nothing more precise will do, and it should
+// lead the shops named after it — which its coverage of the query does — without standing over the
+// park or the station a reader named exactly.
+const NEIGHBORHOOD_PROMINENCE = 150;
+
+// How near two documents of one name have to be to be one place said twice. Overture holds the same
+// station, landmark and old shop the curated sets do, under the same name and a doorway or two away,
+// and the curated row is the one that keeps its tier. A block is about 80 m in New York, so this is
+// "the same place, wherever each source put its point" rather than "the same street".
+const SAME_PLACE_METERS = 150;
+// How many of the dropped pairs are printed. Every one is counted; the log is a skim for whether the
+// rule is catching what it should, and thousands of lines is not a skim.
+const LOGGED_DUPLICATES = 25;
 
 // `hasNumber` is the only thing in the place file that speaks to how big a place is, and it speaks
 // by its absence: Overture takes an address from a business listing, so a park with a house number
@@ -276,6 +322,17 @@ export function prominenceOf(
   }
 }
 
+// One row of data/places/<city>-neighborhoods.jsonl. Spelt out here rather than imported from
+// scripts/places.ts for the same reason PlaceRow below is: that module opens DuckDB as it loads, and
+// this one only reads what it wrote.
+const NEIGHBORHOOD_SUFFIX = "-neighborhoods.jsonl";
+
+interface NeighborhoodRow {
+  name: string;
+  lat: number;
+  lng: number;
+}
+
 // One row of data/places/<city>.jsonl.
 export interface PlaceRow {
   name: string;
@@ -291,7 +348,7 @@ export interface PlaceRow {
 export interface SearchDoc {
   name: string;
   kind: DocKind;
-  tokens: readonly string[];
+  tokens: readonly string[]; // every spelling the document is findable under
   lat: number;
   lng: number;
   prominence: number; // how much the name is worth before the query is known
@@ -477,7 +534,10 @@ export function encodeSearch(docs: readonly SearchDoc[]): EncodedSearch {
       doc.number !== null,
     );
     offset += 1;
-    bytes[offset] = packTokenInfo(doc.tokens.length, doc.placeIndex);
+    // The DISPLAY name's word count, which `tokens` is neither: it carries a street's other
+    // spellings, and it is deduplicated, so "Boutique Boutique" would go in as one word the query
+    // `boutique` covers whole rather than two it covers half of.
+    bytes[offset] = packTokenInfo(tokenize(doc.name).length, doc.placeIndex);
     offset += 1;
     bytes[offset] = doc.prominence;
     offset += 1;
@@ -622,6 +682,40 @@ function streetDocs(addresses: AddressIndex): StreetDoc[] {
   return docs;
 }
 
+// A street the ROUTING GRAPH names and the address file does not: the alleys, the footbridges, the
+// paths through a park. 2,551 of them in New York and 701 in San Francisco — no house numbers, so no
+// ADDR ordinal and no address to resolve, but they are names the box answered before this index
+// existed and it would be a poor unification that lost them.
+export interface GraphStreet {
+  name: string;
+  tokens: string[];
+  lat: number;
+  lng: number;
+}
+
+// Which source keeps a name two of them hold. The curated sets lead because they carry the better
+// tier and the city's own spelling of it; dining trails Overture because a dining point is the same
+// restaurant with no category, no address and no borough.
+const CURATED_PRIORITY = 0;
+const OVERTURE_PRIORITY = 1;
+const DINING_PRIORITY = 2;
+
+// A named point from one of the sets the app already ships.
+export interface NamedPoint {
+  name: string;
+  lat: number;
+  lng: number;
+  detail?: string; // rides in the category slot — a station's routes, indexed into the shared table
+}
+
+export interface PointSet {
+  kind: DocKind;
+  source: string; // which file, for the log — two sets are places, so the kind cannot say which lost
+  prominence: number; // the tier every point in the set is worth
+  priority: number; // which set survives when two of them name one place
+  points: readonly NamedPoint[];
+}
+
 function numberKey({ major, minor, suffix }: HouseNumber): string {
   return `${major}/${minor}/${suffix}`;
 }
@@ -713,7 +807,10 @@ class StreetLookup {
 
 export interface Summary {
   places: number;
-  streets: number;
+  streets: number; // ADDR streets, which are the ones a house number can be resolved on
+  graphStreets: number; // names the routing graph carries and ADDR does not
+  points: number; // documents from the curated sets — stations, landmarks, art, legacy, dining
+  duplicates: number; // documents dropped as one place two sources both named
   joined: number; // places that carry a street ordinal, so a result can be labelled with its address
   unplaced: number; // joined places whose street could not be told from its namesakes
   bounded: number; // places whose borough came from the boundaries rather than from an address
@@ -769,18 +866,330 @@ async function readAddresses(cityId: string): Promise<AddressIndex> {
   return decodeAddresses(gunzipSync(gzipped));
 }
 
-// The documents of one city: every place, then every street. Pure, so a test stands up a handful of
-// addresses and a couple of Overture rows and checks which street a place was filed under.
+// One of the shared point blobs (LMRK, ARTW, LGCY, DINE), or null where this city has none — San
+// Francisco publishes no outdoor-dining table.
+async function readPoints(
+  directory: string,
+  cityId: string,
+  magic: string,
+): Promise<NamedPoint[] | null> {
+  const path = join(DATA_DIR, directory, `${cityId}.bin`);
+  const file = await readFile(path).catch(() => null);
+  if (file === null) {
+    return null;
+  }
+  const { lats, lngs, names } = decodePois(
+    file.buffer.slice(file.byteOffset, file.byteOffset + file.byteLength),
+    magic,
+  );
+  const points: NamedPoint[] = [];
+  for (let point = 0; point < names.length; point += 1) {
+    // An unnamed artwork — 410 of New York's 1,498 — is a point on a map and nothing a search can
+    // reach, so it is not a document.
+    if (names[point] !== "") {
+      points.push({ name: names[point], lat: lats[point], lng: lngs[point] });
+    }
+  }
+  return points;
+}
+
+// The city's own named parts, out of the file scripts/places.ts writes beside the places: New York's
+// 368 and San Francisco's 95, from the divisions theme of the same Overture release the places come
+// from. A city whose places have not been read yet has none.
+async function neighborhoodPoints(
+  cityId: string,
+): Promise<NamedPoint[] | null> {
+  const path = join(PLACES_DIR, `${cityId}${NEIGHBORHOOD_SUFFIX}`);
+  const text = await readFile(path, "utf-8").catch(() => null);
+  if (text === null) {
+    return null;
+  }
+  return text
+    .split("\n")
+    .filter((line) => line !== "")
+    .map((line) => JSON.parse(line) as NeighborhoodRow);
+}
+
+// The subway stations, merged into one document per complex the way the overlay and the old station
+// search both merged them: a rider searching Times Sq means all ten routes, not the ten records the
+// feed files. The routes ride in the category slot, which is what lets a result still read
+// "14 St-Union Sq (4/5/6/L…)".
+async function stationPoints(cityId: string): Promise<NamedPoint[] | null> {
+  const path = join(DATA_DIR, "subway", `${cityId}.bin`);
+  const file = await readFile(path).catch(() => null);
+  if (file === null) {
+    return null;
+  }
+  const { routes, stations } = decodeSubway(
+    file.buffer.slice(file.byteOffset, file.byteOffset + file.byteLength),
+  );
+  return mergeStations(stations).map((station) => {
+    const serving = stationRoutes(station, routes).join("/");
+    return {
+      name: station.name,
+      lat: station.lat,
+      lng: station.lng,
+      // Absent rather than empty for a station whose feed named no route, so the category slot is
+      // "this document has none" instead of a blank string in the shared table.
+      detail: serving === "" ? undefined : serving,
+    };
+  });
+}
+
+// Every set of named points the city ships, in the order that settles which of them keeps a name two
+// of them hold.
+async function citySets(cityId: string): Promise<PointSet[]> {
+  const sets: PointSet[] = [];
+  const add = (
+    kind: DocKind,
+    source: string,
+    prominence: number,
+    priority: number,
+    points: NamedPoint[] | null,
+  ) => {
+    if (points !== null && points.length > 0) {
+      sets.push({ kind, source, prominence, priority, points });
+    }
+  };
+  const stations = await stationPoints(cityId);
+  add(
+    "station",
+    "subway",
+    STATION_PROMINENCE,
+    CURATED_PRIORITY,
+    stations?.filter(({ name }) => !CORNER_NAME.test(name)) ?? null,
+  );
+  add(
+    "station",
+    "subway stops",
+    STOP_PROMINENCE,
+    CURATED_PRIORITY,
+    stations?.filter(({ name }) => CORNER_NAME.test(name)) ?? null,
+  );
+  add(
+    "landmark",
+    "landmarks",
+    LANDMARK_PROMINENCE,
+    CURATED_PRIORITY,
+    await readPoints("landmarks", cityId, "LMRK"),
+  );
+  add(
+    "legacy-business",
+    "legacy",
+    LEGACY_PROMINENCE,
+    CURATED_PRIORITY,
+    await readPoints("legacy", cityId, "LGCY"),
+  );
+  add(
+    "art",
+    "art",
+    ART_PROMINENCE,
+    CURATED_PRIORITY,
+    await readPoints("art", cityId, "ARTW"),
+  );
+  add(
+    "neighborhood",
+    "neighborhoods",
+    NEIGHBORHOOD_PROMINENCE,
+    CURATED_PRIORITY,
+    await neighborhoodPoints(cityId),
+  );
+  // Outdoor dining is a restaurant like any other, so it is filed as a place — and behind Overture,
+  // which holds most of the same restaurants with a category and a front door.
+  add(
+    "place",
+    "dining",
+    DINING_PROMINENCE,
+    DINING_PRIORITY,
+    await readPoints("dining", cityId, "DINE"),
+  );
+  return sets;
+}
+
+// The street names the routing graph carries, minus the ones ADDR already has: what is left is the
+// alleys, the footbridges and the park paths that have no addresses on them. The first edge carrying
+// a name decides where the name points, which is what the street search did, and walking the edges
+// in order makes that deterministic.
+async function graphStreets(
+  cityId: string,
+  addresses: AddressIndex,
+): Promise<GraphStreet[]> {
+  const path = join(GRAPH_DIR, `${cityId}.bin`);
+  const file = await readFile(path).catch(() => null);
+  if (file === null) {
+    throw new Error(
+      `${path} is missing: the graph names are part of the index, so build it first (bun run build-tiles:graph)`,
+    );
+  }
+  const identity = JSON.parse(
+    await readFile(join(GRAPH_DIR, `${cityId}.version.json`), "utf-8"),
+  ) as GraphIdentity;
+  const graph = decodeGraph(
+    file.buffer.slice(file.byteOffset, file.byteOffset + file.byteLength),
+    identity,
+  );
+  const known = new Set(
+    addresses.sourceNames.map((name) => name.toUpperCase()),
+  );
+  const seen = new Set<number>();
+  const streets: GraphStreet[] = [];
+  for (let edge = 0; edge < graph.edgeCount; edge += 1) {
+    const nameId = graph.edgeNameId[edge];
+    const name = graph.names[nameId];
+    if (name === undefined || name === "" || seen.has(nameId)) {
+      continue;
+    }
+    seen.add(nameId);
+    if (known.has(name.toUpperCase())) {
+      continue; // ADDR has this street, with addresses on it and a borough to label it with
+    }
+    const node = graph.edgeNodeA[edge];
+    const pretty = prettifyStreetName(name);
+    streets.push({
+      name: pretty,
+      tokens: streetTokens(name, pretty),
+      lat: graph.originLat + graph.nodeQy[node] * graph.scale,
+      lng: graph.originLng + graph.nodeQx[node] * graph.scale,
+    });
+  }
+  return streets;
+}
+
+const METERS_PER_DEGREE = 111_320;
+
+function metersApart(
+  from: { lat: number; lng: number },
+  to: { lat: number; lng: number },
+): number {
+  const north = from.lat - to.lat;
+  const east = (from.lng - to.lng) * Math.cos((from.lat * Math.PI) / 180);
+  return Math.sqrt(north * north + east * east) * METERS_PER_DEGREE;
+}
+
+// A document and the source that produced it, before the sources are folded into one list.
+interface Candidate {
+  doc: SearchDoc;
+  source: string;
+  priority: number;
+}
+
+function tokenKey(tokens: readonly string[]): string {
+  return [...tokens].sort().join(" ");
+}
+
+// Everything the dropped document knew that the surviving one does not.
+function inherit(kept: SearchDoc, dropped: SearchDoc): void {
+  // Two sources' opinions of how prominent one place is, and each tier is what its own source can
+  // vouch for rather than the whole truth: the bank named Bay Ridge stands in the neighbourhood of
+  // that name, and the plaza called Nolan Park is a park. The higher of the two is what the one
+  // remaining document is worth.
+  kept.prominence = Math.max(kept.prominence, dropped.prominence);
+  if (kept.placeIndex < 0) {
+    kept.placeIndex = dropped.placeIndex;
+  }
+  // A district is not a bank and has no front door, whatever the shop that shares its name and its
+  // corner has: a neighborhood takes the borough it stands in and none of the rest.
+  if (kept.kind !== "neighborhood") {
+    if (kept.streetIndex < 0 && dropped.streetIndex >= 0) {
+      kept.streetIndex = dropped.streetIndex;
+      kept.number = dropped.number;
+    }
+    if (kept.category === null) {
+      kept.category = dropped.category;
+    }
+  }
+}
+
+// One place is one document however many sources name it: an Overture row and a curated point that
+// share every word of their names and stand within SAME_PLACE_METERS are the same station, landmark
+// or fifty-year-old shop, and the one that stays is the one whose source knows more about it.
+//
+// Only ACROSS sources. Two Overture rows of one name a block apart are two branches of a chain at
+// least as often as they are one shop written down twice, and nothing here can tell those apart.
+function dedupe(candidates: readonly Candidate[]): {
+  docs: SearchDoc[];
+  dropped: string[];
+} {
+  const byName = new Map<string, Candidate[]>();
+  for (const candidate of candidates) {
+    const key = tokenKey(candidate.doc.tokens);
+    if (key === "") {
+      continue; // a name with no searchable word is nobody's duplicate
+    }
+    const group = byName.get(key);
+    if (group === undefined) {
+      byName.set(key, [candidate]);
+    } else {
+      group.push(candidate);
+    }
+  }
+
+  const duplicates = new Set<SearchDoc>();
+  const dropped: string[] = [];
+  for (const group of byName.values()) {
+    if (
+      group.length < 2 ||
+      group.every((one) => one.priority === group[0].priority)
+    ) {
+      continue;
+    }
+    const ordered = [...group].sort(
+      (left, right) => left.priority - right.priority,
+    );
+    const kept: Candidate[] = [];
+    for (const candidate of ordered) {
+      const winner = kept.find(
+        (other) =>
+          other.priority < candidate.priority &&
+          metersApart(other.doc, candidate.doc) <= SAME_PLACE_METERS,
+      );
+      if (winner === undefined) {
+        kept.push(candidate);
+      } else {
+        // What the loser knew and the winner does not: an Overture row carries a doorway, a borough
+        // and a category, and a curated point carries none of the three, so the survivor takes them.
+        // Only the empty fields — a station's routes ride in the category slot and are not an
+        // Overture slug to be overwritten by one.
+        inherit(winner.doc, candidate.doc);
+        duplicates.add(candidate.doc);
+        dropped.push(
+          `${candidate.doc.name} (${candidate.source}) for ${winner.doc.name} (${winner.source}), ` +
+            `${metersApart(winner.doc, candidate.doc).toFixed(0)} m apart`,
+        );
+      }
+    }
+  }
+  return {
+    docs: candidates
+      .filter(({ doc }) => !duplicates.has(doc))
+      .map(({ doc }) => doc),
+    dropped,
+  };
+}
+
+// Everything the city has to say beyond its Overture places and its address file.
+export interface DocSources {
+  areas?: readonly PlaceArea[];
+  sets?: readonly PointSet[];
+  streets?: readonly GraphStreet[];
+}
+
+// The documents of one city: every place, every street, and every named point the city ships. Pure,
+// so a test stands up a handful of addresses and a couple of Overture rows and checks which street a
+// place was filed under.
 export function buildDocs(
   rows: readonly PlaceRow[],
   addresses: AddressIndex,
-  areas: readonly PlaceArea[] = [],
-): { docs: SearchDoc[]; summary: Summary } {
+  { areas = [], sets = [], streets = [] }: DocSources = {},
+): { docs: SearchDoc[]; summary: Summary; dropped: string[] } {
   const lookup = new StreetLookup(addresses);
-  const docs: SearchDoc[] = [];
+  const candidates: Candidate[] = [];
   const summary: Summary = {
     places: 0,
     streets: 0,
+    graphStreets: 0,
+    points: 0,
+    duplicates: 0,
     joined: 0,
     unplaced: 0,
     bounded: 0,
@@ -788,6 +1197,9 @@ export function buildDocs(
     untokenized: 0,
     longNames: 0,
   };
+  // Which borough a point with no address is in, which is all the boundaries are asked for.
+  const boroughOf = (at: { lat: number; lng: number }): number =>
+    areas.find(({ contains }) => contains(at))?.placeIndex ?? -1;
 
   for (const row of rows) {
     const street =
@@ -819,72 +1231,138 @@ export function buildDocs(
       if (street !== null) {
         placeIndex = addresses.streetPlace[street];
       } else {
-        const area = areas.find(({ contains }) => contains(row));
-        if (area !== undefined) {
-          placeIndex = area.placeIndex;
+        placeIndex = boroughOf(row);
+        if (placeIndex >= 0) {
           summary.bounded += 1;
         } else {
           summary.homeless += 1;
         }
       }
     }
-    docs.push({
-      name: row.name,
-      kind: "place",
-      tokens,
-      lat: row.lat,
-      lng: row.lng,
-      prominence: prominenceOf(row.category, row.houseNumber !== null),
-      category: row.category,
-      placeIndex,
-      streetIndex: street ?? -1,
-      number: street === null ? null : row.houseNumber,
+    candidates.push({
+      source: "overture",
+      priority: OVERTURE_PRIORITY,
+      doc: {
+        name: row.name,
+        kind: "place",
+        tokens,
+        lat: row.lat,
+        lng: row.lng,
+        prominence: prominenceOf(row.category, row.houseNumber !== null),
+        category: row.category,
+        placeIndex,
+        streetIndex: street ?? -1,
+        number: street === null ? null : row.houseNumber,
+      },
     });
+  }
+
+  for (const set of sets) {
+    for (const point of set.points) {
+      const tokens = [...new Set(tokenize(point.name))];
+      if (tokens.length === 0) {
+        continue;
+      }
+      summary.points += 1;
+      candidates.push({
+        source: set.source,
+        priority: set.priority,
+        doc: {
+          name: point.name,
+          kind: set.kind,
+          tokens,
+          lat: point.lat,
+          lng: point.lng,
+          prominence: set.prominence,
+          category: point.detail ?? null,
+          placeIndex: boroughOf(point),
+          streetIndex: -1,
+          number: null,
+        },
+      });
+    }
   }
 
   for (const street of streetDocs(addresses)) {
     summary.streets += 1;
-    docs.push({
-      name: street.name,
-      kind: "street",
-      tokens: street.tokens,
-      lat: street.lat,
-      lng: street.lng,
-      prominence: STREET_PROMINENCE,
-      category: null,
-      placeIndex: street.placeIndex,
-      streetIndex: street.street,
-      number: null,
+    candidates.push({
+      source: "addresses",
+      priority: CURATED_PRIORITY,
+      doc: {
+        name: street.name,
+        kind: "street",
+        tokens: street.tokens,
+        lat: street.lat,
+        lng: street.lng,
+        prominence: STREET_PROMINENCE,
+        category: null,
+        placeIndex: street.placeIndex,
+        streetIndex: street.street,
+        number: null,
+      },
     });
   }
 
-  return { docs, summary };
+  for (const street of streets) {
+    summary.graphStreets += 1;
+    candidates.push({
+      source: "graph",
+      priority: CURATED_PRIORITY,
+      doc: {
+        name: street.name,
+        kind: "street",
+        tokens: street.tokens,
+        lat: street.lat,
+        lng: street.lng,
+        prominence: STREET_PROMINENCE,
+        category: null,
+        placeIndex: boroughOf(street),
+        streetIndex: -1,
+        number: null,
+      },
+    });
+  }
+
+  const { docs, dropped } = dedupe(candidates);
+  summary.duplicates = dropped.length;
+  return { docs, summary, dropped };
 }
 
 async function buildCity(
   cityId: string,
-): Promise<{ docs: SearchDoc[]; summary: Summary }> {
-  const [rows, addresses] = await Promise.all([
+): Promise<{ docs: SearchDoc[]; summary: Summary; dropped: string[] }> {
+  const [rows, addresses, sets] = await Promise.all([
     readPlaces(cityId),
     readAddresses(cityId),
+    citySets(cityId),
   ]);
-  return buildDocs(rows, addresses, await placeAreas(cityId, addresses));
+  return buildDocs(rows, addresses, {
+    areas: await placeAreas(cityId, addresses),
+    sets,
+    streets: await graphStreets(cityId, addresses),
+  });
 }
 
 export async function updateSearchIndex(): Promise<void> {
   await mkdir(SEARCH_DIR, { recursive: true });
   for (const cityId of CITIES) {
     console.error(`search-index: reading ${cityId}`);
-    const { docs, summary } = await buildCity(cityId);
+    const { docs, summary, dropped } = await buildCity(cityId);
     const encoded = encodeSearch(docs);
     const gzipped = gzipSync(encoded.bytes, {
       level: constants.Z_BEST_COMPRESSION,
     });
     await writeFile(join(SEARCH_DIR, `${cityId}.bin.gz`), gzipped);
     const megabytes = (value: number) => (value / 1e6).toFixed(2);
+    for (const pair of dropped.slice(0, LOGGED_DUPLICATES)) {
+      console.error(`search-index: ${cityId}: dropped ${pair}`);
+    }
     console.error(
       `search-index: ${cityId}: ${encoded.docCount} docs ` +
-        `(${summary.places} places, ${summary.streets} streets, ${summary.joined} at an address), ` +
+        `(${summary.places} places, ${summary.streets} streets, ` +
+        `${summary.graphStreets} the graph names and ADDR does not, ` +
+        `${summary.points} curated points, ${summary.duplicates} dropped as duplicates, ` +
+        `${summary.joined} at an address), ` +
         `${encoded.tokenCount} tokens, ${encoded.postingCount} postings, ` +
         `largest list ${encoded.largestList.token} ${encoded.largestList.postings}, ` +
         `${summary.unplaced} places whose street was ambiguous, ` +

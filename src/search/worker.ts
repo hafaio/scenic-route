@@ -1,4 +1,3 @@
-import { formatHouseNumber } from "./address-format";
 import { type AddressIndex, fetchAddresses } from "./addresses";
 import type {
   FromSearchWorker,
@@ -7,11 +6,10 @@ import type {
   ToSearchWorker,
 } from "./protocol";
 import {
+  type CityRequest,
   decodeSearchIndex,
-  type SearchHit,
   type SearchIndex,
-  type SearchRequest,
-  searchNames,
+  searchCity,
 } from "./search-query";
 
 // The search box's own thread. It owns one city's SRCH index (./search-format.ts) and the address
@@ -86,39 +84,14 @@ async function fetchIndex(url: string): Promise<SearchIndex> {
   return decodeSearchIndex(new Uint8Array(bytes));
 }
 
-// The line under a result's name: the door it sits at and the borough it is in, from the address
-// file the ordinals in the index point into. A place that never joined an address still names its
-// borough — the builder takes that from the city's own boundaries — and a city that is one place
-// names nothing.
-function labelOf(addresses: AddressIndex, hit: SearchHit): string {
-  const parts: string[] = [];
-  if (hit.streetIndex >= 0 && hit.number !== null) {
-    const name = addresses.names[addresses.streetName[hit.streetIndex]];
-    parts.push(`${formatHouseNumber(hit.number)} ${name}`);
-  }
-  const place = addresses.places[hit.placeIndex];
-  if (place !== undefined) {
-    parts.push(place);
-  }
-  return parts.join(", ");
-}
-
 // An unloaded index answers nothing rather than not answering: the page holds its questions until
 // `ready`, so an empty list here is only reachable in the moment after a city switch, and a silence
 // would leave the asking side waiting forever.
-function look(city: Loaded | null, request: SearchRequest): IndexHit[] {
+function look(city: Loaded | null, request: CityRequest): IndexHit[] {
   if (city === null) {
     return [];
   } else {
-    return searchNames(city.index, request).map((hit) => ({
-      kind: hit.kind,
-      name: hit.name,
-      label: labelOf(city.addresses, hit),
-      lat: hit.lat,
-      lng: hit.lng,
-      score: hit.score,
-      category: hit.category,
-    }));
+    return searchCity(city.index, city.addresses, request);
   }
 }
 
@@ -126,11 +99,11 @@ scope.onmessage = ({ data }: MessageEvent<ToSearchWorker>) => {
   if (data.type === "init") {
     void load(data);
   } else {
-    const { id, text, centre, limit, kinds } = data;
+    const { id, text, centre, limit } = data;
     scope.postMessage({
       type: "results",
       id,
-      hits: look(loaded, { text, centre, limit, kinds }),
+      hits: look(loaded, { text, centre, limit }),
     });
   }
 };

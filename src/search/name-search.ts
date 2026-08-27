@@ -6,7 +6,6 @@ import type {
   InitMessage,
   QueryMessage,
 } from "./protocol";
-import type { DocKind } from "./search-format";
 
 // The page's half of the search worker (./worker.ts), following the tile layer's pattern: one worker
 // for the whole app, started on first use, told which city it is answering for and then asked one
@@ -81,12 +80,36 @@ export function warmNameIndex(cityId: string): void {
   searchWorker().postMessage(message);
 }
 
+// Where the map is, for the search box — which runs long before anything asks for a route and cannot
+// take the camera as a prop. Set from the map's settled camera, and kept WITH the city it belongs
+// to: a centre in Brooklyn says nothing about which of San Francisco's streets was meant, so after a
+// switch it is ignored until the map settles over the new city.
+let mapCentre: { cityId: string; at: { lat: number; lng: number } } | null =
+  null;
+
+export function setSearchCentre(
+  cityId: string,
+  at: { lat: number; lng: number },
+): void {
+  mapCentre = { cityId, at };
+}
+
+// Where the map is pointing, for a search over this city — null until it has settled over one, which
+// is when the city's own centre stands in for it. Every result the index gives is ranked by how far
+// it is from here.
+export function searchCentre(
+  cityId: string,
+): { lat: number; lng: number } | null {
+  return mapCentre !== null && mapCentre.cityId === cityId
+    ? mapCentre.at
+    : null;
+}
+
 export interface NameSearch {
   cityId: string;
   text: string;
   centre: { lat: number; lng: number };
   limit: number;
-  kinds?: readonly DocKind[];
 }
 
 // The index's answers, or null where it has none to give yet — a city still loading, or one whose
@@ -96,7 +119,6 @@ export function searchNameIndex({
   text,
   centre,
   limit,
-  kinds,
 }: NameSearch): Promise<IndexHit[] | null> {
   warmNameIndex(cityId);
   if (ready !== cityId) {
@@ -111,7 +133,6 @@ export function searchNameIndex({
     text,
     centre,
     limit,
-    kinds,
   };
   searchWorker().postMessage(message);
   return new Promise((resolve) => {
