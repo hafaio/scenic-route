@@ -12,6 +12,7 @@ import {
   FiMapPin,
   FiMessageSquare,
   FiRefreshCw,
+  FiSliders,
   FiUser,
 } from "react-icons/fi";
 import { CITIES, type City } from "../src/cities";
@@ -40,7 +41,7 @@ interface ToolbarProps {
   onSignOut: () => void | Promise<void>;
   onRefreshClaims: () => void | Promise<void>;
   onAbout: () => void;
-  onSettings: () => void;
+  onSettings: (section?: string) => void;
   onLogHere: () => void;
   logHereDisabled: boolean; // no live location yet, so there's nothing to log
   logHereBusy: boolean; // a high-accuracy fix + geocode is in flight
@@ -328,9 +329,21 @@ export default function Toolbar({
               role="menuitem"
               onClick={() => {
                 setMenuOpen(false);
-                onAbout();
+                onSettings();
               }}
               className={`${MENU_ITEM} ${MENU_DIVIDER}`}
+            >
+              <FiSliders />
+              Settings
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                setMenuOpen(false);
+                onAbout();
+              }}
+              className={MENU_ITEM}
             >
               <FiInfo />
               About

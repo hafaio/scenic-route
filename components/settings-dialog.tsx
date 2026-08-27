@@ -1,6 +1,6 @@
 "use client";
 
-import type { CSSProperties } from "react";
+import type { CSSProperties, ReactNode } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { FiEye, FiEyeOff, FiX } from "react-icons/fi";
 import { MdDragIndicator } from "react-icons/md";
@@ -372,7 +372,7 @@ function FactorRows({
 // How much of the map to keep, and how much is kept. The figure comes from the worker's own book
 // (src/sw/ledger.ts) rather than from the worker, which is stopped between requests: the book is
 // ordinary same-origin IndexedDB, so the page can read it without waking anything.
-function OfflineSection() {
+function OfflineSection({ wanted }: { wanted: boolean }) {
   const { coverage } = useSettings();
   const [held, setHeld] = useState<number | null>(null);
 
@@ -396,14 +396,11 @@ function OfflineSection() {
   const kept = held === null ? "" : formatBytes(held);
 
   return (
-    <div className="mt-7">
-      <p className="text-[11px] uppercase tracking-wide text-slate-400 dark:text-slate-500">
-        Offline maps
-      </p>
-      <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-        Ground you have looked at is kept, so a walk works with no signal. The
-        routes themselves are always kept.
-      </p>
+    <Section
+      id="offline"
+      wanted={wanted}
+      caption="Ground you have looked at is kept, so a walk works with no signal. The routes themselves are always kept."
+    >
       <ul className="mt-3">
         {COVERAGE.map((option) => (
           <li key={option.id}>
@@ -455,6 +452,67 @@ function OfflineSection() {
           Clear stored maps
         </button>
       </div>
+    </Section>
+  );
+}
+
+// The page's groups, in order. Named here rather than at each heading so the deep links, the
+// scroll-to and the headings themselves cannot disagree about what a section is called.
+export const SECTIONS = ["layers", "routing", "offline"] as const;
+
+// How long the group the reader was sent to stays tinted. Long enough to be seen after a smooth
+// scroll, short enough that it is plainly a flash rather than a state.
+const HIGHLIGHT_MS = 1600;
+export type SettingsSection = (typeof SECTIONS)[number];
+
+const SECTION_TITLE: Record<SettingsSection, string> = {
+  layers: "Map layers",
+  routing: "Route preferences",
+  offline: "Offline maps",
+};
+
+// One group. It carries the id the deep link scrolls to, and flashes when it was the one asked for —
+// a page that jumps somewhere without saying why reads as a page that lost your place. The flash
+// FADES, because its job is to catch the eye on arrival; left on, it reads as a selection the reader
+// cannot clear.
+function Section({
+  id,
+  caption,
+  wanted,
+  children,
+}: {
+  id: SettingsSection;
+  caption: string;
+  wanted: boolean;
+  children: ReactNode;
+}) {
+  const heading = useRef<HTMLDivElement | null>(null);
+  const [arriving, setArriving] = useState(false);
+
+  useEffect(() => {
+    if (!wanted) {
+      return undefined;
+    }
+    heading.current?.scrollIntoView({ block: "start", behavior: "smooth" });
+    setArriving(true);
+    const timer = window.setTimeout(() => setArriving(false), HIGHLIGHT_MS);
+    return () => window.clearTimeout(timer);
+  }, [wanted]);
+
+  return (
+    <div
+      ref={heading}
+      className={`mt-5 scroll-mt-2 rounded-2xl transition-colors duration-700 ${
+        arriving ? "bg-brand-50/70 dark:bg-brand-500/10" : ""
+      }`}
+    >
+      <p className="text-[11px] uppercase tracking-wide text-slate-400 dark:text-slate-500">
+        {SECTION_TITLE[id]}
+      </p>
+      <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+        {caption}
+      </p>
+      {children}
     </div>
   );
 }
@@ -464,12 +522,16 @@ export default function SettingsDialog({
   onWeight,
   onGate,
   syncingAs,
+  section,
   onClose,
 }: {
   weights: RouteWeights;
   onWeight: (key: FactorKey, weight: number) => void;
   onGate: (key: GateKey, on: boolean) => void;
   syncingAs: string | null; // the signed-in address, or null on a device that is only ever local
+  // The group the reader asked for, so a link from the layers menu lands on the layers rather than
+  // at the top of a page they then have to search. Empty string is "the page, no group in mind".
+  section: string | null;
   onClose: () => void;
 }) {
   useEffect(() => {
@@ -514,30 +576,24 @@ export default function SettingsDialog({
           </button>
         </div>
 
-        <div className="mt-5">
-          <p className="text-[11px] uppercase tracking-wide text-slate-400 dark:text-slate-500">
-            Map layers
-          </p>
-          <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-            The order of the layers menu, and which layers it offers. One order
-            for every city — each shows the layers it has data for.
-          </p>
+        <Section
+          id="layers"
+          wanted={section === "layers"}
+          caption="The order of the layers menu, and which layers it offers. One order for every city — each shows the layers it has data for."
+        >
           <LayerRows />
-        </div>
+        </Section>
 
-        <div className="mt-6">
-          <p className="text-[11px] uppercase tracking-wide text-slate-400 dark:text-slate-500">
-            Route preferences
-          </p>
-          <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-            One value per preference — these are the route panel's own sliders.
-            Hiding one takes it out of the panel; it still prices the route.
-          </p>
+        <Section
+          id="routing"
+          wanted={section === "routing"}
+          caption="One value per preference — these are the route panel's own sliders. Hiding one takes it out of the panel; it still prices the route."
+        >
           <FactorRows weights={weights} onWeight={onWeight} />
           <GateRows weights={weights} onGate={onGate} />
-        </div>
+        </Section>
 
-        <OfflineSection />
+        <OfflineSection wanted={section === "offline"} />
 
         <div className="mt-7 border-t border-slate-200/60 pt-4 text-xs text-slate-500 dark:border-slate-700/60 dark:text-slate-400">
           {syncingAs === null
