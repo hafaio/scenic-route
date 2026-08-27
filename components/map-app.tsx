@@ -25,7 +25,12 @@ import {
   watchAuth,
   watchPins,
 } from "../src/firebase";
-import { type GeocodeResult, reverseGeocode } from "../src/geocode";
+import {
+  type GeocodeResult,
+  resolveSharedQuery,
+  reverseGeocode,
+  searchAddress,
+} from "../src/geocode";
 import {
   isOverlayId,
   OVERLAYS,
@@ -75,6 +80,7 @@ import { computeEdgeShade } from "../src/routing/shade";
 import { computeEdgeSheds, setShedSun, shedDay } from "../src/routing/sheds";
 import { buildSnapIndex, type SnapIndex, snapPair } from "../src/routing/snap";
 import {
+  awaitNameIndex,
   prefetchNameIndex,
   releaseNameIndex,
   setSearchCentre,
@@ -88,8 +94,10 @@ import {
   startSettingsSync,
   stopSettingsSync,
 } from "../src/settings/sync-session";
+import { sharedDestinationText, withoutShareParams } from "../src/share-target";
 import {
   type Camera,
+  decodeDestQuery,
   decodeRoute,
   decodeView,
   encodeRoute,
@@ -98,10 +106,12 @@ import {
   hashParams,
   type LatLng,
   type RouteUrlState,
+  withoutDestQuery,
 } from "../src/url-state";
 import AboutDialog from "./about-dialog";
 import { CityProvider } from "./city-context";
 import FollowToggle from "./follow-toggle";
+import type { DestPrefill } from "./location-field";
 import type { MapTarget, PickMode } from "./map";
 import PinEditor from "./pin-editor";
 import RoutePanel from "./route-panel";
@@ -320,6 +330,14 @@ export default function MapApp() {
   } | null>(null);
   // which field, if any, has armed a map tap to set its location
   const [pickTarget, setPickTarget] = useState<"start" | "dest" | null>(null);
+  // A destination carried as words rather than as a point — a `#q=` link, or an Android share. Held
+  // until it has been resolved into a place rather than read from the URL where it is wanted, since
+  // the URL is stripped the moment it is read and the city it must be resolved against can still
+  // change afterwards; cleared once it resolves, and when the reader answers the box themselves.
+  const [destQuery, setDestQuery] = useState<string | null>(null);
+  // What that query resolved to when it resolved to nothing certain: the words go into the
+  // destination box with their candidates under them, and the reader picks.
+  const [destPrefill, setDestPrefill] = useState<DestPrefill | null>(null);
   const [treeWeight, setTreeWeight] = useState<number>(DEFAULT_TREE_WEIGHT);
   // Ferry preference and gate, driven by the route panel's slider and toggle. Both restore from
   // localStorage below so a reload keeps the setting.
@@ -1243,10 +1261,22 @@ export default function MapApp() {
     ],
   );
 
-  const handleDestSelect = useCallback((result: GeocodeResult) => {
-    setDest({ lat: result.lat, lng: result.lng, label: result.displayName });
-    setPickTarget(null);
+  // Answering the destination box — by picking a row, by clearing it, or by tapping the map — retires
+  // any query a link arrived with: the reader has said what they want, and a lookup still running for
+  // words they have moved past must not overwrite it.
+  const forgetDestQuery = useCallback(() => {
+    setDestQuery(null);
+    setDestPrefill(null);
   }, []);
+
+  const handleDestSelect = useCallback(
+    (result: GeocodeResult) => {
+      setDest({ lat: result.lat, lng: result.lng, label: result.displayName });
+      setPickTarget(null);
+      forgetDestQuery();
+    },
+    [forgetDestQuery],
+  );
 
   const handleStartSelect = useCallback((result: GeocodeResult) => {
     setManualStart({
@@ -1260,7 +1290,8 @@ export default function MapApp() {
   const handleClearDest = useCallback(() => {
     setDest(null);
     setPickTarget((target) => (target === "dest" ? null : target));
-  }, []);
+    forgetDestQuery();
+  }, [forgetDestQuery]);
 
   // Clearing the start — via the X or the dropdown's "My location" row — resets it to the live position.
   // Both clearing the start and asking for "my location" mean the same thing here: route from the
@@ -1287,6 +1318,7 @@ export default function MapApp() {
         setManualStart(pinned);
       } else {
         setDest(pinned);
+        forgetDestQuery();
       }
       reverseGeocode(lat, lng)
         .then((place) => {
@@ -1307,7 +1339,7 @@ export default function MapApp() {
         })
         .catch(() => {});
     },
-    [],
+    [forgetDestQuery],
   );
 
   // Asking for directions pins where you are. Until a destination exists the start tracks the live
@@ -1440,6 +1472,83 @@ export default function MapApp() {
     hashAppliedRef.current = true;
     setHashApplied(true);
   }, [applyPick]);
+
+  // A destination named in words rather than as a point: the `q` key of a shared link, or the text
+  // Android's share sheet hands the installed app. Both land here because both say the same thing,
+  // and the city's own index resolves them without a network — which is the only reason this can be
+  // acted on at all. Read once and taken straight back out of the URL, so a link cannot fire twice
+  // on reload or travel on to the next person carrying a destination they never asked for; the words
+  // themselves live in `destQuery` from then on. The box opens with them in it immediately, before
+  // anything is known about what they mean.
+  useEffect(() => {
+    if (!hashApplied || destQuery !== null) {
+      return;
+    }
+    const asked =
+      decodeDestQuery(hashParams(window.location.hash)) ??
+      sharedDestinationText(new URLSearchParams(window.location.search));
+    if (asked === null) {
+      return;
+    }
+    setRoutingOpen(true);
+    setDestQuery(asked);
+    setDestPrefill({ text: asked, results: [] });
+    window.history.replaceState(
+      null,
+      "",
+      window.location.pathname +
+        withoutShareParams(window.location.search) +
+        withoutDestQuery(window.location.hash),
+    );
+  }, [hashApplied, destQuery]);
+
+  // Resolving those words against a city. An exact house number is routed to; anything vaguer fills
+  // the box with the words and the answers found for them and lets the reader choose, because a
+  // shared "Joe's" that silently routes to one of eleven is worse than a list of eleven. The answers
+  // are handed to the box rather than left for it to search again: it searches on a timer after the
+  // words land, which on the cold load this feature exists for asks an index that has not arrived
+  // and gets nothing, with no second keystroke coming to ask again.
+  //
+  // Threaded a captured `city` rather than letting `searchAddress` read the live one, for the reason
+  // spelled out at `routeCity` above: a first location fix can reselect the city while the index is
+  // still loading, and answering about the wrong city's streets is worse than answering late.
+  //
+  // That fix is also why the words are held in state rather than consumed where the URL is read. A
+  // `q` link names words, not a place, so unlike one carrying coordinates it cannot say which city
+  // it means — it must not be treated as having chosen one, or a visitor standing in San Francisco
+  // would be answered out of New York's streets. So the fix is left free to move the city, and this
+  // resolves again in the new one instead of dropping the destination. Waiting for the index is what
+  // makes that window wide enough to matter: on a cold load the fix lands long before the tables do.
+  useEffect(() => {
+    if (destQuery === null) {
+      return;
+    }
+    let cancelled = false;
+    const cityId = city.id;
+    // Waits for the index rather than searching without it. A shared link is opened cold, so the
+    // files are usually still arriving, and asking early would answer "nothing found" about an
+    // address the city certainly has.
+    awaitNameIndex(cityId)
+      .then(() =>
+        resolveSharedQuery(destQuery, cityId, searchAddress, () => cancelled),
+      )
+      .then((found) => {
+        if (cancelled || found === null) {
+          return;
+        }
+        setDestQuery(null);
+        if (found.exact === null) {
+          setDestPrefill({ text: found.query, results: found.results });
+        } else {
+          const { lat, lng, displayName } = found.exact;
+          setDest({ lat, lng, label: displayName });
+          setDestPrefill(null);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [destQuery, city]);
 
   const handleCamera = useCallback((camera: Camera, view: CityBounds) => {
     cameraRef.current = camera;
@@ -1788,6 +1897,7 @@ export default function MapApp() {
         ) : null}
         {routingOpen ? (
           <RoutePanel
+            destPrefill={destPrefill}
             startLabel={
               manualStart
                 ? manualStart.label

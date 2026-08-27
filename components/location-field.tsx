@@ -20,6 +20,12 @@ const MAX_SUGGESTION_HEIGHT = 256;
 const SUGGESTION_MARGIN = 8;
 const BLUR_CLOSE_MS = 120; // let a result click land before the blur closes the list
 
+// Words the app put in a box, with whatever the index has already said about them.
+export interface DestPrefill {
+  text: string;
+  results: GeocodeResult[];
+}
+
 interface LocationFieldProps {
   label: string | null; // committed selection text; null shows the placeholder
   placeholder: string;
@@ -34,6 +40,15 @@ interface LocationFieldProps {
   // When both are set, a "My location" row is prepended and the list opens on focus even when empty.
   currentLocationLabel?: string | null;
   onUseCurrentLocation?: () => void;
+  // Words the app has typed into the box on the reader's behalf — a shared link's destination that
+  // resolved to nothing certain — together with the answers it already found for them. It arrives
+  // after mount, so it is applied whenever it changes rather than as an initial value. The answers
+  // are handed over rather than searched for again because this arrives on a cold load, when the
+  // box's own debounced search would ask an index that has not finished loading, get an empty list,
+  // and never be asked again — the draft it keys off never changes after the prefill sets it. The
+  // focus is deliberately left alone: the list opens upward out of the panel, and a keyboard would
+  // cover the answers the reader is here to pick from.
+  prefill?: DestPrefill | null;
 }
 
 export default function LocationField({
@@ -49,6 +64,7 @@ export default function LocationField({
   onArmPick,
   currentLocationLabel,
   onUseCurrentLocation,
+  prefill,
 }: LocationFieldProps) {
   // The in-progress typing; null means "not editing", so the box mirrors the committed label instead.
   const [draft, setDraft] = useState<string | null>(null);
@@ -58,6 +74,23 @@ export default function LocationField({
 
   const [activeIndex, setActiveIndex] = useState<number>(-1);
   const [open, setOpen] = useState<boolean>(false);
+
+  // Retiring a prefill takes its words back out of the box, which is what lets the committed label
+  // show through: the app retires one only once the destination question has been answered — by the
+  // link resolving to a door, or by the reader picking, clearing or tapping one out.
+  useEffect(() => {
+    if (prefill) {
+      setDraft(prefill.text);
+      setResults(prefill.results);
+      setActiveIndex(-1);
+      setOpen(true);
+    } else {
+      setDraft(null);
+      setResults([]);
+      setActiveIndex(-1);
+      setOpen(false);
+    }
+  }, [prefill]);
 
   const value = draft ?? label ?? "";
   const showCurrentRow = Boolean(currentLocationLabel && onUseCurrentLocation);
