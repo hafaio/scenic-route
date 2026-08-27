@@ -3,13 +3,20 @@
 // the delta-varint postings all agree with each other rather than each being plausible alone.
 
 import { expect, test } from "bun:test";
-import { encodeSearch, type SearchDoc } from "../../scripts/search-index";
+import { encodeAddresses } from "../../scripts/addresses";
+import {
+  encodeSearch,
+  type SearchDoc,
+  streetTokens,
+} from "../../scripts/search-index";
+import { decodeAddresses } from "./addresses";
 import { spelledOrdinals, tokenize } from "./search-format";
 import {
   decodeSearchIndex,
   distanceFactor,
   prominenceFactor,
   type SearchIndex,
+  searchCity,
   searchNames,
   splitTrailingPlace,
 } from "./search-query";
@@ -371,6 +378,146 @@ test("the street link needs the street, not merely the words the street is made 
   expect(names(index, "joes pizza bleecker st")).toEqual([]);
 });
 
+test("a street that answers the whole query is not buried under the shops on it", () => {
+  const index = build([
+    place("Bedford Hall", { streetIndex: 3 }),
+    place("Bedford Galleries", { streetIndex: 3 }),
+    street("Bedford Avenue", 3),
+  ]);
+  // Every shop on Bedford Avenue can borrow the word "av" from the street it sits on, which is what
+  // answers "Katz's Delicatessen E Houston St" — and what would put a dozen shops above the street
+  // itself for someone who typed nothing but its name.
+  expect(names(index, "bedford av")[0]).toBe("Bedford Avenue");
+});
+
+test("a street the query names in full leads the places that only carry its words", () => {
+  const index = build([
+    place("Court Street Post Office", { prominence: 200 }),
+    place("Kings County Court House", { prominence: 200 }),
+    street("Court Street", 3),
+    street("Stable Court", 4),
+  ]);
+  // A bare street name is a query about the street. Stable Court is made of the same two words and
+  // is not it: what was typed has to start where the name does.
+  expect(names(index, "court st")).toEqual([
+    "Court Street",
+    "Court Street Post Office",
+    "Stable Court",
+    "Kings County Court House",
+  ]);
+});
+
+test("the avenue the query spells in full beats the one it only opens", () => {
+  const index = build([
+    place("5th Avenue", {
+      kind: "street",
+      streetIndex: 3,
+      prominence: 110,
+      tokens: streetTokens("5 AVE", "5th Avenue"),
+    }),
+    place("57th Avenue", {
+      kind: "street",
+      streetIndex: 4,
+      prominence: 110,
+      tokens: streetTokens("57 AVE", "57th Avenue"),
+    }),
+  ]);
+  // Both names start with what was typed. Only one of them is spelt by it — "5" is a word of 5 AVE
+  // and merely the first character of 57 AVE — and the whole-name lift is for the one that is.
+  expect(names(index, "5 av")).toEqual(["5th Avenue", "57th Avenue"]);
+});
+
+test("a name spells out the numbers in it, and only a name that has one", () => {
+  expect(spelledOrdinals(["5th", "avenue"])).toEqual(["fifth", "avenue"]);
+  expect(spelledOrdinals(["5", "ave"])).toEqual(["fifth", "ave"]);
+  expect(spelledOrdinals(["west", "21st", "street"])).toEqual([
+    "west",
+    "twenty",
+    "first",
+    "street",
+  ]);
+  expect(spelledOrdinals(["court", "street"])).toBeNull();
+  // Past the streets either city numbers there is no word for it, so the name reads as it is.
+  expect(spelledOrdinals(["10000", "street"])).toBeNull();
+});
+
+test("the place a query ends in is cut at an offset into the query itself", () => {
+  expect(splitTrailingPlace(["Brooklyn"], "312 Court St Brooklyn")).toEqual({
+    text: "312 Court St",
+    placeIndex: 0,
+  });
+  // Turkish İ lowercases to two code points, so an offset measured in the lowered text would cut the
+  // rest of the query a character short — "İstiklal Cadde" rather than "İstiklal Caddesi".
+  expect(splitTrailingPlace(["Brooklyn"], "İstiklal Caddesi Brooklyn")).toEqual(
+    {
+      text: "İstiklal Caddesi",
+      placeIndex: 0,
+    },
+  );
+});
+
+test("a door on a street the query only opened is not the top of the scale", () => {
+  // The doorway is underfoot and the avenue is three kilometres north, which is the arrangement that
+  // used to decide it: a real house number on a street the query merely opened was scored above
+  // everything a name can reach, so "5 Av" answered with a door on Avenue A.
+  const AVENUE_A = HERE;
+  const FIFTH = { lat: HERE.lat + 0.027, lng: HERE.lng };
+  const addresses = decodeAddresses(
+    encodeAddresses([
+      {
+        street: "5 AVE",
+        place: "",
+        number: { major: 5, minor: 0, suffix: 0 },
+        ...FIFTH,
+      },
+      {
+        street: "AVENUE A",
+        place: "",
+        number: { major: 5, minor: 0, suffix: 0 },
+        ...AVENUE_A,
+      },
+    ]).bytes,
+  );
+  const ordinalOf = (name: string): number =>
+    addresses.streetName.findIndex(
+      (nameId) => addresses.names[nameId] === name,
+    );
+  const index = build([
+    place("5th Avenue", {
+      kind: "street",
+      streetIndex: ordinalOf("5th Avenue"),
+      prominence: 110,
+      tokens: streetTokens("5 AVE", "5th Avenue"),
+      ...FIFTH,
+    }),
+    place("Avenue A", {
+      kind: "street",
+      streetIndex: ordinalOf("Avenue A"),
+      prominence: 110,
+      tokens: streetTokens("AVENUE A", "Avenue A"),
+      ...AVENUE_A,
+    }),
+  ]);
+  const answers = (text: string): string[] =>
+    searchCity(index, addresses, { text, centre: HERE, limit: 5 }).map(
+      (hit) => hit.name,
+    );
+  expect(answers("5 Av")[0]).toBe("5th Avenue");
+  // And a reader who names the whole street still gets the door, wherever it is.
+  expect(answers("5 Avenue A")[0]).toBe("5 Avenue A");
+});
+
+test("a neighbourhood the query names is not the school named after it", () => {
+  const away = { lat: HERE.lat + 0.027, lng: HERE.lng };
+  const index = build([
+    place("Williamsburg Montessori School", { prominence: 150 }),
+    place("Williamsburg", { kind: "neighborhood", prominence: 150, ...away }),
+  ]);
+  // The district is three kilometres off and the school is underfoot, because a district is filed at
+  // its middle and half of it is nowhere near that. Naming the whole of it is what says so.
+  expect(names(index, "williamsburg")[0]).toBe("Williamsburg");
+});
+
 test("a name that answered on its own outranks one that needed its street", () => {
   const index = build([
     place("Carmine Pizza", { streetIndex: 9 }),
@@ -402,4 +549,78 @@ test("the kinds a caller asks for are the only ones answered, and every kind sti
     kinds: ["place"],
   });
   expect(linked.map((hit) => hit.name)).toEqual(["Joes Pizza"]);
+});
+
+// New York's boroughs, as the two places a query can name at its end.
+const BOROUGHS = decodeAddresses(
+  encodeAddresses([
+    {
+      street: "COURT ST",
+      place: "Brooklyn",
+      number: { major: 312, minor: 0, suffix: 0 },
+      lat: 40.688,
+      lng: -73.993,
+    },
+    {
+      street: "5 AVE",
+      place: "Manhattan",
+      number: { major: 350, minor: 0, suffix: 0 },
+      lat: 40.748,
+      lng: -73.985,
+    },
+  ]).bytes,
+);
+
+const BROOKLYN = { lat: 40.688, lng: -73.993 };
+const MANHATTAN = { lat: 40.748, lng: -73.985 };
+
+test("a borough named at the end of a query is where the answer is measured from", () => {
+  const index = build([
+    place("Joes Pizza", { ...BROOKLYN, placeIndex: 0 }),
+    place("Joes Pizza", { ...MANHATTAN, placeIndex: 1 }),
+  ]);
+  const named = (text: string): { lat: number; lng: number } => {
+    const [hit] = searchCity(index, BOROUGHS, {
+      text,
+      centre: MANHATTAN,
+      limit: 5,
+    });
+    return { lat: hit.lat, lng: hit.lng };
+  };
+  // No pizzeria is called "Brooklyn", and the word is what says which of the two was meant.
+  expect(named("joes pizza brooklyn").lat).toBeCloseTo(BROOKLYN.lat, 3);
+  expect(named("joes pizza").lat).toBeCloseTo(MANHATTAN.lat, 3);
+});
+
+test("a query that only names a borough keeps its words", () => {
+  const index = build([
+    place("Brooklyn Bagel", { ...MANHATTAN, placeIndex: 1 }),
+    place("Bagel Shop", { ...BROOKLYN, placeIndex: 0 }),
+  ]);
+  // Stripping "Brooklyn" here would answer with every bagel in Brooklyn instead of the shop named
+  // after it, so the whole text is searched as well and the name that carries the word wins.
+  const [hit] = searchCity(index, BOROUGHS, {
+    text: "brooklyn bagel",
+    centre: MANHATTAN,
+    limit: 5,
+  });
+  expect(hit.name).toBe("Brooklyn Bagel");
+});
+
+test("a station is answered with the routes it serves, out of the category slot", () => {
+  const index = build([
+    place("14 St-Union Sq", {
+      kind: "station",
+      category: "4/5/6/L/N/Q/R/W",
+      prominence: 240,
+    }),
+  ]);
+  const [hit] = searchCity(index, BOROUGHS, {
+    text: "union sq",
+    centre: HERE,
+    limit: 5,
+  });
+  expect(hit.kind).toBe("station");
+  expect(hit.category).toBe("4/5/6/L/N/Q/R/W");
+  expect(hit.exact).toBeNull();
 });

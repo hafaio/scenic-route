@@ -36,6 +36,9 @@ import { haversineMeters } from "./geometry";
 import type { Coord } from "./socrata";
 
 const PLACES_DIR = join(import.meta.dirname, "..", "data", "places");
+// What the city's neighborhood file is called. Spelt out again in scripts/search-index.ts, which
+// reads it: importing it from here would open DuckDB in a module that has no use for it.
+const NEIGHBORHOOD_SUFFIX = "-neighborhoods.jsonl";
 const ADDRESS_DIR = join(import.meta.dirname, "..", "public", "addresses");
 
 // Pinned rather than "latest". Overture cuts a release a month, and a rebuild that quietly picked up
@@ -45,6 +48,25 @@ const OVERTURE_RELEASE = "2026-08-19.0";
 const OVERTURE_BUCKET = "s3://overturemaps-us-west-2/release";
 const PLACES_PARQUET = `${OVERTURE_BUCKET}/${OVERTURE_RELEASE}/theme=places/type=place/*.parquet`;
 const DIVISIONS_PARQUET = `${OVERTURE_BUCKET}/${OVERTURE_RELEASE}/theme=divisions/type=division_area/*.parquet`;
+// The same theme's places rather than its shapes: a division_area is the outline a city is clipped
+// to, and a division is the named point inside it, which is what a neighborhood is here.
+const DIVISION_PARQUET = `${OVERTURE_BUCKET}/${OVERTURE_RELEASE}/theme=divisions/type=division/*.parquet`;
+
+// What Overture calls the parts of a city a person names: a macrohood is Brooklyn or the Mission, a
+// neighborhood is Park Slope or Noe Valley, and a microhood is Williamsburg, Harlem and Times
+// Square. The tier says how the sources nest, not how well known the name is — leave the last of the
+// three out and the city loses exactly the names most likely to be typed — so all three are read.
+const NEIGHBORHOOD_SUBTYPES = ["macrohood", "neighborhood", "microhood"];
+
+// An administrative unit filed as a neighborhood. Nobody walks to Manhattan Community Board 5, and
+// the name is the only thing that says so.
+const NOT_A_NEIGHBORHOOD = /\bcommunity (board|district)\b/i;
+
+// How near two rows of one name have to be to be one neighborhood written down twice. The gap in the
+// data is wide, so this sits in the middle of it: Herald Square, Union Square, Hayes Valley and
+// Fresh Meadows are each filed twice within 1.2 km, and the next pair of a shared name stands ten
+// kilometres apart — Chelsea in Manhattan and Chelsea in Staten Island, which are two real places.
+const SAME_NEIGHBORHOOD_METERS = 2000;
 
 // How sure Overture is that a place exists and is what it says. Below this the names stop being
 // things anyone would type — a phone number where the name goes, a half-transcribed shopfront — and
@@ -73,6 +95,14 @@ export interface PlaceRow {
   // not join — which is every park and most landmarks, since they have no street address to join.
   street: string | null;
   houseNumber: HouseNumber | null;
+}
+
+// A named part of a city — what someone types when they mean an area rather than a door. Written
+// beside the places because it comes out of the same read, and read back by the search index.
+export interface NeighborhoodRow {
+  name: string;
+  lat: number;
+  lng: number;
 }
 
 // A place as Overture hands it over, before the confidence filter and before the address join.
@@ -375,6 +405,54 @@ function placesSql(source: Source): string {
       AND ST_Contains(outline.geometry, place.geometry)`;
 }
 
+// Every named part of one city: the same outline the places are clipped to, and the division points
+// inside it. The subtypes come back together because the three of them are one list to a reader —
+// Brooklyn, Park Slope and Williamsburg are all answers to "where is that".
+function neighborhoodsSql(source: Source): string {
+  const subtypes = NEIGHBORHOOD_SUBTYPES.map(sqlText).join(", ");
+  return `WITH outline AS (${outlineSql(source)})
+    SELECT
+      area.names.primary AS name,
+      ST_Y(area.geometry) AS lat,
+      ST_X(area.geometry) AS lng
+    FROM read_parquet(${sqlText(DIVISION_PARQUET)}) AS area, outline
+    WHERE area.country = 'US'
+      AND area.subtype IN (${subtypes})
+      AND area.bbox.xmin > ${source.west} AND area.bbox.xmax < ${source.east}
+      AND area.bbox.ymin > ${source.south} AND area.bbox.ymax < ${source.north}
+      AND area.names.primary IS NOT NULL
+      AND ST_Contains(outline.geometry, area.geometry)`;
+}
+
+// The rows worth typing at, out of the ones the query returned: the administrative units dropped, and
+// a name the theme files twice kept once. Sorted first, so which of a repeated pair survives is the
+// file's own order rather than the parquet's.
+export function toNeighborhoods(
+  rows: readonly NeighborhoodRow[],
+): NeighborhoodRow[] {
+  const kept: NeighborhoodRow[] = [];
+  const ordered = [...rows].sort(
+    (left, right) =>
+      left.name.localeCompare(right.name) ||
+      left.lat - right.lat ||
+      left.lng - right.lng,
+  );
+  for (const row of ordered) {
+    if (NOT_A_NEIGHBORHOOD.test(row.name)) {
+      continue;
+    }
+    const twice = kept.some(
+      (other) =>
+        other.name === row.name &&
+        haversineMeters(other, row) <= SAME_NEIGHBORHOOD_METERS,
+    );
+    if (!twice) {
+      kept.push(row);
+    }
+  }
+  return kept;
+}
+
 async function connect(): Promise<DuckDBConnection> {
   const instance = await DuckDBInstance.create(":memory:");
   const connection = await instance.connect();
@@ -425,6 +503,22 @@ async function fetchPlaces(
       address: text(row.address),
       confidence: typeof row.confidence === "number" ? row.confidence : 0,
       status: text(row.status),
+    }));
+  });
+}
+
+// The city's own named parts, cached against the query the way the places are.
+async function fetchNeighborhoods(
+  connection: DuckDBConnection,
+  source: Source,
+): Promise<NeighborhoodRow[]> {
+  const sql = neighborhoodsSql(source);
+  return await cached(`neighborhoods.${source.id}`, sql, async () => {
+    const reader = await connection.runAndReadAll(sql);
+    return reader.getRowObjects().map((row) => ({
+      name: String(row.name),
+      lat: coordinate(row.lat, "latitude"),
+      lng: coordinate(row.lng, "longitude"),
     }));
   });
 }
@@ -510,13 +604,20 @@ export async function updatePlaces(): Promise<void> {
       join(PLACES_DIR, `${source.id}.jsonl`),
       `${lines.join("\n")}\n`,
     );
+    const found = await fetchNeighborhoods(connection, source);
+    const neighborhoods = toNeighborhoods(found);
+    await writeFile(
+      join(PLACES_DIR, `${source.id}${NEIGHBORHOOD_SUFFIX}`),
+      `${neighborhoods.map((row) => JSON.stringify(row)).join("\n")}\n`,
+    );
     const rate = ((100 * summary.joined) / summary.kept).toFixed(1);
     console.error(
       `places: ${source.id}: ${summary.fetched} in the city, ${summary.kept} kept, ` +
         `${summary.joined} joined to an address (${rate}%), ` +
         `${summary.kept - summary.joined} with coordinates only, ` +
         `${summary.tooFar} of those a house too far off to be theirs, ` +
-        `${summary.categories} categories`,
+        `${summary.categories} categories, ` +
+        `${neighborhoods.length} neighborhoods of ${found.length} named parts`,
     );
   }
   connection.closeSync();

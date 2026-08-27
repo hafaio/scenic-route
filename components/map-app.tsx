@@ -74,9 +74,7 @@ import {
 import { computeEdgeShade } from "../src/routing/shade";
 import { computeEdgeSheds, setShedSun, shedDay } from "../src/routing/sheds";
 import { buildSnapIndex, type SnapIndex, snapPair } from "../src/routing/snap";
-import { setSearchGraph } from "../src/routing/street-search";
-import { setSearchCentre, warmAddresses } from "../src/search/addresses";
-import { warmNameIndex } from "../src/search/name-search";
+import { setSearchCentre, warmNameIndex } from "../src/search/name-search";
 import {
   settings as storedSettings,
   updateSettings,
@@ -695,13 +693,12 @@ export default function MapApp() {
     // for data the new city does not have — the hill slider stayed enabled in New York after San
     // Francisco. Null is the honest answer until this city's own graph lands.
     setRoutingGraph(null);
-    setSearchGraph(null);
-    // The two files the search box answers from with no signal — house numbers, and every name in the
-    // city — fetched now rather than when someone types at it, because a file only fetched once you
-    // have already searched offline is a file you never have when you need it. Ten megabytes against
-    // the graph's thirty-seven, and on an idle callback so they queue behind the first paint.
+    // The two files the search box answers from with no signal — every name in the city, and the
+    // house numbers its worker resolves them against — fetched now rather than when someone types at
+    // it, because a file only fetched once you have already searched offline is a file you never
+    // have when you need it. Ten megabytes against the graph's thirty-seven, and on an idle callback
+    // so they queue behind the first paint.
     const warm = () => {
-      warmAddresses(city.id);
       warmNameIndex(city.id);
     };
     if (typeof requestIdleCallback === "function") {
@@ -884,8 +881,6 @@ export default function MapApp() {
           // says which layers a city has) and built San Francisco's turn-by-turn directions against
           // New York's edges. The identity check keeps the re-render, which is what `??` was for.
           setRoutingGraph((current) => (current === graph ? current : graph));
-          // The search box reads street names off it, and cannot be handed a prop from here.
-          setSearchGraph(graph);
           routedForRef.current = request;
           // Keep the shade routing context current. loadRouting hands back one stable graph, so the
           // per-edge attrs are recomputed only when the sun position (a clock tick) moves — a start/dest
