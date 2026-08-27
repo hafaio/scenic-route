@@ -19,6 +19,7 @@ import WorkerTileLayer, {
   sendShedDecks,
 } from "../src/tiles/layer";
 import type { TileCoords } from "../src/tiles/protocol";
+import { KEEP_BUFFER } from "../src/tiles/raster";
 import { shedDecks } from "../src/tiles/shed-decks";
 import { useCity } from "./city-context";
 
@@ -240,7 +241,7 @@ export default function ShadeLayer() {
           // Deliberately no maxNativeZoom: it would clamp the requested coordinates to the baked
           // levels, leaving Leaflet to stretch the tile again and the worker nothing to magnify.
           opacity: 0,
-          keepBuffer: 4,
+          keepBuffer: KEEP_BUFFER,
         },
       );
       layer.on("load", () => ready.add(index));

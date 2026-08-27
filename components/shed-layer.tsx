@@ -7,6 +7,7 @@ import { getResolvedDate, subscribeRouteTime } from "../src/route-time/store";
 import { loadGraph, type RoutingGraph } from "../src/routing/graph";
 import { loadSheds, type ShedHistory, shedDay } from "../src/routing/sheds";
 import CanvasGrid from "../src/tiles/canvas-grid";
+import { KEEP_BUFFER, tileRatio } from "../src/tiles/raster";
 import { repeatable } from "../src/tiles/repaint";
 import {
   forEachDeckIn,
@@ -54,7 +55,7 @@ class ShedGrid extends CanvasGrid {
 
   createTile(coords: L.Coords): HTMLCanvasElement {
     const tile = document.createElement("canvas");
-    const ratio = window.devicePixelRatio || 1;
+    const ratio = tileRatio();
     tile.width = TILE_SIZE * ratio;
     tile.height = TILE_SIZE * ratio;
     const context = tile.getContext("2d");
@@ -119,7 +120,7 @@ export default function ShedLayer() {
       ),
       minZoom: MIN_ZOOM,
       maxZoom: MAX_ZOOM,
-      keepBuffer: 4,
+      keepBuffer: KEEP_BUFFER,
     });
     grid.addTo(map);
 

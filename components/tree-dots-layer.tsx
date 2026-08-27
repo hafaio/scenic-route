@@ -5,6 +5,7 @@ import { useEffect } from "react";
 import { useMap } from "react-leaflet";
 import { watchLayerStatus } from "../src/overlays/status";
 import WorkerTileLayer from "../src/tiles/layer";
+import { KEEP_BUFFER } from "../src/tiles/raster";
 import {
   getEnabledGenera,
   subscribeGenusFilter,
@@ -49,8 +50,7 @@ export default function TreeDotsLayer() {
             bounds: L.latLngBounds([south, west], [north, east]),
             minZoom: MIN_ZOOM,
             maxZoom: MAX_ZOOM,
-            // a wider ring, so panning after a zoom doesn't immediately re-draw
-            keepBuffer: 4,
+            keepBuffer: KEEP_BUFFER,
           },
         );
       });

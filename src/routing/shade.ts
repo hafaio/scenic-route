@@ -248,6 +248,22 @@ export function decodeShadeBin(buffer: ArrayBuffer): BinFractions {
 // Keyed by city as well as index: the same index is a different sun position in another city.
 const binCache = new Map<string, Promise<BinFractions>>();
 
+// A bin is 1.2 MB in New York and a city has around sixty of them, so remembering every bin the clock
+// has ever crossed is seventy megabytes on a device that is already carrying the graph.
+//
+// EIGHT is what one schedule takes at its worst, not a bin more: replaying `selectBlend` over every
+// bucket of the four-hour schedule for a departure every five minutes through a year, against both
+// cities' baked bins.json, the referenced set reaches 8 on 19 departures in New York (worst
+// 2026-04-09 15:25 UTC) and 42 in San Francisco (2026-02-05 20:20 UTC), where the declination crosses
+// a season-band boundary mid-walk and the schedule straddles two bands' worth of bins.
+//
+// So eight held ONE schedule and evicted the previous one entirely, which is the wrong thing to
+// forget: scrubbing the clock between two times of day is the gesture this cache exists for, and at
+// eight, three round trips between 10:00 and 15:45 cost 27 fetches against the 9 an unbounded cache
+// pays. Sixteen is two whole schedules — about 20 MB of New York, 3 MB of San Francisco — so a scrub
+// back to where the reader just was refetches nothing.
+const CACHE_BINS = 16;
+
 export function loadShadeBin(
   index: number,
   cityId: string = activeCity().id,
@@ -255,6 +271,9 @@ export function loadShadeBin(
   const key = `${cityId}:${index}`;
   const cached = binCache.get(key);
   if (cached) {
+    // Map iterates in insertion order, so re-inserting is what makes the eviction below an LRU.
+    binCache.delete(key);
+    binCache.set(key, cached);
     return cached;
   }
   const url = binUrl(cityId, index);
@@ -266,10 +285,21 @@ export function loadShadeBin(
       return decodeShadeBin(await response.arrayBuffer());
     })
     .catch((error: unknown) => {
-      binCache.delete(key); // a failed load must not be memoized
+      // A failed load must not be memoized — but only THIS one. The LRU can have evicted a stalled
+      // fetch and a second fetch of the same bin have succeeded in the meantime, and deleting by key
+      // alone would then throw away the good entry.
+      if (binCache.get(key) === promise) {
+        binCache.delete(key);
+      }
       throw error;
     });
   binCache.set(key, promise);
+  for (const oldest of binCache.keys()) {
+    if (binCache.size <= CACHE_BINS) {
+      break;
+    }
+    binCache.delete(oldest);
+  }
   return promise;
 }
 

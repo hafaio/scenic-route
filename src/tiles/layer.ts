@@ -8,6 +8,7 @@ import type {
   TileParams,
   ToWorker,
 } from "./protocol";
+import { tileRatio } from "./raster";
 import type { ShedDecks } from "./shed-decks";
 
 // The main-thread half of the off-thread rasterizer. Every canvas overlay that used to project its
@@ -113,7 +114,7 @@ export default class WorkerTileLayer extends L.GridLayer {
 
   createTile(coords: L.Coords, done: L.DoneCallback): HTMLCanvasElement {
     const tile = document.createElement("canvas");
-    const ratio = window.devicePixelRatio || 1;
+    const ratio = tileRatio();
     tile.width = TILE_SIZE * ratio;
     tile.height = TILE_SIZE * ratio;
 
@@ -127,7 +128,7 @@ export default class WorkerTileLayer extends L.GridLayer {
       type: "draw",
       tileKey,
       coords: { x: coords.x, y: coords.y, z: coords.z },
-      ratio, // devicePixelRatio does not exist in a worker
+      ratio, // the worker has no window to read a pixel ratio from
       params: this.tileParams(),
       canvas,
     };
