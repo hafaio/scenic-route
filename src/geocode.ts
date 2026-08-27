@@ -1,5 +1,6 @@
 import { activeCity } from "./cities";
 import { searchLoadedStreets } from "./routing/street-search";
+import { searchAddresses } from "./search/addresses";
 import { searchStations, stationLabel } from "./subway/stations";
 
 const NOMINATIM_BASE = "https://nominatim.openstreetmap.org";
@@ -182,6 +183,27 @@ export const STREET_RESULT_TYPE = "scenic:street";
 // At most this many streets, so a common word ("Park") cannot bury everything else in the list.
 const MAX_LOCAL_STREETS = 4;
 
+// A house number found in the city's own address file. Its own glyph in the search box, and its own
+// type here, because it is the one local answer as precise as anything the geocoder returns.
+export const ADDRESS_RESULT_TYPE = "scenic:address";
+
+// At most this many addresses, since one house number can sit on several streets whose names all
+// answer what was typed ("123 Grand" is on Grand Street, Grand Avenue and Grand Concourse).
+const MAX_LOCAL_ADDRESSES = 3;
+
+// How close a geocoder result has to be to an exact local address before it is the same building
+// said twice. A New York lot is around 30 m deep, so this is "the same door, give or take which
+// corner of the parcel each source put its point on" rather than "next door".
+const SAME_BUILDING_METERS = 40;
+
+// Close enough at the scale of one city block, and only ever compared against a threshold.
+function metersApart(left: SearchBias, right: SearchBias): number {
+  const north = (left.lat - right.lat) * 111_320;
+  const east =
+    (left.lng - right.lng) * 111_320 * Math.cos((left.lat * Math.PI) / 180);
+  return Math.hypot(north, east);
+}
+
 // A search, and whether the geocoder was part of it. The flag is what lets the box say the list is
 // PARTIAL: three streets and a station is a perfectly good answer, but shown without a word it reads
 // as "there is nothing else by that name", which is the opposite of true.
@@ -222,6 +244,7 @@ export async function searchAddress(
   }
   // Local first and unawaited, so the local lookups and the geocoder round trip overlap.
   const stations = searchStations(trimmed);
+  const addresses = searchAddresses(scope, trimmed, MAX_LOCAL_ADDRESSES, bias);
   // A geocoder this device cannot reach is not a failed search: everything below it is answered from
   // data that already shipped, and throwing here used to take those answers down with it — with no
   // signal the box returned nothing at all, stations included, which is the one case it was most
@@ -262,6 +285,43 @@ export async function searchAddress(
   }
   const leading: GeocodeResult[] = [];
   const trailing: GeocodeResult[] = [];
+  // Where the address file put an exact hit, for dropping the geocoder's own copy of the same door.
+  const atExactAddress: GeocodeResult[] = [];
+  // A house number the city's own file has, on a street whose name matches, is the most precise
+  // answer anything here can give, so it leads — including the geocoder, which answers this exact
+  // query with a point at an arbitrary end of a street kilometres long more often than not. A number
+  // the street does not have is a different thing: the nearest neighbour is offered under its own
+  // real number, and it trails, because a near miss is not what was asked for.
+  //
+  // The display name carries the place ("312 Court Street, Brooklyn") where the city has places, so
+  // the several streets of one name are told apart in the list and by their ids.
+  const addressHits = await addresses;
+  for (const { place, exact } of addressHits ?? []) {
+    const result: GeocodeResult = {
+      placeId: `address:${scope}:${place.name}`,
+      lat: place.lat,
+      lng: place.lng,
+      displayName: place.name,
+      type: ADDRESS_RESULT_TYPE,
+    };
+    if (exact) {
+      leading.push(result);
+      atExactAddress.push(result);
+    } else {
+      trailing.push(result);
+    }
+  }
+  // Photon answers a house number with the same building we just answered with, under its own idea
+  // of the neighbourhood: "312 Court Street, Cobble Hill" directly under our "312 Court Street,
+  // Brooklyn". That is two rows of a five-row list spent on one place, and ours is the row that
+  // stays — for the reason it leads in the first place. Only an EXACT hit suppresses anything: a
+  // nearest-number fallback is a different address, and must not silence a real answer.
+  const geocoded = results.filter(
+    (result) =>
+      !atExactAddress.some(
+        (hit) => metersApart(hit, result) <= SAME_BUILDING_METERS,
+      ),
+  );
   for (const { station, rank } of await stations) {
     const result: GeocodeResult = {
       placeId: `subway:${scope}:${station.index}`,
@@ -297,13 +357,15 @@ export async function searchAddress(
       trailing.push(result);
     }
   }
-  const merged = [...leading, ...results, ...trailing].slice(
+  const merged = [...leading, ...geocoded, ...trailing].slice(
     0,
     MAX_SEARCH_RESULTS + MAX_LEADING_STATIONS,
   );
   // Only a real answer is remembered. A list assembled while the geocoder was unreachable is a
-  // partial one, and caching it would keep serving that partial list after the signal came back.
-  if (data !== null) {
+  // partial one, and caching it would keep serving that partial list after the signal came back —
+  // and the same goes for an address file this device has not managed to fetch yet, which is the
+  // one source that can be missing while the network is otherwise fine.
+  if (data !== null && addressHits !== null) {
     setBounded(searchCache, cacheKey, merged);
   }
   return { results: merged, reachedGeocoder: data !== null };

@@ -75,6 +75,7 @@ import { computeEdgeShade } from "../src/routing/shade";
 import { computeEdgeSheds, setShedSun, shedDay } from "../src/routing/sheds";
 import { buildSnapIndex, type SnapIndex, snapPair } from "../src/routing/snap";
 import { setSearchGraph } from "../src/routing/street-search";
+import { setSearchCentre, warmAddresses } from "../src/search/addresses";
 import {
   settings as storedSettings,
   updateSettings,
@@ -694,6 +695,18 @@ export default function MapApp() {
     // Francisco. Null is the honest answer until this city's own graph lands.
     setRoutingGraph(null);
     setSearchGraph(null);
+    // Fetched now rather than when someone types a house number, because the point of it is the walk
+    // with no signal, and a file only fetched once you have already searched offline is a file you
+    // never have when you need it. A couple of megabytes against the graph's thirty-seven, and on an
+    // idle callback so it queues behind the first paint.
+    const warm = () => warmAddresses(city.id);
+    if (typeof requestIdleCallback === "function") {
+      const handle = requestIdleCallback(warm, { timeout: 5000 });
+      return () => cancelIdleCallback(handle);
+    } else {
+      const handle = window.setTimeout(warm, 2000);
+      return () => window.clearTimeout(handle);
+    }
   }, [city]);
 
   // Taking a layer out of the menu turns it off, the same way switching city does: a layer drawn on
@@ -1435,6 +1448,11 @@ export default function MapApp() {
     const inView = citiesInView(view);
     if (inView.length === 1) {
       const [next] = inView;
+      // The same one-city-in-frame test the switch uses, because it is the same question: this
+      // centre only says anything about a city when it is the only one on screen. The address search
+      // ranks the several streets of one name — New York has five Court Streets — by how near they
+      // are to it, when the reader has not shared a location of their own.
+      setSearchCentre(next.id, camera.center);
       setCity((current) => (next.id === current.id ? current : next));
     }
   }, []);

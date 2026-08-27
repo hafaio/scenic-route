@@ -73,6 +73,13 @@ export function coversACity(
   );
 }
 
+// What a walk with no signal cannot be without, and so may not be evicted by a pan or a clock scrub:
+// the routing graph with its per-day bins, and the address index the search box answers house
+// numbers from. Both are fetched once and then read out of memory for the rest of the session, so
+// their read times never move — in the overlay store's least-recently-read order they would be the
+// FIRST things out, which is the exact opposite of what should happen.
+const KEPT_DIRS = ["routing/", "addresses/"];
+
 // The exported app itself, as against the data it reads.
 const SHELL_FILES = ["", "index.html", "404.html", "manifest.webmanifest"];
 const SHELL_DIRS = ["_next/", "icons/"];
@@ -163,7 +170,9 @@ export function fileRequest(
   // one here would silently leave it out of the offline story with nothing to notice it by.
   return {
     path,
-    store: path.startsWith("routing/") ? "routing" : "overlay",
+    store: KEPT_DIRS.some((dir) => path.startsWith(dir))
+      ? "routing"
+      : "overlay",
     fresh: false,
   };
 }

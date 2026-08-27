@@ -2,9 +2,10 @@
 
 import { useEffect, useRef, useState } from "react";
 import { FiCrosshair, FiNavigation, FiX } from "react-icons/fi";
-import { MdSignpost } from "react-icons/md";
+import { MdOutlineHome, MdSignpost } from "react-icons/md";
 import { PiTrainSimpleFill } from "react-icons/pi";
 import {
+  ADDRESS_RESULT_TYPE,
   type GeocodeResult,
   type SearchBias,
   STREET_RESULT_TYPE,
@@ -247,7 +248,14 @@ export default function LocationField({
                     : "text-slate-700 hover:bg-slate-50 dark:text-slate-200 dark:hover:bg-slate-700/60"
                 }`}
               >
-                {result.type === SUBWAY_RESULT_TYPE ? (
+                {result.type === ADDRESS_RESULT_TYPE ? (
+                  // A house number out of the city's own address file, which is a door rather than
+                  // the whole street the signpost below stands for.
+                  <MdOutlineHome
+                    className="h-4 w-4 shrink-0 text-slate-400 dark:text-slate-500"
+                    aria-hidden="true"
+                  />
+                ) : result.type === SUBWAY_RESULT_TYPE ? (
                   <PiTrainSimpleFill
                     className="h-4 w-4 shrink-0 text-[#0062cf]"
                     aria-hidden="true"
@@ -266,7 +274,7 @@ export default function LocationField({
           ))}
           {partial ? (
             <li className="border-t border-slate-200/60 px-3 py-2 text-[11px] text-slate-400 dark:border-slate-700/60 dark:text-slate-500">
-              Offline — showing stations and streets only
+              Offline — showing addresses, stations and streets only
             </li>
           ) : null}
         </ul>
