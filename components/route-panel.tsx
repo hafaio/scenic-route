@@ -45,7 +45,7 @@ import {
 import type { NavProgress } from "../src/routing/nav-progress";
 import type { RouteFactors } from "../src/routing/search";
 import { factorRunOrder } from "../src/settings/store";
-import LocationField from "./location-field";
+import LocationField, { type DestPrefill } from "./location-field";
 import { useSettings } from "./use-settings";
 
 interface RoutePanelProps {
@@ -121,6 +121,9 @@ interface RoutePanelProps {
   onGate: (key: GateKey, on: boolean) => void;
   onStartSelect: (result: GeocodeResult) => void;
   onDestSelect: (result: GeocodeResult) => void;
+  // A link's textual destination that resolved to nothing certain, typed into the destination box
+  // with the answers already found for it, for the reader to pick from.
+  destPrefill: DestPrefill | null;
   onStartClear: () => void;
   onDestClear: () => void;
   onUseCurrentLocation: () => void;
@@ -251,6 +254,7 @@ export default function RoutePanel({
   onGate,
   onStartSelect,
   onDestSelect,
+  destPrefill,
   onStartClear,
   onDestClear,
   onUseCurrentLocation,
@@ -552,6 +556,7 @@ export default function RoutePanel({
             onSelect={onDestSelect}
             onClear={onDestClear}
             onArmPick={onArmDest}
+            prefill={destPrefill}
           />
         </div>
 

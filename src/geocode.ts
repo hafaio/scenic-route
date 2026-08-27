@@ -1,10 +1,11 @@
-import { activeCity } from "./cities";
+import { activeCity, cityById } from "./cities";
 import {
   reverseNameIndex,
   searchCentre,
   searchNameIndex,
 } from "./search/name-search";
 import type { IndexHit, ReverseHit } from "./search/protocol";
+import { sharedQueries } from "./share-target";
 
 // What the app calls a place, in both directions: what was typed into the search box, and what a
 // point picked off the map is called. Neither needs a network — both are answered from the city's
@@ -26,6 +27,9 @@ export interface GeocodeResult {
   lng: number;
   displayName: string;
   type: string;
+  // Whether this is the thing that was asked for rather than the nearest the city could offer: the
+  // house number typed, not the door two along from it. What `exactAddressMatch` below reads.
+  exact: boolean;
 }
 
 const searchCache = new Map<string, GeocodeResult[]>();
@@ -97,6 +101,7 @@ export async function reverseGeocode(
     lng: hit.lng,
     displayName: [name, hit.label].filter(Boolean).join(", "),
     type: reverseResultType(hit.kind),
+    exact: hit.at,
   };
 }
 
@@ -135,25 +140,46 @@ function localResultType(hit: IndexHit): string {
   }
 }
 
-export async function searchAddress(query: string): Promise<GeocodeResult[]> {
+// The one answer confident enough to route to without asking: the door that was asked for, sitting
+// at the top of the list. Everything else is a guess — a near-miss house number, a street standing
+// for the whole of itself, a park that happens to share a word — and a guess quietly set as the
+// destination is worse than a list to pick from. What a link's textual destination is decided by.
+export function exactAddressMatch(
+  results: readonly GeocodeResult[],
+): GeocodeResult | null {
+  const [top] = results;
+  if (top?.exact === true && top.type === ADDRESS_RESULT_TYPE) {
+    return top;
+  } else {
+    return null;
+  }
+}
+
+// `cityId` defaults to whichever city is live, which is what the search box wants — it has no city of
+// its own and asks about the one on screen. A caller that captured a city and must keep answering
+// about THAT one, however long the index takes to arrive, names it instead.
+export async function searchAddress(
+  query: string,
+  cityId: string = activeCity().id,
+): Promise<GeocodeResult[]> {
   const trimmed = query.trim();
   if (!trimmed) {
     return [];
   }
-  const scope = activeCity().id;
   // The map centre is part of the answer, not just of its order: the name index ranks by distance
   // from it, so the same query at two ends of the city is two different lists. Rounded to ~1 km, the
   // scale the distance term works at, so panning a block does not throw the cache away.
-  const centre = searchCentre(scope) ?? activeCity().center;
+  const centre =
+    searchCentre(cityId) ?? (cityById(cityId) ?? activeCity()).center;
   const near = `${centre.lat.toFixed(2)},${centre.lng.toFixed(2)}`;
-  const cacheKey = `${scope}|${trimmed}@${near}`;
+  const cacheKey = `${cityId}|${trimmed}@${near}`;
   const cached = searchCache.get(cacheKey);
   if (cached) {
     return cached;
   }
   // Ranked from the map centre: it is what the reader is looking at, and it needs no permission.
   const indexHits = await searchNameIndex({
-    cityId: scope,
+    cityId,
     text: trimmed,
     centre,
     limit: MAX_LOCAL_RESULTS,
@@ -177,11 +203,12 @@ export async function searchAddress(query: string): Promise<GeocodeResult[]> {
       streets.add(hit.name);
     }
     results.push({
-      placeId: `local:${scope}:${hit.kind}:${hit.lat.toFixed(5)},${hit.lng.toFixed(5)}:${displayName}`,
+      placeId: `local:${cityId}:${hit.kind}:${hit.lat.toFixed(5)},${hit.lng.toFixed(5)}:${displayName}`,
       lat: hit.lat,
       lng: hit.lng,
       displayName,
       type: localResultType(hit),
+      exact: hit.exact === true,
     });
   }
   // Only a real answer is remembered: an index this device has not managed to fetch yet answers
@@ -190,4 +217,51 @@ export async function searchAddress(query: string): Promise<GeocodeResult[]> {
     setBounded(searchCache, cacheKey, results);
   }
   return results;
+}
+
+// What a shared query resolved to, against the city it was resolved in: the door to route straight
+// to when one was named, and always the words that found something and the answers they found, so
+// the box can offer them.
+export interface SharedDestination {
+  query: string;
+  results: GeocodeResult[];
+  exact: GeocodeResult | null;
+}
+
+// What a destination carried as words — a `#q=` link, or the text Android's share sheet hands over —
+// actually points at in `cityId`.
+//
+// Every reading of the share is searched, not just readings until one of them answers. "Katz's
+// Delicatessen, 205 E Houston St" is a name and a door in one string: the name matches the index and
+// the door matches the address file, and only the door is precise enough to route to without asking.
+// Stopping at the first part that found anything would stop at whichever came first and never try
+// the other, so a door wins wherever among the parts it sits, and the first part to find anything at
+// all is what is offered when no part names one.
+//
+// `cancelled` is asked between searches because each one warms the worker for its city: a lookup
+// left running after the reader has moved to another city would drag the index back to this one.
+export async function resolveSharedQuery(
+  text: string,
+  cityId: string,
+  search: (
+    query: string,
+    cityId: string,
+  ) => Promise<GeocodeResult[]> = searchAddress,
+  cancelled: () => boolean = () => false,
+): Promise<SharedDestination | null> {
+  let named: SharedDestination | null = null;
+  for (const query of sharedQueries(text)) {
+    if (cancelled()) {
+      return null;
+    }
+    const results = await search(query, cityId);
+    const exact = exactAddressMatch(results);
+    if (exact !== null) {
+      return { query, results, exact };
+    }
+    if (named === null && results.length > 0) {
+      named = { query, results, exact: null };
+    }
+  }
+  return cancelled() ? null : named;
 }

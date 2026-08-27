@@ -247,6 +247,19 @@ export function searchNameIndex({
   });
 }
 
+// Waits for the city's index to be in memory, the way naming a pin does, and answers whether it
+// arrived. A destination carried as words in a link is asked once and has nothing to show in the
+// meantime, so it waits rather than taking the empty answer a keystroke gets — at load the index is
+// never ready yet, and answering nothing would put every shared address in front of the reader as
+// an empty list.
+export async function awaitNameIndex(cityId: string): Promise<boolean> {
+  warmNameIndex(cityId);
+  if (ready !== cityId) {
+    await new Promise<void>((resume) => waiting.push(resume));
+  }
+  return ready === cityId;
+}
+
 // What a point on the map is called, out of the same two files the box searches: the nearest house
 // number, or the name of whatever the point is standing on. Null where the city has nothing near
 // enough — a pin in the middle of the harbour keeps whatever the caller already put on it.
