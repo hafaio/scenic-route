@@ -1,4 +1,5 @@
 import { activeCity } from "./cities";
+import { searchLoadedStreets } from "./routing/street-search";
 import { searchStations, stationLabel } from "./subway/stations";
 
 const NOMINATIM_BASE = "https://nominatim.openstreetmap.org";
@@ -154,14 +155,49 @@ export interface SearchBias {
   lng: number;
 }
 
+// The geocoder's answer, or none where it could not be reached. Null rather than an exception, so a
+// caller that has local answers can still give them.
+async function fetchPhoton(
+  url: URL,
+  signal: AbortSignal | undefined,
+): Promise<PhotonResponse | null> {
+  try {
+    const response = await fetch(url.toString(), { signal });
+    if (!response.ok) {
+      return null;
+    }
+    return (await response.json()) as PhotonResponse;
+  } catch (error) {
+    if ((error as { name?: string })?.name === "AbortError") {
+      throw error;
+    }
+    return null;
+  }
+}
+
+// A street the routing graph named, as against a place the geocoder found. The search box draws it
+// with its own glyph, so a coarse answer looks like one.
+export const STREET_RESULT_TYPE = "scenic:street";
+
+// At most this many streets, so a common word ("Park") cannot bury everything else in the list.
+const MAX_LOCAL_STREETS = 4;
+
+// A search, and whether the geocoder was part of it. The flag is what lets the box say the list is
+// PARTIAL: three streets and a station is a perfectly good answer, but shown without a word it reads
+// as "there is nothing else by that name", which is the opposite of true.
+export interface GeocodeSearch {
+  results: GeocodeResult[];
+  reachedGeocoder: boolean;
+}
+
 export async function searchAddress(
   query: string,
   options: { bias?: SearchBias | null; signal?: AbortSignal } = {},
-): Promise<GeocodeResult[]> {
+): Promise<GeocodeSearch> {
   const { bias, signal } = options;
   const trimmed = query.trim();
   if (!trimmed) {
-    return [];
+    return { results: [], reachedGeocoder: true };
   }
   // The bias reorders results and the city bounds them, so both are part of the cache identity; the
   // bias is rounded to ~100 m so GPS jitter doesn't defeat the cache while the ranking stays
@@ -172,7 +208,8 @@ export async function searchAddress(
     : `${scope}|${trimmed}`;
   const cached = searchCache.get(cacheKey);
   if (cached) {
-    return cached;
+    // Only complete answers are cached (see below), so a hit is one.
+    return { results: cached, reachedGeocoder: true };
   }
   const url = new URL("/api", PHOTON_BASE);
   url.searchParams.set("q", trimmed);
@@ -183,18 +220,19 @@ export async function searchAddress(
     url.searchParams.set("lat", String(bias.lat));
     url.searchParams.set("lon", String(bias.lng));
   }
-  // Local first and unawaited, so the station lookup and the geocoder round trip overlap.
+  // Local first and unawaited, so the local lookups and the geocoder round trip overlap.
   const stations = searchStations(trimmed);
-  const response = await fetch(url.toString(), { signal });
-  if (!response.ok) {
-    throw new Error(`Photon search failed: ${response.status}`);
-  }
-  const data = (await response.json()) as PhotonResponse;
+  // A geocoder this device cannot reach is not a failed search: everything below it is answered from
+  // data that already shipped, and throwing here used to take those answers down with it — with no
+  // signal the box returned nothing at all, stations included, which is the one case it was most
+  // able to answer. An aborted request is different and is rethrown: that is the app changing its
+  // mind about the query, not the network refusing it.
+  const data = await fetchPhoton(url, signal);
   const results: GeocodeResult[] = [];
   // Photon can return the same OSM feature more than once (e.g. a way split into segments); dedupe
   // by id so the list has no repeats and no colliding React keys.
   const seen = new Set<string>();
-  for (const feature of data.features ?? []) {
+  for (const feature of data?.features ?? []) {
     const coordinates = feature.geometry?.coordinates;
     const props = feature.properties;
     if (!coordinates || !props) {
@@ -238,10 +276,35 @@ export async function searchAddress(
       trailing.push(result);
     }
   }
+  // Street names off the routing graph, which is already on the device and already cached for
+  // offline use. They trail the geocoder, which answers the same question with house numbers, and
+  // lead it only when nothing else did — a street is the coarsest answer there is, so it is what you
+  // get when there is nothing better rather than what you get first.
+  for (const { place, rank } of searchLoadedStreets(
+    trimmed,
+    MAX_LOCAL_STREETS,
+  )) {
+    const result: GeocodeResult = {
+      placeId: `street:${scope}:${place.name}`,
+      lat: place.lat,
+      lng: place.lng,
+      displayName: place.name,
+      type: STREET_RESULT_TYPE,
+    };
+    if (results.length === 0 && rank === 2) {
+      leading.push(result);
+    } else {
+      trailing.push(result);
+    }
+  }
   const merged = [...leading, ...results, ...trailing].slice(
     0,
     MAX_SEARCH_RESULTS + MAX_LEADING_STATIONS,
   );
-  setBounded(searchCache, cacheKey, merged);
-  return merged;
+  // Only a real answer is remembered. A list assembled while the geocoder was unreachable is a
+  // partial one, and caching it would keep serving that partial list after the signal came back.
+  if (data !== null) {
+    setBounded(searchCache, cacheKey, merged);
+  }
+  return { results: merged, reachedGeocoder: data !== null };
 }

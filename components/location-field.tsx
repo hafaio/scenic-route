@@ -2,15 +2,21 @@
 
 import { useEffect, useRef, useState } from "react";
 import { FiCrosshair, FiNavigation, FiX } from "react-icons/fi";
+import { MdSignpost } from "react-icons/md";
 import { PiTrainSimpleFill } from "react-icons/pi";
 import {
   type GeocodeResult,
   type SearchBias,
+  STREET_RESULT_TYPE,
   SUBWAY_RESULT_TYPE,
   searchAddress,
 } from "../src/geocode";
 
 const SEARCH_DEBOUNCE_MS = 300;
+// The tallest the suggestions may ever be, before the room above the field is taken into account.
+const MAX_SUGGESTION_HEIGHT = 256;
+// Clearance kept above the list so it never sits flush against the top of the screen.
+const SUGGESTION_MARGIN = 8;
 const BLUR_CLOSE_MS = 120; // let a result click land before the blur closes the list
 
 interface LocationFieldProps {
@@ -49,12 +55,30 @@ export default function LocationField({
   // The in-progress typing; null means "not editing", so the box mirrors the committed label instead.
   const [draft, setDraft] = useState<string | null>(null);
   const [results, setResults] = useState<GeocodeResult[]>([]);
+  // The geocoder could not be reached, so this list is what already shipped and nothing else.
+  const [partial, setPartial] = useState(false);
+  const list = useRef<HTMLUListElement | null>(null);
+  const [roomAbove, setRoomAbove] = useState<number>(MAX_SUGGESTION_HEIGHT);
+
   const [activeIndex, setActiveIndex] = useState<number>(-1);
   const [open, setOpen] = useState<boolean>(false);
 
   const value = draft ?? label ?? "";
   const showCurrentRow = Boolean(currentLocationLabel && onUseCurrentLocation);
   const dropdownOpen = open && (showCurrentRow || results.length > 0);
+
+  // Remeasured whenever the list opens or its contents change, because the field it hangs from moves
+  // as the panel above it grows and shrinks. The deps are those changes, not anything the body
+  // reads — measuring the DOM is exactly the case the exhaustive-deps rule cannot see.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the deps are what moves the anchor
+  useEffect(() => {
+    const anchor = list.current?.parentElement;
+    if (!anchor) {
+      return;
+    }
+    const above = anchor.getBoundingClientRect().top - SUGGESTION_MARGIN;
+    setRoomAbove(Math.max(0, Math.min(MAX_SUGGESTION_HEIGHT, above)));
+  }, [dropdownOpen, results.length, partial]);
 
   // Read the latest bias without it being an effect dependency, so a drifting GPS fix doesn't re-run
   // the search mid-type; the next keystroke picks up the current location.
@@ -67,6 +91,7 @@ export default function LocationField({
     const trimmed = draft?.trim() ?? "";
     if (!trimmed) {
       setResults([]);
+      setPartial(false);
       setActiveIndex(-1);
       return;
     }
@@ -77,7 +102,8 @@ export default function LocationField({
         signal: controller.signal,
       })
         .then((hits) => {
-          setResults(hits);
+          setResults(hits.results);
+          setPartial(!hits.reachedGeocoder);
           setActiveIndex(-1);
           setOpen(true);
         })
@@ -184,7 +210,15 @@ export default function LocationField({
         </button>
       </div>
       {dropdownOpen ? (
-        <ul className="absolute bottom-full left-0 z-10 mb-1 max-h-64 w-full overflow-y-auto rounded-xl bg-white shadow-xl ring-1 ring-black/5 dark:bg-slate-800 dark:ring-white/10">
+        // Opens UPWARD out of the route panel, which is why that panel takes no overflow of its own.
+        // That leaves this list the one surface whose room cannot be written down: it is anchored to
+        // a field that moves as the panel grows, so the cap is measured rather than declared — the
+        // same invariant as every other menu, arrived at the only way this one can.
+        <ul
+          ref={list}
+          style={{ maxHeight: roomAbove }}
+          className="absolute bottom-full left-0 z-10 mb-1 w-full overflow-y-auto overscroll-contain rounded-xl bg-white shadow-xl ring-1 ring-black/5 dark:bg-slate-800 dark:ring-white/10"
+        >
           {showCurrentRow ? (
             <li>
               <button
@@ -218,11 +252,23 @@ export default function LocationField({
                     className="h-4 w-4 shrink-0 text-[#0062cf]"
                     aria-hidden="true"
                   />
+                ) : result.type === STREET_RESULT_TYPE ? (
+                  // A street is one point on the whole of it, which is a coarser answer than the
+                  // rest of the list gives. Its own glyph is what says so at a glance.
+                  <MdSignpost
+                    className="h-4 w-4 shrink-0 text-slate-400 dark:text-slate-500"
+                    aria-hidden="true"
+                  />
                 ) : null}
                 <span className="truncate">{result.displayName}</span>
               </button>
             </li>
           ))}
+          {partial ? (
+            <li className="border-t border-slate-200/60 px-3 py-2 text-[11px] text-slate-400 dark:border-slate-700/60 dark:text-slate-500">
+              Offline — showing stations and streets only
+            </li>
+          ) : null}
         </ul>
       ) : null}
     </div>

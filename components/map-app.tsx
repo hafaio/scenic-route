@@ -74,6 +74,7 @@ import {
 import { computeEdgeShade } from "../src/routing/shade";
 import { computeEdgeSheds, setShedSun, shedDay } from "../src/routing/sheds";
 import { buildSnapIndex, type SnapIndex, snapPair } from "../src/routing/snap";
+import { setSearchGraph } from "../src/routing/street-search";
 import {
   settings as storedSettings,
   updateSettings,
@@ -692,6 +693,7 @@ export default function MapApp() {
     // for data the new city does not have — the hill slider stayed enabled in New York after San
     // Francisco. Null is the honest answer until this city's own graph lands.
     setRoutingGraph(null);
+    setSearchGraph(null);
   }, [city]);
 
   // Taking a layer out of the menu turns it off, the same way switching city does: a layer drawn on
@@ -865,6 +867,8 @@ export default function MapApp() {
           // says which layers a city has) and built San Francisco's turn-by-turn directions against
           // New York's edges. The identity check keeps the re-render, which is what `??` was for.
           setRoutingGraph((current) => (current === graph ? current : graph));
+          // The search box reads street names off it, and cannot be handed a prop from here.
+          setSearchGraph(graph);
           routedForRef.current = request;
           // Keep the shade routing context current. loadRouting hands back one stable graph, so the
           // per-edge attrs are recomputed only when the sun position (a clock tick) moves — a start/dest
