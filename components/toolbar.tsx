@@ -9,7 +9,6 @@ import {
   FiLogIn,
   FiLogOut,
   FiMap,
-  FiMapPin,
   FiMessageSquare,
   FiRefreshCw,
   FiSliders,
@@ -46,8 +45,6 @@ interface ToolbarProps {
   logHereDisabled: boolean; // no live location yet, so there's nothing to log
   logHereBusy: boolean; // a high-accuracy fix + geocode is in flight
   logHereHint: string | null; // why the location is unavailable, when it is
-  shareLocationForSearch: boolean; // send the live location to the geocoder to rank nearby results
-  onToggleSearchBias: () => void;
   onSelectCity: (city: City) => void;
   composeShareUrl: () => string; // the route plus the current camera and overlays, as a link
 }
@@ -82,8 +79,6 @@ export default function Toolbar({
   logHereDisabled,
   logHereBusy,
   logHereHint,
-  shareLocationForSearch,
-  onToggleSearchBias,
   onSelectCity,
   composeShareUrl,
 }: ToolbarProps) {
@@ -248,38 +243,6 @@ export default function Toolbar({
                 </span>
               </button>
             ) : null}
-            <button
-              type="button"
-              role="menuitemcheckbox"
-              aria-checked={shareLocationForSearch}
-              // A preference toggle, so it leaves the menu open for the next action.
-              onClick={onToggleSearchBias}
-              className={`justify-between ${MENU_ITEM} ${MENU_DIVIDER}`}
-            >
-              <span className="flex min-w-0 items-center gap-2">
-                <FiMapPin className="shrink-0" />
-                <span className="flex min-w-0 flex-col">
-                  <span>Search near me</span>
-                  <span className="mt-0.5 text-xs font-normal text-slate-400 dark:text-slate-500">
-                    Rank nearby results first
-                  </span>
-                </span>
-              </span>
-              <span
-                aria-hidden="true"
-                className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition ${
-                  shareLocationForSearch
-                    ? "bg-brand-500"
-                    : "bg-slate-300 dark:bg-slate-600"
-                }`}
-              >
-                <span
-                  className={`inline-block h-4 w-4 rounded-full bg-white transition ${
-                    shareLocationForSearch ? "translate-x-4" : "translate-x-0.5"
-                  }`}
-                />
-              </span>
-            </button>
             {/* Chromium hands the page its own install flow and this runs it; every other browser
                 keeps it in a menu of its own, and the dialog says where. Gone once the app is
                 already running from the home screen, where there is nothing left to add. */}

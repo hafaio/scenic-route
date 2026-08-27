@@ -8,7 +8,6 @@ import {
   ADDRESS_RESULT_TYPE,
   type GeocodeResult,
   INDEX_RESULT_TYPE,
-  type SearchBias,
   STREET_RESULT_TYPE,
   SUBWAY_RESULT_TYPE,
   searchAddress,
@@ -35,8 +34,6 @@ interface LocationFieldProps {
   // When both are set, a "My location" row is prepended and the list opens on focus even when empty.
   currentLocationLabel?: string | null;
   onUseCurrentLocation?: () => void;
-  // Ranks results near this point first; null when the user hasn't shared their location for search.
-  searchBias?: SearchBias | null;
 }
 
 export default function LocationField({
@@ -52,13 +49,10 @@ export default function LocationField({
   onArmPick,
   currentLocationLabel,
   onUseCurrentLocation,
-  searchBias,
 }: LocationFieldProps) {
   // The in-progress typing; null means "not editing", so the box mirrors the committed label instead.
   const [draft, setDraft] = useState<string | null>(null);
   const [results, setResults] = useState<GeocodeResult[]>([]);
-  // The geocoder could not be reached, so this list is what already shipped and nothing else.
-  const [partial, setPartial] = useState(false);
   const list = useRef<HTMLUListElement | null>(null);
   const [roomAbove, setRoomAbove] = useState<number>(MAX_SUGGESTION_HEIGHT);
 
@@ -80,40 +74,33 @@ export default function LocationField({
     }
     const above = anchor.getBoundingClientRect().top - SUGGESTION_MARGIN;
     setRoomAbove(Math.max(0, Math.min(MAX_SUGGESTION_HEIGHT, above)));
-  }, [dropdownOpen, results.length, partial]);
+  }, [dropdownOpen, results.length]);
 
-  // Read the latest bias without it being an effect dependency, so a drifting GPS fix doesn't re-run
-  // the search mid-type; the next keystroke picks up the current location.
-  const biasRef = useRef(searchBias);
-  biasRef.current = searchBias;
-
-  // Debounced forward geocode driven off the draft only; the in-flight request is aborted when the
-  // draft changes so a slow response can't overwrite a newer one. A null/empty draft searches nothing.
+  // Debounced search driven off the draft only; an answer to a draft that has since been typed over
+  // is dropped rather than shown, so a slow one can't overwrite a newer one. A null/empty draft
+  // searches nothing.
   useEffect(() => {
     const trimmed = draft?.trim() ?? "";
     if (!trimmed) {
       setResults([]);
-      setPartial(false);
       setActiveIndex(-1);
       return;
     }
-    const controller = new AbortController();
+    let stale = false;
     const timer = window.setTimeout(() => {
-      searchAddress(trimmed, {
-        bias: biasRef.current,
-        signal: controller.signal,
-      })
+      searchAddress(trimmed)
         .then((hits) => {
-          setResults(hits.results);
-          setPartial(!hits.reachedGeocoder);
-          setActiveIndex(-1);
-          setOpen(true);
+          if (!stale) {
+            setResults(hits);
+            setActiveIndex(-1);
+            setOpen(true);
+          }
         })
         .catch(() => {});
     }, SEARCH_DEBOUNCE_MS);
     return () => {
+      stale = true;
       window.clearTimeout(timer);
-      controller.abort();
     };
   }, [draft]);
 
@@ -281,11 +268,6 @@ export default function LocationField({
               </button>
             </li>
           ))}
-          {partial ? (
-            <li className="border-t border-slate-200/60 px-3 py-2 text-[11px] text-slate-400 dark:border-slate-700/60 dark:text-slate-500">
-              Offline — showing what is on this device
-            </li>
-          ) : null}
         </ul>
       ) : null}
     </div>

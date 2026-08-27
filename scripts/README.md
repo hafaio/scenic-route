@@ -2036,7 +2036,9 @@ network regardless. A re-run off the cache is two seconds.
 sourced and **CC0-1.0** on those from AllThePlaces. There is no OpenStreetMap in the places theme, so
 none of this is ODbL and none of it may be merged into an artifact that is. CDLA-Permissive-2.0 asks
 one thing (§2.1): that the text of the agreement travel with the data. No share-alike, and no
-attribution string is compelled.
+attribution string is compelled. That text ships as `public/licenses/CDLA-Permissive-2.0.txt`, and
+Foursquare's NOTICE — which Apache-2.0 asks be preserved in full — as
+`public/licenses/foursquare-places-NOTICE.txt`; the About dialog links both.
 
 ### `public/search/<city>.bin.gz` — the offline search index, magic `SRCH` (v1, derived, **committed**)
 
@@ -3389,7 +3391,7 @@ city or which day that is.
 
 Three caches, each named with the deploy's sha, so any deploy at all is a clean slate rather than a
 merge: **`shell-<sha>`** (precached at install: the export, `_next/static/**`, the icons, the
-manifest), **`routing-<sha>`** (`routing/**`, plus the two daily feeds), and **`overlay-<sha>`**
+manifest), **`routing-<sha>`** (`routing/**`, `addresses/**` and `search/**`, plus the two daily feeds), and **`overlay-<sha>`**
 (everything else the deploy serves). Routing is split from overlay because the graph is the one
 artifact a walk in progress cannot do without, and a long scrub through the clock must not be able to
 evict it. Anything the worker does not file — the basemap, Firestore, auth — goes without
@@ -3421,8 +3423,9 @@ Two caps bound the rest, at **128 MB** for routing and **1 GB** for overlay; the
 none, since losing a piece of it is the one thing that would stop the app opening at all. Both are
 sized off what the artifacts actually weigh. Routing's realistic worst case is both cities loaded
 with a day of shade each — New York's graph is 39.3 MB and San Francisco's 6.4 MB, plus about 15 MB
-of routing shade bins between them — so the cap is roughly double what it can hold and the store
-never evicts in practice. Overlay is sized so one city fits comfortably: New York walked over at
+of routing shade bins between them, and about 12 MB more for the address and search files the box
+answers from — so the cap is comfortably above what it can hold and the store never evicts in
+practice. Overlay is sized so one city fits comfortably: New York walked over at
 every zoom is about 400 MB — caster chunks 169 MB, one season of both display pyramids around 125 MB
 city-wide, the canopy pyramid 48 MB, the genus field 37 MB — so a gigabyte leaves room to wander
 without evicting ground still in use, and a second city's residue is what the cap eventually pushes
