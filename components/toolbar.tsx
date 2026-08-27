@@ -162,7 +162,7 @@ export default function Toolbar({
         {menuOpen ? (
           <div
             role="menu"
-            className="absolute right-0 mt-2 w-72 origin-top-right overflow-hidden rounded-2xl bg-white/95 shadow-2xl ring-1 ring-black/5 backdrop-blur-md dark:bg-slate-800/95 dark:ring-white/10"
+            className="toolbar-menu absolute right-0 mt-2 w-72 origin-top-right overflow-hidden rounded-2xl bg-white/95 shadow-2xl ring-1 ring-black/5 backdrop-blur-md dark:bg-slate-800/95 dark:ring-white/10"
           >
             {signedIn ? (
               <div className={`px-4 py-3 ${MENU_DIVIDER}`}>

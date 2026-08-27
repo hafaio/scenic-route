@@ -135,7 +135,7 @@ export default function ClockControl() {
         />
       </button>
       {open ? (
-        <div className="absolute right-0 mt-2 w-64 origin-top-right rounded-2xl bg-white/95 p-3 shadow-2xl ring-1 ring-black/5 backdrop-blur-md dark:bg-slate-800/95 dark:ring-white/10">
+        <div className="toolbar-menu absolute right-0 mt-2 w-64 origin-top-right rounded-2xl bg-white/95 p-3 shadow-2xl ring-1 ring-black/5 backdrop-blur-md dark:bg-slate-800/95 dark:ring-white/10">
           <div className="mb-2 flex items-center justify-between gap-2">
             <span className="text-[11px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
               Time of day

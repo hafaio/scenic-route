@@ -476,7 +476,13 @@ export default function RoutePanel({
 
   return (
     <div className={wrapper}>
-      <div className="rounded-2xl bg-white/85 p-4 shadow-lg ring-1 ring-black/5 backdrop-blur-md dark:bg-slate-800/80 dark:ring-white/10">
+      {/* Capped against the viewport and laid out as a column: the fields, the headings and the
+          button stay put while whichever tall section is open scrolls inside. `dvh` rather than `vh`
+          because on a phone `100vh` is the viewport with the browser chrome RETRACTED, which
+          overflows by exactly the chrome's height whenever it is showing. The 4rem is the toolbar
+          row this must stay clear of. No `overflow` on the card itself — the location fields open
+          their suggestions upward, out of it. */}
+      <div className="flex max-h-[calc(100dvh-env(safe-area-inset-top)-4rem-max(0.75rem,env(safe-area-inset-bottom)))] flex-col rounded-2xl bg-white/85 p-4 shadow-lg ring-1 ring-black/5 backdrop-blur-md dark:bg-slate-800/80 dark:ring-white/10">
         <div className="flex items-center justify-between gap-2">
           <p className="text-[11px] font-semibold uppercase tracking-wide text-brand-600 dark:text-brand-400">
             Walking directions
@@ -560,8 +566,12 @@ export default function RoutePanel({
           </p>
         ) : null}
 
-        <div className="mt-4">
-          <div className="flex w-full items-center gap-2">
+        <div
+          className={`mt-4 flex flex-col ${
+            sceneryOpen ? "min-h-0 shrink" : "shrink-0"
+          }`}
+        >
+          <div className="flex w-full shrink-0 items-center gap-2">
             <button
               type="button"
               onClick={toggleScenery}
@@ -609,7 +619,7 @@ export default function RoutePanel({
               do that in. Outside the button, too, so a sideways drag scrolls it rather than
               expanding the section. */}
           {sceneryOpen ? null : (
-            <div className="chip-row mt-1 gap-2">
+            <div className="chip-row mt-1 shrink-0 gap-2">
               {factors.map((factor) => (
                 <span
                   key={factor.key}
@@ -625,7 +635,7 @@ export default function RoutePanel({
           )}
 
           {sceneryOpen ? (
-            <div className="mt-2 space-y-3">
+            <div className="mt-2 min-h-0 shrink space-y-3 overflow-y-auto overscroll-contain">
               {factors.map((factor) => (
                 <label
                   key={factor.key}
@@ -731,7 +741,7 @@ export default function RoutePanel({
               {directionsOpen ? "Hide directions" : "Get directions"}
             </button>
             {directionsOpen ? (
-              <ol className="mt-2 max-h-[45vh] space-y-1 overflow-y-auto pb-[env(safe-area-inset-bottom)]">
+              <ol className="mt-2 min-h-0 shrink space-y-1 overflow-y-auto overscroll-contain">
                 {directions.map((maneuver, index) => {
                   const isNext =
                     progress !== null && index === progress.nextManeuver;
