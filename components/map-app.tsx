@@ -74,7 +74,12 @@ import {
 import { computeEdgeShade } from "../src/routing/shade";
 import { computeEdgeSheds, setShedSun, shedDay } from "../src/routing/sheds";
 import { buildSnapIndex, type SnapIndex, snapPair } from "../src/routing/snap";
-import { setSearchCentre, warmNameIndex } from "../src/search/name-search";
+import {
+  prefetchNameIndex,
+  releaseNameIndex,
+  setSearchCentre,
+  warmNameIndex,
+} from "../src/search/name-search";
 import {
   settings as storedSettings,
   updateSettings,
@@ -709,21 +714,35 @@ export default function MapApp() {
     // Francisco. Null is the honest answer until this city's own graph lands.
     setRoutingGraph(null);
     // The two files the search box answers from with no signal — every name in the city, and the
-    // house numbers its worker resolves them against — fetched now rather than when someone types at
-    // it, because a file only fetched once you have already searched offline is a file you never
-    // have when you need it. Ten megabytes against the graph's thirty-seven, and on an idle callback
-    // so they queue behind the first paint.
-    const warm = () => {
-      warmNameIndex(city.id);
+    // house numbers its worker resolves them against — pulled onto the device now rather than when
+    // someone types at it, because a file only fetched once you have already searched offline is a
+    // file you never have when you need it. Ten megabytes against the graph's thirty-nine, and on
+    // an idle callback so they queue behind the first paint. Reading them into the index is a
+    // separate, later decision (below) — this only puts them within reach.
+    const prefetch = () => {
+      void prefetchNameIndex(city.id);
     };
     if (typeof requestIdleCallback === "function") {
-      const handle = requestIdleCallback(warm, { timeout: 5000 });
+      const handle = requestIdleCallback(prefetch, { timeout: 5000 });
       return () => cancelIdleCallback(handle);
     } else {
-      const handle = window.setTimeout(warm, 2000);
+      const handle = window.setTimeout(prefetch, 2000);
       return () => window.clearTimeout(handle);
     }
   }, [city]);
+
+  // The decoded index is forty megabytes and the search box is the only thing that reads it, so it
+  // is loaded when the panel that holds the box opens and dropped when it closes. Opening the panel
+  // is early enough that the tables are ready before anything is typed, and it spares every visitor
+  // who only ever looks at the map — on a phone already holding the graph and a screenful of tile
+  // canvases, that is the difference between a session iOS tolerates and one it kills.
+  useEffect(() => {
+    if (routingOpen) {
+      warmNameIndex(city.id);
+    } else {
+      releaseNameIndex();
+    }
+  }, [routingOpen, city]);
 
   // Taking a layer out of the menu turns it off, the same way switching city does: a layer drawn on
   // the map with no row to turn it off by is a state the reader cannot get out of. Putting it back in

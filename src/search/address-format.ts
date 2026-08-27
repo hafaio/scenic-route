@@ -1,9 +1,9 @@
 // ADDR: every street address in a city, small enough to ship.
 //
-// The geocoder answers "123 Broadway" and the routing graph's names answer "Broadway", so the gap
-// offline is exactly the house number. Both cities publish their own address file — NYC AddressPoint
-// (uf93-f8nk) and SF EAS (ramy-di5m) — and at ~3 bytes an address the whole of both fits in a few
-// megabytes, which is cheaper than one zoom level of any tile pyramid.
+// A network geocoder answers "123 Broadway" and the routing graph's names answer "Broadway", so the
+// gap offline is exactly the house number. Both cities publish their own address file — NYC
+// AddressPoint (uf93-f8nk) and SF EAS (ramy-di5m) — and at ~3 bytes an address the whole of both
+// fits in a few megabytes, which is cheaper than one zoom level of any tile pyramid.
 //
 // Written by scripts/addresses.ts to public/addresses/<city>.bin.gz, read by src/search/addresses.ts.
 // Shipped gzipped and decompressed in the browser rather than served raw: Pages does not compress

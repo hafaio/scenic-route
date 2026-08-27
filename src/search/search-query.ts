@@ -40,6 +40,7 @@ import {
   type DocKind,
   HAS_NUMBER,
   HAS_STREET,
+  MAX_NAME_TOKENS,
   MAX_PLACES,
   RESTART_BYTES,
   SEARCH_FORMAT,
@@ -655,6 +656,20 @@ function placeFactor(
     : prominenceFactor(index.prominence[doc]) * distanceFactor(meters);
 }
 
+// The word sequences a document may be read as. Everything is its own name; a STREET is also its
+// name with the numbers spelt out, since that is what the index files it under — and reading "fifth
+// avenue" against ["fifth", "avenue"] rather than against ["5th", "avenue"] is the whole difference
+// between 5th Avenue, which the query names entirely, and 55th Avenue, which carries the word
+// `fifth` just as genuinely and is ["fifty", "fifth", "avenue"].
+//
+// A document is then scored under whichever of its spellings answers the query best, never under a
+// mix of two: one that answers it under neither gains nothing from being read twice.
+function spellingsOf(kind: DocKind, name: string): string[][] {
+  const words = tokenize(name);
+  const spelt = kind === "street" ? spelledOrdinals(words) : null;
+  return spelt === null ? [words] : [words, spelt];
+}
+
 // How many words of the query reached only a word of the name that another word of the query has a
 // better claim on. Typing "shake sh" at "Shake Top DeLite" matches both words against "Shake", and
 // counting that as two words answered puts it above the Shake Shack that answers one word each — so
@@ -945,38 +960,43 @@ export function searchNames(
   const typed = new Set(tokens);
   const finalists = pool.map(({ doc, quality, named, linked, meters }) => {
     const name = docName(index, doc);
-    const nameWords = tokenize(name);
-    const answered = named - doubledWords(queryWords, nameWords);
-    const { tokenCount } = unpackTokenInfo(index.tokenInfo[doc]);
-    const leads = nameWords.length > 0 && nameWords[0].startsWith(tokens[0]);
-    const whole =
-      nameWords.length > 0 && nameWords.every((word) => typed.has(word));
-    const place = placeFactor(
-      index,
-      doc,
-      meters,
-      namedWholeArea(
-        unpackKind(index.kindFlags[doc]),
-        answered,
-        (quality * answered) / named,
-        leads,
-        tokens.length,
-        nameWords.length,
-      ),
-    );
-    // A word that only doubled up on another's takes its share of the quality with it: the
-    // accumulator holds one sum for the document, not a figure per word.
-    const text =
-      textScore(
-        (quality * answered) / named,
-        answered,
-        linked,
-        tokens.length,
-        tokenCount,
-      ) *
-      (leads ? FIRST_WORD_BONUS : 1) *
-      (whole ? WHOLE_NAME_BONUS : 1);
-    return { doc, name, text, score: text * place };
+    const kind = unpackKind(index.kindFlags[doc]);
+    let best = { text: 0, score: 0 };
+    for (const nameWords of spellingsOf(kind, name)) {
+      const answered = named - doubledWords(queryWords, nameWords);
+      const leads = nameWords.length > 0 && nameWords[0].startsWith(tokens[0]);
+      const whole =
+        nameWords.length > 0 && nameWords.every((word) => typed.has(word));
+      const place = placeFactor(
+        index,
+        doc,
+        meters,
+        namedWholeArea(
+          kind,
+          answered,
+          (quality * answered) / named,
+          leads,
+          tokens.length,
+          nameWords.length,
+        ),
+      );
+      // A word that only doubled up on another's takes its share of the quality with it: the
+      // accumulator holds one sum for the document, not a figure per word.
+      const text =
+        textScore(
+          (quality * answered) / named,
+          answered,
+          linked,
+          tokens.length,
+          Math.min(nameWords.length, MAX_NAME_TOKENS),
+        ) *
+        (leads ? FIRST_WORD_BONUS : 1) *
+        (whole ? WHOLE_NAME_BONUS : 1);
+      if (text * place > best.score) {
+        best = { text, score: text * place };
+      }
+    }
+    return { doc, name, text: best.text, score: best.score };
   });
   finalists.sort((left, right) => betterThan(index, left, right));
 
@@ -1000,12 +1020,15 @@ export function searchNames(
   });
 }
 
-// How prominent a door is. A house number the city's own file has, on a street whose name was typed,
-// is the most precise answer anything here can give — the geocoder answers the same query with a
-// point at an arbitrary end of a street kilometres long more often than not — so it is baked at the
-// top of the scale, where nothing that is merely a name can reach it. The nearest number to one the
-// street does not have is a different thing: it is offered, under its own real number, from near the
-// bottom, because a near miss is not what was asked for.
+// How prominent a door is. A house number the city's own file has, on a street whose WHOLE name was
+// typed, is the most precise answer anything here can give — a network geocoder answers the same
+// query with a point at an arbitrary end of a street kilometres long more often than not — so it is
+// baked at the top of the scale, where nothing that is merely a name can reach it.
+//
+// Both halves have to be the reader's. A near miss on the number is not what was asked for, and
+// neither is a real number on a street the query only prefix-matched: "5 Av" reaches every avenue in
+// the city, and answering it from the top of the scale puts a doorway on Avenue A above Fifth
+// Avenue. Either way the door is offered under its own real number, from near the bottom.
 const EXACT_ADDRESS_PROMINENCE = 255;
 const NEAREST_ADDRESS_PROMINENCE = 60;
 
@@ -1039,7 +1062,10 @@ export interface CityRequest {
 // file the ordinals in the index point into. A place that never joined an address still names its
 // borough — the builder takes that from the city's own boundaries — and a city that is one place
 // names nothing.
-function labelOf(addresses: AddressIndex, hit: SearchHit): string {
+function labelOf(
+  addresses: AddressIndex,
+  hit: Pick<SearchHit, "placeIndex" | "streetIndex" | "number">,
+): string {
   const parts: string[] = [];
   if (hit.streetIndex >= 0 && hit.number !== null) {
     const name = addresses.names[addresses.streetName[hit.streetIndex]];
@@ -1050,6 +1076,18 @@ function labelOf(addresses: AddressIndex, hit: SearchHit): string {
     parts.push(place);
   }
   return parts.join(", ");
+}
+
+// The same line, for a caller holding a document rather than a search hit: ./reverse.ts names the
+// point a pin was dropped on, and a pin has to read exactly as the same place would if it had been
+// typed into the box.
+export function docLabel(
+  index: SearchIndex,
+  addresses: AddressIndex,
+  doc: number,
+): string {
+  const { placeIndex } = unpackTokenInfo(index.tokenInfo[doc]);
+  return labelOf(addresses, { ...docPayload(index, doc), placeIndex });
 }
 
 // A place named at the end of what was typed, and what is left of the text without it. New York's

@@ -1,3 +1,4 @@
+import type { ReverseHit } from "./reverse";
 import type { DocKind } from "./search-format";
 
 // The messages between the search box and the worker that owns the city's name index. Everything the
@@ -22,7 +23,18 @@ export interface QueryMessage {
   limit: number;
 }
 
-export type ToSearchWorker = InitMessage | QueryMessage;
+// What a point on the map is called: a dropped pin, a dragged route endpoint, "Log here". The worker
+// answers it because it is the side that holds the two files the answer comes out of — the label is
+// all this is for, since a route is computed from the coordinate either way.
+export interface ReverseMessage {
+  type: "reverse";
+  id: number;
+  at: { lat: number; lng: number };
+}
+
+export type ToSearchWorker = InitMessage | QueryMessage | ReverseMessage;
+
+export type { ReverseHit };
 
 // One answer, ready to be shown: the name and the line under it are both built in here, so nothing
 // on the main thread has to hold the address file to label a result with its street and borough.
@@ -57,4 +69,14 @@ export interface ResultsMessage {
   hits: IndexHit[];
 }
 
-export type FromSearchWorker = ReadyMessage | ErrorMessage | ResultsMessage;
+export interface ReverseResultMessage {
+  type: "reverse";
+  id: number;
+  hit: ReverseHit | null; // null where the city has nothing near enough to name the point with
+}
+
+export type FromSearchWorker =
+  | ReadyMessage
+  | ErrorMessage
+  | ResultsMessage
+  | ReverseResultMessage;

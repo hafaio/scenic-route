@@ -3,8 +3,10 @@ import type {
   FromSearchWorker,
   IndexHit,
   InitMessage,
+  ReverseHit,
   ToSearchWorker,
 } from "./protocol";
+import { reverseCity } from "./reverse";
 import {
   type CityRequest,
   decodeSearchIndex,
@@ -95,9 +97,28 @@ function look(city: Loaded | null, request: CityRequest): IndexHit[] {
   }
 }
 
+// The same silence-is-not-an-option rule as `look`: a point asked about before the files land is
+// answered with null, and the caller leaves the pin reading "Dropped pin".
+function name(
+  city: Loaded | null,
+  at: { lat: number; lng: number },
+): ReverseHit | null {
+  if (city === null) {
+    return null;
+  } else {
+    return reverseCity(city.index, city.addresses, at);
+  }
+}
+
 scope.onmessage = ({ data }: MessageEvent<ToSearchWorker>) => {
   if (data.type === "init") {
     void load(data);
+  } else if (data.type === "reverse") {
+    scope.postMessage({
+      type: "reverse",
+      id: data.id,
+      hit: name(loaded, data.at),
+    });
   } else {
     const { id, text, centre, limit } = data;
     scope.postMessage({
