@@ -333,6 +333,13 @@ of the cells it caught, in decimetres, in the file's trailing height region. It 
 in place, exactly as the density pass that follows it fills the density blobs — one `tiler ingest`
 run does both, over the files scripts/tree-data-fetch.ts has just written.
 
+Its LiDAR was flown in **August 2013**, behind a 2010 land-cover mask — so the heights are *older
+than the 2017 footprint they are sampled onto*, and a tree planted or felled between the two is a
+crown of the wrong height or a height with no crown. Recorded here because the vintage is nowhere
+in the product's own name and it is the kind of thing a reader assumes matches its neighbour. New
+York State publishes an open 2021 point cloud that would fix it, but as 1,749 raw `.las` tiles on
+the order of 300-500 GB with no staged raster, so it is a pipeline rather than a swap.
+
 San Francisco has no equivalent product, and takes its heights from **band 2 of the same 3DEP
 topographic tiles the terrain overlay is built from** — the surface model less the terrain model,
 which is height above ground. Same pass, two differences: the tiles are a *mosaic* of 651 separate
