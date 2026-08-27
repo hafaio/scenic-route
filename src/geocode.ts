@@ -1,6 +1,8 @@
 import { activeCity } from "./cities";
 import { searchLoadedStreets } from "./routing/street-search";
-import { searchAddresses } from "./search/addresses";
+import { searchAddresses, searchCentre } from "./search/addresses";
+import { searchNameIndex } from "./search/name-search";
+import { tokenize } from "./search/search-format";
 import { searchStations, stationLabel } from "./subway/stations";
 
 const NOMINATIM_BASE = "https://nominatim.openstreetmap.org";
@@ -183,6 +185,16 @@ export const STREET_RESULT_TYPE = "scenic:street";
 // At most this many streets, so a common word ("Park") cannot bury everything else in the list.
 const MAX_LOCAL_STREETS = 4;
 
+// A place out of the city's own name index (src/search/search-format.ts) — a business, a park, a
+// campus — which is the one source here that answers "Peter Luger" with no network at all. Its own
+// type, so the box draws it as a place rather than as an address.
+export const INDEX_RESULT_TYPE = "scenic:index";
+
+// How many of the index's answers may lead the list. Enough that the several branches of one chain
+// are all offered, and short of the whole list being one source: the geocoder still knows names this
+// index does not, and a reader who typed one of them has to be able to see it.
+const MAX_INDEX_PLACES = 4;
+
 // A house number found in the city's own address file. Its own glyph in the search box, and its own
 // type here, because it is the one local answer as precise as anything the geocoder returns.
 export const ADDRESS_RESULT_TYPE = "scenic:address";
@@ -225,9 +237,14 @@ export async function searchAddress(
   // bias is rounded to ~100 m so GPS jitter doesn't defeat the cache while the ranking stays
   // representative of the user's neighbourhood.
   const scope = activeCity().id;
+  // The map centre is part of the answer, not just of its order: the name index ranks by distance
+  // from it, so the same query at two ends of the city is two different lists. Rounded to ~1 km, the
+  // scale the distance term works at, so panning a block does not throw the cache away.
+  const centre = searchCentre(scope) ?? activeCity().center;
+  const near = `${centre.lat.toFixed(2)},${centre.lng.toFixed(2)}`;
   const cacheKey = bias
-    ? `${scope}|${trimmed}@${bias.lat.toFixed(3)},${bias.lng.toFixed(3)}`
-    : `${scope}|${trimmed}`;
+    ? `${scope}|${trimmed}@${near}|${bias.lat.toFixed(3)},${bias.lng.toFixed(3)}`
+    : `${scope}|${trimmed}@${near}`;
   const cached = searchCache.get(cacheKey);
   if (cached) {
     // Only complete answers are cached (see below), so a hit is one.
@@ -245,6 +262,19 @@ export async function searchAddress(
   // Local first and unawaited, so the local lookups and the geocoder round trip overlap.
   const stations = searchStations(trimmed);
   const addresses = searchAddresses(scope, trimmed, MAX_LOCAL_ADDRESSES, bias);
+  // The name index, in its own worker. Ranked from the map centre rather than from the shared
+  // location: it is what the reader is looking at, it needs no permission, and unlike the geocoder's
+  // bias it is there in every session.
+  const places = searchNameIndex({
+    cityId: scope,
+    text: trimmed,
+    centre,
+    limit: MAX_INDEX_PLACES,
+    // Streets ride their own path into this list, off the routing graph, and would otherwise be
+    // listed twice; the index still MATCHES them, which is what answers "Katz's Delicatessen E
+    // Houston St".
+    kinds: ["place"],
+  });
   // A geocoder this device cannot reach is not a failed search: everything below it is answered from
   // data that already shipped, and throwing here used to take those answers down with it — with no
   // signal the box returned nothing at all, stations included, which is the one case it was most
@@ -311,17 +341,61 @@ export async function searchAddress(
       trailing.push(result);
     }
   }
+  // The name index's places, which are what answer a business or a park with no network. Every row
+  // carries its own address and borough, from the same file the address rows above come from.
+  const indexHits = await places;
+  const indexRows: { result: GeocodeResult; words: string[] }[] = [];
+  const listed = new Set<string>();
+  for (const hit of indexHits ?? []) {
+    // The place file holds one place several times over — six rows called "Empire State Building",
+    // three called "Prospect Park" — so rows that read identically are cut to the best-ranked one.
+    // The name is likewise not repeated when the address already opens with it, the way the
+    // geocoder's own display line does not repeat a street that is its own name.
+    const displayName = hit.label.startsWith(hit.name)
+      ? hit.label
+      : [hit.name, hit.label].filter(Boolean).join(", ");
+    if (listed.has(displayName)) {
+      continue;
+    }
+    listed.add(displayName);
+    indexRows.push({
+      result: {
+        placeId: `place:${scope}:${hit.lat.toFixed(5)},${hit.lng.toFixed(5)}:${hit.name}`,
+        lat: hit.lat,
+        lng: hit.lng,
+        displayName,
+        type: INDEX_RESULT_TYPE,
+      },
+      words: tokenize(hit.name),
+    });
+  }
   // Photon answers a house number with the same building we just answered with, under its own idea
   // of the neighbourhood: "312 Court Street, Cobble Hill" directly under our "312 Court Street,
   // Brooklyn". That is two rows of a five-row list spent on one place, and ours is the row that
   // stays — for the reason it leads in the first place. Only an EXACT hit suppresses anything: a
   // nearest-number fallback is a different address, and must not silence a real answer.
-  const geocoded = results.filter(
-    (result) =>
+  //
+  // The same happens to a place the index answered — "Katz's Delicatessen" under "Katz's
+  // Delicatessen, 205 East Houston Street" — but a doorway is shared by several businesses, so
+  // distance alone would drop the shop next door as a duplicate. The geocoder's row also has to
+  // NAME the place: every word of the index's name in the row it would be listed under.
+  const geocoded = results.filter((result) => {
+    const said = new Set(tokenize(result.displayName));
+    return (
       !atExactAddress.some(
         (hit) => metersApart(hit, result) <= SAME_BUILDING_METERS,
-      ),
-  );
+      ) &&
+      // A row that reads exactly like one already listed is the same answer whatever the two
+      // sources put its point at — Photon's "Prospect Park, Brooklyn" under ours, both true, and a
+      // park is far larger than any distance rule that is safe for two shops sharing a doorway.
+      !listed.has(result.displayName) &&
+      !indexRows.some(
+        (row) =>
+          metersApart(row.result, result) <= SAME_BUILDING_METERS &&
+          row.words.every((word) => said.has(word)),
+      )
+    );
+  });
   for (const { station, rank } of await stations) {
     const result: GeocodeResult = {
       placeId: `subway:${scope}:${station.index}`,
@@ -335,6 +409,11 @@ export async function searchAddress(
     } else {
       trailing.push(result);
     }
+  }
+  // The index's places lead the geocoder and follow the two sources that are more precise than a
+  // name: a house number the reader typed, and a station named off an authoritative list.
+  for (const { result } of indexRows) {
+    leading.push(result);
   }
   // Street names off the routing graph, which is already on the device and already cached for
   // offline use. They trail the geocoder, which answers the same question with house numbers, and
@@ -365,7 +444,7 @@ export async function searchAddress(
   // partial one, and caching it would keep serving that partial list after the signal came back —
   // and the same goes for an address file this device has not managed to fetch yet, which is the
   // one source that can be missing while the network is otherwise fine.
-  if (data !== null && addressHits !== null) {
+  if (data !== null && addressHits !== null && indexHits !== null) {
     setBounded(searchCache, cacheKey, merged);
   }
   return { results: merged, reachedGeocoder: data !== null };

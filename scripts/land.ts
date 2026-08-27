@@ -11,28 +11,40 @@ import { type Coord, NYC_OPEN_DATA } from "./socrata";
 const NYC_BOROUGH_COUNT = 5;
 
 interface BoroughRow {
+  boroname?: string;
   the_geom?: { type: string; coordinates: [number, number][][][] };
 }
 
-// The five borough boundaries. Clipping to them drops the New Jersey and Westchester spill a city
-// bounding box reaches, and keeps the harbour out of any field the sources feed.
-export async function fetchNycLand(): Promise<Polygon[]> {
-  // `*` so a newly-read column is free after one refetch (the disk cache keys on the query);
-  // BoroughRow reads only the_geom.
+// A named part of a city, for the ingests that have to say WHICH part a point is in rather than only
+// that it is in the city at all. New York's five boroughs are the case: the land mask is their union.
+export interface NamedArea {
+  name: string;
+  polygons: Polygon[];
+}
+
+// The five borough boundaries, each under the name a postal address and a reader both use. The same
+// spellings src/search/address-format.ts writes, which is what lets a borough found here be matched
+// to the one the address file labels a street with.
+export async function fetchNycBoroughs(): Promise<NamedArea[]> {
+  // `*` so a newly-read column is free after one refetch (the disk cache keys on the query).
   const rows = await NYC_OPEN_DATA.dataset<BoroughRow>(
     "gthc-hcne",
     { $select: "*" },
     NYC_BOROUGH_COUNT,
   );
-  const polygons: Polygon[] = [];
-  for (const row of rows) {
-    for (const parts of row.the_geom?.coordinates ?? []) {
-      polygons.push(
-        parts.map((ring) => ring.map(([lng, lat]) => ({ lat, lng }))),
-      );
-    }
-  }
-  return polygons;
+  return rows.map((row) => ({
+    name: row.boroname ?? "",
+    polygons: (row.the_geom?.coordinates ?? []).map((parts) =>
+      parts.map((ring) => ring.map(([lng, lat]) => ({ lat, lng }))),
+    ),
+  }));
+}
+
+// The city as one shape. Clipping to it drops the New Jersey and Westchester spill a city bounding
+// box reaches, and keeps the harbour out of any field the sources feed.
+export async function fetchNycLand(): Promise<Polygon[]> {
+  const boroughs = await fetchNycBoroughs();
+  return boroughs.flatMap((borough) => borough.polygons);
 }
 
 // Everything an ingest needs to keep to the city: the point-in-land test and the land bounding box
