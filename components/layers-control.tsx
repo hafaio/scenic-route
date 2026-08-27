@@ -91,40 +91,45 @@ export default function LayersControl({
       {menuOpen ? (
         <div
           role="menu"
-          className="absolute right-0 mt-2 w-44 origin-top-right overflow-hidden rounded-2xl bg-white/95 py-1 shadow-2xl ring-1 ring-black/5 backdrop-blur-md dark:bg-slate-800/95 dark:ring-white/10"
+          // The cap is on the menu; the ROWS scroll and the footer stays put, because that footer is
+          // how a layer gets hidden and it is wanted most when the list has grown long enough to
+          // need scrolling. `overflow-hidden` keeps the rounded corners over the scrolling child.
+          className="toolbar-menu-shell absolute right-0 mt-2 flex w-44 origin-top-right flex-col overflow-hidden rounded-2xl bg-white/95 shadow-2xl ring-1 ring-black/5 backdrop-blur-md dark:bg-slate-800/95 dark:ring-white/10"
         >
-          {offered.map((overlay) => {
-            const on = active.has(overlay.id);
-            // A layer whose data did not arrive draws nothing, which on a map is indistinguishable
-            // from a layer with nothing to draw. The glyph is what tells the two apart, and it
-            // replaces the tick rather than crowding it — a layer that is on but showing you
-            // nothing is not in the state the tick claims.
-            const lost = on && unreachable.has(overlay.id);
-            return (
-              <button
-                key={overlay.id}
-                type="button"
-                role="menuitemcheckbox"
-                aria-checked={on}
-                onClick={() => onToggle(overlay.id)}
-                className={on ? ROW_ACTIVE : ROW_IDLE}
-                title={
-                  lost ? "This layer's data could not be loaded" : undefined
-                }
-              >
-                {overlay.icon}
-                {overlayLabel(overlay, city)}
-                {lost ? (
-                  <FiCloudOff
-                    className="ml-auto h-4 w-4 text-slate-400 dark:text-slate-500"
-                    aria-label="data could not be loaded"
-                  />
-                ) : on ? (
-                  <FiCheck className="ml-auto h-4 w-4" aria-hidden="true" />
-                ) : null}
-              </button>
-            );
-          })}
+          <div className="toolbar-menu-scroll py-1">
+            {offered.map((overlay) => {
+              const on = active.has(overlay.id);
+              // A layer whose data did not arrive draws nothing, which on a map is indistinguishable
+              // from a layer with nothing to draw. The glyph is what tells the two apart, and it
+              // replaces the tick rather than crowding it — a layer that is on but showing you
+              // nothing is not in the state the tick claims.
+              const lost = on && unreachable.has(overlay.id);
+              return (
+                <button
+                  key={overlay.id}
+                  type="button"
+                  role="menuitemcheckbox"
+                  aria-checked={on}
+                  onClick={() => onToggle(overlay.id)}
+                  className={on ? ROW_ACTIVE : ROW_IDLE}
+                  title={
+                    lost ? "This layer's data could not be loaded" : undefined
+                  }
+                >
+                  {overlay.icon}
+                  {overlayLabel(overlay, city)}
+                  {lost ? (
+                    <FiCloudOff
+                      className="ml-auto h-4 w-4 text-slate-400 dark:text-slate-500"
+                      aria-label="data could not be loaded"
+                    />
+                  ) : on ? (
+                    <FiCheck className="ml-auto h-4 w-4" aria-hidden="true" />
+                  ) : null}
+                </button>
+              );
+            })}
+          </div>
           <button
             type="button"
             role="menuitem"
@@ -132,7 +137,7 @@ export default function LayersControl({
               setMenuOpen(false);
               onSettings("layers");
             }}
-            className={`${ROW_IDLE} border-t border-slate-200/60 text-slate-500 dark:border-slate-700/60 dark:text-slate-400`}
+            className={`${ROW_IDLE} shrink-0 border-t border-slate-200/60 text-slate-500 dark:border-slate-700/60 dark:text-slate-400`}
           >
             <FiSliders className="h-4 w-4" aria-hidden="true" />
             Layer settings…
