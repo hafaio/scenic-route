@@ -662,3 +662,31 @@ test("a query that is already answered plentifully is not corrected", () => {
   // Thin the answer to one and the same near miss is found.
   expect(names(index, "pizza place 07")).toContain("Pizzo Place");
 });
+
+test("a street spelt out in words is the one whose every word was spelt", () => {
+  // The one the query names in full is three kilometres away and the one it half-names is underfoot,
+  // so nothing but the words can put it first — which is the whole point: a street named entirely is
+  // measured on the flat curve a door is, and distance stops deciding it.
+  const away = { lat: HERE.lat + 0.027, lng: HERE.lng };
+  const index = build([
+    place("5th Avenue", {
+      kind: "street",
+      streetIndex: 3,
+      prominence: 110,
+      tokens: streetTokens("5 AVE", "5th Avenue"),
+      ...away,
+    }),
+    place("55th Avenue", {
+      kind: "street",
+      streetIndex: 4,
+      prominence: 110,
+      tokens: streetTokens("55 AVE", "55th Avenue"),
+    }),
+  ]);
+  // 55 AVE carries the word `fifth` as genuinely as 5 AVE does — it is spoken "fifty fifth" — so
+  // both answer. What separates them is that the query is the whole of one name and two thirds of
+  // the other, which is only visible against the spelling the query was typed in.
+  expect(names(index, "fifth avenue")).toEqual(["5th Avenue", "55th Avenue"]);
+  expect(names(index, "fifth ave")).toEqual(["5th Avenue", "55th Avenue"]);
+  expect(names(index, "fifty fifth avenue")[0]).toBe("55th Avenue");
+});

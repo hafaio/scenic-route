@@ -186,34 +186,13 @@ test("nothing else on that host is a tile", () => {
   expect(coversACity("tiles/v4/15/9649/12315.mvt/extra", CITIES)).toBe(false);
 });
 
-// Naming a point picked off the map is the one lookup left that needs a host, and its usage policy
-// asks that answers be kept — so a pin already named still has a name with no signal.
-test("the reverse lookup is cached, network first, as convenience rather than as routing", () => {
-  const named = fileRequest(
-    "https://nominatim.openstreetmap.org/reverse?lat=40.7&lon=-74",
-    SCOPE,
-  );
-  expect(named?.store).toBe("overlay");
-  expect(named?.fresh).toBe(true);
-  expect(named?.cacheKey).toBe(
-    "https://nominatim.openstreetmap.org/reverse?lat=40.7&lon=-74",
-  );
-
-  // A different point is a different entry, or one pin would answer for another.
-  const other = fileRequest(
-    "https://nominatim.openstreetmap.org/reverse?lat=40.8&lon=-74",
-    SCOPE,
-  );
-  expect(other?.cacheKey).not.toBe(named?.cacheKey);
-
-  // Never in the store a walk depends on.
-  expect(named?.store).not.toBe("routing");
-});
-
-// The search box answers from the city's own index, which is a file under the scope; nothing it does
-// reaches a host of its own.
-test("no outside host is cached to answer the search box", () => {
+// Naming a point picked off the map needs no host at all: the answer comes out of the city's own
+// address file and name index, which are files under the scope. Nothing outside it is filed.
+test("no outside host is cached to name a point", () => {
   expect(
-    fileRequest("https://photon.komoot.io/api?q=bedford", SCOPE),
+    fileRequest(
+      "https://nominatim.openstreetmap.org/reverse?lat=40.7&lon=-74",
+      SCOPE,
+    ),
   ).toBeNull();
 });

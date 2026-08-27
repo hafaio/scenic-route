@@ -1,13 +1,17 @@
 import { activeCity } from "./cities";
-import { searchCentre, searchNameIndex } from "./search/name-search";
-import type { IndexHit } from "./search/protocol";
+import {
+  reverseNameIndex,
+  searchCentre,
+  searchNameIndex,
+} from "./search/name-search";
+import type { IndexHit, ReverseHit } from "./search/protocol";
 
-// What the app calls a place: what was typed into the search box, and what a point picked off the
-// map is called. The search box needs no network — it is answered from the city's own index and
-// address file, which ship with the map. Naming a point is still a round trip to Nominatim.
+// What the app calls a place, in both directions: what was typed into the search box, and what a
+// point picked off the map is called. Neither needs a network — both are answered from the city's
+// own index and address file, which ship with the map.
 
-const NOMINATIM_BASE = "https://nominatim.openstreetmap.org";
-const USER_AGENT_NOTE = "scenic-route (https://github.com/hafaio/scenic-route)";
+// How many searches are remembered. Only the box's answers are cached; naming a point is arithmetic
+// against tables already in memory and is cheaper to redo than to keep.
 const MAX_CACHE_ENTRIES = 200;
 
 // The `type` a station result carries, which the search box renders with a train glyph rather than
@@ -24,17 +28,6 @@ export interface GeocodeResult {
   type: string;
 }
 
-interface NominatimReverseResponse {
-  place_id?: number | string;
-  lat?: string;
-  lon?: string;
-  display_name?: string;
-  type?: string;
-  class?: string;
-  error?: string;
-}
-
-const reverseCache = new Map<string, GeocodeResult | null>();
 const searchCache = new Map<string, GeocodeResult[]>();
 
 function setBounded<K, V>(map: Map<K, V>, key: K, value: V): void {
@@ -47,60 +40,65 @@ function setBounded<K, V>(map: Map<K, V>, key: K, value: V): void {
   map.set(key, value);
 }
 
-function reverseKey(lat: number, lng: number): string {
-  return `${lat.toFixed(5)},${lng.toFixed(5)}`;
-}
-
-export async function reverseGeocode(
-  lat: number,
-  lng: number,
-  signal?: AbortSignal,
-): Promise<GeocodeResult | null> {
-  const key = reverseKey(lat, lng);
-  if (reverseCache.has(key)) {
-    return reverseCache.get(key) ?? null;
-  }
-  const url = new URL("/reverse", NOMINATIM_BASE);
-  url.searchParams.set("lat", String(lat));
-  url.searchParams.set("lon", String(lng));
-  url.searchParams.set("format", "json");
-  url.searchParams.set("zoom", "18");
-  url.searchParams.set("addressdetails", "0");
-  const response = await fetch(url.toString(), {
-    signal,
-    headers: { "Accept-Language": "en", "X-Client": USER_AGENT_NOTE },
-  });
-  if (!response.ok) {
-    throw new Error(`Nominatim reverse failed: ${response.status}`);
-  }
-  const data = (await response.json()) as NominatimReverseResponse;
-  if (data.error || !data.display_name || !data.lat || !data.lon) {
-    setBounded(reverseCache, key, null);
-    return null;
-  }
-  const result: GeocodeResult = {
-    placeId: String(data.place_id ?? key),
-    lat: Number.parseFloat(data.lat),
-    lng: Number.parseFloat(data.lon),
-    displayName: data.display_name,
-    type: data.type ?? data.class ?? "place",
-  };
-  setBounded(reverseCache, key, result);
-  return result;
-}
-
 // A street, which is the coarsest answer there is: one point stands for the whole of it. The search
 // box draws it with its own glyph, so that reads at a glance.
 export const STREET_RESULT_TYPE = "scenic:street";
 
 // A place out of the city's own name index (src/search/search-format.ts) — a business, a park, a
-// campus — which is the one source here that answers "Peter Luger" with no network at all. Its own
-// type, so the box draws it as a place rather than as an address.
+// campus. Its own type, so the box draws it as a place rather than as an address.
 export const INDEX_RESULT_TYPE = "scenic:index";
 
 // A house number found in the city's own address file. Its own glyph in the search box, and its own
 // type here, because it is the most precise answer the box can give.
 export const ADDRESS_RESULT_TYPE = "scenic:address";
+
+// The `type` a point named off the map carries, mapped from what the index says the thing is, so a
+// dropped pin reads with the same glyph the same place would carry in the search box.
+function reverseResultType(kind: ReverseHit["kind"]): string {
+  if (kind === "address") {
+    return ADDRESS_RESULT_TYPE;
+  } else if (kind === "station") {
+    return SUBWAY_RESULT_TYPE;
+  } else if (kind === "street") {
+    return STREET_RESULT_TYPE;
+  } else {
+    return INDEX_RESULT_TYPE;
+  }
+}
+
+// What a point picked off the map is called: a dropped pin, a dragged route endpoint, "Log here".
+// The label is all this is for — a route is computed from the coordinate, and nothing about finding
+// or drawing one depends on what the endpoint is called.
+//
+// Answered from the city's own address file and name index (src/search/reverse.ts), which is to say
+// with no network at all: the nearest house number, or the name of whatever the point is standing
+// on, or — where the number is too far off to be this point's — the street, the neighbourhood, or
+// nothing. A point the city has nothing near enough to name is answered with null, and the caller
+// keeps whatever it already put on the pin. Nothing is ever invented: every answer is a row of a
+// file, at the coordinates the city published for it.
+//
+// Not cached. The lookup that used to sit here was a round trip to a public service with a usage
+// policy that required caching its answers; this is a few milliseconds of arithmetic against tables
+// already in memory, and a cache of two hundred pins would cost more to hold than to recompute.
+export async function reverseGeocode(
+  lat: number,
+  lng: number,
+): Promise<GeocodeResult | null> {
+  const cityId = activeCity().id;
+  const hit = await reverseNameIndex(cityId, { lat, lng });
+  if (hit === null) {
+    return null;
+  }
+  // "near" is the honest half of the answer: the point is not AT this, it is beside it.
+  const name = hit.at ? hit.name : `near ${hit.name}`;
+  return {
+    placeId: `local:${cityId}:${hit.kind}:${hit.lat.toFixed(5)},${hit.lng.toFixed(5)}`,
+    lat: hit.lat,
+    lng: hit.lng,
+    displayName: [name, hit.label].filter(Boolean).join(", "),
+    type: reverseResultType(hit.kind),
+  };
+}
 
 // How many answers the index is asked for. It ranks a door, a station, a park and a street against
 // each other, so what leads is whatever the one ranking put first.
