@@ -128,19 +128,19 @@ test("the wait rides on the ETA unit, on top of the walked time", () => {
 
 const CROSSING_FREE: RouteWeights = {
   ...DEFAULT_WEIGHTS,
-  fewerCrossings: false,
+  allowCrossings: true,
 };
 const CROSSING_PRICED: RouteWeights = {
   ...DEFAULT_WEIGHTS,
-  fewerCrossings: true,
+  allowCrossings: false,
 };
 
-test("crossings cost the router nothing extra until asked", () => {
+test("crossings cost the router nothing extra once they are allowed", () => {
   expect(crossingPrice(PLAIN, 1, 0, CROSSING_FREE)).toBe(0);
   expect(crossingPrice(DIVIDED, 1, 0, CROSSING_FREE)).toBe(0);
 });
 
-test("asking for fewer prices the act of crossing, not the pavement", () => {
+test("barring free crossings prices the act, not the pavement", () => {
   expect(crossingPrice(PLAIN, 1, 0, CROSSING_PRICED)).toBe(
     CROSSING_SECONDS * CROSSING_AVOID_MULTIPLE,
   );

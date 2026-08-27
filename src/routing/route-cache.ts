@@ -1,7 +1,7 @@
 // The optimal route is piecewise-constant in a single weight: each candidate path's cost is linear
 // in that weight, so the cheapest path changes only at discrete breakpoints, and any weight bracketed
 // by two samples that share a path provably yields that path — no recompute. That interval argument
-// is strictly one-dimensional, so with several scenic weights plus the ferry and scaffolding gates the
+// is strictly one-dimensional, so with several scenic weights plus the gates the
 // cache brackets only the *active* slider: whichever single one moved since the last call. Moving
 // another slider or toggling a gate changes the fixed context the range was built against, so the old range
 // is dropped and a fresh one is started around the current slider — seeded with the just-computed
@@ -13,7 +13,7 @@ import type { RoutingGraph } from "./graph";
 import { findRoute, type RouteResult } from "./search";
 import type { Snap } from "./snap";
 
-// The numeric weights that a slider can move; the two toggles (ferries, scaffolding) are discrete
+// The numeric weights that a slider can move; the gates are discrete
 // contexts, not axes. Every slider has to be here: `sameWeights` reads this list, so one left out is
 // a slider whose moves the cache cannot see, and it answers them with the previous route.
 const AXES = [
@@ -55,7 +55,7 @@ function quantizeWeights(weights: RouteWeights): RouteWeights {
     shelter: quantize(weights.shelter),
     allowFerries: weights.allowFerries,
     allowSheds: weights.allowSheds,
-    fewerCrossings: weights.fewerCrossings,
+    allowCrossings: weights.allowCrossings,
   };
 }
 

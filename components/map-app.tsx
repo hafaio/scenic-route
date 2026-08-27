@@ -167,7 +167,7 @@ function loadRouting(
 // The weights the settings document holds, each falling back to its default. These are what a URL key
 // overrides and what a missing one leaves in place.
 function storedWeights(): RouteWeights {
-  const { weights, allowFerries, allowSheds, fewerCrossings } =
+  const { weights, allowFerries, allowSheds, allowCrossings } =
     storedSettings();
   const read = (key: FactorKey, fallback: number, min: number, max: number) => {
     const stored = weights[key];
@@ -199,7 +199,7 @@ function storedWeights(): RouteWeights {
     shelter: read("shelter", DEFAULT_SHELTER_WEIGHT, 0, MAX_SHELTER_WEIGHT),
     allowFerries,
     allowSheds,
-    fewerCrossings,
+    allowCrossings,
   };
 }
 
@@ -348,7 +348,7 @@ export default function MapApp() {
     DEFAULT_SHELTER_WEIGHT,
   );
   const [allowSheds, setAllowSheds] = useState<boolean>(true);
-  const [fewerCrossings, setFewerCrossings] = useState<boolean>(true);
+  const [allowCrossings, setAllowCrossings] = useState<boolean>(false);
   const shedDayRef = useRef<string>("");
   // Which (city, clock tick) the graph's ferry timetable was resolved for. The DAY picks the services
   // that run, but the sailing you catch moves with the clock inside that day, so this rebuilds on
@@ -801,10 +801,10 @@ export default function MapApp() {
       shelter: shelterWeight,
       allowFerries,
       allowSheds,
-      fewerCrossings,
+      allowCrossings,
     }),
     [
-      fewerCrossings,
+      allowCrossings,
       treeWeight,
       ferryWeight,
       landmarkWeight,
@@ -1151,7 +1151,7 @@ export default function MapApp() {
     const setters: Record<GateKey, (on: boolean) => void> = {
       allowFerries: setAllowFerries,
       allowSheds: setAllowSheds,
-      fewerCrossings: setFewerCrossings,
+      allowCrossings: setAllowCrossings,
     };
     setters[key](on);
     updateSettings({ [key]: on });
@@ -1353,7 +1353,7 @@ export default function MapApp() {
     setShelterWeight(route.weights.shelter);
     setAllowFerries(route.weights.allowFerries);
     setAllowSheds(route.weights.allowSheds);
-    setFewerCrossings(route.weights.fewerCrossings);
+    setAllowCrossings(route.weights.allowCrossings);
     if (route.customHour !== null) {
       setCustomHour(route.customHour);
     }
@@ -1788,7 +1788,7 @@ export default function MapApp() {
             shadeDataLost={shadeDataLost}
             shelterWeight={shelterWeight}
             allowSheds={allowSheds}
-            fewerCrossings={fewerCrossings}
+            allowCrossings={allowCrossings}
             directions={directions}
             progress={progress}
             directionsOpen={directionsOpen}

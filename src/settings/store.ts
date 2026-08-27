@@ -32,7 +32,7 @@ export interface Settings {
   weights: Partial<Record<FactorKey, number>>;
   allowFerries: boolean;
   allowSheds: boolean;
-  fewerCrossings: boolean;
+  allowCrossings: boolean;
   // The scenic factors in the order the route panel lists them. Empty is the table's own order, in
   // src/routing/factors.tsx.
   factorOrder: readonly FactorKey[];
@@ -58,7 +58,7 @@ export const DEFAULT_SETTINGS: Settings = {
   weights: {},
   allowFerries: true,
   allowSheds: true,
-  fewerCrossings: true,
+  allowCrossings: false,
   factorOrder: [],
   hiddenFactors: [],
   hiddenGates: [],
@@ -114,12 +114,43 @@ function factorKeys(value: unknown): FactorKey[] {
 
 const GATE_KEYS = new Set<string>(GATES.map(({ key }) => key));
 
+// What the crossings gate was called before the flag was inverted. A reader who hid it back then
+// stored that spelling, and filtering against the current names alone would drop it — putting a gate
+// they had deliberately hidden back in the panel, on upgrade, with nothing said. The weight beside it
+// already gets this treatment; the list of hidden ones needs it for the same rename.
+const RENAMED_GATES: Readonly<Record<string, GateKey>> = {
+  fewerCrossings: "allowCrossings",
+};
+
 function gateKeys(value: unknown): GateKey[] {
-  return Array.isArray(value)
-    ? (value.filter(
-        (key) => typeof key === "string" && GATE_KEYS.has(key),
-      ) as GateKey[])
-    : [];
+  if (!Array.isArray(value)) {
+    return [];
+  } else {
+    const keys: GateKey[] = [];
+    for (const key of value) {
+      if (typeof key !== "string") {
+        continue;
+      }
+      const current = RENAMED_GATES[key];
+      if (current !== undefined && !keys.includes(current)) {
+        keys.push(current);
+      } else if (GATE_KEYS.has(key) && !keys.includes(key as GateKey)) {
+        keys.push(key as GateKey);
+      }
+    }
+    return keys;
+  }
+}
+
+// What this device last chose about crossings, under either spelling. `fewerCrossings: false` was
+// how "crossings are free" was written before the flag was inverted.
+function allowCrossingsIn(stored: Partial<Settings>): boolean {
+  const legacy = (stored as { fewerCrossings?: unknown }).fewerCrossings;
+  if (stored.allowCrossings === undefined && typeof legacy === "boolean") {
+    return !legacy;
+  } else {
+    return stored.allowCrossings === true;
+  }
 }
 
 function stamps(value: unknown): Record<string, number> {
@@ -196,9 +227,10 @@ export function settingsFrom(
         ? folded.allowFerries
         : stored.allowFerries !== false,
       allowSheds: folded ? folded.allowSheds : stored.allowSheds !== false,
-      // Never had a pre-document key: it did not exist before the settings document did. Absent
-      // reads as ON, like the two gates above it.
-      fewerCrossings: stored.fewerCrossings !== false,
+      // Absent reads as OFF, unlike the two gates above it — see DEFAULT_WEIGHTS. A document saved
+      // before the flag was inverted spells it `fewerCrossings` and means the opposite, so it is
+      // read once and turned round rather than being silently dropped.
+      allowCrossings: allowCrossingsIn(stored),
       factorOrder: factorKeys(stored.factorOrder),
       hiddenFactors: factorKeys(hiddenFactors),
       hiddenGates: gateKeys(stored.hiddenGates),

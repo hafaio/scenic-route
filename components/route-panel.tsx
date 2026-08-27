@@ -103,7 +103,7 @@ interface RoutePanelProps {
   shadeDataLost: boolean;
   shelterWeight: number;
   allowSheds: boolean;
-  fewerCrossings: boolean;
+  allowCrossings: boolean;
   directions: Maneuver[] | null;
   progress: NavProgress | null; // live position along the route, or null when off-route/unlocated
   directionsOpen: boolean;
@@ -232,7 +232,7 @@ export default function RoutePanel({
   shadeDataLost,
   shelterWeight,
   allowSheds,
-  fewerCrossings,
+  allowCrossings,
   directions,
   progress,
   directionsOpen,
@@ -268,19 +268,19 @@ export default function RoutePanel({
   const gateTint: Record<GateKey, string> = {
     allowFerries: "text-blue-600 dark:text-blue-400",
     allowSheds: "text-orange-600 dark:text-orange-400",
-    fewerCrossings: "text-slate-600 dark:text-slate-300",
+    allowCrossings: "text-teal-600 dark:text-teal-400",
   };
   const gateOpen: Record<GateKey, boolean> = {
     allowFerries,
     allowSheds,
-    fewerCrossings,
+    allowCrossings,
   };
   // Whether the city has anything for this gate to act on. Crossings are not a dataset — every city
   // has streets to cross — so it is offered everywhere.
   const gateHere: Record<GateKey, boolean> = {
     allowFerries: capabilities.ferries,
     allowSheds: capabilities.sheds,
-    fewerCrossings: true,
+    allowCrossings: true,
   };
   // The highlighted maneuver row is scrolled into view whenever the next maneuver advances.
   const highlightRef = useRef<HTMLLIElement | null>(null);
@@ -396,7 +396,7 @@ export default function RoutePanel({
         factor.lost === undefined,
     ).length +
     // A gate is either open or shut rather than weighted, so what counts is a SHUT one the reader
-    // cannot see: it is still keeping ferries or sheds out of every route.
+    // cannot see: it is still shutting something out of every route.
     GATES.filter(
       (gate) =>
         hiddenGate.has(gate.key) && !gateOpen[gate.key] && gateHere[gate.key],

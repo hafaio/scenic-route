@@ -35,7 +35,7 @@ test("every route field survives a round trip", () => {
     shelter: 0.25,
     allowFerries: false,
     allowSheds: false,
-    fewerCrossings: true,
+    allowCrossings: true,
   };
   const state: RouteUrlState = {
     start: { lat: 40.712776, lng: -74.005974 },
@@ -119,4 +119,15 @@ test("rewriting the route keeps foreign keys, including the About flag", () => {
   );
   expect(hash).toBe("#about&ninth=1");
   expect(hashParams(hash).has("about")).toBe(true);
+});
+
+// The key was written as `crossings=0` before the flag was inverted and is `crossings=1` now, and in
+// both schemes it was only ever written when crossings are FREE. A link shared before the rename has
+// to keep describing the route it described.
+test("both spellings of the crossings key mean crossings are free", () => {
+  const decode = (hash: string) =>
+    decodeRoute(hashParams(hash)).weights.allowCrossings;
+  expect(decode("#crossings=0")).toBe(true); // shared before the rename
+  expect(decode("#crossings=1")).toBe(true); // shared since
+  expect(decode("#at=40.7,-74,15")).toBe(false); // absent: the default, priced
 });

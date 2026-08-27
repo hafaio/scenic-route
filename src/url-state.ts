@@ -73,7 +73,9 @@ export const DEFAULT_WEIGHTS: RouteWeights = {
   shelter: DEFAULT_SHELTER_WEIGHT,
   allowFerries: true,
   allowSheds: true,
-  fewerCrossings: true,
+  // Off: a route that spends crossings freely zigzags across a street to chase the shady side, which
+  // is the cost model buying something nobody asked for rather than a taste anyone holds.
+  allowCrossings: false,
 };
 
 export const DEFAULT_ROUTE_STATE: RouteUrlState = {
@@ -209,9 +211,16 @@ export function decodeRoute(
   weights.allowSheds = params.has("sheds")
     ? params.get("sheds") !== "0"
     : defaults.weights.allowSheds;
-  weights.fewerCrossings = params.has("crossings")
-    ? params.get("crossings") !== "0"
-    : defaults.weights.fewerCrossings;
+  // Both spellings of this key mean the same thing, because in both schemes it was only ever written
+  // when crossings are FREE: `crossings=0` before the flag was inverted (when it was named for the
+  // opposite state) and `crossings=1` since. So presence is the signal, and the value is read only
+  // to reject a string neither encoder ever wrote. Without this a link shared before the rename
+  // would decode to the opposite of the route it described.
+  const crossings = params.get("crossings");
+  weights.allowCrossings =
+    crossings === "0" || crossings === "1"
+      ? true
+      : defaults.weights.allowCrossings;
   const hour = params.get("time");
   const day = params.get("date");
   return {
@@ -244,8 +253,8 @@ export function encodeRoute(state: RouteUrlState): URLSearchParams {
   if (!state.weights.allowSheds) {
     params.set("sheds", "0");
   }
-  if (!state.weights.fewerCrossings) {
-    params.set("crossings", "0");
+  if (state.weights.allowCrossings) {
+    params.set("crossings", "1");
   }
   if (state.customHour !== null) {
     params.set("time", String(round(state.customHour, WEIGHT_DIGITS)));

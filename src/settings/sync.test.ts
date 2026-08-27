@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import type { OverlayId } from "../overlays/registry";
+import { GATE_KEYS } from "../routing/cost";
 import { DEFAULT_SETTINGS, type Settings } from "./store";
 import { mergeSettings } from "./sync";
 
@@ -68,4 +69,25 @@ test("the merged stamps carry whichever side won, so the next merge agrees", () 
   const merged = mergeSettings(local, remote);
   expect(merged.updatedAt.coverage).toBe(400);
   expect(mergeSettings(merged, remote)).toEqual(merged);
+});
+
+// The gates are spread from GATE_KEYS, so this walks that list rather than naming gates: a gate
+// added later is synced by construction, and a test that named them would pass while the code it
+// guards forgot one.
+test("every gate reaches the other device, not just the two the list was born with", () => {
+  for (const gate of GATE_KEYS) {
+    const local = {
+      ...DEFAULT_SETTINGS,
+      [gate]: false,
+      updatedAt: { [gate]: 1 },
+    };
+    const remote = {
+      ...DEFAULT_SETTINGS,
+      [gate]: true,
+      updatedAt: { [gate]: 2 },
+    };
+    expect(mergeSettings(local, remote)[gate], `${gate} did not sync`).toBe(
+      true,
+    );
+  }
 });

@@ -1,6 +1,11 @@
 import { expect, test } from "bun:test";
 import type { OverlayId } from "../overlays/registry";
-import { mergeOrder, orderedOverlays, settingsFrom } from "./store";
+import {
+  mergeOrder,
+  orderedOverlays,
+  type Settings,
+  settingsFrom,
+} from "./store";
 
 // The registry is what changes under a stored order — a release adds a layer, a release removes one —
 // so these pin what happens to an order the reader arranged when it does.
@@ -148,4 +153,47 @@ test("the pre-document keys are folded in exactly once", () => {
   expect(second.migrated).toBe(false);
   expect(second.settings.weights).toEqual({});
   expect(second.settings.allowSheds).toBe(true);
+});
+
+test("a document saved before the crossings flag was inverted is turned round, not dropped", () => {
+  const before = settingsFrom(
+    { weights: {}, fewerCrossings: false } as Partial<Settings>,
+    () => null,
+  );
+  expect(before.settings.allowCrossings).toBe(true); // "not fewer" meant free
+
+  const after = settingsFrom(
+    { weights: {}, allowCrossings: true } as Partial<Settings>,
+    () => null,
+  );
+  expect(after.settings.allowCrossings).toBe(true);
+
+  // The new spelling wins where a document somehow carries both.
+  const both = settingsFrom(
+    {
+      weights: {},
+      fewerCrossings: false,
+      allowCrossings: false,
+    } as Partial<Settings>,
+    () => null,
+  );
+  expect(both.settings.allowCrossings).toBe(false);
+});
+
+test("a gate hidden under its old name stays hidden after the rename", () => {
+  const { settings } = settingsFrom(
+    { weights: {}, hiddenGates: ["fewerCrossings"] } as Partial<Settings>,
+    () => null,
+  );
+  expect(settings.hiddenGates).toEqual(["allowCrossings"]);
+
+  // Both spellings in one document is one hidden gate, not two.
+  const both = settingsFrom(
+    {
+      weights: {},
+      hiddenGates: ["fewerCrossings", "allowCrossings", "allowFerries"],
+    } as Partial<Settings>,
+    () => null,
+  );
+  expect(both.settings.hiddenGates).toEqual(["allowCrossings", "allowFerries"]);
 });
