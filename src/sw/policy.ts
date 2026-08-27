@@ -28,6 +28,10 @@ const FEED_DIRS = ["sheds/", "ferry-schedule/"];
 const BASEMAP_HOST = "api.protomaps.com";
 const BASEMAP_TILE = /^\/tiles\/v\d+\/(\d+)\/(\d+)\/(\d+)\.[a-z]+$/;
 
+// The two geocoders src/geocode.ts calls: Photon answers the search box, Nominatim names a point
+// picked off the map.
+const GEOCODER_HOSTS = ["photon.komoot.io", "nominatim.openstreetmap.org"];
+
 // A city's extent, in degrees. Passed in rather than imported so the rule stays a pure function of
 // its inputs and the worker decides where the manifest comes from.
 export interface CityBounds {
@@ -106,6 +110,25 @@ export function fileRequest(
           cacheKey: `${target.origin}/${path}`,
         }
       : null;
+  }
+  if (GEOCODER_HOSTS.includes(target.host)) {
+    // A place you have already searched for still resolves with no signal. The whole query string is
+    // the identity, so every prefix of a name typed as-you-type is its own entry — which is what
+    // makes retyping a destination offline work keystroke by keystroke rather than only on the exact
+    // string that was typed before.
+    //
+    // Network first, so a live answer always wins and the cache is only ever the fallback. Filed
+    // under `overlay` because it is convenience that may be evicted, never under `routing`, which
+    // holds what a walk cannot proceed without.
+    //
+    // Caching these is not merely allowed: Nominatim's usage policy REQUIRES results to be cached,
+    // and both services are OpenStreetMap underneath, which this app already credits.
+    return {
+      path: `geocode/${target.host}${target.pathname}${target.search}`,
+      store: "overlay",
+      fresh: true,
+      cacheKey: target.href,
+    };
   }
   if (target.host === FEED_HOST) {
     const dir = target.pathname.startsWith(FEED_PREFIX)
