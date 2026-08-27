@@ -176,3 +176,36 @@ test("nothing else on that host is a tile", () => {
   expect(coversACity("tiles/v4.json", CITIES)).toBe(false);
   expect(coversACity("tiles/v4/15/9649/12315.mvt/extra", CITIES)).toBe(false);
 });
+
+// A place already searched for still resolves with no signal. The whole query is the identity, so
+// each prefix typed on the way to a name is its own entry — which is what makes retyping a
+// destination offline work as you type rather than only on the exact string typed before.
+test("the geocoders are cached, network first, as convenience rather than as routing", () => {
+  const search = fileRequest(
+    "https://photon.komoot.io/api?q=bedford&limit=6&lang=en",
+    SCOPE,
+  );
+  expect(search?.store).toBe("overlay");
+  expect(search?.fresh).toBe(true);
+  expect(search?.cacheKey).toBe(
+    "https://photon.komoot.io/api?q=bedford&limit=6&lang=en",
+  );
+
+  // A different query is a different entry, or one search would answer for another.
+  const other = fileRequest("https://photon.komoot.io/api?q=bedf", SCOPE);
+  expect(other?.cacheKey).not.toBe(search?.cacheKey);
+
+  // Reverse lookups, which name a point picked off the map, are the same bargain.
+  expect(
+    fileRequest(
+      "https://nominatim.openstreetmap.org/reverse?lat=40.7&lon=-74",
+      SCOPE,
+    )?.store,
+  ).toBe("overlay");
+});
+
+test("a geocoder answer never lands in the store a walk depends on", () => {
+  expect(
+    fileRequest("https://photon.komoot.io/api?q=anything", SCOPE)?.store,
+  ).not.toBe("routing");
+});
