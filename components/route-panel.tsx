@@ -129,7 +129,9 @@ interface RoutePanelProps {
   onArmDest: () => void;
   onToggleDirections: () => void;
   onToggleMinimize: () => void;
-  onSettings: () => void; // opens the settings page, where a hidden factor's slider still lives
+  // Opens the settings page. The route preferences, since that is where a hidden factor's slider
+  // went and what the reader is asking after when they tap the count.
+  onSettings: (section?: string) => void;
   onClose: () => void;
 }
 
@@ -591,7 +593,7 @@ export default function RoutePanel({
             {hiddenApplying > 0 ? (
               <button
                 type="button"
-                onClick={onSettings}
+                onClick={() => onSettings("routing")}
                 title={`${hiddenApplying} hidden preference${hiddenApplying === 1 ? "" : "s"} still ${hiddenApplying === 1 ? "applies" : "apply"} to this route — open settings`}
                 aria-label={`${hiddenApplying} hidden preference${hiddenApplying === 1 ? "" : "s"} still applying. Open settings.`}
                 className="flex shrink-0 items-center gap-1 rounded-full px-1.5 py-0.5 text-[11px] font-semibold tabular-nums text-slate-400 hover:bg-slate-100 dark:text-slate-500 dark:hover:bg-slate-700"

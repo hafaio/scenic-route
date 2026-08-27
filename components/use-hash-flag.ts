@@ -44,3 +44,42 @@ export function useHashFlag(name: string): [boolean, (open: boolean) => void] {
 
   return [open, set];
 }
+
+// The same key read for its VALUE rather than its presence, so one dialog can be opened at a
+// particular section: `#settings` opens it at the top, `#settings=layers` opens it scrolled to the
+// layers group. `null` is closed; the empty string is open with no section named, which is what a
+// bare `#settings` decodes to.
+export function useHashSection(
+  name: string,
+): [string | null, (section: string | null) => void] {
+  const [section, setSection] = useState<string | null>(null);
+
+  useEffect(() => {
+    const sync = () => setSection(hashParams(window.location.hash).get(name));
+    sync();
+    window.addEventListener("hashchange", sync);
+    return () => window.removeEventListener("hashchange", sync);
+  }, [name]);
+
+  const set = useCallback(
+    (next: string | null) => {
+      const params = hashParams(window.location.hash);
+      if (next === null) {
+        params.delete(name);
+        // Dropped without navigating; replaceState does not fire hashchange, so close by hand.
+        window.history.replaceState(
+          null,
+          "",
+          window.location.pathname + window.location.search + formatHash(params),
+        );
+        setSection(null);
+      } else {
+        params.set(name, next);
+        window.location.hash = formatHash(params); // pushes an entry and fires hashchange
+      }
+    },
+    [name],
+  );
+
+  return [section, set];
+}

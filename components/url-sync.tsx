@@ -16,8 +16,8 @@ interface UrlSyncProps {
 
 // Mirrors the route into the URL hash, live. Its own component so the once-a-minute clock tick it
 // subscribes to re-renders nothing but this. Always replaceState — a slider drag or an endpoint drag
-// would otherwise bury the back button under a hundred entries; the only pushState in the app is
-// opening the About dialog, which Back should close.
+// would otherwise bury the back button under a hundred entries. The pushStates in the app are the
+// dialogs — About and the settings page — which Back should close.
 export default function UrlSync({
   start,
   dest,

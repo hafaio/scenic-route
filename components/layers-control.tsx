@@ -16,7 +16,7 @@ interface LayersControlProps {
   city: City;
   active: ReadonlySet<OverlayId>;
   onToggle: (id: OverlayId) => void;
-  onSettings: () => void;
+  onSettings: (section?: string) => void;
 }
 
 const ROW_BASE =
@@ -130,7 +130,7 @@ export default function LayersControl({
             role="menuitem"
             onClick={() => {
               setMenuOpen(false);
-              onSettings();
+              onSettings("layers");
             }}
             className={`${ROW_IDLE} border-t border-slate-200/60 text-slate-500 dark:border-slate-700/60 dark:text-slate-400`}
           >

@@ -103,7 +103,7 @@ import SettingsDialog from "./settings-dialog";
 import SignInDialog from "./sign-in-dialog";
 import Toolbar from "./toolbar";
 import UrlSync from "./url-sync";
-import { useHashFlag } from "./use-hash-flag";
+import { useHashFlag, useHashSection } from "./use-hash-flag";
 import { useSettings } from "./use-settings";
 
 // leaflet touches `window` at module load, so the map must be client-only
@@ -280,7 +280,9 @@ export default function MapApp() {
   // Bound to the URL hash so About is deep-linkable (#about) and the back button closes it.
   const settings = useSettings();
   const [aboutOpen, setAboutOpen] = useHashFlag("about");
-  const [settingsOpen, setSettingsOpen] = useHashFlag("settings");
+  // Carries WHICH group was asked for, so the layers menu can land the reader on the layers.
+  const [settingsSection, setSettingsSection] = useHashSection("settings");
+  const settingsOpen = settingsSection !== null;
   const [locationError, setLocationError] = useState<
     "denied" | "unavailable" | null
   >(null);
@@ -1702,7 +1704,7 @@ export default function MapApp() {
           onSignOut={handleSignOut}
           onRefreshClaims={handleRefreshClaims}
           onAbout={() => setAboutOpen(true)}
-          onSettings={() => setSettingsOpen(true)}
+          onSettings={(section) => setSettingsSection(section ?? "")}
           onLogHere={handleLogHere}
           logHereDisabled={userLocation === null}
           logHereBusy={logging}
@@ -1814,7 +1816,7 @@ export default function MapApp() {
             onArmDest={handleArmDest}
             onToggleDirections={handleToggleDirections}
             onToggleMinimize={handleToggleMinimize}
-            onSettings={() => setSettingsOpen(true)}
+            onSettings={(section) => setSettingsSection(section ?? "")}
             onClose={handleToggleRouting}
           />
         ) : null}
@@ -1835,7 +1837,8 @@ export default function MapApp() {
             onWeight={handleWeight}
             onGate={handleGate}
             syncingAs={auth.kind === "signedIn" ? auth.info.user.email : null}
-            onClose={() => setSettingsOpen(false)}
+            section={settingsSection}
+            onClose={() => setSettingsSection(null)}
           />
         ) : null}
       </main>
