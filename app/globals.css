@@ -99,6 +99,35 @@
    invert + hue-rotate over the whole pane, which is why dark mode had near-black streets on a
    brown ground: inverting a style turns its most important lines into its least visible ones. */
 
+/* THE RULE FOR EVERY SURFACE ANCHORED TO THE VIEWPORT, stated once so the next panel someone adds
+   does not have to re-derive it: the outermost VISUAL box (the card or menu, never the shared
+   positioning wrapper) carries a max-height of 100dvh less its own anchor offsets and the opposite
+   edge's safe-area inset; inside it, exactly one list scrolls and everything else is pinned.
+
+   `dvh`, not `vh`: on iOS Safari and Android Chrome `100vh` is the viewport with the URL bar
+   RETRACTED, so a vh cap overflows by the height of the browser chrome exactly when that chrome is
+   showing — which is the failure this exists to prevent. The usual objection to dvh, relayout while
+   the chrome animates, does not apply here because the page itself never scrolls: the map is the
+   page.
+
+   This one serves the three surfaces that hang off the toolbar — the layers menu, the account menu
+   and the clock popover. They share an anchor (12px inset + a 40px button + an 8px gap = 60px), so
+   they share a cap. `env()` is 0 where there is no inset, so it needs no fallback. */
+.toolbar-menu,
+.toolbar-menu-shell {
+  max-height: calc(100dvh - 60px - env(safe-area-inset-bottom) - 0.75rem);
+}
+.toolbar-menu {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+/* The shell keeps its own overflow hidden for the corners; whichever child is marked scrolls. */
+.toolbar-menu-scroll {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
 /* A row of value chips: one line, however many there are, scrolled sideways rather than wrapped.
    There are eleven scenic factors now and a wrapped second line pushes the map controls around every
    time one is switched on. The scrollbar is hidden because the row is a summary rather than a
