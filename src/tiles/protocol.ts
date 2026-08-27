@@ -110,7 +110,7 @@ export interface DrawMessage {
   type: "draw";
   tileKey: number;
   coords: TileCoords;
-  ratio: number; // devicePixelRatio, which does not exist in a worker
+  ratio: number; // the capped pixel ratio (./raster), unreadable from a worker
   params: TileParams;
   canvas: OffscreenCanvas;
 }

@@ -8,6 +8,7 @@ import { edgeKind, type RoutingGraph, subEdgePath } from "../src/routing/graph";
 import type { RouteResult, RouteStep } from "../src/routing/search";
 import type { Snap } from "../src/routing/snap";
 import CanvasGrid from "../src/tiles/canvas-grid";
+import { KEEP_BUFFER, tileRatio } from "../src/tiles/raster";
 import { repeatable } from "../src/tiles/repaint";
 import { savedIcon, startIcon } from "./map-icons";
 
@@ -158,7 +159,7 @@ class RouteGrid extends CanvasGrid {
 
   createTile(coords: L.Coords): HTMLCanvasElement {
     const tile = document.createElement("canvas");
-    const ratio = window.devicePixelRatio || 1;
+    const ratio = tileRatio();
     tile.width = TILE_SIZE * ratio;
     tile.height = TILE_SIZE * ratio;
     const context = tile.getContext("2d");
@@ -276,6 +277,7 @@ export default function RouteLayer({
       pane: PANE_NAME,
       minZoom: MIN_ZOOM,
       maxZoom: MAX_ZOOM,
+      keepBuffer: KEEP_BUFFER,
     });
     gridRef.current = grid;
     grid.addTo(map);

@@ -2,6 +2,7 @@
 
 import type L from "leaflet";
 import { leafletLayer } from "protomaps-leaflet";
+import { KEEP_BUFFER, tileRatio } from "../tiles/raster";
 import type { Flavor } from "./flavor";
 import { basemapLabelRules, basemapPaintRules } from "./rules";
 
@@ -37,12 +38,14 @@ export function basemapLayer(flavor: Flavor): L.Layer {
   return leafletLayer({
     url: BASEMAP_URL,
     maxDataZoom: BASEMAP_MAX_DATA_ZOOM,
-    // Both carried over from the raster layer this replaced. `maxZoom` is what the MAP's zoom range
+    // `maxZoom` is carried over from the raster layer this replaced: it is what the MAP's zoom range
     // is derived from, so dropping it would quietly cap the whole app below the zooms the swept
-    // shade and the route detail live at; `keepBuffer` holds a ring of tiles around the viewport so
-    // a pan after a zoom does not immediately redraw.
+    // shade and the route detail live at.
     maxZoom: 20,
-    keepBuffer: 4,
+    // The renderer would otherwise size its tile canvases by the raw pixel ratio, which is the one
+    // choice on the map that costs a phone hundreds of megabytes (../tiles/raster).
+    devicePixelRatio: tileRatio(),
+    keepBuffer: KEEP_BUFFER,
     paintRules: basemapPaintRules(flavor),
     labelRules: basemapLabelRules(flavor),
     backgroundColor: flavor.background as string,
