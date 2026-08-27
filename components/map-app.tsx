@@ -105,6 +105,7 @@ import SignInDialog from "./sign-in-dialog";
 import Toolbar from "./toolbar";
 import UrlSync from "./url-sync";
 import { useHashFlag, useHashSection } from "./use-hash-flag";
+import { useStandalone } from "./use-install";
 import { useSettings } from "./use-settings";
 
 // leaflet touches `window` at module load, so the map must be client-only
@@ -286,6 +287,12 @@ export default function MapApp() {
   const [locationError, setLocationError] = useState<
     "denied" | "unavailable" | null
   >(null);
+  // Bumped to ask for location again: the watch below is registered once per value of it. Without a
+  // retry a reader who allows location in Settings after refusing it gets nothing until the app is
+  // relaunched, and iOS keeps a home-screen app alive for days — which is most of what "Safari finds
+  // me but the installed app cannot" is.
+  const [locationAttempt, setLocationAttempt] = useState<number>(0);
+  const standalone = useStandalone();
   const [banner, setBanner] = useState<string | null>(null);
   // The basemap is the one layer with no menu row to badge, and the one whose absence leaves the map
   // unreadable rather than just emptier — overlays floating on blank ground with no streets to place
@@ -491,9 +498,16 @@ export default function MapApp() {
     }
   }, [syncingUid]);
 
+  // The installed app is its own permission container: iOS copies cookies from Safari at install
+  // time and nothing else, so a site allowed in Safari is a fresh ask here and browser settings do
+  // not govern it. Sending an installed reader to the wrong Settings screen is worse than saying
+  // nothing, and the app's own Location entry only exists once a request has run — which the retry
+  // below is what re-runs.
   const locationHint =
     locationError === "denied"
-      ? "Location access is blocked — enable it in your browser settings."
+      ? standalone
+        ? "Location is blocked for this app — allow it in iOS Settings › Privacy & Security › Location Services › Scenic Route, then tap the location button. If Scenic Route is not listed, remove it from the Home Screen and add it again."
+        : "Location access is blocked — enable it in your browser settings."
       : locationError === "unavailable"
         ? "Couldn't get your location. Make sure location services are on."
         : null;
@@ -520,6 +534,7 @@ export default function MapApp() {
   }, [isAdmin]);
 
   // follow centering lives in the map-side controller (reacts to userLocation + following)
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the attempt count is not read here, it is what re-issues the watch
   useEffect(() => {
     if (!("geolocation" in navigator)) {
       return;
@@ -567,7 +582,7 @@ export default function MapApp() {
       { enableHighAccuracy: false, maximumAge: 30_000 },
     );
     return () => navigator.geolocation.clearWatch(watchId);
-  }, []);
+  }, [locationAttempt]);
 
   // The live fix, but only while the active city could do anything with it. Routing stays within one
   // city, so a fix outside the one on screen is not a start, is not somewhere to centre, and is not a
@@ -613,6 +628,16 @@ export default function MapApp() {
     }
   }, [city, dest, manualStart]);
 
+  // Asking again, from a control the reader pressed — which is both what picks up a permission they
+  // have just granted in Settings and, on iOS, the gesture WebKit would rather see a prompt come
+  // from. Clearing the error first is what lets a second refusal re-raise a banner already dismissed.
+  const retryLocation = useCallback(() => {
+    if (userLocation === null) {
+      setLocationError(null);
+      setLocationAttempt((attempt) => attempt + 1);
+    }
+  }, [userLocation]);
+
   // The toggle reads and writes the derived state, so pressing it always does what the button says.
   // Engaging it from a city you are not in means "take me to me", which moves the active city with
   // the camera rather than lighting a control that centres nothing.
@@ -621,11 +646,13 @@ export default function MapApp() {
       setFollowing(false);
     } else {
       setFollowing(true);
-      if (userLocation && !routableLocation) {
+      if (userLocation === null) {
+        retryLocation();
+      } else if (!routableLocation) {
         setCity(nearestCity(userLocation));
       }
     }
-  }, [followLive, userLocation, routableLocation]);
+  }, [followLive, userLocation, routableLocation, retryLocation]);
 
   // Picking a city frames it and stops following, since the visitor has just said they want to look
   // somewhere other than where they are.
@@ -1217,10 +1244,13 @@ export default function MapApp() {
   }, []);
 
   // Clearing the start — via the X or the dropdown's "My location" row — resets it to the live position.
+  // Both clearing the start and asking for "my location" mean the same thing here: route from the
+  // live fix. So they are also the two places worth asking for one again when there is none.
   const handleClearStart = useCallback(() => {
     setManualStart(null);
     setPickTarget((target) => (target === "start" ? null : target));
-  }, []);
+    retryLocation();
+  }, [retryLocation]);
 
   const handleArmStart = useCallback(() => {
     setPickTarget((target) => (target === "start" ? null : "start"));
@@ -1723,8 +1753,9 @@ export default function MapApp() {
             )}
           </div>
         </div>
+        {/* under the dialogs' 1100, whose titles it used to cover, and over the map's own chrome */}
         {banner ? (
-          <div className="absolute top-16 left-1/2 z-[1200] flex max-w-[90vw] -translate-x-1/2 items-center gap-3 rounded-2xl bg-slate-900/90 px-4 py-2.5 text-sm font-medium text-white shadow-xl backdrop-blur-md dark:bg-slate-100/95 dark:text-slate-900">
+          <div className="absolute inset-x-3 top-16 z-[1050] mx-auto flex w-fit items-center gap-3 rounded-2xl bg-slate-900/90 px-4 py-2.5 text-sm font-medium text-white shadow-xl backdrop-blur-md dark:bg-slate-100/95 dark:text-slate-900">
             <span>{banner}</span>
             <button
               type="button"

@@ -20,6 +20,16 @@ function isInstalled(): boolean {
   );
 }
 
+// Whether this is the installed home-screen app rather than a browser tab. Read in an effect because
+// the server has no window to ask, so the first render must assume a tab.
+export function useStandalone(): boolean {
+  const [standalone, setStandalone] = useState<boolean>(false);
+  useEffect(() => {
+    setStandalone(isInstalled());
+  }, []);
+  return standalone;
+}
+
 // Whether to offer installing at all, and the browser's own install flow when it has one. `install`
 // resolves false when there is none, and the caller should explain the browser's menu instead.
 export function useInstall(): {
