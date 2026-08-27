@@ -1,14 +1,18 @@
 name: build
 
 # The push filter keeps every commit of a Sapling stack from building: only main is pushed as a
-# branch. The daily sheds job pushes to main too, so the two paths it writes are ignored — nothing
-# here reads either artifact, and a push carrying only those bytes has nothing to lint or test.
-# `paths-ignore` is on the push trigger alone: a PR that touches them is a person changing the
-# pipeline, and builds.
+# branch. The daily sheds job and the monthly search-data job push to main too, so the paths they
+# write are ignored — nothing here reads any of those artifacts, and a push carrying only those bytes
+# has nothing to lint or test. `paths-ignore` is on the push trigger alone: a PR that touches them is
+# a person changing the pipeline, and builds.
 on:
   push:
     branches: [main]
-    paths-ignore: ["public/sheds/**", "public/ferry-schedule/**"]
+    paths-ignore:
+      - "public/sheds/**"
+      - "public/ferry-schedule/**"
+      - "public/addresses/**"
+      - "public/search/**"
   pull_request:
   workflow_call:
     inputs:

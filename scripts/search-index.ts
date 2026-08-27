@@ -21,6 +21,8 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { constants, gunzipSync, gzipSync } from "node:zlib";
+import { cityById } from "../src/cities";
+import type { OverlayId } from "../src/overlays/registry";
 import { decodeGraph, type GraphIdentity } from "../src/routing/graph";
 import { decodePois } from "../src/routing/pois";
 import { prettifyStreetName } from "../src/routing/street-names";
@@ -61,6 +63,12 @@ const DATA_DIR = join(ROOT, "data");
 const PLACES_DIR = join(DATA_DIR, "places");
 const ADDRESS_DIR = join(ROOT, "public", "addresses");
 const GRAPH_DIR = join(ROOT, "public", "routing");
+// The curated point sets, read where the CLIENT reads them — public/<set>/<city>.bin, which the tile
+// build copies out of data/ and the deploy publishes — rather than from the data/ originals, which
+// are Git LFS. Those bytes are identical, so this is not about the contents: it is that the monthly
+// refresh job can fetch these off the deployed site as the graph beside them already is, and draw
+// nothing against the account's LFS bandwidth for files the site is serving anyway.
+const POINT_DIR = join(ROOT, "public");
 const SEARCH_DIR = join(ROOT, "public", "search");
 
 const CITIES = ["nyc", "sf"] as const;
@@ -866,22 +874,46 @@ async function readAddresses(cityId: string): Promise<AddressIndex> {
   return decodeAddresses(gunzipSync(gzipped));
 }
 
-// One of the shared point blobs (LMRK, ARTW, LGCY, DINE), or null where this city has none — San
-// Francisco publishes no outdoor-dining table.
+// Whether a set that is not on disk is a city that does not have one or a checkout that has not
+// built it. The city's own overlay list (src/cities.ts) settles it, because that list is authored
+// and is what the app offers: San Francisco publishes no outdoor-dining table and offers no
+// commercial layer, so its missing DINE file is the city. New York offering the layer and having no
+// file is a build that did not run, and that has to be loud — a set read as absent is two thousand
+// documents quietly missing from an index that still writes and still commits.
+async function pointFile(
+  set: string,
+  overlay: OverlayId,
+  cityId: string,
+): Promise<ArrayBuffer | null> {
+  const path = join(POINT_DIR, set, `${cityId}.bin`);
+  const file = await readFile(path).catch(() => null);
+  if (file !== null) {
+    return file.buffer.slice(
+      file.byteOffset,
+      file.byteOffset + file.byteLength,
+    );
+  } else if (cityById(cityId)?.overlays.includes(overlay) === true) {
+    throw new Error(
+      `${path} is missing, and ${cityId} offers the ${overlay} layer, so it should be there:` +
+        " the tile build copies these out of data/ (bun run build-tiles)",
+    );
+  } else {
+    return null;
+  }
+}
+
+// One of the shared point blobs (LMRK, ARTW, LGCY, DINE), or null where this city has none.
 async function readPoints(
   directory: string,
+  overlay: OverlayId,
   cityId: string,
   magic: string,
 ): Promise<NamedPoint[] | null> {
-  const path = join(DATA_DIR, directory, `${cityId}.bin`);
-  const file = await readFile(path).catch(() => null);
+  const file = await pointFile(directory, overlay, cityId);
   if (file === null) {
     return null;
   }
-  const { lats, lngs, names } = decodePois(
-    file.buffer.slice(file.byteOffset, file.byteOffset + file.byteLength),
-    magic,
-  );
+  const { lats, lngs, names } = decodePois(file, magic);
   const points: NamedPoint[] = [];
   for (let point = 0; point < names.length; point += 1) {
     // An unnamed artwork — 410 of New York's 1,498 — is a point on a map and nothing a search can
@@ -915,14 +947,11 @@ async function neighborhoodPoints(
 // feed files. The routes ride in the category slot, which is what lets a result still read
 // "14 St-Union Sq (4/5/6/L…)".
 async function stationPoints(cityId: string): Promise<NamedPoint[] | null> {
-  const path = join(DATA_DIR, "subway", `${cityId}.bin`);
-  const file = await readFile(path).catch(() => null);
+  const file = await pointFile("subway", "subway", cityId);
   if (file === null) {
     return null;
   }
-  const { routes, stations } = decodeSubway(
-    file.buffer.slice(file.byteOffset, file.byteOffset + file.byteLength),
-  );
+  const { routes, stations } = decodeSubway(file);
   return mergeStations(stations).map((station) => {
     const serving = stationRoutes(station, routes).join("/");
     return {
@@ -971,21 +1000,21 @@ async function citySets(cityId: string): Promise<PointSet[]> {
     "landmarks",
     LANDMARK_PROMINENCE,
     CURATED_PRIORITY,
-    await readPoints("landmarks", cityId, "LMRK"),
+    await readPoints("landmarks", "landmarks", cityId, "LMRK"),
   );
   add(
     "legacy-business",
     "legacy",
     LEGACY_PROMINENCE,
     CURATED_PRIORITY,
-    await readPoints("legacy", cityId, "LGCY"),
+    await readPoints("legacy", "legacy", cityId, "LGCY"),
   );
   add(
     "art",
     "art",
     ART_PROMINENCE,
     CURATED_PRIORITY,
-    await readPoints("art", cityId, "ARTW"),
+    await readPoints("art", "art", cityId, "ARTW"),
   );
   add(
     "neighborhood",
@@ -1001,7 +1030,7 @@ async function citySets(cityId: string): Promise<PointSet[]> {
     "dining",
     DINING_PROMINENCE,
     DINING_PRIORITY,
-    await readPoints("dining", cityId, "DINE"),
+    await readPoints("dining", "commercial", cityId, "DINE"),
   );
   return sets;
 }
