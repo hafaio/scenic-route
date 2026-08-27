@@ -8,7 +8,9 @@ export const dynamic = "force-static";
 export default function manifest(): MetadataRoute.Manifest {
   return {
     name: "Scenic Route",
-    short_name: "Scenic",
+    // The Home Screen label, and the name iOS files the installed app under in Location Services —
+    // which the location banner names back to the reader, so the two have to agree.
+    short_name: "Scenic Route",
     description: "Walking directions that pick shade, trees and water over the shortest line",
     start_url: ".",
     scope: ".",
