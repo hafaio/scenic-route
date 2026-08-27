@@ -36,6 +36,8 @@ const GRAPH = graphOf([
   "GRAND STREET",
   "SIXTH GRAND COURT",
   "ATLANTIC AVENUE",
+  "5 AVE",
+  "W  239 ST", // two spaces, as the source writes it
 ]);
 
 test("a name that starts with the query outranks one that merely contains it", () => {
@@ -51,6 +53,24 @@ test("streets are found by prefix and ranked, best first", () => {
     "Grand Street",
     "Sixth Grand Court",
   ]);
+});
+
+// The prettified name is what the list shows, and comparing against only that quietly lost every
+// numbered street in New York: "5 Av" is on the sign, "5th Avenue" is this app's own spelling, and
+// neither starts with the other.
+test("a numbered street is found the way it is signposted, and the way we print it", () => {
+  for (const query of ["5 Av", "5 AVE", "5th Ave", "5th Avenue"]) {
+    expect(searchStreets(GRAPH, query, 5).map((hit) => hit.place.name)).toEqual(
+      ["5th Avenue"],
+    );
+  }
+});
+
+// The source writes two spaces between the tokens; nobody types it that way.
+test("a run of whitespace in the source name is one space to a search", () => {
+  expect(
+    searchStreets(GRAPH, "W 239 St", 5).map((hit) => hit.place.name),
+  ).toEqual(["West 239th Street"]);
 });
 
 test("one letter matches half a city, so it matches nothing", () => {
