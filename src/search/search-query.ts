@@ -27,8 +27,16 @@ import {
   streetAddresses,
 } from "./addresses";
 import {
+  blockToken,
+  dictCursorAt,
+  dictToken,
+  fuzzyMatches,
+  maxEditDistance,
+  reachesWithinEdits,
+  stepDict,
+} from "./dictionary";
+import {
   compareBytes,
-  DICT_BLOCK,
   type DocKind,
   HAS_NUMBER,
   HAS_STREET,
@@ -57,6 +65,11 @@ export const DEFAULT_LIMIT = 20;
 // named them all — cannot be read off the accumulators, so it is applied after the names are
 // decoded, to a pool wide enough that it can still change the order of what is shown.
 const POOL_FACTOR = 4;
+// And how much wider again once a misspelt word has been corrected. A correction can add hundreds of
+// documents that each answer one more word of the query than they would have, and the cheap ordering
+// cannot yet see that two of those words landed on the SAME word of the name — so without the room,
+// a name that answered the query properly from across town is cut before anything reads it.
+const FUZZY_POOL_FACTOR = 4;
 
 // Quality is summed in the accumulator as a fixed-point integer, so the array can be a Uint16Array:
 // eight tokens at 1.0 is 8,000, well inside it.
@@ -323,6 +336,7 @@ export function decodeSearchIndex(bytes: Uint8Array): SearchIndex {
 }
 
 const decoder = new TextDecoder();
+const encoder = new TextEncoder();
 
 export function docName(index: SearchIndex, doc: number): string {
   const start = index.nameOffset[doc];
@@ -371,61 +385,6 @@ function docStreetIndex(index: SearchIndex, doc: number): number {
   }
 }
 
-// Where the walk over the dictionary is: the token it has just read, spelt out from the front-coded
-// tail, and where that token's postings start. `index` is the dictionary position, so that a caller
-// can tell a run's extent.
-interface DictCursor {
-  token: Uint8Array;
-  length: number;
-  entry: number;
-  posting: number;
-  index: number;
-  postingCount: number;
-  postingBytes: number;
-}
-
-function dictCursorAt(index: SearchIndex, block: number): DictCursor {
-  const restart = block * RESTART_BYTES;
-  return {
-    token: new Uint8Array(64),
-    length: 0,
-    entry: index.dictStart + index.restarts.getUint32(restart, true),
-    posting: index.postingsStart + index.restarts.getUint32(restart + 4, true),
-    index: block * DICT_BLOCK,
-    postingCount: 0,
-    postingBytes: 0,
-  };
-}
-
-// Reads the next entry into the cursor. False at the end of the dictionary; the token itself is
-// `cursor.token` for `cursor.length` bytes, and the previous entry's postings are stepped over on
-// the way, which is what `postingBytes` is stored for.
-function stepDict(index: SearchIndex, cursor: DictCursor): boolean {
-  if (cursor.index >= index.tokenCount) {
-    return false;
-  }
-  cursor.posting += cursor.postingBytes;
-  const entry: Cursor = { offset: cursor.entry };
-  const lcp = readUnsignedVarint(index.bytes, entry);
-  const tail = readUnsignedVarint(index.bytes, entry);
-  if (lcp + tail > cursor.token.length) {
-    const grown = new Uint8Array(lcp + tail + 64);
-    grown.set(cursor.token);
-    cursor.token = grown;
-  }
-  cursor.token.set(
-    index.bytes.subarray(entry.offset, entry.offset + tail),
-    lcp,
-  );
-  cursor.length = lcp + tail;
-  entry.offset += tail;
-  cursor.postingCount = readUnsignedVarint(index.bytes, entry);
-  cursor.postingBytes = readUnsignedVarint(index.bytes, entry);
-  cursor.entry = entry.offset;
-  cursor.index += 1;
-  return true;
-}
-
 function compareToPrefix(
   token: Uint8Array,
   length: number,
@@ -442,23 +401,25 @@ function compareToPrefix(
   return length < prefix.length ? -1 : 0;
 }
 
-// The first token of a block, read without decoding anything: a block's first entry has an lcp of
-// zero, so its tail IS the token.
-function blockToken(index: SearchIndex, block: number): Uint8Array {
-  const entry: Cursor = {
-    offset:
-      index.dictStart + index.restarts.getUint32(block * RESTART_BYTES, true),
-  };
-  readUnsignedVarint(index.bytes, entry);
-  const tail = readUnsignedVarint(index.bytes, entry);
-  return index.bytes.subarray(entry.offset, entry.offset + tail);
-}
-
 // One dictionary token a query token reached, and how well.
 interface Match {
   postings: number;
   postingCount: number;
   quality: number;
+}
+
+// One word of the query: what was typed, the bytes the dictionary is searched with, whether it is
+// the word still being typed, how wrong it was allowed to be spelt — zero until the fuzzy pass runs,
+// and zero for every word too short for it — and the dictionary tokens it reached.
+interface QueryWord {
+  text: string;
+  bytes: Uint8Array;
+  // Which bit of the per-document mask is this word's, which is where it sits in the query — fixed,
+  // so that the corrections a second pass adds land on the same bit the first pass used.
+  mark: number;
+  last: boolean;
+  edits: number;
+  matches: Match[];
 }
 
 // Every dictionary token carrying `prefix`, which is a contiguous run: the block-first tokens are
@@ -486,6 +447,7 @@ function expand(
   const matches: Match[] = [];
   const cursor = dictCursorAt(index, block);
   while (stepDict(index, cursor)) {
+    dictToken(index, cursor);
     const order = compareToPrefix(cursor.token, cursor.length, prefix);
     if (order > 0) {
       break;
@@ -704,14 +666,34 @@ function placeFactor(
 // so this is asked of the decoded name — affordable only because the pool's names are decoded for
 // the order bonuses anyway.
 function doubledWords(
-  queryWords: readonly string[],
+  queryWords: readonly QueryWord[],
   nameWords: readonly string[],
 ): number {
+  const encoded = new Array<Uint8Array | null>(nameWords.length).fill(null);
+  // Whether the word the reader typed is a word of this name, by the same rule the dictionary was
+  // searched under: it starts one, or — where it was looked for misspelt — it is within the same
+  // number of edits of the start of one. Without the second half a word that only matched through a
+  // correction claims nothing, and the name word it corrected to is left free for the next query
+  // word to claim as well, which is the doubling this whole function exists to stop.
+  const reaches = (word: number, name: number): boolean => {
+    if (nameWords[name].startsWith(queryWords[word].text)) {
+      return true;
+    } else if (queryWords[word].edits === 0) {
+      return false;
+    } else {
+      encoded[name] ??= encoder.encode(nameWords[name]);
+      return reachesWithinEdits(
+        queryWords[word].bytes,
+        encoded[name] as Uint8Array,
+        queryWords[word].edits,
+      );
+    }
+  };
   const takenBy = new Array<number>(nameWords.length).fill(-1);
   const walked = new Array<boolean>(nameWords.length).fill(false);
   const claim = (word: number): boolean => {
     for (let name = 0; name < nameWords.length; name += 1) {
-      if (walked[name] || !nameWords[name].startsWith(queryWords[word])) {
+      if (walked[name] || !reaches(word, name)) {
         continue;
       }
       walked[name] = true;
@@ -726,7 +708,7 @@ function doubledWords(
   let reached = 0;
   let paired = 0;
   for (let word = 0; word < queryWords.length; word += 1) {
-    if (!nameWords.some((name) => name.startsWith(queryWords[word]))) {
+    if (!nameWords.some((_, name) => reaches(word, name))) {
       continue; // this word is answered by something other than the name, or by nothing
     }
     reached += 1;
@@ -738,35 +720,70 @@ function doubledWords(
   return reached - paired;
 }
 
-export function searchNames(
-  index: SearchIndex,
-  { text, centre, limit = DEFAULT_LIMIT, kinds }: SearchRequest,
-): SearchHit[] {
-  const tokens = queryTokens(text);
-  if (tokens.join("").length < MIN_QUERY_CHARS) {
-    return [];
-  }
-  const wanted = kinds === undefined ? null : new Set(kinds);
-  const encoder = new TextEncoder();
-  const expansions = tokens
-    .map((token, position) =>
-      expand(index, encoder.encode(token), position === tokens.length - 1),
-    )
-    // Cheapest first, so the expensive token walks a list that most documents have already failed
-    // out of, and the last walk is the one that collects the survivors.
-    .sort(
-      (left, right) =>
-        left.reduce((sum, match) => sum + match.postingCount, 0) -
-        right.reduce((sum, match) => sum + match.postingCount, 0),
-    );
+// A word one edit from what the dictionary holds is scored well below the same word spelt right, and
+// a word two edits away well below that: what these multiply is the prefix quality the same match
+// would have earned had it been typed correctly, so a misspelling can only ever ADD an answer under
+// the ones that match properly, never displace them.
+const EDIT_PENALTY = [1, 0.55, 0.3];
 
+// Every dictionary token within an edit or two of a word, as matches to be unioned exactly like a
+// prefix run. The tokens the walk reaches at no edits at all are the ones that simply carry the word
+// as a prefix, which `expand` has already returned, so they are dropped here rather than having the
+// largest posting lists of the query read a second time.
+function fuzzyExpand(
+  index: SearchIndex,
+  token: Uint8Array,
+  last: boolean,
+  distance: number,
+): Match[] {
+  const matches: Match[] = [];
+  for (const near of fuzzyMatches(index, token, distance)) {
+    if (near.distance === 0) {
+      continue;
+    }
+    matches.push({
+      postings: near.postings,
+      postingCount: near.postingCount,
+      quality:
+        (last
+          ? PREFIX_FLOOR + (PREFIX_SPAN * near.matchedLength) / near.tokenLength
+          : INNER_PREFIX_QUALITY) * EDIT_PENALTY[near.distance],
+    });
+  }
+  return matches;
+}
+
+// Cheapest first, so the expensive word walks a list that most documents have already failed out of.
+function byMass(words: readonly QueryWord[]): readonly QueryWord[] {
+  return [...words].sort(
+    (left, right) => postingMass(left) - postingMass(right),
+  );
+}
+
+function postingMass(word: QueryWord): number {
+  return word.matches.reduce((sum, match) => sum + match.postingCount, 0);
+}
+
+// Reads each word's matches into the accumulators, appending to `candidates` every document as it
+// completes the last word of the query it was missing — which is what saves a sweep over the city
+// afterwards to find them.
+//
+// It is called twice for a query that had to be corrected, the second time with the corrections
+// ALONE: what a word already reached it keeps, at the quality it first arrived with, and since every
+// correction scores below every properly spelt match, first is also best. So the second pass reads
+// only the posting lists the first one did not, which is what keeps a corrected query from costing
+// twice a plain one — and matters most where one word of the query is a single letter carrying tens
+// of thousands of documents.
+function accumulate(
+  index: SearchIndex,
+  words: readonly QueryWord[],
+  queryWords: number,
+  candidates: number[],
+): void {
   const { matched, hitCount, quality, touched } = index.accumulators;
-  const everyToken = (1 << expansions.length) - 1;
-  const candidates: number[] = [];
-  for (let position = 0; position < expansions.length; position += 1) {
-    const mark = 1 << position;
-    const final = position === expansions.length - 1;
-    for (const match of expansions[position]) {
+  for (const word of words) {
+    const mark = 1 << word.mark;
+    for (const match of word.matches) {
       const cursor: Cursor = { offset: match.postings };
       const points = Math.round(match.quality * QUALITY_SCALE);
       let doc = 0;
@@ -781,10 +798,63 @@ export function searchNames(
         matched[doc] |= mark;
         hitCount[doc] += 1;
         quality[doc] += points;
-        if (final && hitCount[doc] === tokens.length) {
+        if (hitCount[doc] === queryWords) {
           candidates.push(doc);
         }
       }
+    }
+  }
+}
+
+export function searchNames(
+  index: SearchIndex,
+  { text, centre, limit = DEFAULT_LIMIT, kinds }: SearchRequest,
+): SearchHit[] {
+  const tokens = queryTokens(text);
+  if (tokens.join("").length < MIN_QUERY_CHARS) {
+    return [];
+  }
+  const wanted = kinds === undefined ? null : new Set(kinds);
+  const queryWords: QueryWord[] = tokens.map((token, position) => {
+    const bytes = encoder.encode(token);
+    const last = position === tokens.length - 1;
+    return {
+      text: token,
+      bytes,
+      mark: position,
+      last,
+      edits: 0,
+      matches: expand(index, bytes, last),
+    };
+  });
+
+  const { matched, hitCount, quality, touched } = index.accumulators;
+  const everyToken = (1 << queryWords.length) - 1;
+  const candidates: number[] = [];
+  accumulate(index, byMass(queryWords), tokens.length, candidates);
+  // What was typed reaches almost nothing, so it is worth asking whether it was typed wrong. A query
+  // spelt right never pays for this, and one that is not pays for one walk over the dictionary per
+  // word — after which the walk above runs again over the corrections, because a word one edit away
+  // can complete a document that only one of the properly spelt words reached.
+  let corrected = false;
+  if (candidates.length < limit) {
+    for (const word of queryWords) {
+      const edits = maxEditDistance(word.bytes.length);
+      // Descending, since a document keeps the first quality to reach it and the best has to be
+      // first — one edit before two.
+      word.matches =
+        edits === 0
+          ? []
+          : fuzzyExpand(index, word.bytes, word.last, edits).sort(
+              (left, right) => right.quality - left.quality,
+            );
+      if (word.matches.length > 0) {
+        word.edits = edits;
+        corrected = true;
+      }
+    }
+    if (corrected) {
+      accumulate(index, byMass(queryWords), tokens.length, candidates);
     }
   }
   // How many of the query's words the street a document sits on accounted for, for the documents
@@ -804,7 +874,7 @@ export function searchNames(
   }
 
   const pool: Candidate[] = [];
-  const poolSize = limit * POOL_FACTOR;
+  const poolSize = limit * POOL_FACTOR * (corrected ? FUZZY_POOL_FACTOR : 1);
   for (const doc of candidates) {
     if (wanted !== null && !wanted.has(unpackKind(index.kindFlags[doc]))) {
       continue;
@@ -875,11 +945,12 @@ export function searchNames(
   const typed = new Set(tokens);
   const finalists = pool.map(({ doc, quality, named, linked, meters }) => {
     const name = docName(index, doc);
-    const words = tokenize(name);
-    const answered = named - doubledWords(tokens, words);
+    const nameWords = tokenize(name);
+    const answered = named - doubledWords(queryWords, nameWords);
     const { tokenCount } = unpackTokenInfo(index.tokenInfo[doc]);
-    const leads = words.length > 0 && words[0].startsWith(tokens[0]);
-    const whole = words.length > 0 && words.every((word) => typed.has(word));
+    const leads = nameWords.length > 0 && nameWords[0].startsWith(tokens[0]);
+    const whole =
+      nameWords.length > 0 && nameWords.every((word) => typed.has(word));
     const place = placeFactor(
       index,
       doc,
@@ -890,7 +961,7 @@ export function searchNames(
         (quality * answered) / named,
         leads,
         tokens.length,
-        words.length,
+        nameWords.length,
       ),
     );
     // A word that only doubled up on another's takes its share of the quality with it: the
