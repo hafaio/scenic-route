@@ -86,6 +86,16 @@ export const DEFAULT_ROUTE_STATE: RouteUrlState = {
   customDay: null,
 };
 
+// A destination named in words — "205 East Houston" — instead of as a point. It sits in the hash
+// beside `from` and `to` because it says the same thing they do, in the one scheme this app writes
+// links in, and the reader can read it. Unlike them it is an instruction rather than state: nothing
+// in the app ever writes it, and on arrival it is resolved against the city's own index and taken
+// out of the URL (`withoutDestQuery`), so a link that has been acted on cannot fire again on reload
+// or travel on to the next person carrying a stale query. Taking it out is its own step rather than
+// the hash writer's business: that writer has nothing to say until a route exists, which is exactly
+// the state a bare `#q=` link arrives in.
+const DEST_QUERY_KEY = "q";
+
 const COORD_DIGITS = 6; // ~0.1 m
 const WEIGHT_DIGITS = 2;
 const ZOOM_DIGITS = 2;
@@ -133,6 +143,7 @@ const WEIGHT_PARAMS: readonly WeightParam[] = [
 const ROUTE_KEYS: readonly string[] = [
   "from",
   "to",
+  DEST_QUERY_KEY,
   ...WEIGHT_PARAMS.map((param) => param.key),
   "ferries",
   "sheds",
@@ -292,6 +303,19 @@ export function encodeView(
   params.set("layers", overlays.join(","));
   params.set("city", city);
   return params;
+}
+
+export function decodeDestQuery(params: URLSearchParams): string | null {
+  const text = params.get(DEST_QUERY_KEY)?.trim() ?? "";
+  return text === "" ? null : text;
+}
+
+// `hash` with the destination query taken out and everything else — the route, the view, the About
+// flag — left exactly as it was.
+export function withoutDestQuery(hash: string): string {
+  const params = hashParams(hash);
+  params.delete(DEST_QUERY_KEY);
+  return formatHash(params);
 }
 
 export function hashParams(hash: string): URLSearchParams {
