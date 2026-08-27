@@ -17,6 +17,9 @@ import { prettifyStreetName } from "./street-names";
 // answer into forty and buries everything else in the list.
 export interface StreetPlace {
   name: string;
+  // The source's own spelling, kept because it is also how people type: "5 Av" is what is written on
+  // the sign, and "5th Avenue" is only what this app prints.
+  sourceName: string;
   lat: number;
   lng: number;
 }
@@ -54,6 +57,7 @@ function placesOf(graph: RoutingGraph): StreetPlace[] {
       // pass them through this before reading them out; a search result shouting next to a station
       // name that does not is the same name looking like two different things.
       name: prettifyStreetName(name),
+      sourceName: name,
       lat: graph.originLat + graph.nodeQy[node] * graph.scale,
       lng: graph.originLng + graph.nodeQx[node] * graph.scale,
     });
@@ -62,16 +66,36 @@ function placesOf(graph: RoutingGraph): StreetPlace[] {
   return places;
 }
 
+// Lower case, and runs of whitespace down to one: the source writes "W  239 ST" with two spaces
+// between the tokens, and nobody types it that way.
+function collapse(text: string): string {
+  return text.toLowerCase().replace(/\s+/g, " ").trim();
+}
+
 // The same two-tier match the station search uses, so a local hit ranks the same however it got here.
 export function rankName(name: string, query: string): number {
-  const haystack = name.toLowerCase();
-  if (haystack.startsWith(query)) {
+  const haystack = collapse(name);
+  const needle = collapse(query);
+  if (haystack.startsWith(needle)) {
     return 2;
   }
   // A word inside it: "grand" should find "Sixth Grand Avenue", not only names opening with it.
-  return haystack.split(/[^a-z0-9]+/).some((word) => word.startsWith(query))
+  return haystack.split(/[^a-z0-9]+/).some((word) => word.startsWith(needle))
     ? 1
     : 0;
+}
+
+// Both spellings of a street, best of the two. Prettifying is what the list shows and it is also
+// what a query was being compared against, which quietly cost every numbered street in New York:
+// "5 Av" starts neither "5th Avenue" nor any word in it, so 5 AVE — sitting right there in the name
+// blob — scored zero. Reading the source's own spelling as well costs nothing and is how the street
+// is signposted; "Fifth"-style typing still matches the prettified form.
+export function rankStreetName(
+  name: string,
+  sourceName: string,
+  query: string,
+): number {
+  return Math.max(rankName(name, query), rankName(sourceName, query));
 }
 
 export function searchStreets(
@@ -85,7 +109,7 @@ export function searchStreets(
   }
   const hits: StreetHit[] = [];
   for (const place of placesOf(graph)) {
-    const rank = rankName(place.name, needle);
+    const rank = rankStreetName(place.name, place.sourceName, needle);
     if (rank > 0) {
       hits.push({ place, rank });
     }
