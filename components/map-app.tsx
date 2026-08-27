@@ -76,6 +76,7 @@ import { computeEdgeSheds, setShedSun, shedDay } from "../src/routing/sheds";
 import { buildSnapIndex, type SnapIndex, snapPair } from "../src/routing/snap";
 import { setSearchGraph } from "../src/routing/street-search";
 import { setSearchCentre, warmAddresses } from "../src/search/addresses";
+import { warmNameIndex } from "../src/search/name-search";
 import {
   settings as storedSettings,
   updateSettings,
@@ -695,11 +696,14 @@ export default function MapApp() {
     // Francisco. Null is the honest answer until this city's own graph lands.
     setRoutingGraph(null);
     setSearchGraph(null);
-    // Fetched now rather than when someone types a house number, because the point of it is the walk
-    // with no signal, and a file only fetched once you have already searched offline is a file you
-    // never have when you need it. A couple of megabytes against the graph's thirty-seven, and on an
-    // idle callback so it queues behind the first paint.
-    const warm = () => warmAddresses(city.id);
+    // The two files the search box answers from with no signal — house numbers, and every name in the
+    // city — fetched now rather than when someone types at it, because a file only fetched once you
+    // have already searched offline is a file you never have when you need it. Ten megabytes against
+    // the graph's thirty-seven, and on an idle callback so they queue behind the first paint.
+    const warm = () => {
+      warmAddresses(city.id);
+      warmNameIndex(city.id);
+    };
     if (typeof requestIdleCallback === "function") {
       const handle = requestIdleCallback(warm, { timeout: 5000 });
       return () => cancelIdleCallback(handle);

@@ -1934,6 +1934,183 @@ no room for (a letter inside the hyphen, "2701-B8", the buildings of one complex
 Francisco, all half addresses whose suffix is "½" rather than a letter. A New York row whose
 `boroughcode` is not one of the five would join them; today every row has one.
 
+### `data/places/<city>.jsonl` — the named places (derived, gitignored, **intermediate**)
+
+Everything a destination box gets typed at that is not an address: the shops, restaurants, parks,
+schools, stations and landmarks. `bun run update-places` (`scripts/places.ts`) reads them out of
+**Overture Maps**, release **`2026-08-19.0`**, pinned in the script — bumping it is a deliberate act,
+because every count below was measured against that release and has to be re-measured with the next.
+
+This is **not the shipped artifact**. It is the join done once, in a form the shipped index reads:
+`public/search/<city>.bin.gz` below is built from this file plus the address file, so a rebuild of
+the index costs seconds rather than another read of the planet. One JSON object per line:
+
+| field | |
+| --- | --- |
+| `name` | Overture's `names.primary`, the name on the sign |
+| `category` | Overture's `categories.primary`, or null — 1,639 distinct in New York, 1,297 in San Francisco |
+| `lat`, `lng` | always present, joined or not |
+| `street` | the **address file's** spelling of the street, or null |
+| `houseNumber` | `{ major, minor, suffix }`, the shape `parseHouseNumber` answers, or null |
+
+Overture publishes the planet as 10.5 GB of parquet on S3, but every row carries its own `bbox`
+struct and the files are spatially ordered, so a DuckDB predicate on it prunes at the row group and
+only the ranges holding a city are ever fetched: **both cities read in about twenty-five seconds**, over
+the open internet, with no account. The box is only a prefilter — the outline that decides what is
+in the city is Overture's own `divisions` theme, the `New York` **locality** and the `San Francisco`
+**county** land polygon, read the same way. That is the difference between 533,628 rows in New York's
+box (which holds Newark, Jersey City and Yonkers) and **389,043** in New York. San Francisco's county
+polygon reaches out to the Farallon Islands, so the division is prefiltered by *intersection* with
+the city box rather than containment, or its own box would fail the test.
+
+Places are kept where `confidence >= 0.5` and Overture does not say `permanently_closed`. Below that
+the names stop being things anyone would type — a phone number where the name goes, a half-read
+shopfront — and the cut is the visible choice `MIN_CONFIDENCE` is there to make: it takes New York
+from 389,043 to **309,968** and San Francisco from 57,783 to **49,520**.
+
+The join is against `public/addresses/<city>.bin.gz` **as it shipped**, read back and decoded rather
+than re-fetched from the city, so a place joins to the spelling the client will look up or it does
+not join at all. Overture writes a US address as one line with the house number first ("178
+Broadway", "168-27 Baisley Blvd", "305 W 39th St Ste 210"), so the split is that first run of digits
+and the rest, less any unit inside the building. Both sides then go through one `normalizeStreet`,
+which is what makes the fold safe — a rule that is wrong is wrong symmetrically and cannot invent a
+match. It folds case, drops `.,'` (San Francisco files `OFARRELL ST`, New York `O'BRIEN AVE`), strips
+ordinal suffixes (`W 39th St` → `W 39 ST`), strips the leading zeros San Francisco pads with (`03 ST`
+→ `3 ST`), and contracts the long forms one file writes out and the other abbreviates (`AVENUE`→`AVE`,
+`WEST`→`W`, `SAINT`→`ST`). On top of that sits a short table of names the two files genuinely
+disagree about, each checked against the published street list rather than guessed: `Grand Concourse`
+is filed `GRAND CONC`, `Beach Channel Dr` is `BCH CHANNEL DR`, `MacDougal St` is `MAC DOUGAL ST`,
+`Crossbay Blvd` is `CROSS BAY BLVD`, `Fashion Ave` was never adopted and is `7 AVE`; San Francisco
+splits `BAY SHORE BLVD`, files `LA PLAYA` and `SOUTH PARK` with no type at all, and keeps `THE
+EMBARCADERO`'s article. Queens files a house as `126-10` and Overture writes it either way, so every
+hyphenated number is registered a second time as the digits run together — in its own map, so a
+street with both a 126-10 and a 12610 still answers "12610" with the house of that number.
+
+**New York does not qualify its street names**, so its five Court Streets are one street to look a
+house number up in and a place in Staten Island can match a house on the Queens street of that name.
+The place's own coordinates settle it: the nearest house of that number wins, and a match more than
+`MAX_JOIN_METERS` (1,000 m) away is thrown back. There is no gap in the distances to cut at — 96% of
+matches are within 100 m and the rest tails off — so the number is not tuned to the data; it is the
+distance past which a place and its own front door cannot be the same thing, left wide enough to keep
+a hospital or a campus whose point is a centroid and whose address is a gate. It throws back 3,282
+New York matches and 340 San Francisco ones, the worst of them 50 km out.
+
+What comes out, on release `2026-08-19.0`:
+
+| | in the city | kept | joined | | coordinates only |
+| --- | --- | --- | --- | --- | --- |
+| New York | 389,043 | 309,968 | 256,461 | **82.7%** | 53,507 |
+| San Francisco | 57,783 | 49,520 | 42,781 | **86.4%** | 6,739 |
+
+The unjoined are not a failure to fix: parks, beaches and landmarks have no street address and never
+will — Golden Gate Park and the Ferry Building come through with no address line at all — which is
+why every row keeps its coordinates whether it joined or not.
+
+The whole S3 read is cached under `.cache/` keyed by the query itself, so a changed release, box or
+outline lands on a different entry rather than reusing the old one, and `REFRESH=1` goes back to the
+network regardless. A re-run off the cache is two seconds.
+
+**Licence.** Overture places is **CDLA-Permissive-2.0**, with **Apache-2.0** on the rows Foursquare
+sourced and **CC0-1.0** on those from AllThePlaces. There is no OpenStreetMap in the places theme, so
+none of this is ODbL and none of it may be merged into an artifact that is. CDLA-Permissive-2.0 asks
+one thing (§2.1): that the text of the agreement travel with the data. No share-alike, and no
+attribution string is compelled.
+
+### `public/search/<city>.bin.gz` — the offline search index, magic `SRCH` (v1, derived, **committed**)
+
+One index over every name in a city, so the search box answers with no network. `bun run
+update-search-index` (`scripts/search-index.ts`) reads `data/places/<city>.jsonl` and
+`public/addresses/<city>.bin.gz` — both already on disk, so this is seconds rather than a download —
+and writes a sorted token dictionary, a posting list per token and a table of names and coordinates.
+It also reads New York's **borough boundaries** (Socrata `gthc-hcne`, the same rows the land mask is
+built from, through `scripts/land.ts`) to name the borough of the 53,507 places that never joined an
+address: a park has no front door, and nothing in the Overture row says which borough it is in.
+The format is frozen in `src/search/search-format.ts`, which the builder and `src/search/search-query.ts`
+share: they must tokenize identically, or a name is indexed one way and searched the other.
+
+**Addresses are not in it, and that is why it is small.** Tokenizing New York's 967,230 addresses
+would put `street` and `avenue` into a million documents each, and every way of coping with a posting
+list that size — stop words, caps, tiered lists — degrades exactly the queries addresses exist to
+answer. Instead a **street is one document** (9,387 in New York, 2,070 in San Francisco, one per ADDR
+`(name, place)` pair) carrying its ADDR ordinal, and a house number is resolved after the match by
+decoding that one street's run, the way `src/search/addresses.ts` already does. With addresses out,
+**no posting list exceeds 13,871 entries** (`inc`, New York) and **no two-character prefix expands
+past 30,150 postings** (`co`, over 1,808 dictionary tokens) — measured, not estimated, and the reason
+nothing in the query path needs a cap.
+
+| | New York | San Francisco |
+| --- | --- | --- |
+| documents | 319,355 (309,968 places, 9,387 streets) | 51,590 (49,520 + 2,070) |
+| distinct tokens | 100,680 | 29,749 |
+| postings | 1,025,288 | 160,980 |
+| largest posting list | `inc` 13,871 | `san` 2,860 |
+| heaviest 2-char prefix | `co` 30,150 | `st` 5,616 |
+| raw | 12.72 MB | 2.14 MB |
+| **gzipped** | **7.50 MB** | **1.25 MB** |
+
+| offset | type | field |
+| --- | --- | --- |
+| 0 | u8[4] | magic `SRCH` |
+| 4 | u8 | format version = 1 |
+| 5 | varint | category blob bytes |
+| .. | UTF-8 | the Overture category slugs, `"\n"`-joined, ascending |
+| .. | varint | document count |
+
+Then that many documents, in **Hilbert order** over their quantized coordinates:
+
+| field | written as |
+| --- | --- |
+| name | varint length, then UTF-8, original case and punctuation |
+| kindFlags | u8: kind in the low four bits, `hasStreet` 0x10, `hasNumber` 0x20 |
+| tokenInfo | u8: token count capped at 15 in the high nibble, ADDR place index **plus one** in the low nibble |
+| prominence | u8 |
+| category | varint, index into the blob **plus one**; 0 where the document has none |
+| latitude, longitude | zigzag varint deltas from the previous document, units of 1e-5° |
+| streetIndex | varint, only when `hasStreet` |
+| number | varint `major * 2 + hasExtra`, then `minor * 32 + suffix`, only when `hasNumber` — exactly as ADDR packs one |
+
+Then the dictionary: a `tokenCount`, the byte length of the token entries (which is what locates the
+postings behind them), a `restartCount`, and a fixed-width restart table of `u32 LE × 2` per block of
+sixteen tokens — where the block's first entry is, and where its first posting list is. Then the
+tokens themselves, **sorted bytewise and front-coded**, each an `lcp` with its predecessor (zero at a
+block start, so a block decodes alone), a tail length, the tail, a posting count and the posting
+list's byte length. Then the posting lists, concatenated in dictionary order, each ascending
+**delta varints** with the first document id absolute.
+
+A query token is found by binary searching the block-first tokens — stored whole, at lcp 0 —
+comparing raw bytes with **no decoding**, and only the ≤ 16 entries of the block it lands in are
+expanded. A prefix match is then a contiguous **run** of the dictionary, so prefix search costs an
+exact search plus the run. New York's 101,221 tokens are 6,327 restarts, 50 KB of table.
+
+There are **no positions, no fields and no per-posting payload**, which is what keeps a posting at
+about 1.8 bytes. Match quality is a property of *which* dictionary token matched — exact, a prefix,
+later an edit away — and that is known on the dictionary side before a posting is read; how much of
+the name the query covered needs only the token count, which rides in the document table.
+
+The document order is a **Hilbert curve** purely so the coordinate deltas are small: adjacent
+documents are metres apart, so the pair costs about four bytes instead of eight. Nothing at query
+time depends on the order. It shows in the compression — the document region gzips to ×0.53 while
+the posting lists, already dense, only reach ×0.92.
+
+A place is filed under the **borough its own doorway is in**: `data/places/<city>.jsonl` records the
+street *name* a place joined to, and New York has five Court Streets, so the builder asks which of
+them carries that house number nearest the place. 256,461 New York places and 42,781 San Francisco
+ones come out with a street ordinal and a number, which is what lets a result be labelled "7 Carmine
+St, Manhattan" without decoding a street run. A place that never joined has **no borough** — nothing
+in the Overture row says which one it is in — and its `placeIndex` nibble is 0, the same value San
+Francisco writes for every document because it is one place.
+
+A street is indexed under **both its spellings plus its ordinal words**: `5 AVE` as the file writes
+it, `5th Avenue` as the client shows it, and `fifth` from a baked table that spells a number up to
+999 as the words it would be typed as ("two hundred seventy first" for New York's West 271st). Prefix
+matching already makes "st" find "street", so nothing needs an abbreviation table in that direction.
+
+`prominence` is baked so that tuning the ranking is a rebuild rather than a redesign: transit 240,
+landmarks 210, parks and plazas 200, museums and attractions 190, schools and churches 150, food and
+retail 120, streets 110, generic services 80, and the `professional_services` / contractor / LLC tier
+40, matched off the Overture slug in `scripts/search-index.ts`. The tiers are judgment, not
+measurement; the golden-query file that settles them is not written yet.
+
 ### `public/streets/{x}/{y}.bin` — the chunks (derived, gitignored)
 
 The segments touching one z12 tile. A segment goes into every z12 tile its bounding box

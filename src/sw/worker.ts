@@ -75,8 +75,9 @@ const scope = globalThis as unknown as {
 // They are sized so ONE city fits comfortably and a second city's residue is what gets pushed out —
 // New York walked over at every zoom comes to roughly 400 MB of overlay, so a gigabyte leaves room
 // to wander without ever evicting ground the reader is still using. Routing is generous for the same
-// reason from the other end: it holds one graph per city plus one day of bins, about 62 MB for both
-// cities together, and evicting either mid-walk is exactly what the split exists to prevent.
+// reason from the other end: it holds one graph per city plus one day of bins and the two files the
+// search box answers from, about 71 MB for both cities together, and evicting any of it mid-walk is
+// exactly what the split exists to prevent.
 // The overlay figure here is only the starting point: the reader's own, once they have chosen one,
 // is in the book (OVERLAY_CAP). Routing's is not offered as a setting at all.
 const CAPS: Partial<Record<Store, number>> = {

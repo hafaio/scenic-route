@@ -337,30 +337,33 @@ export function matchAddresses(
 // device with no signal when the first address was typed still gets the file once it has one.
 const files = new Map<string, Promise<AddressIndex>>();
 
+// One file, fetched and decoded. Named separately from the per-city cache below because the search
+// worker holds its own copy of the same file and has to name it absolutely — a relative URL inside a
+// worker resolves against the worker's own chunk rather than against the document.
+export async function fetchAddresses(url: string): Promise<AddressIndex> {
+  const response = await fetch(url);
+  if (!response.ok || response.body === null) {
+    throw new Error(`${url}: ${response.status} ${response.statusText}`);
+  }
+  // Shipped gzipped and unpacked here: Pages does not compress .bin, so the alternative is twice the
+  // bytes over the wire, twice the cache and twice the repo.
+  const unpacked = response.body.pipeThrough(new DecompressionStream("gzip"));
+  const bytes = await new Response(unpacked).arrayBuffer();
+  return decodeAddresses(new Uint8Array(bytes));
+}
+
 export function loadAddresses(cityId: string): Promise<AddressIndex> {
   const pending = files.get(cityId);
   if (pending) {
     return pending;
   } else {
     // Relative, so it picks up the basePath the deploy injects.
-    const url = `addresses/${cityId}.bin.gz`;
-    const request = fetch(url)
-      .then(async (response) => {
-        if (!response.ok || response.body === null) {
-          throw new Error(`${url}: ${response.status} ${response.statusText}`);
-        }
-        // Shipped gzipped and unpacked here: Pages does not compress .bin, so the alternative is
-        // twice the bytes over the wire, twice the cache and twice the repo.
-        const unpacked = response.body.pipeThrough(
-          new DecompressionStream("gzip"),
-        );
-        const bytes = await new Response(unpacked).arrayBuffer();
-        return decodeAddresses(new Uint8Array(bytes));
-      })
-      .catch((error: unknown) => {
+    const request = fetchAddresses(`addresses/${cityId}.bin.gz`).catch(
+      (error: unknown) => {
         files.delete(cityId);
         throw error;
-      });
+      },
+    );
     files.set(cityId, request);
     return request;
   }
@@ -386,7 +389,7 @@ export async function searchAddresses(
   // A location the reader has actually shared beats where the map happens to be pointing; the map's
   // centre is what stands in for it when they have not, and the file's own order when there is
   // neither.
-  const near = bias ?? centreOf(cityId);
+  const near = bias ?? searchCentre(cityId);
   return index === null ? null : matchAddresses(index, query, limit, near);
 }
 
@@ -401,7 +404,9 @@ export function setSearchCentre(cityId: string, at: AddressBias): void {
   mapCentre = { cityId, at };
 }
 
-function centreOf(cityId: string): AddressBias | null {
+// Where the map is pointing, for a search over this city — null until it has settled over one. Read
+// by the name index too, which ranks every result by how far it is from here.
+export function searchCentre(cityId: string): AddressBias | null {
   return mapCentre !== null && mapCentre.cityId === cityId
     ? mapCentre.at
     : null;

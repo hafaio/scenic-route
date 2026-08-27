@@ -36,6 +36,10 @@
 # public/ferries/ above is a different thing entirely: the deploy's own drawn ferry lines.
 # Nor public/icons/ or public/sw.js: hand-made static assets that no build step writes.
 
+# the named places read out of Overture by `bun run update-places`, an intermediate the search
+# index will consume; re-read from the pinned release rather than committed, unlike the rest of data/
+/data/places/
+
 # raw source reads cached by `bun run build-tree-data`; --refresh to go back to the network
 /.cache/
 

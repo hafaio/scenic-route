@@ -74,11 +74,12 @@ export function coversACity(
 }
 
 // What a walk with no signal cannot be without, and so may not be evicted by a pan or a clock scrub:
-// the routing graph with its per-day bins, and the address index the search box answers house
-// numbers from. Both are fetched once and then read out of memory for the rest of the session, so
-// their read times never move — in the overlay store's least-recently-read order they would be the
-// FIRST things out, which is the exact opposite of what should happen.
-const KEPT_DIRS = ["routing/", "addresses/"];
+// the routing graph with its per-day bins, and the two files the search box answers from — the
+// address index behind a house number, and the name index behind everything else. All of them are
+// fetched once and then read out of memory for the rest of the session, so their read times never
+// move — in the overlay store's least-recently-read order they would be the FIRST things out, which
+// is the exact opposite of what should happen.
+const KEPT_DIRS = ["routing/", "addresses/", "search/"];
 
 // The exported app itself, as against the data it reads.
 const SHELL_FILES = ["", "index.html", "404.html", "manifest.webmanifest"];

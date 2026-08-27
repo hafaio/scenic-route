@@ -28,8 +28,11 @@ test("routing is its own store, so a shade binge cannot evict the graph", () => 
   );
 });
 
-test("the address index is kept with the graph, not with the evictable tiles", () => {
+test("the search files are kept with the graph, not with the evictable tiles", () => {
   expect(fileRequest(`${SCOPE}addresses/nyc.bin.gz`, SCOPE)?.store).toBe(
+    "routing",
+  );
+  expect(fileRequest(`${SCOPE}search/nyc.bin.gz`, SCOPE)?.store).toBe(
     "routing",
   );
 });

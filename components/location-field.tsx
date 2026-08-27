@@ -2,11 +2,12 @@
 
 import { useEffect, useRef, useState } from "react";
 import { FiCrosshair, FiNavigation, FiX } from "react-icons/fi";
-import { MdOutlineHome, MdSignpost } from "react-icons/md";
+import { MdOutlineHome, MdOutlinePlace, MdSignpost } from "react-icons/md";
 import { PiTrainSimpleFill } from "react-icons/pi";
 import {
   ADDRESS_RESULT_TYPE,
   type GeocodeResult,
+  INDEX_RESULT_TYPE,
   type SearchBias,
   STREET_RESULT_TYPE,
   SUBWAY_RESULT_TYPE,
@@ -267,6 +268,14 @@ export default function LocationField({
                     className="h-4 w-4 shrink-0 text-slate-400 dark:text-slate-500"
                     aria-hidden="true"
                   />
+                ) : result.type === INDEX_RESULT_TYPE ? (
+                  // A named place off the city's own index. One pin for all of them: the row carries
+                  // a category, but a glyph per category is 1,639 of them, and what the pin has to
+                  // say here is that this is a place rather than a door or a street.
+                  <MdOutlinePlace
+                    className="h-4 w-4 shrink-0 text-slate-400 dark:text-slate-500"
+                    aria-hidden="true"
+                  />
                 ) : null}
                 <span className="truncate">{result.displayName}</span>
               </button>
@@ -274,7 +283,7 @@ export default function LocationField({
           ))}
           {partial ? (
             <li className="border-t border-slate-200/60 px-3 py-2 text-[11px] text-slate-400 dark:border-slate-700/60 dark:text-slate-500">
-              Offline — showing addresses, stations and streets only
+              Offline — showing what is on this device
             </li>
           ) : null}
         </ul>
