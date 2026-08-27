@@ -186,35 +186,34 @@ test("nothing else on that host is a tile", () => {
   expect(coversACity("tiles/v4/15/9649/12315.mvt/extra", CITIES)).toBe(false);
 });
 
-// A place already searched for still resolves with no signal. The whole query is the identity, so
-// each prefix typed on the way to a name is its own entry — which is what makes retyping a
-// destination offline work as you type rather than only on the exact string typed before.
-test("the geocoders are cached, network first, as convenience rather than as routing", () => {
-  const search = fileRequest(
-    "https://photon.komoot.io/api?q=bedford&limit=6&lang=en",
+// Naming a point picked off the map is the one lookup left that needs a host, and its usage policy
+// asks that answers be kept — so a pin already named still has a name with no signal.
+test("the reverse lookup is cached, network first, as convenience rather than as routing", () => {
+  const named = fileRequest(
+    "https://nominatim.openstreetmap.org/reverse?lat=40.7&lon=-74",
     SCOPE,
   );
-  expect(search?.store).toBe("overlay");
-  expect(search?.fresh).toBe(true);
-  expect(search?.cacheKey).toBe(
-    "https://photon.komoot.io/api?q=bedford&limit=6&lang=en",
+  expect(named?.store).toBe("overlay");
+  expect(named?.fresh).toBe(true);
+  expect(named?.cacheKey).toBe(
+    "https://nominatim.openstreetmap.org/reverse?lat=40.7&lon=-74",
   );
 
-  // A different query is a different entry, or one search would answer for another.
-  const other = fileRequest("https://photon.komoot.io/api?q=bedf", SCOPE);
-  expect(other?.cacheKey).not.toBe(search?.cacheKey);
+  // A different point is a different entry, or one pin would answer for another.
+  const other = fileRequest(
+    "https://nominatim.openstreetmap.org/reverse?lat=40.8&lon=-74",
+    SCOPE,
+  );
+  expect(other?.cacheKey).not.toBe(named?.cacheKey);
 
-  // Reverse lookups, which name a point picked off the map, are the same bargain.
-  expect(
-    fileRequest(
-      "https://nominatim.openstreetmap.org/reverse?lat=40.7&lon=-74",
-      SCOPE,
-    )?.store,
-  ).toBe("overlay");
+  // Never in the store a walk depends on.
+  expect(named?.store).not.toBe("routing");
 });
 
-test("a geocoder answer never lands in the store a walk depends on", () => {
+// The search box answers from the city's own index, which is a file under the scope; nothing it does
+// reaches a host of its own.
+test("no outside host is cached to answer the search box", () => {
   expect(
-    fileRequest("https://photon.komoot.io/api?q=anything", SCOPE)?.store,
-  ).not.toBe("routing");
+    fileRequest("https://photon.komoot.io/api?q=bedford", SCOPE),
+  ).toBeNull();
 });

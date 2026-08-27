@@ -26,7 +26,7 @@ import {
   MdTurnSlightRight,
   MdUTurnLeft,
 } from "react-icons/md";
-import type { GeocodeResult, SearchBias } from "../src/geocode";
+import type { GeocodeResult } from "../src/geocode";
 import {
   formatDistance,
   formatDuration,
@@ -58,7 +58,6 @@ interface RoutePanelProps {
   // another city is not one: routing stays within one city, so the placeholder would name a start
   // that cannot be used.
   hasLiveLocation: boolean;
-  searchBias: SearchBias | null; // ranks search results near the user, or null when not shared
   pickTarget: "start" | "dest" | null;
   status: "idle" | "loading" | "ready" | "error";
   errorMessage: string | null;
@@ -214,7 +213,6 @@ export default function RoutePanel({
   destSet,
   needsStart,
   hasLiveLocation,
-  searchBias,
   pickTarget,
   status,
   errorMessage,
@@ -542,7 +540,6 @@ export default function RoutePanel({
             onArmPick={onArmStart}
             currentLocationLabel={hasLiveLocation ? "My location" : null}
             onUseCurrentLocation={onUseCurrentLocation}
-            searchBias={searchBias}
           />
           <LocationField
             label={destLabel}
@@ -555,7 +552,6 @@ export default function RoutePanel({
             onSelect={onDestSelect}
             onClear={onDestClear}
             onArmPick={onArmDest}
-            searchBias={searchBias}
           />
         </div>
 
