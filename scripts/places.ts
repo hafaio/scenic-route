@@ -41,10 +41,14 @@ const PLACES_DIR = join(import.meta.dirname, "..", "data", "places");
 const NEIGHBORHOOD_SUFFIX = "-neighborhoods.jsonl";
 const ADDRESS_DIR = join(import.meta.dirname, "..", "public", "addresses");
 
-// Pinned rather than "latest". Overture cuts a release a month, and a rebuild that quietly picked up
-// a different one would answer with different rows than the counts in scripts/README.md were
-// measured against. Bumping this is a deliberate act, and the counts are re-measured with it.
-const OVERTURE_RELEASE = "2026-08-19.0";
+// The release a local run reads, pinned rather than "latest" so a rebuild answers with the rows the
+// counts in scripts/README.md were measured against rather than whatever shipped this month.
+// `OVERTURE_RELEASE` in the environment overrides it, which is what the monthly refresh job passes:
+// that job exists to follow the data, and Overture keeps only its last two releases in the public
+// bucket, so a job on this pin would stop finding any parquet at all two months after it was set.
+// Every run says which release it read, and the job puts that in the commit message it writes.
+const PINNED_RELEASE = "2026-08-19.0";
+const OVERTURE_RELEASE = process.env.OVERTURE_RELEASE || PINNED_RELEASE;
 const OVERTURE_BUCKET = "s3://overturemaps-us-west-2/release";
 const PLACES_PARQUET = `${OVERTURE_BUCKET}/${OVERTURE_RELEASE}/theme=places/type=place/*.parquet`;
 const DIVISIONS_PARQUET = `${OVERTURE_BUCKET}/${OVERTURE_RELEASE}/theme=divisions/type=division_area/*.parquet`;
