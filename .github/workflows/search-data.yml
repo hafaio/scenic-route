@@ -1,0 +1,165 @@
+name: search-data
+
+# The three artifacts the search box reads — the address files, the Overture places extract and the
+# index built over both — rebuilt from their sources and committed to `main`, the way `sheds.yml`
+# commits its own. Everything about the shape of this job is that job's; only the cadence differs.
+#
+# MONTHLY, on the 5th. Overture has published monthly since October 2023, mid-to-late in the month
+# (docs.overturemaps.org/release-calendar), and the two cities' address files move slower still, so a
+# daily run would rebuild identical rows twenty-nine days in thirty. What makes that a real cost is
+# not the twenty minutes of downloading; it is GIT HISTORY. `sheds.yml`'s artifacts are uncompressed,
+# so a day's handful of changed records deltas to a couple of kilobytes and a daily commit is
+# affordable forever. These four files are `.gz`: one changed address rewrites the deflate stream
+# from that point on, git can delta nothing against the previous copy, and a refresh writes ~12 MB
+# that never leaves history. Monthly that is ~140 MB a year. Daily it would be ~4.3 GB a year, on a
+# repo whose Pages artifact already sits against its cap.
+#
+# Which is why the unchanged-bytes check at the bottom matters more here than it does for sheds: a
+# month in which nothing moved must commit NOTHING rather than 12 MB of re-gzipped identical rows.
+# All three builders sort before they write, so identical inputs give identical bytes and the check
+# fires.
+#
+# The 5th, not the 1st: GitHub's cron is best-effort and worst at the popular slots, and nothing here
+# cares what day it lands on. A run that is late, or that never happened, does the same work next
+# month — every step reads its sources fresh and writes the whole artifact.
+#
+# `workflow_dispatch` is the recovery hatch, and this job needs it for a second reason beyond the one
+# sheds.yml explains: scheduled workflows are disabled after 60 days without a push, and THIS job
+# cannot keep itself alive, because the good outcome is a run that commits nothing. The daily sheds
+# commit is what re-arms that timer, for every schedule in the repository.
+on:
+  schedule:
+    - cron: "0 17 5 * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: search-data
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      # NEVER `lfs: true` here, and never a `git lfs pull` either — the same rule sheds.yml states,
+      # for the same 10 GiB a month of account-wide LFS bandwidth. The index does read four blobs
+      # that data/ keeps in LFS (subway, landmarks, art, dining), but it reads them from `public/`,
+      # where the tile build copies them and the deploy publishes them un-tracked, and the step below
+      # fetches those copies off the site. Identical bytes, no LFS.
+      - uses: actions/checkout@v7
+        with:
+          lfs: false
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+
+      # What the index needs that a checkout does not carry, all of it gitignored build output and
+      # all of it already on the site: the routing graph, whose street names are the alleys,
+      # footbridges and park paths no address file lists (48 MB, and the version file beside each
+      # graph is what says how to decode it), and the curated point sets. `update-sheds` reads the
+      # deployed graph the same way and for the same reason — what the site serves is what the client
+      # is using, so a name indexed off it is a name the app can actually take you to. The set of
+      # these that ought to exist is not decided here: a 404 is passed through as an absent file, and
+      # scripts/search-index.ts fails the run if a city's own overlay list says it should have been
+      # there.
+      - name: what the deployed site is serving
+        env:
+          SITE: https://hafaio.github.io/scenic-route
+        run: |
+          mkdir -p public/routing
+          for name in nyc.bin nyc.version.json sf.bin sf.version.json; do
+            curl --fail --silent --show-error --location \
+              --output "public/routing/$name" "$SITE/routing/$name"
+          done
+          for set in art dining landmarks legacy subway; do
+            mkdir -p "public/$set"
+            for city in nyc sf; do
+              code="$(curl --silent --show-error --location \
+                --write-out '%{http_code}' \
+                --output "public/$set/$city.bin" "$SITE/$set/$city.bin")"
+              case "$code" in
+                200) ;;
+                404) rm -f "public/$set/$city.bin" ;;
+                *) echo "$SITE/$set/$city.bin: HTTP $code" >&2; exit 1 ;;
+              esac
+            done
+          done
+
+      # Which Overture release this run reads. `scripts/places.ts` pins one, and that pin stays: it
+      # is what makes a local rebuild reproducible and what the counts in scripts/README.md were
+      # measured against. But a JOB on that pin is a job that stops working — Overture keeps only its
+      # last two releases in the public bucket (60 days, for GDPR erasure), so two months after the
+      # pin was set the parquet it names is gone and the refresh fails on data it exists to keep
+      # current. So the job asks the bucket what is there and takes the newest, and the release it
+      # used goes into the commit message, which is what lets anyone say afterwards exactly what
+      # produced a given artifact.
+      - name: the newest Overture release
+        run: |
+          listing="https://overturemaps-us-west-2.s3.amazonaws.com/?list-type=2&delimiter=/&prefix=release/"
+          release="$(curl --fail --silent --show-error "$listing" \
+            | tr '<' '\n' \
+            | sed -n 's|^Prefix>release/\([0-9-]*\.[0-9]*\)/$|\1|p' \
+            | sort | tail -1)"
+          if [ -z "$release" ]; then
+            echo "$listing named no release; has the bucket or its layout moved?" >&2
+            exit 1
+          fi
+          echo "reading Overture $release"
+          echo "OVERTURE_RELEASE=$release" >> "$GITHUB_ENV"
+
+      # NYC AddressPoint and SF EAS, read through their CSV exports: ~90 MB, and the only one of the
+      # three reads that moves on the cities' own schedule rather than Overture's. Nothing under
+      # `.cache/` is restored between runs anywhere in this job — that cache never expires, so keeping
+      # it would pin every future month to the copy the first run downloaded.
+      - run: bun run update-addresses
+
+      # Overture places and divisions off S3, against the release resolved above. DuckDB is a
+      # devDependency and prunes the read to the byte ranges holding each city, so this is minutes and
+      # a few hundred megabytes on a runner that has 16 GB of memory, 14 GB of disk and six hours.
+      - run: bun run update-places
+
+      # Everything above plus the curated sets, tokenized into the SRCH files. Reads NYC's borough
+      # boundaries off Socrata to name the borough of a place that never joined an address; the token
+      # is absent on a fork, which reads unauthenticated instead.
+      - run: bun run update-search-index
+        env:
+          SOCRATA_APP_TOKEN: ${{ secrets.SOCRATA_APP_TOKEN }}
+          SOCRATA_VERBOSE: "1"
+
+      # One ordinary commit on `main`, at most twelve a year. `data/places/` is not in it: that file
+      # is the intermediate the index is built from, gitignored, and re-read rather than stored.
+      #
+      # Never forced, and not `--force-with-lease` either — a lease is checked against what this
+      # checkout last fetched, which is exactly the human push it would be overwriting. The commit is
+      # built on the tip it is aimed at, and a rejected push re-reads `main` and rebuilds it there.
+      # Only these two directories are ever staged, so a retry is a fresh commit with nothing to
+      # conflict with.
+      #
+      # `build.yml` ignores both paths, so the push does not fire a lint+test run.
+      - name: commit the artifacts
+        run: |
+          staged="$(mktemp -d)"
+          mkdir -p "$staged/addresses" "$staged/search"
+          cp public/addresses/*.bin.gz "$staged/addresses/"
+          cp public/search/*.bin.gz "$staged/search/"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          for attempt in 1 2 3; do
+            git fetch --depth=1 origin main
+            git reset --quiet --hard FETCH_HEAD
+            mkdir -p public/addresses public/search
+            cp "$staged"/addresses/*.bin.gz public/addresses/
+            cp "$staged"/search/*.bin.gz public/search/
+            git add public/addresses public/search
+            if git diff --quiet --cached; then
+              echo "the artifacts are unchanged; nothing to commit"
+              exit 0
+            fi
+            git commit --quiet -m "chore(data): refresh the search artifacts from Overture $OVERTURE_RELEASE"
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            echo "main moved under the push; rebuilding the commit on the new tip"
+          done
+          exit 1

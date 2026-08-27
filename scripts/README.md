@@ -1881,7 +1881,8 @@ builder and the client share its house-number helpers and its borough table, so 
 into its own idea of what "12-34" means.
 
 Committed, like `public/ferry-schedule/` and for the same reason — nothing in a build or a deploy
-writes it — and **never LFS-tracked**. Stored **gzipped**: Pages serves `.bin` uncompressed, so this
+writes it — and **never LFS-tracked**. A monthly job re-reads both cities and rewrites it, described
+under the search index below. Stored **gzipped**: Pages serves `.bin` uncompressed, so this
 is a third smaller both in the repo and against the Pages cap, and the client inflates it with
 `DecompressionStream`. New York is 2.53 MB gzipped over 967,230 addresses on 9,387 streets, San
 Francisco 0.46 MB over 224,201 on 2,070 — 2.6 and 2.0 bytes an address, which is cheaper than one
@@ -1947,6 +1948,10 @@ Everything a destination box gets typed at that is not an address: the shops, re
 schools, stations and landmarks. `bun run update-places` (`scripts/places.ts`) reads them out of
 **Overture Maps**, release **`2026-08-19.0`**, pinned in the script — bumping it is a deliberate act,
 because every count below was measured against that release and has to be re-measured with the next.
+The monthly job described under the search index leaves this constant alone and passes it the newest
+release the bucket holds instead, naming that release in the commit it writes: Overture drops a
+release from its public bucket after 60 days, so a job reading a fixed pin would find nothing there
+two months on.
 
 This is **not the shipped artifact**. It is the join done once, in a form the shipped index reads:
 `public/search/<city>.bin.gz` below is built from this file plus the address file, so a rebuild of
@@ -2052,8 +2057,8 @@ list per token and a table of names and coordinates:
 | `data/places/<city>.jsonl` | the Overture places, 309,968 in New York and 49,520 in San Francisco |
 | `public/addresses/<city>.bin.gz` | a **street** per ADDR `(name, place)` pair, carrying its ordinal |
 | `public/routing/<city>.bin` | the street names ADDR has none: 2,551 alleys, footbridges and park paths in New York, 701 in San Francisco |
-| `data/subway/<city>.bin` | the stations, merged per complex as the overlay merges them, with the routes they serve |
-| `data/landmarks`, `data/art`, `data/legacy`, `data/dining` | the curated points — designated landmarks, public art, fifty-year-old businesses, outdoor dining |
+| `public/subway/<city>.bin` | the stations, merged per complex as the overlay merges them, with the routes they serve |
+| `public/landmarks`, `public/art`, `public/legacy`, `public/dining` | the curated points — designated landmarks, public art, fifty-year-old businesses, outdoor dining |
 | `data/places/<city>-neighborhoods.jsonl` | the parts of the city a reader names instead of a door: 368 in New York, 95 in San Francisco |
 
 It also reads New York's **borough boundaries** (Socrata `gthc-hcne`, the same rows the land mask is
@@ -2063,8 +2068,19 @@ which borough it is in. The format is frozen in `src/search/search-format.ts`, w
 `src/search/search-query.ts` share: they must tokenize identically, or a name is indexed one way and
 searched the other.
 
-Because it reads the routing graph, this runs **after** `bun run build-tiles` has written one; it
-fails rather than quietly dropping three thousand street names.
+Every one of those is under `public/`, which is where the tile build puts them and where the client
+fetches them, so this runs **after** `bun run build-tiles`; a missing graph fails rather than quietly
+dropping three thousand street names. The curated sets are read there rather than from the `data/`
+originals they are copied from **because those originals are Git LFS**, and a job that wants a search
+index should not have to spend the account's LFS bandwidth on bytes the site already serves — which
+is exactly what the monthly job below does instead. The bytes are identical either way.
+
+A curated set that is not on disk is only allowed to be missing when the **city does not have one**:
+`src/cities.ts` says which layers a city offers, San Francisco offers no commercial layer and files no
+outdoor-dining table, and that is the one absence read as an absence. A city that offers the layer and
+has no file stops the run. Before, any unreadable set was silently taken as a set the city lacked,
+which is a failure mode that ships — the index still builds, still gzips and still commits, two
+thousand documents short.
 
 **One place is one document.** An Overture row and a curated point that share every word of their
 names within **150 m** are the same station, landmark or old shop, and the curated one is what stays
@@ -2181,6 +2197,45 @@ hold for that, each ruling out a name the same words also reach — every word o
 distinct word of the name with none of the name left over (not Court Street Bagels), the query starts
 where the name starts (not Stable Court), and nothing but the word still being typed is an unfinished
 prefix (5th Avenue, not 57th). `src/search/search-query.ts` holds it.
+
+#### Keeping them current — the monthly commit
+
+`.github/workflows/search-data.yml` runs the three builders in order — `bun run update-addresses`,
+`bun run update-places`, `bun run update-search-index` — on the 5th of the month at 17:00 UTC, and
+pushes `public/addresses/` and `public/search/` to `main` as one ordinary commit, the way the daily
+sheds job pushes its own. `build.yml`'s push trigger ignores both paths, so that commit fires no
+lint+test run, and the push is never forced: a rejected one re-reads `main`, re-stages the same four
+files on the new tip and commits again. `data/places/` is not in it — that file is the intermediate
+the index is built from, gitignored and re-read rather than stored.
+
+Monthly rather than daily, and what sets the cadence is **git history, not build time**. Overture has
+published monthly since October 2023, mid-to-late in the month, and the two cities' address files
+move slower still, so a daily run would rebuild identical rows twenty-nine days in thirty. Sheds can
+afford that because its artifacts are uncompressed and a day's changes delta to a couple of
+kilobytes; these four files are `.gz`, so one changed address rewrites the deflate stream from that
+point on, git deltas nothing against the previous copy, and a refresh writes ~12 MB that never leaves
+history. Monthly that is ~140 MB a year, against ~4.3 GB a year daily. It is also why the
+nothing-to-commit path matters more here than it does there: all three builders sort before they
+write, so a month in which no source moved produces identical bytes and commits nothing at all.
+
+**The job reads the newest Overture release rather than the pinned one.** The pin in
+`scripts/places.ts` stays where it is and still governs a local rebuild, which is what keeps one
+reproducible and comparable against the counts above; the job overrides it with an `OVERTURE_RELEASE`
+environment variable, having asked the public bucket what it holds and taken the newest. It has to:
+Overture keeps only its last two releases in that bucket (60 days, for GDPR erasure), so a job on a
+fixed pin would find no parquet at all two months after the pin was set, and stop refreshing the data
+it exists to refresh. **The release it read goes in the commit message it writes** — "refresh the
+search artifacts from Overture 2026-08-19.0" — so any artifact on `main` can be traced back to what
+produced it, which is what the pin used to provide. Bumping the pin is still worth doing when the
+counts above are re-measured; nothing breaks while it sits still.
+
+Two things the job needs that a checkout does not hand it, and it takes both off the **deployed
+site**: the routing graph (48 MB) and the curated point sets (~380 KB), exactly as `update-sheds`
+takes the graph. That is what keeps it clear of Git LFS, which it must never touch — the `data/`
+originals of those point sets are LFS objects, and the account has 10 GiB of LFS bandwidth a month
+across everything. Reading what the site serves is also the more honest source: those are the bytes
+the client has. Nothing under `.cache/` is restored between runs — those entries never expire, and
+keeping them would pin every later month to the copy the first run downloaded.
 
 ### `public/streets/{x}/{y}.bin` — the chunks (derived, gitignored)
 
