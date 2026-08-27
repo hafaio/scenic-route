@@ -131,7 +131,9 @@ test("a prefix run spanning several front-coded blocks comes back whole", () => 
   );
   const index = build([...docs, place("beta"), place("zulu")]);
   expect(names(index, "alpha", 100)).toHaveLength(41);
-  expect(names(index, "alpha007", 100)).toEqual(["alpha007"]);
+  // Named in full it leads the run, with the forty near-spellings of it behind — a corpus where
+  // every name is two edits from every other is what the fuzzy pass is for and what it does here.
+  expect(names(index, "alpha007", 100)[0]).toBe("alpha007");
 });
 
 test("binary search reaches a token in the last block", () => {
@@ -139,8 +141,8 @@ test("binary search reaches a token in the last block", () => {
     place(`token${String(index).padStart(3, "0")}`),
   );
   const index = build(docs);
-  expect(names(index, "token199", 10)).toEqual(["token199"]);
-  expect(names(index, "token000", 10)).toEqual(["token000"]);
+  expect(names(index, "token199", 10)[0]).toBe("token199");
+  expect(names(index, "token000", 10)[0]).toBe("token000");
 });
 
 test("a token on hundreds of documents decodes as one ascending posting list", () => {
@@ -623,4 +625,40 @@ test("a station is answered with the routes it serves, out of the category slot"
   expect(hit.kind).toBe("station");
   expect(hit.category).toBe("4/5/6/L/N/Q/R/W");
   expect(hit.exact).toBeNull();
+});
+
+test("a word spelt wrong finds the name, under the one spelt right", () => {
+  const index = build([
+    place("Katzs Delicatessen"),
+    place("Kanz Express Delicatessen"),
+  ]);
+  // Two letters out of eleven, which is what the walk allows a word this long.
+  expect(names(index, "katzs delicatesen")).toEqual([
+    "Katzs Delicatessen",
+    "Kanz Express Delicatessen",
+  ]);
+  // And spelt right, the correction is still there but cannot overtake: a match one edit away is
+  // worth a little over half of the same match spelt properly.
+  expect(names(index, "katzs delicatessen")[0]).toBe("Katzs Delicatessen");
+});
+
+test("a word of three letters is never corrected, a word of four is", () => {
+  const index = build([place("Bath House"), place("Path House")]);
+  expect(names(index, "bath")).toEqual(["Bath House", "Path House"]);
+  // At three letters every word in a city is a letter from every other, so nothing is looked for.
+  expect(names(index, "bat")).toEqual(["Bath House"]);
+});
+
+test("a query that is already answered plentifully is not corrected", () => {
+  // Twenty-five names the query matches outright, and one it only nearly matches: the fuzzy pass
+  // costs a walk over the whole dictionary and is not worth paying when the answer is already there.
+  const docs = Array.from({ length: 25 }, (_, at) =>
+    place(`Pizza Place ${String(at).padStart(2, "0")}`),
+  );
+  // Prominent enough to lead the list if it were matched at all, so its absence is the pass never
+  // having run rather than the ranking having buried it.
+  const index = build([...docs, place("Pizzo Place", { prominence: 255 })]);
+  expect(names(index, "pizza place")).not.toContain("Pizzo Place");
+  // Thin the answer to one and the same near miss is found.
+  expect(names(index, "pizza place 07")).toContain("Pizzo Place");
 });
