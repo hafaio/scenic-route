@@ -21,7 +21,12 @@ export function readUnsignedVarint(bytes: Uint8Array, cursor: Cursor): number {
   return value;
 }
 
-export function readVarint(bytes: Uint8Array, cursor: Cursor): number {
-  const value = readUnsignedVarint(bytes, cursor);
+// The zigzag itself, for the blobs that pack a signed value alongside a flag rather than giving it a
+// varint of its own (src/search/addresses.ts).
+export function unzigzag(value: number): number {
   return value % 2 === 0 ? value / 2 : -(value + 1) / 2;
+}
+
+export function readVarint(bytes: Uint8Array, cursor: Cursor): number {
+  return unzigzag(readUnsignedVarint(bytes, cursor));
 }

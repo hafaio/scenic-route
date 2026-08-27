@@ -1863,6 +1863,77 @@ terminals, merged across routes and shifted into seconds from midnight of the ro
 because a walk beginning near midnight catches a boat on the next service day, and because GTFS
 writes an after-midnight sailing as the previous day's 25:10.
 
+### `public/addresses/<city>.bin.gz` — every street address, magic `ADDR` (v1, derived, **committed**)
+
+The routing graph already carries street names, so the part of "312 Court St" that is not on the
+device is the house number. Each city publishes its own address file — NYC AddressPoint
+(`uf93-f8nk`, 967,871 rows) and SF EAS (`ramy-di5m`, 388,568) — and `bun run update-addresses`
+(`scripts/addresses.ts`) reads both through their **CSV export**, which answers a whole dataset in one
+request where the JSON API pages it. The format is frozen in `src/search/address-format.ts`: the
+builder and the client share its house-number helpers and its borough table, so neither can drift
+into its own idea of what "12-34" means.
+
+Committed, like `public/ferry-schedule/` and for the same reason — nothing in a build or a deploy
+writes it — and **never LFS-tracked**. Stored **gzipped**: Pages serves `.bin` uncompressed, so this
+is a third smaller both in the repo and against the Pages cap, and the client inflates it with
+`DecompressionStream`. New York is 2.53 MB gzipped over 967,230 addresses on 9,387 streets, San
+Francisco 0.46 MB over 224,201 on 2,070 — 2.6 and 2.0 bytes an address, which is cheaper than one
+zoom level of any pyramid.
+
+| offset | type | field |
+| --- | --- | --- |
+| 0 | u8[4] | magic `ADDR` |
+| 4 | u8 | format version = 1 |
+| 5 | varint | name blob bytes |
+| .. | UTF-8 | the street names, `"\n"`-joined, **ascending** |
+| .. | varint | place blob bytes |
+| .. | UTF-8 | the places, `"\n"`-joined, ascending; **empty for a city that is one place** |
+| .. | varint | street count |
+
+Then that many streets, ordered by (name, place), each of them a `nameIndex`, a `placeIndex`, a
+`count`, and then `count` addresses:
+
+| field | written as |
+| --- | --- |
+| number | `zigzag(major delta) * 2 + hasExtra` |
+| extra | only when `hasExtra`: `minor * 32 + suffix` |
+| latitude | zigzag delta, units of 1e-5° |
+| longitude | zigzag delta |
+
+All LEB128, and every delta **runs within one street and resets at the next**, the first of each from
+zero. That is why the body is grouped by street rather than sorted globally: a query names a street
+first, so only that street's few hundred addresses are ever decoded.
+
+A street is a **name and a place**, not a name. New York does not qualify its street names and has
+five Court Streets, one in Staten Island and one in Brooklyn; run together they would answer "312
+Court St" with whichever the sort happened to put first and show no sign that it had chosen. The
+place costs less than nothing — a borough's run is geographically tight, so the coordinate deltas get
+*smaller*, and New York's 8,215 names spread over 9,387 streets came out 54 KB smaller gzipped than
+the merged file did. San Francisco, which gains the two indices and no split, grew by 6 KB. New York's places are the five boroughs, mapped from AddressPoint's `boroughcode`
+through `NYC_BOROUGHS`; San Francisco is one place, so its place blob is empty, every street's
+`placeIndex` is 0, and the client shows nothing beside the street name.
+
+A house number is three parts because the two cities disagree about what one is. `major` is the
+number everyone has; `minor` is Queens' hyphen ("25-07" is house 7 on block 25, and sorts by both);
+`suffix` is San Francisco's trailing letter ("269B"), 1-26 for A-Z. Both are zero for almost every
+address in both cities, so they cost the one bit of `hasExtra` rather than a field of their own, and
+only an address that has one pays the extra byte. **`minor` is a number, so the source's padding is
+not kept** — "25-07" comes back as "25-7", which parses and matches either way but is not what the
+sign on the house says.
+
+Coordinates are quantized to 1e-5° (1.1 m north-south, 0.85 m across at these latitudes) — a pin
+lands on the right building, and a finer grid would spend a byte an address on noise the sources do
+not have. San Francisco's file is **per unit**, so one six-flat is six rows of one address; addresses
+identical in number and in quantized position are collapsed within their street, which is what takes
+its 388,544 readable rows down to 224,201. New York's file is per address and loses only 450 that way.
+
+Street names are stored exactly as the source writes them, upper case and all, and the client
+prettifies for display: keeping both spellings would mean shipping both. Rows that cannot be carried
+are **counted and reported** rather than dropped quietly — 191 in New York, all a shape the format has
+no room for (a letter inside the hyphen, "2701-B8", the buildings of one complex), and 24 in San
+Francisco, all half addresses whose suffix is "½" rather than a letter. A New York row whose
+`boroughcode` is not one of the five would join them; today every row has one.
+
 ### `public/streets/{x}/{y}.bin` — the chunks (derived, gitignored)
 
 The segments touching one z12 tile. A segment goes into every z12 tile its bounding box

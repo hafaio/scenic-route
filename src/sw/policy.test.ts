@@ -28,6 +28,12 @@ test("routing is its own store, so a shade binge cannot evict the graph", () => 
   );
 });
 
+test("the address index is kept with the graph, not with the evictable tiles", () => {
+  expect(fileRequest(`${SCOPE}addresses/nyc.bin.gz`, SCOPE)?.store).toBe(
+    "routing",
+  );
+});
+
 // The rule that keeps a new layer from being silently left out of the offline story.
 test("data the worker has never heard of still lands in the overlay store", () => {
   expect(fileRequest(`${SCOPE}some-future-layer/nyc.bin`, SCOPE)).toEqual({
