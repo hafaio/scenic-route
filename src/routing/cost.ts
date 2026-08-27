@@ -277,14 +277,14 @@ export const SHED_AVOID_PENALTY = 20;
 // Phase 3 directions use before bothering to name a greener side.
 export const SIDE_TIE_BYTES = 12;
 
-// The full cost context a search runs against: the scenic weights and the two gates.
+// The full cost context a search runs against: the scenic weights and the gates.
 // The switches, as data. Everything that has to enumerate them — the cache's staleness check, the
 // settings page, the panel's header — reads this rather than writing the list out again, because a
 // list written out again is a list that can miss one. It has: the crossing gate was added and the
 // route cache went on comparing the other two, so flipping it changed nothing on screen.
 export const GATE_KEYS = [
-  "allowFerries",
   "allowSheds",
+  "allowFerries",
   "allowCrossings",
 ] as const;
 

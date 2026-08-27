@@ -69,15 +69,10 @@ export interface Gate {
   off: string;
 }
 
+// Ordered against the sliders below: a gate sits where the factor it shares its data with sits
+// — scaffolding beside `shelter`, ferries beside `ferry` — and crossings, which has no slider of
+// its own, comes last. Every list of the switches is drawn from here, so the order is settled once.
 export const GATES: readonly Gate[] = [
-  {
-    key: "allowFerries",
-    label: "Allow ferries",
-    Icon: MdDirectionsBoat,
-    overlay: "ferries",
-    on: "Ferries allowed — click to route without them",
-    off: "Ferries barred — click to allow ferry crossings",
-  },
   {
     key: "allowSheds",
     label: "Allow scaffolding",
@@ -85,6 +80,14 @@ export const GATES: readonly Gate[] = [
     overlay: "scaffolding",
     on: "Scaffolding allowed — click to route around sidewalk sheds",
     off: "Scaffolding avoided — click to walk under sidewalk sheds again",
+  },
+  {
+    key: "allowFerries",
+    label: "Allow ferries",
+    Icon: MdDirectionsBoat,
+    overlay: "ferries",
+    on: "Ferries allowed — click to route without them",
+    off: "Ferries barred — click to allow ferry crossings",
   },
   {
     key: "allowCrossings",

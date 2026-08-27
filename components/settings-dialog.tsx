@@ -37,6 +37,9 @@ import { useSettings } from "./use-settings";
 
 // The handle a row is dragged by, and the arrow keys that do the same thing without a pointer.
 // `touch-none` is on the handle alone, so a finger anywhere else on the row still scrolls the sheet.
+// A long press on it must start a drag and nothing else: `select-none` keeps the press off the
+// glyph's own text run, and iOS Safari needs `-webkit-touch-callout` cleared as well or it answers
+// with the copy/share callout instead.
 function DragHandle({
   label,
   index,
@@ -64,7 +67,7 @@ function DragHandle({
         }
       }}
       aria-label={`Reorder ${label}, ${index + 1} of ${count}`}
-      className="grid h-8 w-8 shrink-0 cursor-grab touch-none place-items-center rounded-full text-slate-300 hover:bg-slate-100 active:cursor-grabbing dark:text-slate-500 dark:hover:bg-slate-700"
+      className="grid h-8 w-8 shrink-0 cursor-grab touch-none select-none place-items-center rounded-full text-slate-300 [-webkit-touch-callout:none] hover:bg-slate-100 active:cursor-grabbing dark:text-slate-500 dark:hover:bg-slate-700"
     >
       <MdDragIndicator />
     </button>
@@ -216,7 +219,7 @@ function Switch({
   );
 }
 
-// One of the two gates, editing the same state as the route panel's header toggles. Hideable like a
+// One of the gates, editing the same state as the route panel's header toggles. Hideable like a
 // factor and on the same bargain: the gate keeps gating, so a closed one that has been hidden is
 // counted in the panel's "hidden preferences still apply" line.
 function GateRow({
@@ -567,14 +570,18 @@ export default function SettingsDialog({
         onClick={onClose}
         className="absolute inset-0 cursor-default bg-slate-950/40 backdrop-blur-sm"
       />
+      {/* The card is the capped box and the sections are the one thing inside it that scrolls, so the
+          title and the close stay put however long the page gets (the rule at the top of
+          app/globals.css). `90dvh` rather than `vh` because on a phone `100vh` is the viewport with
+          the browser chrome retracted. */}
       <div
         role="dialog"
         aria-modal="true"
         aria-labelledby="settings-title"
-        className="relative max-h-[90dvh] w-full overflow-y-auto rounded-t-3xl bg-white p-6 shadow-2xl ring-1 ring-black/5 dark:bg-slate-800 dark:ring-white/10 md:max-w-md md:rounded-3xl md:p-7"
+        className="relative flex max-h-[90dvh] w-full flex-col rounded-t-3xl bg-white p-6 shadow-2xl ring-1 ring-black/5 dark:bg-slate-800 dark:ring-white/10 md:max-w-md md:rounded-3xl md:p-7"
       >
-        <div className="mx-auto mb-3 h-1.5 w-10 rounded-full bg-slate-200 dark:bg-slate-700 md:hidden" />
-        <div className="flex items-start gap-3">
+        <div className="mx-auto mb-3 h-1.5 w-10 shrink-0 rounded-full bg-slate-200 dark:bg-slate-700 md:hidden" />
+        <div className="flex shrink-0 items-start gap-3">
           <h2
             id="settings-title"
             className="min-w-0 flex-1 text-lg font-semibold tracking-tight"
@@ -591,29 +598,31 @@ export default function SettingsDialog({
           </button>
         </div>
 
-        <Section
-          id="layers"
-          wanted={section === "layers"}
-          caption="The order of the layers menu, and which layers it offers. One order for every city — each shows the layers it has data for."
-        >
-          <LayerRows />
-        </Section>
+        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
+          <Section
+            id="layers"
+            wanted={section === "layers"}
+            caption="The order of the layers menu, and which layers it offers. One order for every city — each shows the layers it has data for."
+          >
+            <LayerRows />
+          </Section>
 
-        <Section
-          id="routing"
-          wanted={section === "routing"}
-          caption="One value per preference — these are the route panel's own sliders. Hiding one takes it out of the panel; it still prices the route."
-        >
-          <FactorRows weights={weights} onWeight={onWeight} />
-          <GateRows weights={weights} onGate={onGate} />
-        </Section>
+          <Section
+            id="routing"
+            wanted={section === "routing"}
+            caption="One value per preference — these are the route panel's own sliders. Hiding one takes it out of the panel; it still prices the route."
+          >
+            <FactorRows weights={weights} onWeight={onWeight} />
+            <GateRows weights={weights} onGate={onGate} />
+          </Section>
 
-        <OfflineSection wanted={section === "offline"} />
+          <OfflineSection wanted={section === "offline"} />
 
-        <div className="mt-7 border-t border-slate-200/60 pt-4 text-xs text-slate-500 dark:border-slate-700/60 dark:text-slate-400">
-          {syncingAs === null
-            ? "These settings are kept on this device. Sign in and they follow you to your others."
-            : `Synced with ${syncingAs}. Changes here reach your other devices, and theirs reach this one.`}
+          <div className="mt-7 border-t border-slate-200/60 pt-4 text-xs text-slate-500 dark:border-slate-700/60 dark:text-slate-400">
+            {syncingAs === null
+              ? "These settings are kept on this device. Sign in and they follow you to your others."
+              : `Synced with ${syncingAs}. Changes here reach your other devices, and theirs reach this one.`}
+          </div>
         </div>
       </div>
     </div>

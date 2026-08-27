@@ -39,7 +39,7 @@ export interface Settings {
   // Factors the reader has taken out of the route panel: no slider and no summary chip. Their
   // weights still price the route, so the panel counts the non-zero ones and says so.
   hiddenFactors: readonly FactorKey[];
-  // The two gates, taken out of the panel's header. Same bargain as a hidden factor: the gate keeps
+  // The gates taken out of the panel's header. Same bargain as a hidden factor: the gate keeps
   // gating, so a hidden one that is CLOSED is counted alongside them.
   hiddenGates: readonly GateKey[];
   // How much of the map to keep for offline use, as one of the coverage options in ./offline.ts. The
