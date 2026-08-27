@@ -6,6 +6,7 @@ import { useMap } from "react-leaflet";
 import type { OverlayId } from "../src/overlays/registry";
 import { watchLayerStatus } from "../src/overlays/status";
 import WorkerTileLayer from "../src/tiles/layer";
+import { KEEP_BUFFER } from "../src/tiles/raster";
 import manifest from "../src/tree-cover/manifest.json";
 import { useCity } from "./city-context";
 
@@ -51,7 +52,7 @@ export default function LinesLayer({
             bounds: L.latLngBounds([south, west], [north, east]),
             minZoom: MIN_ZOOM,
             maxZoom: MAX_ZOOM,
-            keepBuffer: 4,
+            keepBuffer: KEEP_BUFFER,
           },
         );
       });

@@ -4,6 +4,7 @@ import L from "leaflet";
 import { useEffect } from "react";
 import { useMap } from "react-leaflet";
 import { watchLayerStatus } from "../src/overlays/status";
+import { KEEP_BUFFER } from "../src/tiles/raster";
 import { GENUS_COLORS } from "../src/tree-cover/genus";
 import {
   getEnabledGenera,
@@ -367,7 +368,7 @@ export default function GenusGlLayer() {
       minNativeZoom: MIN_NATIVE_ZOOM,
       maxNativeZoom: MAX_NATIVE_ZOOM,
       maxZoom: MAX_NATIVE_ZOOM, // hand off to TreeDotsLayer above
-      keepBuffer: 2,
+      keepBuffer: KEEP_BUFFER,
     });
 
     // The WebGL grid is the whole genus overlay below z15, where the dots layer has not taken over —

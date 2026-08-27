@@ -5,6 +5,7 @@ import { useEffect } from "react";
 import { useMap } from "react-leaflet";
 import { watchLayerStatus } from "../src/overlays/status";
 import WorkerTileLayer from "../src/tiles/layer";
+import { KEEP_BUFFER } from "../src/tiles/raster";
 import manifest from "../src/tree-cover/manifest.json";
 import { useCity } from "./city-context";
 
@@ -34,8 +35,7 @@ export default function StreetScoreLayer() {
           minZoom: MIN_ZOOM,
           maxZoom: MAX_ZOOM,
           zIndex: Z_INDEX,
-          // a wider ring, so panning after a zoom doesn't immediately re-draw
-          keepBuffer: 4,
+          keepBuffer: KEEP_BUFFER,
         });
       });
     // Attached before the layers go on the map, or the first load cycle's `loading` is missed.

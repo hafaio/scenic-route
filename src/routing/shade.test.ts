@@ -120,6 +120,46 @@ test("loadShadeBin decodes a bin file to its two occlusion rows", async () => {
   expect(Array.from(trees)).toEqual([0, 255, 0, 0]);
 });
 
+test("a rejected bin load only forgets itself", async () => {
+  // A stalled fetch is evicted by the cache, a second fetch of the same bin succeeds, and only then
+  // does the first one fail. Deleting by key alone would throw away the good entry it never owned.
+  const outer = globalThis.fetch;
+  let fetches = 0;
+  let stall: ((error: Error) => void) | null = null;
+  const stalled = new Promise<Response>((_, reject) => {
+    stall = reject;
+  });
+  globalThis.fetch = ((input: RequestInfo | URL): Promise<Response> => {
+    const url = String(input);
+    if (url.endsWith("/9.bin")) {
+      fetches += 1;
+      return fetches === 1
+        ? stalled
+        : Promise.resolve(new Response(buildBin([1, 2, 3, 4], [0, 0, 0, 0])));
+    }
+    return Promise.resolve(new Response(buildBin([0, 0, 0, 0], [0, 0, 0, 0])));
+  }) as typeof fetch;
+  try {
+    const first = loadShadeBin(9, "stalled");
+    first.catch(() => undefined); // the rejection below is the point; it must not go unhandled
+    // Past any capacity this cache is given, so the stalled entry is certainly gone.
+    for (let filler = 0; filler < 40; filler += 1) {
+      await loadShadeBin(0, `filler${filler}`);
+    }
+    expect(Array.from((await loadShadeBin(9, "stalled")).buildings)).toEqual([
+      1, 2, 3, 4,
+    ]);
+    (stall as unknown as (error: Error) => void)(new Error("stalled"));
+    await expect(first).rejects.toThrow("stalled");
+    expect(Array.from((await loadShadeBin(9, "stalled")).buildings)).toEqual([
+      1, 2, 3, 4,
+    ]);
+    expect(fetches).toBe(2);
+  } finally {
+    globalThis.fetch = outer;
+  }
+});
+
 test("computeEdgeShade composites the two occlusions and blends the nearest bins", async () => {
   expect(daySun.elevation).toBeGreaterThan(0.5); // precondition: the sun is up, so a blend is computed
 
