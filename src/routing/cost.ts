@@ -54,10 +54,17 @@ export const CROSSING_AVOID_MULTIPLE = 10;
 // How long a walker will stand on a pier before the ferry stops counting as a way to get anywhere.
 // The timetable always has a next sailing — tomorrow's first boat, if nothing else — so without a
 // bound a route planned at midnight would propose waiting until morning. Past this the edge costs
-// Infinity and the search walks instead; that only ever raises cost, so the heuristic's ferry credit
-// (built at zero wait) stays a lower bound. NYC's overnight service sets the floor: the Staten
-// Island Ferry runs every 30-60 minutes all night.
-export const MAX_FERRY_WAIT_SECONDS = 90 * 60;
+// Infinity; that only ever raises cost, so the heuristic's ferry credit (built at zero wait) stays a
+// lower bound.
+//
+// Per city, because what happens past the cap is not the same everywhere. In New York the search
+// walks instead — the Staten Island Ferry runs every 30-60 minutes all night, and a bridge is always
+// there. Across San Francisco Bay the ferry is the ONLY way over on foot, so past the cap is not
+// "walk instead", it is "no route at all" — and the timetable has a 140-minute midday gap. Ninety
+// minutes there tells a walker standing on the pier at 10:10 that they cannot get to Oakland, with a
+// boat coming. The cost of a longer cap is a route that proposes a long wait; the cost of a short one
+// is refusing a trip that is possible.
+export const DEFAULT_MAX_FERRY_WAIT_SECONDS = 90 * 60;
 
 // Every weight spans [0, 1]. w must stay <= 1 or a discount floor (1 - w*max) can go negative, and a
 // negative edge cost breaks Dijkstra/A*. Defaults sit a little in from the extremes for a mild bias.
@@ -501,7 +508,8 @@ export function ferrySeconds(
     return { wait: 0, crossing: graph.edgeDurationSeconds[edge] };
   }
   const sailing = graph.ferries.board(edge, fromNode, elapsedSeconds);
-  if (!sailing || sailing.wait > MAX_FERRY_WAIT_SECONDS) {
+  const cap = graph.maxFerryWaitSeconds ?? DEFAULT_MAX_FERRY_WAIT_SECONDS;
+  if (!sailing || sailing.wait > cap) {
     return { wait: Number.POSITIVE_INFINITY, crossing: 0 };
   } else {
     return { wait: sailing.wait, crossing: sailing.crossing };

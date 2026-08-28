@@ -10,6 +10,7 @@ import { createHash } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { parseArgs } from "node:util";
+import { EAST_BAY_STREET_ATTRIBUTION, fetchEastBayStreets } from "./alameda";
 import {
   type CrownAllometry,
   crownDiameterMeters,
@@ -38,7 +39,7 @@ import {
   UNNAMED_ID,
 } from "./geometry";
 import { ingestHighways } from "./highways";
-import { fetchNycLand, type LandContext } from "./land";
+import { fetchBayAreaLand, fetchNycLand, type LandContext } from "./land";
 import { buildLandTest } from "./land-filter";
 import {
   ingestLandmarks,
@@ -56,7 +57,6 @@ import {
 } from "./overpass";
 import {
   fetchSfCanopyPolygons,
-  fetchSfLand,
   fetchSfStreets,
   fetchSfTrees,
   SF_CANOPY_ATTRIBUTION,
@@ -653,7 +653,10 @@ interface CitySources {
   canopySourceUrl: string;
   // The polygons the whole ingest is clipped to, and whose box every Overpass query is cut from.
   land: () => Promise<Polygon[]>;
-  streets: () => Promise<Segment[]>;
+  // Handed the finished land context because a city may read a centreline that is not its own: the
+  // Bay Area's East Bay half comes from a COUNTY layer covering three times the city, and only the
+  // land test decides which of its rows are in. San Francisco's and New York's ignore it.
+  streets: (land: LandContext) => Promise<Segment[]>;
   trees: () => Promise<Tree[]>;
   canopy: () => Promise<{
     polygons: Polygon[];
@@ -737,12 +740,18 @@ const NYC: CitySources = {
   medianDbhInches: 9, // the ForMS median over standing trees
 };
 
+// San Francisco and the East Bay under one id. The id stays `sf` — it names every artifact on disk,
+// every service-worker cache key and every link anyone has already shared — while the NAME is the
+// region, because the region is what this is growing into and the two halves it holds today are
+// where it starts rather than what it is.
 const SF: CitySources = {
   id: "sf",
-  name: "San Francisco",
+  name: "Bay Area",
   attribution: "SF Public Works street trees via DataSF",
   sourceUrl: DATA_SF.page("tkzw-k3nq"),
-  streetAttribution: "SF basemap street centrelines via DataSF",
+  // Two centrelines, one per half of the region. The manifest schema has one source URL, so it
+  // stays San Francisco's.
+  streetAttribution: `SF basemap street centrelines via DataSF; ${EAST_BAY_STREET_ATTRIBUTION}`,
   streetSourceUrl: DATA_SF.page("3psu-pn9h"),
   fieldAttribution: "path & tree data © OpenStreetMap contributors",
   fieldSourceUrl: "https://www.openstreetmap.org/copyright",
@@ -750,8 +759,13 @@ const SF: CitySources = {
   pathSourceUrl: "https://www.openstreetmap.org/copyright",
   canopyAttribution: SF_CANOPY_ATTRIBUTION,
   canopySourceUrl: DATA_SF.page("ni2e-vpbg"),
-  land: fetchSfLand,
-  streets: fetchSfStreets,
+  land: fetchBayAreaLand,
+  // Their durable ids cannot collide — DataSF's `cnn` runs in the low millions and the county's
+  // `SEGID` starts at 181,000,001 — which is what lets one STRT file hold both halves.
+  streets: async (land) => [
+    ...(await fetchSfStreets()),
+    ...(await fetchEastBayStreets(land)),
+  ],
   trees: fetchSfTrees,
   canopy: fetchSfCanopyPolygons,
   // The same 3DEP tiles the terrain overlay is built from, read at the band that differences the
@@ -769,8 +783,9 @@ const SF: CitySources = {
       sourceUrl: raster.sourceUrl,
     };
   },
-  // The Bay Area feed is behind a 511.org key, which nothing in this pipeline holds yet.
-  ferries: null,
+  // The ferry is not one scenic option among several here: it is the only way across the bay on
+  // foot, so the two halves of this city are one connected walking network only because of it.
+  ferries: () => ingestFerries("sf"),
   alleys: false,
   landmarks: SF_LANDMARKS,
   art: SF_ART,
@@ -881,7 +896,7 @@ async function fetchCity(CITY: CitySources): Promise<void> {
   );
 
   console.error(`${CITY.id}: fetching street segments`);
-  const segments = await CITY.streets();
+  const segments = await CITY.streets(landContext);
   const names = buildNameTable(segments);
   const unnamed = segments.filter(
     (segment) => segment.nameId === UNNAMED_ID,

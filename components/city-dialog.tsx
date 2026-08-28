@@ -6,9 +6,9 @@ import { GiSuspensionBridge, GiTorch } from "react-icons/gi";
 import { CITIES, type City } from "../src/cities";
 
 // Something of the place rather than the same pin twice: the torch stands in for the Statue of
-// Liberty, which react-icons has no icon of, and the suspension bridge for the Golden Gate. A city
-// with none named falls back to a map pin, which is honest — better an obviously generic mark than
-// one that gestures at the wrong landmark.
+// Liberty, which react-icons has no icon of, and the suspension bridge for the bridges the Bay Area
+// is known by. A region with none named falls back to a map pin, which is honest — better an
+// obviously generic mark than one that gestures at the wrong landmark.
 const CITY_ICONS: Record<
   string,
   ComponentType<{ className?: string; "aria-hidden"?: boolean }>
@@ -23,8 +23,8 @@ interface CityDialogProps {
   onClose: () => void;
 }
 
-// What each city offers, named the way the toolbar's overlay switcher names it, so the list says
-// what changes by switching rather than only where. A city carries a handful of these; the ones a
+// What each region offers, named the way the toolbar's overlay switcher names it, so the list says
+// what changes by switching rather than only where. Each carries a handful of these; the ones a
 // reader would look for (trees, hills, ferries) are what distinguishes one entry from another.
 const OVERLAY_LABELS: Record<string, string> = {
   canopy: "Tree cover",
@@ -74,7 +74,7 @@ export default function CityDialog({
     <div className="fixed inset-0 z-[1100] flex items-end justify-center md:items-center">
       <button
         type="button"
-        aria-label="Close city picker"
+        aria-label="Close region picker"
         onClick={onClose}
         className="absolute inset-0 cursor-default bg-slate-950/40 backdrop-blur-sm"
       />
@@ -91,10 +91,10 @@ export default function CityDialog({
               id="city-title"
               className="text-lg font-semibold text-slate-800 dark:text-slate-100"
             >
-              Choose a city
+              Choose a region
             </h2>
             <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-              One city is active at a time — switching swaps the map, the
+              One region is active at a time — switching swaps the map, the
               overlays and the routing graph.
             </p>
           </div>
@@ -115,8 +115,8 @@ export default function CityDialog({
               type="search"
               value={query}
               onChange={(event) => setQuery(event.target.value)}
-              placeholder="Search cities"
-              aria-label="Search cities"
+              placeholder="Search regions"
+              aria-label="Search regions"
               className="w-full bg-transparent text-slate-700 outline-none placeholder:text-slate-400 dark:text-slate-100"
             />
           </label>
@@ -159,7 +159,7 @@ export default function CityDialog({
           })}
           {shown.length === 0 ? (
             <li className="px-3 py-6 text-center text-sm text-slate-500 dark:text-slate-400">
-              No city matches “{query.trim()}”.
+              No region matches “{query.trim()}”.
             </li>
           ) : null}
         </ul>

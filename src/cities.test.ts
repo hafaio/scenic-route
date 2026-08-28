@@ -3,6 +3,7 @@ import {
   CITIES,
   citiesInView,
   cityById,
+  cityInSentence,
   containsPoint,
   DEFAULT_CITY,
   metersFromCity,
@@ -42,6 +43,14 @@ test("a point far outside every city still resolves to the nearest one", () => {
   const sanFrancisco = { lat: 37.7749, lng: -122.4194 };
   expect(containsPoint(DEFAULT_CITY, sanFrancisco)).toBe(false);
   expect(CITIES).toContain(nearestCity(sanFrancisco));
+});
+
+// The name is a label in the switcher and a noun in a sentence, and the two differ once one of these
+// is a region: "outside New York City", but "outside the Bay Area".
+test("a region's name takes an article in a sentence and a city's does not", () => {
+  const bay = cityById("sf");
+  expect(bay && cityInSentence(bay)).toBe("the Bay Area");
+  expect(cityInSentence(DEFAULT_CITY)).toBe(DEFAULT_CITY.name);
 });
 
 test("an unknown or absent city id resolves to nothing rather than a default", () => {

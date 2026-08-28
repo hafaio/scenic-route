@@ -3,6 +3,7 @@
 // over the fetched buffer; the strided edge records are copied once into parallel typed arrays so
 // the search loop touches only flat arrays.
 
+import { cityById } from "../cities";
 import type { FerryTimetable } from "./ferry-schedule";
 import type { ShadeField } from "./shade";
 import type { ShedField } from "./sheds";
@@ -169,6 +170,11 @@ export interface RoutingGraph extends GraphIdentity {
   // the moment it is reached. Null when no artifact is loaded or the sun is below the horizon for the
   // whole walk (no shade to bias); its maxAbs (0..1) is the shade factor's clip-floor input.
   shade: ShadeField | null;
+
+  // How long this region's walker will wait on a pier, from src/cities.ts. Not baked into the
+  // artifact: it is a judgement about the timetable rather than a fact about the geometry, and
+  // changing it should not mean rebuilding a 40 MB graph.
+  maxFerryWaitSeconds?: number;
 
   // The picked day's sidewalk sheds, filled from the SHED artifact by computeEdgeSheds: per edge, how
   // much of it stands under a deck. A deck is opaque and dry, so it feeds the shade composite, the
@@ -511,7 +517,10 @@ export function loadGraph(cityId: string): Promise<RoutingGraph> {
       if (!response.ok) {
         throw new Error(`${url}: ${response.status} ${response.statusText}`);
       }
-      return decodeGraph(await response.arrayBuffer(), identity);
+      const graph = decodeGraph(await response.arrayBuffer(), identity);
+      // Attached here so every caller's graph carries it, not just the router's.
+      graph.maxFerryWaitSeconds = cityById(cityId)?.maxFerryWaitSeconds;
+      return graph;
     })
     .catch((error: unknown) => {
       graphPromises.delete(cityId); // a failed load must not be memoized

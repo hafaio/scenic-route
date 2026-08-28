@@ -1,5 +1,6 @@
 // `bun run update-ferry-schedule`: the ferry timetable the router departs against, as its own small
-// artifact rather than a number baked into the graph.
+// artifact rather than a number baked into the graph. Every ferry city on one run, so a city that
+// gains ferries is covered without the daily workflow being touched.
 //
 // data/ferries/<id>.bin (FERR) collapses the whole schedule into one crossing-plus-average-wait
 // figure per stop pair, and the graph pass bakes that into the 37 MB routing graph. Nothing in the
@@ -11,7 +12,7 @@
 // Two files per city. `<id>.bin` is the timetable in effect now; `<id>-past.bin` is every superseded
 // one, appended whole and never rewritten — a record carries the day range it was in effect, so a
 // route planned on a past day is planned against the timetable that actually ran. Only the feeds
-// decide the contents: the record's body is a pure function of the two zips, so a day that finds
+// decide the contents: the record's body is a pure function of the city's zips, so a day that finds
 // them unchanged rewrites identical bytes and the daily job's "nothing to commit" path fires.
 //
 // Layout: scripts/README.md.
@@ -19,11 +20,13 @@
 import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { parseArgs } from "node:util";
 import {
-  EXCLUDED_STOP_NAMES,
-  FEEDS,
+  excludedStopNames,
+  FERRY_CITIES,
   FERRY_ROUTE_TYPE,
   type FeedSource,
+  feedsOf,
   toSeconds,
 } from "./ferries";
 import { writeVarint } from "./geometry";
@@ -123,11 +126,13 @@ function previousDay(day: number): number {
 
 // One feed's ferry trips, cut into consecutive-stop departures and folded into the shared lanes.
 // Only route_type 4 is kept (the NYC Ferry feed also carries its shuttle buses), and the same
-// Rockaway exclusion the FERR ingest applies is applied here, so the two artifacts describe the same
-// network.
+// out-of-city stop names the FERR ingest drops are dropped here, so the two artifacts describe the
+// same network. The names are all this job knows: it runs daily in CI and must not depend on the two
+// GIS services the ingest's land check reads.
 function consolidate(
   feed: GtfsFeed,
   feedId: string,
+  excluded: ReadonlySet<string>,
   lanes: Map<string, Lane>,
   usedServices: Set<string>,
   stopOfName: Map<string, string>,
@@ -192,8 +197,8 @@ function consolidate(
         fromName === undefined ||
         toName === undefined ||
         fromName === toName ||
-        EXCLUDED_STOP_NAMES.has(fromName) ||
-        EXCLUDED_STOP_NAMES.has(toName)
+        excluded.has(fromName) ||
+        excluded.has(toName)
       ) {
         continue;
       }
@@ -295,14 +300,17 @@ function collectServices(
   };
 }
 
+// `excluded` defaults to nothing so a caller building a timetable out of feeds it wrote itself — the
+// tests do — need not name a city's exclusions to say it has none.
 export function buildTimetable(
   feeds: { source: FeedSource; feed: GtfsFeed }[],
+  excluded: ReadonlySet<string> = new Set<string>(),
 ): Timetable {
   const lanes = new Map<string, Lane>();
   const usedServices = new Set<string>();
   const stopOfName = new Map<string, string>();
   for (const { source, feed } of feeds) {
-    consolidate(feed, source.id, lanes, usedServices, stopOfName);
+    consolidate(feed, source.id, excluded, lanes, usedServices, stopOfName);
   }
   const { services, exceptions } = collectServices(feeds, usedServices);
 
@@ -506,23 +514,23 @@ export interface ScheduleUpdate {
   sha256: string;
 }
 
-// Fetches both feeds, builds the timetable and — only if it differs from the one in effect — closes
-// the standing record into `<id>-past.bin` and opens a new one. `today` is the day the new record
-// takes effect from; the superseded one is closed the day before, so the two ranges meet without
-// overlapping and no day is left without a timetable.
+// Fetches the city's feeds, builds its timetable and — only if it differs from the one in effect —
+// closes the standing record into `<id>-past.bin` and opens a new one. `today` is the day the new
+// record takes effect from; the superseded one is closed the day before, so the two ranges meet
+// without overlapping and no day is left without a timetable.
 export async function updateFerrySchedule(
   cityId: string,
   today: string,
 ): Promise<ScheduleUpdate> {
   await mkdir(SCHEDULE_DIR, { recursive: true });
   const loaded: { source: FeedSource; feed: GtfsFeed }[] = [];
-  for (const source of FEEDS) {
+  for (const source of feedsOf(cityId)) {
     console.error(`ferry-schedule: fetching ${source.name}`);
     const zip = await fetchGtfsZip(source.cacheKey, source.url);
     loaded.push({ source, feed: parseGtfs(zip) });
   }
 
-  const timetable = buildTimetable(loaded);
+  const timetable = buildTimetable(loaded, excludedStopNames(cityId));
   const day = dayNumber(today);
   const currentPath = join(SCHEDULE_DIR, `${cityId}.bin`);
   const pastPath = join(SCHEDULE_DIR, `${cityId}-past.bin`);
@@ -576,7 +584,7 @@ export async function updateFerrySchedule(
     0,
   );
   console.error(
-    `ferry-schedule: ${timetable.lanes.length} lanes, ${departures} departures, ` +
+    `ferry-schedule: ${cityId} ${timetable.lanes.length} lanes, ${departures} departures, ` +
       `${timetable.services.length} services, in effect from ${dayString(firstDay)} ` +
       `(${changed ? "changed" : "unchanged"}, ${record.length} bytes)`,
   );
@@ -599,6 +607,14 @@ function localDay(date: Date): string {
   return `${date.getFullYear()}-${month}-${day}`;
 }
 
+// One city with `--city`, otherwise every city that has ferries — which is what the daily job runs,
+// so adding a ferry city needs no change to the workflow. One `today` for the whole run, so two
+// cities whose feeds both moved open their new records on the same day even across midnight.
 if (import.meta.main) {
-  await updateFerrySchedule("nyc", localDay(new Date()));
+  const { values } = parseArgs({ options: { city: { type: "string" } } });
+  const cities = values.city === undefined ? FERRY_CITIES : [values.city];
+  const today = localDay(new Date());
+  for (const cityId of cities) {
+    await updateFerrySchedule(cityId, today);
+  }
 }
