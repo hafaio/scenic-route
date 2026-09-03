@@ -8,6 +8,7 @@ import { encodeRoute, type LatLng, replaceOwnKeys } from "../src/url-state";
 interface UrlSyncProps {
   start: LatLng | null;
   dest: LatLng | null;
+  pin: LatLng | null;
   weights: RouteWeights;
   // Held off until the hash at load has been applied, so the first render can't overwrite the link
   // being opened with the app's defaults.
@@ -21,6 +22,7 @@ interface UrlSyncProps {
 export default function UrlSync({
   start,
   dest,
+  pin,
   weights,
   enabled,
 }: UrlSyncProps) {
@@ -34,18 +36,25 @@ export default function UrlSync({
     if (!enabled) {
       return;
     }
-    // Nothing to share until a route exists. The weights alone are a local preference, already
-    // persisted, so writing them would put a line of sliders in the address bar of a session that
-    // has not asked for anything — and would strip the keys of a settings-only link on arrival.
-    // Once `from`/`to` have been written, keep going, so clearing the route clears them too.
-    const routed = start !== null || dest !== null;
+    // Nothing to share until a route or a searched place exists. The weights alone are a local
+    // preference, already persisted, so writing them would put a line of sliders in the address bar
+    // of a session that has not asked for anything — and would strip the keys of a settings-only
+    // link on arrival. Once `from`/`to`/`pin` have been written, keep going, so clearing them clears
+    // the keys too.
+    const asked = start !== null || dest !== null || pin !== null;
     const params = new URLSearchParams(window.location.hash.replace(/^#/, ""));
-    if (!routed && !params.has("from") && !params.has("to")) {
+    if (
+      !asked &&
+      !params.has("from") &&
+      !params.has("to") &&
+      !params.has("pin")
+    ) {
       return;
     }
     const next = encodeRoute({
       start,
       dest,
+      pin,
       weights,
       customHour: hour,
       customDay: day,

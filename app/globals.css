@@ -23,10 +23,13 @@
   }
 }
 
-.scenic-saved-pin {
+.scenic-saved-pin,
+.scenic-search-pin {
   filter: drop-shadow(0 4px 6px rgb(0 0 0 / 0.25));
   transition: transform 160ms ease;
 }
+/* The search pin is not in this one: nothing happens when it is clicked, so it must not lift under
+   the cursor as though something would. */
 .scenic-saved-pin:hover {
   transform: translateY(-2px) scale(1.05);
 }

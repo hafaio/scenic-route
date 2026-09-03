@@ -40,6 +40,10 @@ export interface LatLng {
 export interface RouteUrlState {
   start: LatLng | null; // a manually set start; null means the live location
   dest: LatLng | null;
+  // A place the reader looked up and left on the map. Not an endpoint: it carries no route and no
+  // name, because the point is the index's own and the same local lookup that names `from`/`to`
+  // names this back.
+  pin: LatLng | null;
   weights: RouteWeights;
   customHour: number | null; // null tracks the wall clock
   customDay: string | null; // "YYYY-MM-DD"; null is today
@@ -81,6 +85,7 @@ export const DEFAULT_WEIGHTS: RouteWeights = {
 export const DEFAULT_ROUTE_STATE: RouteUrlState = {
   start: null,
   dest: null,
+  pin: null,
   weights: DEFAULT_WEIGHTS,
   customHour: null,
   customDay: null,
@@ -143,6 +148,7 @@ const WEIGHT_PARAMS: readonly WeightParam[] = [
 const ROUTE_KEYS: readonly string[] = [
   "from",
   "to",
+  "pin",
   DEST_QUERY_KEY,
   ...WEIGHT_PARAMS.map((param) => param.key),
   "ferries",
@@ -237,6 +243,7 @@ export function decodeRoute(
   return {
     start: parsePoint(params.get("from")) ?? defaults.start,
     dest: parsePoint(params.get("to")) ?? defaults.dest,
+    pin: parsePoint(params.get("pin")) ?? defaults.pin,
     weights,
     customHour:
       hour === null ? defaults.customHour : parseNumber(hour, 0, 24, 12),
@@ -251,6 +258,9 @@ export function encodeRoute(state: RouteUrlState): URLSearchParams {
   }
   if (state.dest) {
     params.set("to", formatPoint(state.dest));
+  }
+  if (state.pin) {
+    params.set("pin", formatPoint(state.pin));
   }
   for (const { key, field } of WEIGHT_PARAMS) {
     const value = round(state.weights[field], WEIGHT_DIGITS);
