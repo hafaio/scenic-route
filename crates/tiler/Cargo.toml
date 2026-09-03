@@ -6,7 +6,7 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
-cavalier_contours = "0.7"
+cavalier_contours = "0.9"
 clap = { version = "4.6.6", features = ["derive"] }
 # the 3DEP point cloud the East Bay's building heights are binned from: LAS 1.4 records
 # inside laszip nodes, which is what the "laz" feature decodes
