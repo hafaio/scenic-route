@@ -87,6 +87,17 @@ export function overlayLabel(overlay: OverlayDef, city: City): string {
   return typeof overlay.label === "string" ? overlay.label : overlay.label(city);
 }
 
+// Genus recolours every tree rather than adding a colour to the map, so it goes solo. The toggle
+// handler holds to that a click at a time; a whole set arriving at once — a link's `layers`, or the
+// remembered one — has to be held to it here, or a hand-written `#layers=genus,canopy` draws both.
+// Naming an exclusive layer at all is asking for that layer, so it is the one that survives.
+export function applyExclusivity(ids: readonly OverlayId[]): OverlayId[] {
+  const solo = ids.find(
+    (id) => OVERLAYS.find((overlay) => overlay.id === id)?.exclusive,
+  );
+  return solo ? [solo] : [...ids];
+}
+
 export interface OverlayDef {
   id: OverlayId;
   // Menu text. A function where the layer is the same artifact in every city but goes by a different
