@@ -11,7 +11,7 @@
         "east": -73.69948815566987
       },
       "trees": 898100,
-      "updated": "2026-08-13",
+      "updated": "2026-08-29",
       "attribution": "NYC Parks Forestry (ForMS) via NYC Open Data",
       "sourceUrl": "https://data.cityofnewyork.us/d/hn5i-inap",
       "field": {
@@ -38,7 +38,7 @@
           "sha256": "16c31e1005d1cb484130db017ae0d2407f138d67df25d4e158caea3c97585c62",
           "squareKm": 172.6,
           "measuredHeights": 496604,
-          "updated": "2026-08-13",
+          "updated": "2026-08-29",
           "attribution": "Tree canopy © NYC OTI / NYC Parks (2017 LiDAR)",
           "sourceUrl": "https://services3.arcgis.com/xJHn8F2NTtwCMFtX/arcgis/rest/services/TreeCanopy2017_Simplified_1ft/FeatureServer/0",
           "heightAttribution": "Canopy heights © Ma et al. 2023 (CC BY 4.0)",
@@ -146,7 +146,7 @@
             "p99": 0.993
           }
         },
-        "updated": "2026-08-13",
+        "updated": "2026-08-29",
         "attribution": "path & tree data © OpenStreetMap contributors",
         "sourceUrl": "https://www.openstreetmap.org/copyright"
       },
@@ -182,7 +182,7 @@
             "p99": 0.98
           }
         },
-        "updated": "2026-08-13",
+        "updated": "2026-08-29",
         "attribution": "NYC DoITT Street Centerline (CSCL) via NYC Open Data",
         "sourceUrl": "https://data.cityofnewyork.us/d/inkn-q76z"
       },
@@ -217,7 +217,7 @@
             "p99": 1
           }
         },
-        "updated": "2026-08-13",
+        "updated": "2026-08-29",
         "attribution": "OpenStreetMap contributors",
         "sourceUrl": "https://www.openstreetmap.org/copyright"
       }
@@ -226,29 +226,29 @@
       "id": "sf",
       "name": "Bay Area",
       "bounds": {
-        "south": 37.667404397920706,
-        "west": -122.51545908707794,
-        "north": 37.90709382978614,
-        "east": -122.11427676382509
+        "south": 37.665548012654455,
+        "west": -122.51412821607663,
+        "north": 37.90591839002644,
+        "east": -122.11396170101138
       },
       "trees": 194983,
-      "updated": "2026-08-16",
+      "updated": "2026-08-29",
       "attribution": "SF Public Works street trees via DataSF",
       "sourceUrl": "https://data.sfgov.org/d/tkzw-k3nq",
       "field": {
         "trees": {
           "file": "sf.bin",
           "format": 3,
-          "count": 203608,
-          "bytes": 1116661,
-          "sha256": "c7ca3fb60d19034a70eb40a3bfb371d5b80d420d33c09173384b0c1dd2928be9"
+          "count": 206163,
+          "bytes": 1131490,
+          "sha256": "deae8048afbd7199be10f7fa574dcf9982129cf50ebb0a9da0bba497c5e6b34e"
         },
         "land": {
           "file": "sf.bin",
           "format": 1,
-          "count": 79,
-          "bytes": 99903,
-          "sha256": "547cdb89a8993e14eeaf42a08092ad8a34f0b104dc62fc2a35f8bf76d10fe42e"
+          "count": 83,
+          "bytes": 123095,
+          "sha256": "435b54d1758c86a878b2e99246dace1a31e830a5bee07fe07de5cfa923cfd05b"
         },
         "canopy": {
           "file": "sf.bin",
@@ -259,7 +259,7 @@
           "sha256": "f2287b1054607afdf991acae81007f3501605bf5fee94c2e6c20471dad531ef3",
           "squareKm": 16.8,
           "measuredHeights": 233762,
-          "updated": "2026-08-16",
+          "updated": "2026-08-29",
           "attribution": "Urban tree canopy © SF Planning (2013 Urban Forest Plan)",
           "sourceUrl": "https://data.sfgov.org/d/ni2e-vpbg",
           "heightAttribution": "Elevation © USGS 3DEP / NASA WERK (CC0)",
@@ -279,10 +279,10 @@
         "imputedDbhInches": 7,
         "clampedTrees": 963,
         "imputedTrees": 44413,
-        "osmTrees": 8625,
-        "osmTreeDedup": 2059,
-        "osmImputedCrowns": 8621,
-        "meanCoverOverLand": 0.137,
+        "osmTrees": 11180,
+        "osmTreeDedup": 2146,
+        "osmImputedCrowns": 11174,
+        "meanCoverOverLand": 0.045,
         "coverSamples": 1000000,
         "coverSeed": 42,
         "genus": {
@@ -343,102 +343,102 @@
               "count": 5463
             }
           ],
-          "otherCount": 101348
+          "otherCount": 103903
         },
         "density": {
           "min": 0,
           "max": 1,
-          "mean": 0.137,
-          "median": 0.064,
+          "mean": 0.045,
+          "median": 0,
           "percentiles": {
             "p1": 0,
             "p5": 0,
-            "p10": 0.001,
-            "p20": 0.009,
-            "p30": 0.023,
-            "p40": 0.041,
-            "p50": 0.064,
-            "p60": 0.094,
-            "p70": 0.137,
-            "p80": 0.208,
-            "p90": 0.371,
-            "p95": 0.595,
-            "p97": 0.739,
-            "p99": 0.913
+            "p10": 0,
+            "p20": 0,
+            "p30": 0,
+            "p40": 0,
+            "p50": 0,
+            "p60": 0,
+            "p70": 0,
+            "p80": 0.04,
+            "p90": 0.137,
+            "p95": 0.268,
+            "p97": 0.402,
+            "p99": 0.739
           }
         },
-        "updated": "2026-08-16",
+        "updated": "2026-08-29",
         "attribution": "path & tree data © OpenStreetMap contributors",
         "sourceUrl": "https://www.openstreetmap.org/copyright"
       },
       "streets": {
         "file": "sf.bin",
         "format": 6,
-        "segments": 15684,
-        "vertices": 111149,
-        "bytes": 1032058,
-        "sha256": "c668a295656a543ebb94378832694316889746d0962fc92c6bcc9cc1f83ca750",
+        "segments": 37366,
+        "vertices": 362796,
+        "bytes": 2880476,
+        "sha256": "c31c9710bf4d8ef9623b5c7098d5de6003efb329edfbabd372494d0bf7678a2f",
         "densifyMeters": 25,
         "sidewalkInsetMeters": 2,
         "alleys": false,
         "density": {
           "min": 0,
           "max": 1,
-          "mean": 0.091,
-          "median": 0.023,
+          "mean": 0.028,
+          "median": 0,
           "percentiles": {
             "p1": 0,
             "p5": 0,
             "p10": 0,
             "p20": 0,
-            "p30": 0.003,
-            "p40": 0.01,
-            "p50": 0.023,
-            "p60": 0.045,
-            "p70": 0.081,
-            "p80": 0.143,
-            "p90": 0.273,
-            "p95": 0.422,
-            "p97": 0.543,
-            "p99": 0.793
+            "p30": 0,
+            "p40": 0,
+            "p50": 0,
+            "p60": 0,
+            "p70": 0,
+            "p80": 0.006,
+            "p90": 0.069,
+            "p95": 0.179,
+            "p97": 0.278,
+            "p99": 0.521
           }
         },
-        "updated": "2026-08-16",
-        "attribution": "SF basemap street centrelines via DataSF",
+        "updated": "2026-08-29",
+        "attribution": "SF basemap street centrelines via DataSF; Alameda County Street Centerlines via Alameda County GIS",
         "sourceUrl": "https://data.sfgov.org/d/3psu-pn9h"
       },
       "paths": {
         "file": "sf.bin",
         "format": 1,
-        "ways": 12638,
-        "segments": 12638,
-        "vertices": 86100,
-        "bytes": 751462,
-        "sha256": "349f265adeb9ba6fc37b3a64fff8627a7525cdcf0f51df67e4795f4ed2262e51",
-        "km": 661.4,
+        "ways": 24278,
+        "segments": 24278,
+        "vertices": 172611,
+        "bytes": 1486222,
+        "sha256": "e64df38f614f977206193d2548efcb63ac38067b7b544d7c5cbb482f1af59b2e",
+        "km": 1392.7,
         "density": {
           "min": 0,
           "max": 1,
-          "mean": 0.256,
-          "median": 0.137,
+          "mean": 0.137,
+          "median": 0,
           "percentiles": {
             "p1": 0,
             "p5": 0,
             "p10": 0,
-            "p20": 0.006,
-            "p30": 0.03,
-            "p40": 0.072,
-            "p50": 0.137,
-            "p60": 0.229,
-            "p70": 0.35,
-            "p80": 0.51,
-            "p90": 0.738,
-            "p95": 0.889,
-            "p97": 0.95,
-            "p99": 0.994
+            "p20": 0,
+            "p30": 0,
+            "p40": 0,
+            "p50": 0,
+            "p60": 0.014,
+            "p70": 0.092,
+            "p80": 0.256,
+            "p90": 0.537,
+            "p95": 0.758,
+            "p97": 0.872,
+            "p99": 0.978
           }
         },
-        "updated": "2026-08-16",
+        "updated": "2026-08-29",
         "attribution": "OpenStreetMap contributors",
         "sourceUrl": "https://www.openstreetmap.org/copyright"
       }

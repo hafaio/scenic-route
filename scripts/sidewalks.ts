@@ -1,11 +1,17 @@
-// The two sources that say whether a street's sidewalks actually exist, and the per-side bits they
+// The sources that say whether a street's sidewalks actually exist, and the per-side bits they
 // settle. Fetches OSM's own `footway=sidewalk|crossing|traffic_island` ways into
-// data/sidewalks/<id>.bin (magic SWLK) and the NYC planimetric ROW-sidewalk polygons, then stamps
-// four bits into every offsetted STRT record: whether OSM maps a sidewalk on each side, and
-// whether the city's aerial survey drew one there. DESIGN.md, "Whether there is pavement at all",
-// is why both sources are needed and why the planimetric layer is `52n9-sdep` and not its
-// look-alike sibling; the gate in the graph pass (crates/tiler/src/graph.rs) drops a side only when
-// both are silent. Layouts: scripts/README.md.
+// data/sidewalks/<id>.bin (magic SWLK) and the city's own survey, then stamps four bits into every
+// offsetted STRT record: whether OSM maps a sidewalk on each side, and whether a survey says there
+// is one there. DESIGN.md, "Whether there is pavement at all", is why more than one source is
+// needed and why the NYC planimetric layer is `52n9-sdep` and not its look-alike sibling; the gate
+// in the graph pass (crates/tiler/src/graph.rs) drops a side only when all of them are silent.
+//
+// Behind the city's own survey stands OSM's OTHER way of recording a pavement: the `sidewalk`,
+// `sidewalk:left`, `sidewalk:right` and `sidewalk:both` keys on the ROAD, which say per kerb what a
+// separately-drawn footway says by being drawn. Some cities map one way, some the other — San
+// Francisco and New York draw the ways, the East Bay largely tags the roads — so a pipeline that
+// reads only the ways sees a fraction of what OSM records. The tags answer only where the city's
+// survey has nothing to say, which is `statedSides` below. Layouts: scripts/README.md.
 
 import { createHash } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
@@ -13,7 +19,12 @@ import { join } from "node:path";
 import { buildNameTable, densify, encodeNetwork, UNNAMED_ID } from "./geometry";
 import type { LandContext } from "./land";
 import type { SourceFile } from "./manifest";
-import { fetchSidewalks, type SidewalkWay } from "./overpass";
+import {
+  fetchSidewalks,
+  fetchSidewalkTags,
+  type SidewalkTaggedRoad,
+  type SidewalkWay,
+} from "./overpass";
 import { projectX, projectY } from "./planar";
 import { SIDEWALK_WIDTH_COUNT, SIDEWALK_WIDTH_DATASET } from "./sf";
 import { type Coord, DATA_SF, NYC_OPEN_DATA } from "./socrata";
@@ -37,8 +48,10 @@ const U32_MAX = 0xffffffff; // record offset 0 is a u32; an OSM id past this can
 // bytes a vertex are ordered by.
 export const FLAG_OSM_LEFT = 1 << 3; // an OSM sidewalk way flanks the left side
 export const FLAG_OSM_RIGHT = 1 << 4;
-// The city's aerial survey drew a ROW sidewalk polygon on the left side. "Surveyed", not "paved":
-// the layer says a sidewalk is there, and says nothing about what it is made of.
+// A survey says the left side carries pavement — the city's own where it publishes one (New York's
+// aerial ROW polygons, San Francisco's widths study), and OSM's `sidewalk=*` tag on the road itself
+// on any side that survey leaves unstated. "Surveyed", not "paved": the source says a sidewalk is
+// there, and says nothing about what it is made of.
 export const FLAG_SURVEYED_LEFT = 1 << 5;
 export const FLAG_SURVEYED_RIGHT = 1 << 6;
 
@@ -350,11 +363,14 @@ async function sfSurvey(): Promise<Survey> {
   }
   return (segment) => {
     const side = sides.get(String(segment.physicalId));
-    if (side === undefined || side === "NONE") {
-      return { left: false, right: false };
+    if (side === undefined) {
+      return { left: "unstated", right: "unstated" };
+    }
+    if (side === "NONE") {
+      return { left: "bare", right: "bare" };
     }
     if (side === "BOTH") {
-      return { left: true, right: true };
+      return { left: "paved", right: "paved" };
     }
     // The bearing of the whole segment, end to end, is enough: a city block does not turn far
     // enough for its two ends to disagree about which way is north.
@@ -369,15 +385,17 @@ async function sfSurvey(): Promise<Survey> {
       ((bearing + turn) / DEGREES + 360) % 360;
     const wanted = COMPASS[side];
     if (wanted === undefined) {
-      return { left: false, right: false };
+      return { left: "unstated", right: "unstated" }; // a value nobody has seen: not a bare kerb
     }
     const away = (from: number): number => {
       const gap = Math.abs(((from - wanted + 540) % 360) - 180);
       return gap;
     };
+    // The study names the one side that carries pavement, so the other is a stated bare.
+    const left = away(facing(-Math.PI / 2)) < away(facing(Math.PI / 2));
     return {
-      left: away(facing(-Math.PI / 2)) < away(facing(Math.PI / 2)),
-      right: away(facing(Math.PI / 2)) <= away(facing(-Math.PI / 2)),
+      left: left ? "paved" : "bare",
+      right: left ? "bare" : "paved",
     };
   };
 }
@@ -477,22 +495,252 @@ function onSurveyedSidewalk(survey: Grid<Ring>, x: number, y: number): boolean {
   }
 }
 
-// What a city's own survey says a street has pavement on, per side, in the segment's own left/right
-// terms. New York answers it by probing planimetric polygons; San Francisco publishes the answer as
-// a column. Both are the authoritative half of the existence gate — OSM's silence is ambiguous
-// between a mapping gap and genuinely bare kerb, and a survey's is not.
-export type Survey = (segment: SidedSegment) => {
-  left: boolean;
-  right: boolean;
-};
+// What one side of a street carries, as a source states it. Three states and not two, because
+// "there is no pavement here" and "nobody has said" are different facts and only one of them is
+// evidence: OSM's silence is a mapping gap or a bare kerb and cannot be told apart, where
+// `sidewalk=no` and a survey row reading NONE are somebody saying the kerb is bare. Only "paved"
+// sets a STRT bit, so bare and unstated land on the same four bits — but they are held apart here
+// because a stated bare is what stops a weaker source being asked, and because the build reports
+// them apart: a region that is largely unstated is missing data, and one that is largely bare is
+// missing pavement.
+export type SideState = "paved" | "bare" | "unstated";
 
-// The four bits of one street, from the two sources. A side counts as mapped when the corridor
-// matcher finds an OSM sidewalk at half its samples, and as surveyed when the city's survey says so
-// — for a probe, at half its stations, the same "most of the block, not one lucky point" rule.
+// What a source says a street has pavement on, per side, in the segment's own left/right terms.
+// New York answers it by probing planimetric polygons; San Francisco publishes the answer as a
+// column; OSM's road tags answer it wherever a mapper wrote one down. A survey is the authoritative
+// half of the existence gate — OSM's silence is ambiguous between a mapping gap and genuinely bare
+// kerb, and a survey's is not.
+export interface SidewalkSides {
+  left: SideState;
+  right: SideState;
+}
+
+export type Survey = (segment: SidedSegment) => SidewalkSides;
+
+// The city's own survey first, OSM's on-street tags only on a side it leaves unstated. The order is
+// not a preference between two equals and the two are deliberately not unioned: a municipal survey
+// is one trace of the whole city, where a tag is one mapper's note on one way, and a city that
+// already has a survey must not have its numbers moved by a source it never used. New York's
+// polygon probe answers every side of every street, so it never reaches the tags at all; San
+// Francisco's widths study answers the 94% of segments that carry a row; the East Bay has no survey,
+// so the tags are the whole of its answer.
+export function statedSides(
+  own: SidewalkSides,
+  tagged: () => SidewalkSides,
+): SidewalkSides {
+  if (own.left !== "unstated" && own.right !== "unstated") {
+    return own; // asked lazily, so New York's probe never pays for a match it cannot use
+  }
+  const tags = tagged();
+  return {
+    left: own.left === "unstated" ? tags.left : own.left,
+    right: own.right === "unstated" ? tags.right : own.right,
+  };
+}
+
+// One tag value on a side-specific key (`sidewalk:left`, `sidewalk:right`, `sidewalk:both`).
+// `separate` is deliberately no statement: it says the pavement is drawn as its own way, which is
+// what the mapped bits already answer, so reading it as presence would claim one side twice from
+// one fact — and it says nothing at all where the way it points at was never drawn.
+function sideState(value: string | undefined): SideState {
+  switch (value) {
+    case "yes":
+      return "paved";
+    case "no":
+    case "none":
+      return "bare";
+    default:
+      return "unstated";
+  }
+}
+
+// The four keys resolved to one statement per kerb, in the WAY's own digitization direction. The
+// generic `sidewalk` key is read first and the side-specific keys override it, which is the
+// convention a mapper refining `sidewalk=both` into `sidewalk:left=no` is relying on.
+export function taggedSides(road: SidewalkTaggedRoad): SidewalkSides {
+  let left: SideState = "unstated";
+  let right: SideState = "unstated";
+  switch (road.sidewalk) {
+    case "both":
+    // `yes` predates the sided values and the wiki deprecates it in their favour. It asserts a
+    // pavement without saying which kerb, and both sides is the only reading that keeps the
+    // assertion: there is no side to pick, and dropping it would throw away a mapper's statement
+    // that the street is walkable on the strength of the form they wrote it in.
+    case "yes":
+      left = "paved";
+      right = "paved";
+      break;
+    // "on the left side only", so the other kerb is a stated bare rather than an unstated one.
+    case "left":
+      left = "paved";
+      right = "bare";
+      break;
+    case "right":
+      left = "bare";
+      right = "paved";
+      break;
+    case "no":
+    case "none":
+      left = "bare";
+      right = "bare";
+      break;
+    default:
+      break; // `separate`, `crossing`, absent: no statement about either kerb
+  }
+  const both = sideState(road.both);
+  if (both !== "unstated") {
+    left = both;
+    right = both;
+  }
+  const taggedLeft = sideState(road.left);
+  if (taggedLeft !== "unstated") {
+    left = taggedLeft;
+  }
+  const taggedRight = sideState(road.right);
+  if (taggedRight !== "unstated") {
+    right = taggedRight;
+  }
+  return { left, right };
+}
+
+// One straight piece of a tagged OSM road, carrying what its two kerbs are said to have. The states
+// are the piece's own direction's, so a station has to orient itself against it before reading them.
+interface TaggedPiece extends Piece {
+  left: SideState;
+  right: SideState;
+}
+
+// The OSM road that IS this centreline, not one beside it. The two datasets draw the same street
+// within a metre or two of each other, and the city grid puts the next parallel road most of a
+// block away, so the nearest aligned way inside this radius is that street. A dual carriageway is
+// the case that pushes it: OSM splits one where the city centreline does not, which leaves the
+// centreline between the two halves rather than on either.
+const TAG_MATCH_METERS = 12;
+
+function indexTaggedRoads(
+  roads: readonly SidewalkTaggedRoad[],
+): Grid<TaggedPiece> {
+  const grid = new Grid<TaggedPiece>(PROBE_GRID_METERS);
+  for (const road of roads) {
+    const sides = taggedSides(road);
+    if (sides.left === "unstated" && sides.right === "unstated") {
+      continue; // a `sidewalk:left:surface` or a `separate`: fetched, but saying nothing
+    }
+    for (let index = 1; index < road.points.length; index++) {
+      const from = road.points[index - 1];
+      const to = road.points[index];
+      const piece = {
+        x1: projectX(from.lng),
+        y1: projectY(from.lat),
+        x2: projectX(to.lng),
+        y2: projectY(to.lat),
+        left: sides.left,
+        right: sides.right,
+      };
+      grid.insert(piece, [
+        Math.min(piece.x1, piece.x2),
+        Math.min(piece.y1, piece.y2),
+        Math.max(piece.x1, piece.x2),
+        Math.max(piece.y1, piece.y2),
+      ]);
+    }
+  }
+  return grid;
+}
+
+// The nearest tagged road piece running the same way as the street at this station, or undefined
+// where none is close enough. Only the nearest is read, so a tagged service spur that grazes the
+// radius cannot outvote the road the station is standing on.
+function nearestTagged(
+  roads: Grid<TaggedPiece>,
+  x: number,
+  y: number,
+  alongX: number,
+  alongY: number,
+): TaggedPiece | undefined {
+  const cosLimit = Math.cos((MATCH_BEARING_DEGREES * Math.PI) / 180);
+  let nearest: TaggedPiece | undefined;
+  let nearestDistance = TAG_MATCH_METERS;
+  for (const piece of roads.near(x, y, TAG_MATCH_METERS)) {
+    const edgeX = piece.x2 - piece.x1;
+    const edgeY = piece.y2 - piece.y1;
+    const length = Math.hypot(edgeX, edgeY);
+    if (length === 0) {
+      continue;
+    } else if (
+      Math.abs((edgeX * alongX + edgeY * alongY) / length) < cosLimit
+    ) {
+      continue; // a cross street through the junction, not this street
+    }
+    const along = Math.max(
+      0,
+      Math.min(
+        1,
+        ((x - piece.x1) * edgeX + (y - piece.y1) * edgeY) / (length * length),
+      ),
+    );
+    const distance = Math.hypot(
+      piece.x1 + along * edgeX - x,
+      piece.y1 + along * edgeY - y,
+    );
+    if (distance < nearestDistance) {
+      nearest = piece;
+      nearestDistance = distance;
+    }
+  }
+  return nearest;
+}
+
+// OSM's road tags as a survey: at each station along the street, the tagged road under it says what
+// its two kerbs carry, turned round where OSM digitized the street the other way. A side is decided
+// by the same "half the stations, not one lucky point" rule the other two sources are read under,
+// over ALL the segment's stations rather than only the matched ones — a tag on a fifth of a block is
+// not a statement about the block.
+export function tagSurvey(roads: readonly SidewalkTaggedRoad[]): Survey {
+  const grid = indexTaggedRoads(roads);
+  return (segment) => {
+    const samples = stations(segment.points, SAMPLE_METERS);
+    const paved = [0, 0]; // left, right
+    const bare = [0, 0];
+    for (const { x, y, alongX, alongY } of samples) {
+      const piece = nearestTagged(grid, x, y, alongX, alongY);
+      if (piece === undefined) {
+        continue;
+      }
+      // The tag's left and right are the OSM way's; this street may run the other way.
+      const forward =
+        (piece.x2 - piece.x1) * alongX + (piece.y2 - piece.y1) * alongY > 0;
+      const sides = forward
+        ? [piece.left, piece.right]
+        : [piece.right, piece.left];
+      for (const side of [0, 1]) {
+        paved[side] += sides[side] === "paved" ? 1 : 0;
+        bare[side] += sides[side] === "bare" ? 1 : 0;
+      }
+    }
+    const decide = (side: number): SideState => {
+      if (samples.length === 0) {
+        return "unstated";
+      } else if (paved[side] / samples.length >= MATCH_FRACTION) {
+        return "paved";
+      } else if (bare[side] / samples.length >= MATCH_FRACTION) {
+        return "bare";
+      } else {
+        return "unstated";
+      }
+    };
+    return { left: decide(0), right: decide(1) };
+  };
+}
+
+// The four bits of one street. A side counts as mapped when the corridor matcher finds an OSM
+// sidewalk way at half its samples, and as surveyed when the statement `statedSides` settled on
+// reads "paved" — a stated bare and an unstated side both leave the bit clear, since the bits hold
+// presence and the gate is an OR over them.
 function sidesOf(
   segment: SidedSegment,
   pieces: Grid<Piece>,
-  survey: Survey,
+  surveyed: SidewalkSides,
 ): number {
   const halfOffset = halfOffsetMeters(segment);
   let osmLeft = 0;
@@ -503,14 +751,13 @@ function sidesOf(
     osmLeft += left ? 1 : 0;
     osmRight += right ? 1 : 0;
   }
-  const surveyed = survey(segment);
   const covered = (hits: number, total: number, fraction: number): boolean =>
     total > 0 && hits / total >= fraction;
   return (
     (covered(osmLeft, samples.length, MATCH_FRACTION) ? FLAG_OSM_LEFT : 0) |
     (covered(osmRight, samples.length, MATCH_FRACTION) ? FLAG_OSM_RIGHT : 0) |
-    (surveyed.left ? FLAG_SURVEYED_LEFT : 0) |
-    (surveyed.right ? FLAG_SURVEYED_RIGHT : 0)
+    (surveyed.left === "paved" ? FLAG_SURVEYED_LEFT : 0) |
+    (surveyed.right === "paved" ? FLAG_SURVEYED_RIGHT : 0)
   );
 }
 
@@ -542,8 +789,12 @@ function polygonSurvey(rings: Grid<Ring>): Survey {
         }
       }
     }
-    const covered = (hits: number): boolean =>
-      probes.length > 0 && hits / probes.length >= SURVEYED_FRACTION;
+    // An aerial trace of the whole city: where it draws no polygon the kerb is bare, not unstated,
+    // which is what makes it authoritative and is why it never falls through to OSM's road tags.
+    const covered = (hits: number): SideState =>
+      probes.length > 0 && hits / probes.length >= SURVEYED_FRACTION
+        ? "paved"
+        : "bare";
     return { left: covered(left), right: covered(right) };
   };
 }
@@ -640,6 +891,7 @@ export async function ingestSidewalks(
 
   const { south, west, north, east } = land.box;
   const ways = await fetchSidewalks(south, west, north, east);
+  const roads = await fetchSidewalkTags(south, west, north, east);
   const { segments, onLandCount } = toSidewalkSegments(ways, land.onLand);
   const names = buildNameTable(segments);
   const bytes = encodeSidewalks(segments, names);
@@ -655,20 +907,39 @@ export async function ingestSidewalks(
 
   const pieces = indexPieces(segments);
   const survey = await buildSurvey();
+  const tags = tagSurvey(roads);
+  const stating = roads.filter((road) => {
+    const sides = taggedSides(road);
+    return sides.left !== "unstated" || sides.right !== "unstated";
+  }).length;
 
   let offsettedKm = 0;
   let osmBothKm = 0;
   let osmOneKm = 0;
   let surveyedBothKm = 0;
   let surveyedOneKm = 0;
+  // The road tags' own contribution: side-km they paved, and side-km they stated bare, both counted
+  // only where the city's own survey had nothing to say. The second is not pavement, it is the
+  // difference between a region that is missing data and one that is missing sidewalks.
+  let taggedPavedSideKm = 0;
+  let taggedBareSideKm = 0;
   for (const street of streets) {
     if (!isOffsetted(street)) {
       continue;
     }
-    const bits = sidesOf(street, pieces, survey);
+    const own = survey(street);
+    const stated = statedSides(own, () => tags(street));
+    const bits = sidesOf(street, pieces, stated);
     street.flags |= bits;
     const km = street.lengthMeters / 1000;
     offsettedKm += km;
+    for (const side of ["left", "right"] as const) {
+      if (own[side] !== "unstated") {
+        continue;
+      }
+      taggedPavedSideKm += stated[side] === "paved" ? km : 0;
+      taggedBareSideKm += stated[side] === "bare" ? km : 0;
+    }
     const osm =
       ((bits & FLAG_OSM_LEFT) !== 0 ? 1 : 0) +
       ((bits & FLAG_OSM_RIGHT) !== 0 ? 1 : 0);
@@ -685,6 +956,9 @@ export async function ingestSidewalks(
   const seconds = ((performance.now() - started) / 1000).toFixed(1);
   console.error(
     `  sidewalks: ${offsettedKm.toFixed(0)} km offsetted — OSM maps both sides of ${percent(osmBothKm)}%, one of ${percent(osmOneKm)}%; the survey draws both of ${percent(surveyedBothKm)}%, one of ${percent(surveyedOneKm)}% (${seconds}s)`,
+  );
+  console.error(
+    `  sidewalk tags: ${stating} of ${roads.length} roads state a side — ${taggedPavedSideKm.toFixed(0)} km of side paved and ${taggedBareSideKm.toFixed(0)} km stated bare where the survey was silent`,
   );
   return {
     file,

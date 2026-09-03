@@ -254,7 +254,7 @@ in its own band.
 | canopy | NYC's 2017 LiDAR tree canopy, ArcGIS `TreeCanopy2017_Simplified_1ft` | the *measured* canopy footprint the cover field is blurred from, a committed source, magic `CNPY` — feeds the density blobs and, through them, routing; see below |
 | canopy heights | the 1 m LiDAR canopy height model of Ma et al. 2023, figshare doi `10.6084/m9.figshare.20522895` (`NY_CHM_10Int260m.tif`, CC BY 4.0) | a 243 MiB uint16 GeoTIFF of decimetres over UTM 18N, cached but never committed; `tiler ingest` samples it per canopy polygon and writes the result *into* the `CNPY` file — see below |
 | paths | OSM pedestrian/park ways (footway/path/pedestrian/steps/cycleway/bridleway/track) plus park drives (roads closed to through motor traffic), via Overpass | the park, greenway and car-free-drive network CSCL lacks; a separate committed source, magic `PATH` — see below and "Binary layouts" |
-| sidewalks | OSM `footway=sidewalk`/`crossing`/`traffic_island` ways via Overpass, plus the NYC planimetric SIDEWALK polygons, Socrata `52n9-sdep` (`sub_code` 380000 = street right-of-way) | the ways are a committed source, magic `SWLK`; both together settle the four per-side sidewalk bits of every offsetted `STRT` record, and the ways themselves are the walking network wherever they exist — see below and "Binary layouts" |
+| sidewalks | OSM `footway=sidewalk`/`crossing`/`traffic_island` ways via Overpass; the city's own survey — NYC's planimetric SIDEWALK polygons, Socrata `52n9-sdep` (`sub_code` 380000 = street right-of-way), or SF's 2014 Sidewalk Widths study; and the `sidewalk`/`sidewalk:left`/`sidewalk:right`/`sidewalk:both` tags OSM puts on the **road** | the ways are a committed source, magic `SWLK`; the three together settle the four per-side sidewalk bits of every offsetted `STRT` record, and the ways themselves are the walking network wherever they exist — see below and "Binary layouts" |
 | ferries | the two NYC ferry GTFS feeds — Staten Island Ferry (NYC DOT) and NYC Ferry (Hornblower, via Connexionz) | consolidated to a time-independent ferry graph, a committed source, magic `FERR` — OSM- and canopy-independent, read by a later phase's routing graph, not the cover pipeline; see below and "Binary layouts" |
 | subway | the MTA's subway GTFS feed, `https://rrgtfsfeeds.s3.amazonaws.com/gtfs_subway.zip` | the 29 routes as 93 polylines (every shape variant the feed runs that draws track nothing else does) and the 496 stations, with the colours and names the MTA publishes for each route and, per station, the set of routes that genuinely serve it and the complex `transfers.txt` puts it in; a committed source, magic `SBWY` — **display only**, it enters no routing input (this is a walking router and nobody walks the subway); see below and "Binary layouts" |
 | transit (San Francisco) | SFMTA's Muni GTFS, `https://muni-gtfs.apps.sfmta.com/data/muni_gtfs-current.zip`, and BART's, `https://www.bart.gov/dev/schedules/google_transit.zip` — both keyless | Muni's rail (the six Metro lines, the F streetcar, the three cable cars) and the four BART lines that run through the city, as 42 polylines clipped to the city's land, and the 268 stations (no complexes: neither feed publishes a transfer between two of its stations), in the **same `SBWY`** blob New York's subway ships as; **display only**, it enters no routing input; see below |
@@ -547,14 +547,14 @@ exactly, and the layout is STRT's, so one reader serves it.
 
 The extract does two jobs. It is what the **per-side STRT bits** are matched from (a side counts as
 mapped when a sidewalk runs alongside it over most of the block), beside the second source those bits
-carry — the NYC planimetric **SIDEWALK polygons** (`52n9-sdep`, `sub_code` 380000 = street
-right-of-way), probed at the derived sidewalk position to say whether the city's survey drew a
-sidewalk there. The sibling *"Sidewalk Centerline"* layer (`a9xv-vek9`) is **not** that source and is
-not read: its capture rules take interior-campus walkways and explicitly exclude right-of-way
-sidewalks, so it cannot answer the sidedness question at all. And it is the geometry itself:
-the graph pass makes these ways the walking network wherever they exist ("the sidewalk
-network", below), which is why the extract is committed and frozen rather than four bits derived
-from it.
+carry — the city's own **survey**, which in New York is the planimetric **SIDEWALK polygons**
+(`52n9-sdep`, `sub_code` 380000 = street right-of-way), probed at the derived sidewalk position to
+say whether the city drew a sidewalk there. The sibling *"Sidewalk Centerline"* layer (`a9xv-vek9`)
+is **not** that source and is not read: its capture rules take interior-campus walkways and
+explicitly exclude right-of-way sidewalks, so it cannot answer the sidedness question at all. And it
+is the geometry itself: the graph pass makes these ways the walking network wherever they exist
+("the sidewalk network", below), which is why the extract is committed and frozen rather than four
+bits derived from it.
 
 Measured over the 10,521 km of offsetted CSCL centerline the bits cover: OSM maps sidewalks on
 both sides of 70.0% of it, one side of 13.4%, neither of 16.6% — but that is far from uniform
@@ -570,6 +570,63 @@ at each station is wider where CSCL records no `streetwidth`**, since the offset
 then the 30 ft citywide median standing in for an unknown rather than a measured width. Neither
 makes the probe's false negatives uniform — DESIGN.md, "Whether there is pavement at all", carries
 what is left of them by segment length and by whether a width was recorded.
+
+### The sidewalk tags on the road itself
+
+OSM records a pavement two ways, and the extract above is only one of them. The other is a tag on the
+**road**: `sidewalk=both|left|right|yes|no|none`, or the per-side `sidewalk:left`, `sidewalk:right`
+and `sidewalk:both`. It says on the centreline what a drawn footway says by being drawn, and which
+form a city uses is a mapping culture rather than a fact about its streets — San Francisco and New
+York draw the ways, the East Bay largely tags the roads. A pipeline that reads only the ways
+therefore sees a fraction of what OSM knows in a city that tags. Fetched by the four keys, over the
+road classes a city centreline can be (motorways excluded — no centreline here is one, so a tagged
+motorway could only match the frontage road beside it):
+
+    way["highway"~"^(trunk|primary|secondary|tertiary)(_link)?$|
+        ^(unclassified|residential|living_street|service|road|busway)$"]["sidewalk"]   (and the three
+                                                                                       sided keys)
+
+**Three states, not two.** `sidewalk=no` and `sidewalk=none` are a mapper saying the kerb is bare,
+which is *not* what an untagged road says — that one says nothing at all, and the difference is the
+whole reason two sources are needed in the first place. So a side is `paved`, `bare` or `unstated`.
+`sidewalk=left` states the left kerb paved and the right one **bare**, since the value means "on the
+left side only". `sidewalk=yes` predates the sided values and the wiki deprecates it in their favour;
+it asserts a pavement without naming a kerb, and both sides is the only reading that keeps the
+assertion. `sidewalk=separate` states **nothing**: it says the pavement is drawn as its own way,
+which is the question the mapped bits already answer, and it says nothing at all where the way it
+points at was never drawn. The side-specific keys override the generic one, which is the convention a
+mapper refining `sidewalk=both` into `sidewalk:left=no` relies on. Only `paved` sets a STRT bit — the
+bits hold presence and the gate is an OR over them — so a stated bare and an unstated side leave the
+same four bits, and they are held apart anyway because a region that is largely unstated is missing
+*data* where one that is largely bare is missing *pavement*.
+
+**Matched to the centreline, not added to the network.** A tag is a statement about a road this
+pipeline already has from the city, so it is read against it: at each station every 20 m, the nearest
+tagged OSM road running the same way within **12 m** is that street (the two datasets draw it within
+a metre or two of each other, and the grid puts the next parallel road most of a block away), and its
+two kerbs are read off it — **turned round** where OSM digitized the street the other way, since the
+tag's left and right are the way's own. Only the nearest piece at a station is read, so a tagged
+service spur that grazes the radius cannot outvote the road the station stands on, and a side is
+decided by the same "half the stations, not one lucky point" rule the other two sources are read
+under, over *all* the segment's stations: a tag on a fifth of a block is not a statement about the
+block.
+
+**The city's own survey answers first, and the tags only fill the sides it leaves unstated.** The two
+are deliberately not unioned and the order is not a preference between equals: a municipal survey is
+one trace of the whole city where a tag is one mapper's note on one way, and a city that already has
+a survey must not have its numbers moved by a source it never used. New York's polygon probe answers
+every side of every street — where it draws no polygon the kerb is bare, which is what makes it
+authoritative — so New York never reaches the tags at all, and its `STRT` record table came back
+byte-for-byte identical when they were added. San Francisco's widths study answers the segments that
+carry a row and leaves the ~6% that do not unstated, which the tags then fill. **The East Bay has no
+survey, so the tags are the whole of its answer.**
+
+Measured over the Bay Area box: 24,309 roads carry one of the four keys and 18,913 state a side.
+Over the East Bay's 2,709 km of offsettable centreline — 5,418 km of side — the tags state 2,050 km
+of side paved (37.8%), 600 km bare (11.1%) and leave 2,767 km (51.1%) unstated. Across the whole
+region they added 2,195 km of paved side and 695 km of stated-bare side on sides the survey was
+silent on. New York's 35,991 tagged roads (13,700 of them stating a side) add nothing, by
+construction.
 
 ### The ferry network (`FERR` v2)
 
@@ -1600,19 +1657,26 @@ actually carries, from the two sources `scripts/sidewalks.ts` reads:
 | --- | --- |
 | 3 | an OSM `footway=sidewalk` way flanks the **left** side |
 | 4 | the same on the **right** side |
-| 5 | the NYC planimetric ROW-sidewalk polygons draw one on the **left** side |
+| 5 | a survey says the **left** side carries pavement |
 | 6 | the same on the **right** side |
+
+Bits 5-6 are the city's own survey where it publishes one — New York's planimetric ROW-sidewalk
+polygons, San Francisco's 2014 Sidewalk Widths study — and OSM's `sidewalk=*` tag on the road itself
+on any side that survey leaves unstated ("The sidewalk tags on the road itself", above). The bits
+hold *presence*: a source stating a kerb bare and no source having spoken both leave them clear, and
+they are the same four bits either way.
 
 Left and right are the digitization direction's — left is 90° counter-clockwise of travel, the
 same convention the density blob's two bytes a vertex are ordered by and the one
 `crates/tiler/src/sidewalks.rs` offsets the left sidewalk along. A side is *mapped* when the
 corridor matcher finds an OSM sidewalk at ≥ 50% of the samples it takes every 20 m (perpendicular
 distance in [2 m, half-offset + 12 m], bearing within 30° mod 180°, side by cross product), and
-*surveyed* when a probe every 15 m — each fanned across the sidewalk's own width, ±1.5 m where CSCL
-records a `streetwidth` and −3 to +6 m in 1.5 m steps where it records none and the half-offset is
-the citywide median standing in for it — lands inside a `sub_code` 380000 polygon at ≥ 50% of its
-stations. "Surveyed", not "paved": the layer
-says the city's aerial survey drew a sidewalk there, and says nothing about its material. All four
+*surveyed* when the source that settles that side reads paved — for New York's probe, a station every
+15 m, each fanned across the sidewalk's own width (±1.5 m where CSCL records a `streetwidth` and −3
+to +6 m in 1.5 m steps where it records none and the half-offset is the citywide median standing in
+for it), landing inside a `sub_code` 380000 polygon at ≥ 50% of its stations; for the road tags, the
+tag under ≥ 50% of the same stations. "Surveyed", not "paved": the source
+says a sidewalk is there, and says nothing about its material. All four
 bits are **zero unless the segment is offsetted** (not `nonped='V'`, and a non-zero half-offset),
 since a street with no derived sidewalks has no sides to ask about.
 
@@ -1624,8 +1688,9 @@ pavement, OSM's own way is the sidewalk edge, and the per-stretch exclusivity un
 side OSM maps end to end gets no derived edge at all. Both sources are needed and neither alone will
 do — OSM's silence is ambiguous (a mapping gap or genuinely no pavement: 40.5% of Bronx km is
 unmapped where only 24.0% is really bare), the survey's is authoritative. **The East Bay has no
-survey at all**, so its per-side bits rest on the ambiguous source alone; "The pedestrian network
-here is thinner" below has the measured coverage and what it costs. Demotion is never deletion:
+municipal survey at all**, so its bits 5-6 come from OSM's own `sidewalk=*` road tags instead ("The
+sidewalk tags on the road itself", above); "The pedestrian network here is thinner" below has the
+measured coverage and what it costs. Demotion is never deletion:
 an alley has no sidewalk, but you walk the alley. Measured, the gate's own bits leave **15.4% of the
 two-sides-a-street an unconditional derivation would place** with no pavement from either source
 (Manhattan 11.0%, Brooklyn 11.1%, Queens 14.9%, the Bronx 17.2%, Staten Island 24.7%) and demote
@@ -3725,11 +3790,13 @@ polygon is read, and it is absent for exactly the reason New Jersey is absent fr
 
 Read this before trusting an East Bay route. The graph's per-side existence gate wants two
 independent sources — OSM's own sidewalk ways, and the city's own survey — because OSM's silence is
-ambiguous between a mapping gap and genuinely bare kerb. **In the East Bay there is no survey at
-all.** Neither Alameda County nor Oakland's nor Berkeley's open-data portals publish one; the
-searches that turned up New York's planimetric ROW polygons and San Francisco's 2014 Sidewalk Widths
-study turn up damage service-requests here and nothing else. So the per-side bits rest on OSM alone,
-and OSM here is half mapped:
+ambiguous between a mapping gap and genuinely bare kerb. **In the East Bay there is no municipal
+survey at all.** Neither Alameda County nor Oakland's nor Berkeley's open-data portals publish one;
+the searches that turned up New York's planimetric ROW polygons and San Francisco's 2014 Sidewalk
+Widths study turn up damage service-requests here and nothing else. What stands in its place is
+OSM's own `sidewalk=*` road tag ("The sidewalk tags on the road itself", above) — the same per-side
+statement, from the same project as the ways, in the form this region actually uses. Because the
+*ways* here are half mapped:
 
 | place | OSM sidewalk ways | crossing ways | road ways | sidewalk : road |
 | --- | ---: | ---: | ---: | ---: |
@@ -3744,18 +3811,42 @@ granularity varies between mappers, so the ratio is the number to read and not t
 Oakland and Berkeley were measured; Alameda, Albany, Emeryville, Piedmont and San Leandro were not,
 and there is no reason to expect them to be better.
 
-What that means on the ground: **many East Bay streets will carry a sidewalk on one side or on
-neither**, where in San Francisco the pair is usually drawn or surveyed. A street both of whose sides
-come back silent is demoted to its centreline as a path edge — never deleted, so you can still walk
-it, but the route is drawn down the middle of the road rather than along a pavement, and nothing
-per-side (the shade bake, the tree cover, the shed placement) has two sides to distinguish. Expect
-more of that here than in either existing city.
+**The road tags are what the ways alone were missing here.** Over the East Bay's 2,709 km of
+offsettable centreline — 5,418 km of side — they state 2,050 km of side paved (37.8%), 600 km bare
+(11.1%), and leave 2,767 km (51.1%) unstated. Read into the per-side bits, that is the difference
+between the first two rows below:
 
-Two things could narrow the gap, and neither is done. Oakland and Berkeley tag `sidewalk=*` on 3,880
-and 2,231 *roads* respectively — a per-side statement on the centreline itself, which is exactly what
-the survey source supplies elsewhere, and which this pipeline does not read from OSM at all. And the
-existence gate's build guards (`MAX_DROPPED_SIDEWALK_FRACTION`, `MAX_CELL_DEMOTED_SHARE`, both 0.30
-in `crates/tiler/src/graph.rs`) were calibrated against two cities that both have a survey; a region
-where half the streets have neither source is the case they were never held against, so whichever
-way they land on the first full build is information rather than a verdict.
+| region | both sides | one side | neither |
+| --- | ---: | ---: | ---: |
+| **East Bay**, ways only | 2,097 streets / 219 km (9.7%) | 1,297 / 150 km (6.0%) | 18,228 / 2,339 km (**84.3%**) |
+| **East Bay**, ways + tags | 10,077 / 1,169 km (46.6%) | 1,877 / 220 km (8.7%) | 9,668 / 1,319 km (**44.7%**) |
+| San Francisco, before | 12,016 / 1,400 km (82.0%) | 1,105 / 135 km (7.5%) | 1,524 / 198 km (10.4%) |
+| San Francisco, after | 12,472 / 1,452 km (85.2%) | 1,152 / 141 km (7.9%) | 1,021 / 140 km (7.0%) |
+| New York, before and after | 78,181 / 8,217 km (73.6%) | 16,688 / 1,372 km (15.7%) | 11,396 / 932 km (10.7%) |
+
+San Francisco moves because the widths study has no row for about 6% of its segments and the tags
+answer those; New York does not move at all — its polygon probe answers every side, so it never
+reaches them, and its `STRT` record table came back byte-for-byte identical.
+
+What is left is a real hole rather than an unread source: **44.7% of East Bay streets, 1,319 of its
+2,709 km, still have no statement from anybody** — no drawn way, no tag. On those, a street is demoted to its centreline as a
+path edge: never deleted, so you can still walk it, but the route is drawn down the middle of the
+road rather than along a pavement, and nothing per-side (the shade bake, the tree cover, the shed
+placement) has two sides to distinguish. Expect more of that here than in either existing city.
+
+One reading is still deliberately not taken. `sidewalk=separate` — "the pavement is drawn as its own
+way" — is 9,580 of the region's tag values, and reading it as an affirmative would take the East
+Bay's paved sides from 37.8% to 45.6% of side-km. It is left as no statement because it is a pointer
+at the drawn ways, which the mapped bits already read, and it points at nothing where the way was
+never drawn.
+
+**And the existence gate's two build guards still fire on this region.**
+`MAX_DROPPED_SIDEWALK_FRACTION` reads **0.357** against its 0.30 ceiling, down from 0.581 before the
+tags; `MAX_CELL_DEMOTED_SHARE` reads a 90th-percentile **0.84** over the region's 1,294 half-kilometre
+cells against the same 0.30, down from 0.988. Both were calibrated against two cities that have a
+survey, and a region where half the streets have no statement from any source is the case they were
+never held against — so this remains information rather than a verdict, and the numbers stand as
+measured rather than the ceilings being moved to fit them. New York is untouched: 0.144 dropped,
+0.094 at the cell 90th percentile, 97.2% of alley km demoted, 25 phantom sidewalks, all to the digit
+what it read before.
 
