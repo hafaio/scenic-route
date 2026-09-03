@@ -172,6 +172,10 @@ struct PlanCity {
     /// York's meaning, so a city that says nothing is asked about it.
     #[serde(default = "classifies_alleys")]
     alleys: bool,
+    /// The existence gate's two ceilings, for a region whose sidewalk coverage is not what a
+    /// municipal survey implies. Absent leaves it held to `graph::SURVEYED_CEILINGS`.
+    #[serde(default)]
+    existence_ceilings: Option<graph::ExistenceCeilings>,
     #[serde(default)]
     sources: Vec<Source>,
     /// The sun-position grid, absent for a city whose year yields no above-horizon bin.
@@ -1832,6 +1836,9 @@ pub fn run(plan_file: &Path, jobs: Option<usize>, selection: &Selection) -> Fall
                     .map(|layer| plan.data.join("canopy").join(&layer.file)),
                 elevation_bounds: (!planned.elevation.is_empty()).then_some(city.bounds),
                 alleys: planned.alleys,
+                existence_ceilings: planned
+                    .existence_ceilings
+                    .unwrap_or(graph::SURVEYED_CEILINGS),
                 cache: Some(graph_keys[index].clone()),
                 probe: false,
                 report: None,

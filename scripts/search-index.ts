@@ -55,7 +55,7 @@ import {
   stationRoutes,
 } from "../src/subway/format";
 import { writeVarint, zigzag } from "./geometry";
-import { fetchNycBoroughs } from "./land";
+import { fetchNycBoroughs, loadLandContext } from "./land";
 import { buildLandTest } from "./land-filter";
 
 const ROOT = join(import.meta.dirname, "..");
@@ -946,23 +946,37 @@ async function neighborhoodPoints(
 // search both merged them: a rider searching Times Sq means all ten routes, not the ten records the
 // feed files. The routes ride in the category slot, which is what lets a result still read
 // "14 St-Union Sq (4/5/6/L…)".
+//
+// Cut to the city's LAND, and the only point set here that has to be cut at all: the rail artifact
+// is deliberately the whole of each agency's network rather than the part standing on the region's
+// ground (scripts/subway-sf.ts), so the Bay Area's holds BART's Antioch, Berryessa and Milpitas.
+// Drawing them is the point; OFFERING them is not, because a search result is a destination and the
+// graph can only route to ground it was built over. Every other set here was clipped at its own
+// ingest, against these same polygons.
+//
+// The land and not the city's bounding rectangle, which is the wider thing and would still offer
+// five stations the graph does not reach: Daly City and Colma in San Mateo County, Orinda, Lafayette
+// and El Cerrito Plaza in Contra Costa.
 async function stationPoints(cityId: string): Promise<NamedPoint[] | null> {
   const file = await pointFile("subway", "subway", cityId);
   if (file === null) {
     return null;
   }
+  const { onLand } = await loadLandContext(cityId);
   const { routes, stations } = decodeSubway(file);
-  return mergeStations(stations).map((station) => {
-    const serving = stationRoutes(station, routes).join("/");
-    return {
-      name: station.name,
-      lat: station.lat,
-      lng: station.lng,
-      // Absent rather than empty for a station whose feed named no route, so the category slot is
-      // "this document has none" instead of a blank string in the shared table.
-      detail: serving === "" ? undefined : serving,
-    };
-  });
+  return mergeStations(stations)
+    .filter((station) => onLand(station))
+    .map((station) => {
+      const serving = stationRoutes(station, routes).join("/");
+      return {
+        name: station.name,
+        lat: station.lat,
+        lng: station.lng,
+        // Absent rather than empty for a station whose feed named no route, so the category slot is
+        // "this document has none" instead of a blank string in the shared table.
+        detail: serving === "" ? undefined : serving,
+      };
+    });
 }
 
 // Every set of named points the city ships, in the order that settles which of them keeps a name two

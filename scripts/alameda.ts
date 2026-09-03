@@ -45,7 +45,8 @@ export const EAST_BAY_ATTRIBUTION = "Alameda County GIS";
 export const EAST_BAY_STREET_ATTRIBUTION =
   "Alameda County Street Centerlines via Alameda County GIS";
 export const EAST_BAY_LAND_ATTRIBUTION =
-  "City limits © Alameda County GIS, shoreline from US Census TIGER hydrography";
+  "City limits © Alameda County GIS, shoreline from US Census TIGER hydrography, " +
+  "parkland from the California Protected Areas Database (CPAD - www.calands.org). June 2024.";
 export const EAST_BAY_STREET_SOURCE_URL =
   "https://services5.arcgis.com/ROBnTHSNjoZ2Wm1P/arcgis/rest/services/Street_Centerlines/FeatureServer/0";
 
@@ -62,6 +63,11 @@ export const EAST_BAY_STREET_SOURCE_URL =
 // Everything else in the county — Hayward, Union City, Newark, Fremont, and the Livermore Valley
 // cities beyond the ridge — is deliberately out, as are the unincorporated pockets south of San
 // Leandro. They are a later decision, not an oversight.
+//
+// The mask is NOT these seven, though: the line is drawn round the area rather than round the
+// cities, and `EAST_BAY_PARKLANDS` adds the ridge parkland above Oakland that no municipality
+// contains. Nothing else in this file changes — the centreline, the addresses and the landmarks are
+// all read over `boxOf(land)` and kept by `onLand`, so they follow the mask out there by themselves.
 const EAST_BAY_CITY_LIMITS: readonly string[] = [
   "CITY OF ALBANY",
   "CITY OF BERKELEY",
@@ -93,6 +99,96 @@ export const ALAMEDA_PLACES: Readonly<Record<string, string>> = {
 
 const CITY_LIMITS_SERVICE =
   "https://services5.arcgis.com/ROBnTHSNjoZ2Wm1P/arcgis/rest/services/Administrative_Boundaries/FeatureServer/2/query";
+
+// The parkland the mask reaches past the city limits for, and where its outline is read from. CPAD
+// is the state's protected-areas register, published by GreenInfo Network; a "holding" is one parcel
+// and a park is several, so the query returns dozens of polygons per unit and they are unioned with
+// the city limits before the water is cut. Its own terms are that it "is generally available to any
+// user" once the data disclaimer has been read, and the credit line is the publisher's own wording,
+// carried in EAST_BAY_LAND_ATTRIBUTION above.
+const PARKLAND_SERVICE =
+  "https://services1.arcgis.com/4ZKi1B1zTblbwgWB/arcgis/rest/services/cpad_2024a_holdingsgdb/FeatureServer/0/query";
+
+// The hills the seven city limits cut off, as CPAD's `UNIT_NAME` spells them — Redwood carries its
+// full name, Reinhardt, in the register. They are the ridge parkland above Oakland: the shadiest
+// ground in the region, unincorporated, and so outside every boundary the county publishes.
+//
+// A park is admitted on the same condition the rest of the region is: every layer this region offers
+// has to reach it. Canopy does — the ALCC height model is Alameda AND Contra Costa, and it reads 95
+// to 100% covered cells across these two, with crowns up to 226 ft. The county centreline runs well
+// past its own county line (287 segments over Redwood alone, most of them unincorporated), OSM has
+// the trail network (407 foot ways), and the county's address points here already all carry one of
+// the seven municipal codes, so the address filter drops nothing and search gains no hole.
+//
+// What decides it is the GROUND. The 2021 Alameda County lidar the terrain is read from stops at
+// about the county line, and nothing else stages a 1 m mosaic over these hills, so a park the flight
+// missed would route as flat with a blank terrain overlay and nothing in the build would say so —
+// the missing-square guard in scripts/elevation.ts cannot catch it, because the squares ARE staged
+// and merely hold nodata inside. Sampled 400 interior points per park, 2026-08-30:
+//
+//   Reinhardt Redwood 99.5%, Roberts 100% — in.
+//   Tilden Regional Park 50.0%, Tilden Nature Area 18.5%, Sibley Volcanic 14.5%,
+//   Huckleberry Botanic 16.0% — out. Half of Tilden and five sixths of Sibley have no ground at all.
+//
+// Anthony Chabot (88.2%) and Lake Chabot (83.8%) are out for the same reason and one more: they are
+// the first ground east of `boxOf(land)`, and taking them would carry the whole tile plan over the
+// ridge. Claremont Canyon, Leona Heights and Temescal measure 100% and are named nowhere here
+// because they are already inside Oakland's and Berkeley's limits — the mask has them.
+//
+// Roberts is here for the reason Piedmont is in the list above: it sits in the middle of Redwood,
+// and leaving it out would put a hole in the park rather than a boundary around it.
+const EAST_BAY_PARKLANDS: readonly string[] = [
+  "Reinhardt Redwood Regional Park",
+  "Roberts Regional Recreation Area",
+];
+
+// CPAD records a park as the dozens of parcels it was assembled from — 61 for these two — and
+// records their edges to a looser precision than the edges actually meet at. Unioned raw, the two
+// parks arrive as one body pitted with fourteen holes and trailed by two detached specks: six of the
+// holes are under 20 m² and are simply where two neighbouring parcels fail to touch, three are real
+// private in-holdings inside Redwood, and the specks are 1,600 and 1,376 m².
+//
+// None of that is a statement about ground. A hole here would clip the trails that cross it and read
+// as bare canopy in the middle of a forest, which is the same reason the water subtraction leaves
+// Lake Merritt in the land: punching out something you can't walk on only adds rings. So the parkland
+// is unioned on its own, its interior rings are dropped, and a piece too small to hold a walk is
+// dropped whole rather than shipped as an island nothing reaches.
+const MIN_PARKLAND_PIECE_SQUARE_METERS = 10_000;
+const METERS_PER_DEGREE_LAT = 111_320;
+
+// CPAD's park edge and the county's city edge are the same line surveyed by two people, and they do
+// not agree on it: unioned, they leave a row of gaps along the shared boundary — eleven of them, the
+// largest 25,491 m². They are not places, and a hole in the mask cuts the trails that cross it and
+// reads as bare canopy in the middle of a forest.
+//
+// They can be filled without touching anything real, because the ONLY hole this mask is meant to
+// have is water, and water never makes one: the seven city limits less the tidal polygons come out
+// as four pieces with zero interior rings between them, measured. So an enclosed gap here is two
+// sources disagreeing, up to the point where it is too big to be a seam and is left alone to be
+// looked at.
+const MAX_SEAM_HOLE_SQUARE_METERS = 100_000;
+
+// Shoelace on the ring, with longitude scaled at the ring's own latitude. Only ever compared against
+// the floor above, so the flat-earth approximation over a few hundred metres costs nothing.
+function ringAreaSquareMeters(ring: Ring): number {
+  let doubled = 0;
+  for (
+    let index = 0, previous = ring.length - 1;
+    index < ring.length;
+    previous = index++
+  ) {
+    doubled +=
+      ring[previous][0] * ring[index][1] - ring[index][0] * ring[previous][1];
+  }
+  const latitude =
+    ring.reduce((sum, [, lat]) => sum + lat, 0) / Math.max(ring.length, 1);
+  return (
+    (Math.abs(doubled) / 2) *
+    METERS_PER_DEGREE_LAT *
+    METERS_PER_DEGREE_LAT *
+    Math.cos((latitude * Math.PI) / 180)
+  );
+}
 
 // TIGERweb's areal hydrography, the Census Bureau's own water polygons, queried over the East Bay.
 // `H2051` is its code for a bay, estuary, gulf or sound and `H2053` for an ocean — between them San
@@ -217,6 +313,44 @@ async function fetchCityLimits(): Promise<Ring[][]> {
   return features.flatMap((feature) => ringsOf(feature.geometry));
 }
 
+async function fetchParkland(): Promise<Ring[][]> {
+  const url = new URL(PARKLAND_SERVICE);
+  const names = EAST_BAY_PARKLANDS.map((name) => `'${name}'`).join(",");
+  url.searchParams.set("where", `UNIT_NAME IN (${names})`);
+  url.searchParams.set("outFields", "UNIT_NAME");
+  url.searchParams.set("returnGeometry", "true");
+  url.searchParams.set("outSR", "4326");
+  url.searchParams.set("f", "geojson");
+  const features = await cached("cpad-east-bay-parkland", url.toString(), () =>
+    fetchGeoJson<{ UNIT_NAME?: string }>(url.toString()),
+  );
+  const named = new Set(
+    features.map((feature) => feature.properties?.UNIT_NAME ?? ""),
+  );
+  const missing = EAST_BAY_PARKLANDS.filter((name) => !named.has(name));
+  if (missing.length > 0) {
+    // CPAD renames units between releases — Redwood became Reinhardt Redwood in one — and a rename
+    // here would quietly put the hills back outside the mask with nothing but a smaller number in
+    // the log to show for it.
+    throw new Error(`CPAD has no holding named ${missing.join(", ")}`);
+  }
+  const { union } = await import("polygon-clipping");
+  const holdings = features.flatMap((feature) => ringsOf(feature.geometry));
+  const merged = union(holdings as Parameters<typeof union>[0]) as Ring[][];
+  const solid = merged
+    .map((polygon): Ring[] => [polygon[0]])
+    .filter(
+      ([outer]) =>
+        ringAreaSquareMeters(outer) >= MIN_PARKLAND_PIECE_SQUARE_METERS,
+    );
+  console.error(
+    `  east bay parkland: ${features.length} CPAD holdings across` +
+      ` ${EAST_BAY_PARKLANDS.length} parks = ${solid.length} pieces` +
+      ` (${merged.length - solid.length} under ${MIN_PARKLAND_PIECE_SQUARE_METERS} m² dropped)`,
+  );
+  return solid;
+}
+
 async function fetchTidalWater(box: Box): Promise<Ring[][]> {
   const url = new URL(HYDRO_SERVICE);
   url.searchParams.set("where", `MTFCC IN ${TIDAL_WATER_CODES}`);
@@ -256,17 +390,29 @@ async function fetchTidalWater(box: Box): Promise<Ring[][]> {
 // the bounding rectangle reaching over Sausalito costs nothing.
 export async function fetchEastBayLand(): Promise<Polygon[]> {
   const limits = await fetchCityLimits();
-  const water = await fetchTidalWater(boxOfRings(limits));
+  const parks = await fetchParkland();
+  const ground = [...limits, ...parks];
+  const water = await fetchTidalWater(boxOfRings(ground));
   // Imported here rather than at the top: polygon-clipping is a devDependency this one function
   // needs, and every other consumer of this module pays its load otherwise.
   const { difference } = await import("polygon-clipping");
-  const land = difference(
-    limits as Parameters<typeof difference>[0],
+  const cut = difference(
+    ground as Parameters<typeof difference>[0],
     water as Parameters<typeof difference>[0],
   ) as Ring[][];
+  let seams = 0;
+  const land = cut.map(([outer, ...holes]) => [
+    outer,
+    ...holes.filter((hole) => {
+      const seam = ringAreaSquareMeters(hole) < MAX_SEAM_HOLE_SQUARE_METERS;
+      seams += seam ? 1 : 0;
+      return !seam;
+    }),
+  ]);
   console.error(
-    `  east bay: ${EAST_BAY_CITY_LIMITS.length} city limits less ${water.length} water polygons` +
-      ` = ${land.length} land polygons`,
+    `  east bay: ${EAST_BAY_CITY_LIMITS.length} city limits and ${parks.length} parkland pieces` +
+      ` less ${water.length} water polygons = ${land.length} land polygons` +
+      ` (${seams} boundary seams filled)`,
   );
   return toPolygons(land);
 }

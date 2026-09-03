@@ -114,13 +114,29 @@ const CITY_SOURCES: Record<string, readonly DataSource[]> = {
       detail:
         "SF Public Works street trees · DataSF, the Oakland Public Tree Inventory, and Berkeley's Arborwell street-tree survey",
     },
-    { label: "Streets", detail: "SF Basemap Street Centerlines · DataSF" },
+    // The East Bay half of the region is read from the county's own centreline, and this dialog is
+    // the app's only credits surface, so both publishers are named rather than just the one whose
+    // name was here when the region was San Francisco alone.
+    {
+      label: "Streets",
+      detail:
+        "SF Basemap Street Centerlines · DataSF, and Street Centerlines · Alameda County GIS",
+    },
     // The boats are the only way a pedestrian crosses the bay, so the feed is routing input here
     // rather than scenery. Its ODC-BY is written down only on the operator's developer page, which
     // makes naming WETA the whole of what the licence asks for.
     {
       label: "Ferries",
       detail: "San Francisco Bay Ferry GTFS · WETA (ODC-BY)",
+    },
+    // The land mask is a source in its own right here, and an unusual one: it is three publishers
+    // subtracted and unioned rather than a layer anyone hands over. It reaches past the seven city
+    // limits to the ridge parkland above Oakland, which no municipality contains — CPAD's own credit
+    // wording is carried verbatim, as its terms ask.
+    {
+      label: "Land & parks",
+      detail:
+        "Analysis neighbourhoods · DataSF, city limits · Alameda County GIS, protected areas from the California Protected Areas Database (CPAD - www.calands.org). June 2024, and shoreline from US Census TIGER hydrography",
     },
     // SFMTA's feed licence requires this wording verbatim on anything derived from it, so the detail
     // line carries it rather than paraphrasing.
