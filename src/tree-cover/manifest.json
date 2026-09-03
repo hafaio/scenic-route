@@ -231,17 +231,17 @@
         "north": 37.90591839002644,
         "east": -122.11396170101138
       },
-      "trees": 194983,
+      "trees": 298771,
       "updated": "2026-08-29",
-      "attribution": "SF Public Works street trees via DataSF",
+      "attribution": "SF Public Works street trees via DataSF; Oakland Public Tree Inventory; City of Berkeley street trees (Arborwell survey), frozen copy",
       "sourceUrl": "https://data.sfgov.org/d/tkzw-k3nq",
       "field": {
         "trees": {
           "file": "sf.bin",
           "format": 3,
-          "count": 206163,
-          "bytes": 1131490,
-          "sha256": "deae8048afbd7199be10f7fa574dcf9982129cf50ebb0a9da0bba497c5e6b34e"
+          "count": 308962,
+          "bytes": 1728264,
+          "sha256": "a1da8103eca9efd38040898e78a9379eae3f61154a0f93bb2bfcac30e0044aec"
         },
         "land": {
           "file": "sf.bin",
@@ -253,16 +253,16 @@
         "canopy": {
           "file": "sf.bin",
           "format": 2,
-          "polygons": 312170,
-          "vertices": 4512370,
-          "bytes": 13032613,
-          "sha256": "f2287b1054607afdf991acae81007f3501605bf5fee94c2e6c20471dad531ef3",
-          "squareKm": 16.8,
-          "measuredHeights": 233762,
+          "polygons": 648736,
+          "vertices": 10568146,
+          "bytes": 29891047,
+          "sha256": "76325de87bd579d80e483419773716a7595707e3c93f87135b408c71a6a535c6",
+          "squareKm": 59,
+          "measuredHeights": 570321,
           "updated": "2026-08-29",
-          "attribution": "Urban tree canopy © SF Planning (2013 Urban Forest Plan)",
+          "attribution": "Urban tree canopy © SF Planning (2013 Urban Forest Plan); Canopy © EBRPD / CAL FIRE / Tukman Geospatial (ALCC 1 m LiDAR)",
           "sourceUrl": "https://data.sfgov.org/d/ni2e-vpbg",
-          "heightAttribution": "Elevation © USGS 3DEP / NASA WERK (CC0)",
+          "heightAttribution": "Elevation © USGS 3DEP / NASA WERK (CC0); Canopy heights © EBRPD / CAL FIRE / Tukman Geospatial (ALCC 1 m LiDAR CHM)",
           "heightSourceUrl": "https://nationaldataplatform.org/stac/collections/nasa-werk-dem-ca-sanfrancisco-1-b23"
         },
         "fillSigmaMeters": 15,
@@ -277,12 +277,12 @@
         },
         "maxDbhInches": 60,
         "imputedDbhInches": 7,
-        "clampedTrees": 963,
-        "imputedTrees": 44413,
-        "osmTrees": 11180,
-        "osmTreeDedup": 2146,
-        "osmImputedCrowns": 11174,
-        "meanCoverOverLand": 0.045,
+        "clampedTrees": 1080,
+        "imputedTrees": 45216,
+        "osmTrees": 10191,
+        "osmTreeDedup": 3135,
+        "osmImputedCrowns": 10185,
+        "meanCoverOverLand": 0.158,
         "coverSamples": 1000000,
         "coverSeed": 42,
         "genus": {
@@ -290,12 +290,32 @@
             {
               "genus": "Prunus",
               "common": "Cherry",
-              "count": 15033
+              "count": 23004
             },
             {
               "genus": "Platanus",
               "common": "London planetree",
-              "count": 12558
+              "count": 22433
+            },
+            {
+              "genus": "Pyrus",
+              "common": "Pear",
+              "count": 13258
+            },
+            {
+              "genus": "Magnolia",
+              "common": "Magnolia",
+              "count": 12038
+            },
+            {
+              "genus": "Tristaniopsis",
+              "common": "Swamp myrtle",
+              "count": 11236
+            },
+            {
+              "genus": "Pittosporum",
+              "common": "Victorian box",
+              "count": 10677
             },
             {
               "genus": "Lophostemon",
@@ -305,66 +325,46 @@
             {
               "genus": "Ficus",
               "common": "Fig",
-              "count": 9681
-            },
-            {
-              "genus": "Pittosporum",
-              "common": "Victorian box",
-              "count": 9571
-            },
-            {
-              "genus": "Tristaniopsis",
-              "common": "Swamp myrtle",
-              "count": 9348
-            },
-            {
-              "genus": "Magnolia",
-              "common": "Magnolia",
-              "count": 9122
+              "count": 9972
             },
             {
               "genus": "Metrosideros",
               "common": "New Zealand Christmas tree",
-              "count": 8830
+              "count": 9000
             },
             {
-              "genus": "Arbutus",
-              "common": "Strawberry tree",
-              "count": 6342
+              "genus": "Acer",
+              "common": "Maple",
+              "count": 8741
             },
             {
-              "genus": "Pyrus",
-              "common": "Pear",
-              "count": 6108
-            },
-            {
-              "genus": "Acacia",
-              "common": "Acacia",
-              "count": 5463
+              "genus": "Quercus",
+              "common": "Oak",
+              "count": 8307
             }
           ],
-          "otherCount": 103903
+          "otherCount": 170092
         },
         "density": {
           "min": 0,
           "max": 1,
-          "mean": 0.045,
-          "median": 0,
+          "mean": 0.158,
+          "median": 0.086,
           "percentiles": {
             "p1": 0,
             "p5": 0,
             "p10": 0,
-            "p20": 0,
-            "p30": 0,
-            "p40": 0,
-            "p50": 0,
-            "p60": 0,
-            "p70": 0,
-            "p80": 0.04,
-            "p90": 0.137,
-            "p95": 0.268,
-            "p97": 0.402,
-            "p99": 0.739
+            "p20": 0.011,
+            "p30": 0.032,
+            "p40": 0.057,
+            "p50": 0.086,
+            "p60": 0.121,
+            "p70": 0.168,
+            "p80": 0.247,
+            "p90": 0.427,
+            "p95": 0.639,
+            "p97": 0.771,
+            "p99": 0.927
           }
         },
         "updated": "2026-08-29",
@@ -377,30 +377,30 @@
         "segments": 37366,
         "vertices": 362796,
         "bytes": 2880476,
-        "sha256": "c31c9710bf4d8ef9623b5c7098d5de6003efb329edfbabd372494d0bf7678a2f",
+        "sha256": "a50a9ee4f5f2abfdfe3a861fa28318a7dbd9a00bbde4a1a1c52b4d5052e08dc5",
         "densifyMeters": 25,
         "sidewalkInsetMeters": 2,
         "alleys": false,
         "density": {
           "min": 0,
           "max": 1,
-          "mean": 0.028,
-          "median": 0,
+          "mean": 0.19,
+          "median": 0.114,
           "percentiles": {
             "p1": 0,
             "p5": 0,
             "p10": 0,
-            "p20": 0,
-            "p30": 0,
-            "p40": 0,
-            "p50": 0,
-            "p60": 0,
-            "p70": 0,
-            "p80": 0.006,
-            "p90": 0.069,
-            "p95": 0.179,
-            "p97": 0.278,
-            "p99": 0.521
+            "p20": 0.01,
+            "p30": 0.033,
+            "p40": 0.067,
+            "p50": 0.114,
+            "p60": 0.177,
+            "p70": 0.256,
+            "p80": 0.348,
+            "p90": 0.496,
+            "p95": 0.633,
+            "p97": 0.717,
+            "p99": 0.847
           }
         },
         "updated": "2026-08-29",
@@ -414,28 +414,28 @@
         "segments": 24278,
         "vertices": 172611,
         "bytes": 1486222,
-        "sha256": "e64df38f614f977206193d2548efcb63ac38067b7b544d7c5cbb482f1af59b2e",
+        "sha256": "9d9160534f9af3f8b7796c4ec387979234d46faa85d8bdc059d611584adf9dd5",
         "km": 1392.7,
         "density": {
           "min": 0,
           "max": 1,
-          "mean": 0.137,
-          "median": 0,
+          "mean": 0.243,
+          "median": 0.126,
           "percentiles": {
             "p1": 0,
             "p5": 0,
             "p10": 0,
-            "p20": 0,
-            "p30": 0,
-            "p40": 0,
-            "p50": 0,
-            "p60": 0.014,
-            "p70": 0.092,
-            "p80": 0.256,
-            "p90": 0.537,
-            "p95": 0.758,
-            "p97": 0.872,
-            "p99": 0.978
+            "p20": 0.005,
+            "p30": 0.028,
+            "p40": 0.068,
+            "p50": 0.126,
+            "p60": 0.207,
+            "p70": 0.317,
+            "p80": 0.472,
+            "p90": 0.713,
+            "p95": 0.88,
+            "p97": 0.945,
+            "p99": 0.992
           }
         },
         "updated": "2026-08-29",

@@ -12,6 +12,12 @@ import { dirname, join } from "node:path";
 import { parseArgs } from "node:util";
 import { EAST_BAY_STREET_ATTRIBUTION, fetchEastBayStreets } from "./alameda";
 import {
+  ALCC_ATTRIBUTION,
+  ALCC_HEIGHT_ATTRIBUTION,
+  ALCC_SOURCE_URL,
+  eastBayCanopy,
+} from "./alcc";
+import {
   type CrownAllometry,
   crownDiameterMeters,
   NOCALC_LONDON_PLANE,
@@ -21,6 +27,11 @@ import { type ArtSource, ingestArt, NYC_ART, SF_ART } from "./art";
 import { type BuildingSource, NYC_BUILDINGS, SF_BUILDINGS } from "./buildings";
 import { fetchCanopyPolygons } from "./canopy";
 import { CHM_ATTRIBUTION, CHM_SOURCE_URL, fetchChmRaster } from "./chm";
+import {
+  BERKELEY_TREE_ATTRIBUTION,
+  fetchEastBayTrees,
+  OAKLAND_TREE_ATTRIBUTION,
+} from "./east-bay-trees";
 import {
   type ElevationRaster,
   SF_CANOPY_BAND,
@@ -113,21 +124,31 @@ interface StreetRow {
   stname_label?: string; // CSCL's normalized street name, e.g. "W 60 ST"
 }
 
+// One survey a region's crown heights are measured from: the rasters, the band of them that carries
+// height (null where the file's only band is the height itself), the grid they are published on, and
+// the credit the manifest records. `crs` is a name crates/tiler/src/heights.rs resolves to five
+// projection numbers, so the two sides cannot disagree about where a cell sits on the ground.
+interface HeightRaster {
+  paths: string[];
+  band: number | null;
+  crs: "utm18n" | "utm10n" | "sf-cs13";
+  attribution: string;
+  sourceUrl: string;
+}
+
 // .build/ingest.json: everything `tiler ingest` is pointed at, all paths absolute.
 interface IngestParams {
   canopy: string;
   land: string;
   streets: string;
   paths: string;
-  // null for a city with no canopy height model; then no heights pass runs and every polygon keeps
-  // the 0 that reads as unknown. `band` is null for a single raster and the band index that carries
-  // height above ground for a mosaic — several hundred paths ride in this file rather than on a
-  // command line, which is why the mosaic needs no list on disk.
-  chm: {
-    paths: string[];
-    band: number | null;
-    crs: "utm18n" | "sf-cs13";
-  } | null;
+  // Empty for a city with no canopy height model; then no heights pass runs and every polygon keeps
+  // the 0 that reads as unknown. Several where a region's halves were flown by different surveys
+  // onto different grids. `band` is null for a single raster and the band index that carries height
+  // above ground for a mosaic — several hundred paths ride in this file rather than on a command
+  // line, which is why the mosaic needs no list on disk. The credits `HeightRaster` also carries are
+  // the manifest's, not the tiler's, and the tiler rejects a field it was not told about.
+  chm: { paths: string[]; band: number | null; crs: HeightRaster["crs"] }[];
   sourceBox: Bounds;
   landBox: Bounds;
   fillSigmaMeters: number;
@@ -187,6 +208,18 @@ const GENUS_COMMON_NAMES: Record<string, string> = {
   Maytenus: "Mayten",
   Corymbia: "Flowering gum",
   Eucalyptus: "Eucalyptus",
+  // The East Bay's, which are a different planting palette again — Oakland and Berkeley lead on
+  // street trees San Francisco barely plants. None of these is in the region's top eleven today;
+  // they are here because several sit just outside it, and a genus crossing that line should change
+  // the legend's order rather than its language.
+  Liquidambar: "Sweetgum",
+  Lagerstroemia: "Crape myrtle",
+  Pistacia: "Chinese pistache",
+  Sequoia: "Coast redwood",
+  Cinnamomum: "Camphor",
+  Robinia: "Black locust",
+  Pinus: "Pine",
+  Betula: "Birch",
 };
 // The isotropic blur the canopy field is rendered and reported through: closed woods stay dark,
 // lawns stay blank, and a park edge feathers over ~2σ ≈ 30 m. The land cover distribution reads
@@ -663,18 +696,13 @@ interface CitySources {
     fetched: number;
     dropped: number;
   }>;
-  // Where crown heights are measured, or null for a city with none — then every polygon keeps the 0
-  // that reads as an unknown height, and the tree-shade pyramid is simply not produced. A city
-  // states either one raster or a mosaic of them with the band that carries height above ground;
-  // that band measures buildings too, which is safe only because the polygons it is read through
-  // are measured canopy.
-  chm: () => Promise<{
-    paths: string[];
-    band: number | null;
-    crs: "utm18n" | "sf-cs13";
-    attribution: string;
-    sourceUrl: string;
-  } | null>;
+  // Where crown heights are measured. Empty for a city with none — then every polygon keeps the 0
+  // that reads as an unknown height, and the tree-shade pyramid is simply not produced; several
+  // where a region spans two surveys, and each polygon keeps the reading of whichever one covered
+  // it. A survey states either one raster or a mosaic of them with the band that carries height
+  // above ground; that band may measure buildings too, which is safe only because the polygons it is
+  // read through are measured canopy.
+  chm: () => Promise<HeightRaster[]>;
   // The city's ferry network, consolidated from its GTFS feeds, or null where it has none — a
   // fetcher rather than a flag, because a third city's feeds are its own and a boolean can only ever
   // mean "the ones scripts/ferries.ts already hardcodes".
@@ -722,13 +750,15 @@ const NYC: CitySources = {
   streets: fetchNycStreets,
   trees: fetchNycTrees,
   canopy: fetchCanopyPolygons,
-  chm: async () => ({
-    paths: [await fetchChmRaster()],
-    band: null,
-    crs: "utm18n",
-    attribution: CHM_ATTRIBUTION,
-    sourceUrl: CHM_SOURCE_URL,
-  }),
+  chm: async () => [
+    {
+      paths: [await fetchChmRaster()],
+      band: null,
+      crs: "utm18n",
+      attribution: CHM_ATTRIBUTION,
+      sourceUrl: CHM_SOURCE_URL,
+    },
+  ],
   ferries: () => ingestFerries("nyc"),
   alleys: true,
   landmarks: NYC_LANDMARKS,
@@ -747,7 +777,9 @@ const NYC: CitySources = {
 const SF: CitySources = {
   id: "sf",
   name: "Bay Area",
-  attribution: "SF Public Works street trees via DataSF",
+  // Three registers, one per city that keeps one. The five East Bay cities that publish none thin
+  // out the genus overlay and nothing else: cover and shade come from the canopy polygons.
+  attribution: `SF Public Works street trees via DataSF; ${OAKLAND_TREE_ATTRIBUTION}; ${BERKELEY_TREE_ATTRIBUTION}`,
   sourceUrl: DATA_SF.page("tkzw-k3nq"),
   // Two centrelines, one per half of the region. The manifest schema has one source URL, so it
   // stays San Francisco's.
@@ -757,7 +789,10 @@ const SF: CitySources = {
   fieldSourceUrl: "https://www.openstreetmap.org/copyright",
   pathAttribution: "OpenStreetMap contributors",
   pathSourceUrl: "https://www.openstreetmap.org/copyright",
-  canopyAttribution: SF_CANOPY_ATTRIBUTION,
+  // Two canopy measurements of different kinds: San Francisco's 2013 imagery has no height floor and
+  // the East Bay's 2019-21 lidar is cut at 15 feet, so a young street tree counts as canopy on one
+  // side of the bay and not on the other.
+  canopyAttribution: `${SF_CANOPY_ATTRIBUTION}; ${ALCC_ATTRIBUTION}`,
   canopySourceUrl: DATA_SF.page("ni2e-vpbg"),
   land: fetchBayAreaLand,
   // Their durable ids cannot collide — DataSF's `cnn` runs in the low millions and the county's
@@ -766,22 +801,45 @@ const SF: CitySources = {
     ...(await fetchSfStreets()),
     ...(await fetchEastBayStreets(land)),
   ],
-  trees: fetchSfTrees,
-  canopy: fetchSfCanopyPolygons,
-  // The same 3DEP tiles the terrain overlay is built from, read at the band that differences the
-  // surface model against the ground. That band is height above ground for everything standing, not
-  // canopy — downtown reads 200 m of tower — so it is only ever sampled through the measured-canopy
-  // polygons, which is what the ingest's heights pass does and the only thing that makes it a crown
-  // height.
+  trees: async () => [
+    ...(await fetchSfTrees()),
+    ...(await fetchEastBayTrees()),
+  ],
+  // The two halves' polygons in one list: nothing downstream reads which half a polygon came from,
+  // and the height pass finds each one under whichever survey covers it.
+  canopy: async () => {
+    const city = await fetchSfCanopyPolygons();
+    const eastBay = await eastBayCanopy();
+    return {
+      polygons: [...city.polygons, ...eastBay.polygons],
+      fetched: city.fetched + eastBay.fetched,
+      dropped: city.dropped + eastBay.dropped,
+    };
+  },
+  // San Francisco's is the terrain overlay's own 3DEP tiles at the band that differences the surface
+  // against the ground — height above ground for everything standing, downtown towers included — so
+  // it is only ever sampled through the measured-canopy polygons. The East Bay's is a purpose-built
+  // lidar canopy model with every building and water body already zeroed, cut from the same raster
+  // scripts/alcc.ts traced its cover from.
   chm: async () => {
     const raster = await SF_ELEVATION();
-    return {
-      paths: raster.paths,
-      band: SF_CANOPY_BAND,
-      crs: "sf-cs13",
-      attribution: raster.attribution,
-      sourceUrl: raster.sourceUrl,
-    };
+    const eastBay = await eastBayCanopy();
+    return [
+      {
+        paths: raster.paths,
+        band: SF_CANOPY_BAND,
+        crs: "sf-cs13",
+        attribution: raster.attribution,
+        sourceUrl: raster.sourceUrl,
+      },
+      {
+        paths: eastBay.heightTiles,
+        band: 0,
+        crs: "utm10n",
+        attribution: ALCC_HEIGHT_ATTRIBUTION,
+        sourceUrl: ALCC_SOURCE_URL,
+      },
+    ];
   },
   // The ferry is not one scenic option among several here: it is the only way across the bay on
   // foot, so the two halves of this city are one connected walking network only because of it.
@@ -793,7 +851,9 @@ const SF: CitySources = {
   survey: SF_SURVEY,
   elevation: SF_ELEVATION,
   crownAllometry: NOCALC_LONDON_PLANE,
-  medianDbhInches: 7, // the DPW register's median over its 151,806 rows that carry one
+  // San Francisco's own 7 in unchanged: Oakland's 68,281 rows at a median of 8 and Berkeley's
+  // 34,767 at 6.5 move the combined median by less than the inch it is recorded in.
+  medianDbhInches: 7,
 };
 
 const CITIES: Record<string, CitySources> = { nyc: NYC, sf: SF };
@@ -850,13 +910,18 @@ async function fetchCity(CITY: CitySources): Promise<void> {
     }
   }
   console.error(
-    `${CITY.id}: canopy ${canopy.fetched} polygons fetched, ${canopyOnLand.length} on land, ${canopyVertices} vertices, ${canopySquareKilometers.toFixed(1)} km² (${canopy.dropped} degenerate dropped)`,
+    `${CITY.id}: canopy ${canopy.fetched} polygons fetched, ${canopyOnLand.length} on land, ${canopyVertices} vertices, ${canopySquareKilometers.toFixed(1)} km² (${canopy.dropped} dropped as degenerate or too small)`,
   );
 
-  // The LiDAR canopy height model each polygon's crown height is measured from: a 243 MiB raster,
-  // downloaded once into .cache/ and read off disk by the ingest's heights pass.
+  // The LiDAR canopy height models each polygon's crown height is measured from, read off disk by
+  // the ingest's heights pass and never committed.
   console.error(`${CITY.id}: fetching the canopy height model`);
   const chm = await CITY.chm();
+  for (const raster of chm) {
+    console.error(
+      `${CITY.id}: heights from ${raster.paths.length} ${raster.crs} raster${raster.paths.length === 1 ? "" : "s"}`,
+    );
+  }
 
   // Paths are the other Overpass query, so they are fetched next while a mirror is warm — and
   // land-clipped here, against the borough polygons, to drop the New Jersey and Westchester
@@ -1029,7 +1094,7 @@ async function fetchCity(CITY: CitySources): Promise<void> {
     land: join(DATA_DIR, "land", file),
     streets: streetPath,
     paths: pathPath,
-    chm: chm ? { paths: chm.paths, band: chm.band, crs: chm.crs } : null,
+    chm: chm.map(({ paths, band, crs }) => ({ paths, band, crs })),
     sourceBox: sourceBoxOf(segments, trees),
     landBox,
     fillSigmaMeters: FILL_SIGMA_METERS,
@@ -1056,9 +1121,15 @@ async function fetchCity(CITY: CitySources): Promise<void> {
       canopySourceUrl: CITY.canopySourceUrl,
       alleys: CITY.alleys,
     },
-    heightSource: chm
-      ? { attribution: chm.attribution, sourceUrl: chm.sourceUrl }
-      : null,
+    // Every survey's credit, joined the way the two centrelines' is; the source URL is one field in
+    // the manifest schema and names the first, with the rest in scripts/README.md.
+    heightSource:
+      chm.length > 0
+        ? {
+            attribution: chm.map((raster) => raster.attribution).join("; "),
+            sourceUrl: chm[0].sourceUrl,
+          }
+        : null,
     trees: treeFile,
     land: landFile,
     canopy: {

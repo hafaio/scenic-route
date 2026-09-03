@@ -106,9 +106,14 @@ const CITY_SOURCES: Record<string, readonly DataSource[]> = {
   sf: [
     {
       label: "Tree canopy",
-      detail: "2013 Urban Forest Plan canopy analysis · SF Planning",
+      detail:
+        "2013 Urban Forest Plan canopy analysis · SF Planning, and the 1 m LiDAR canopy height model for Alameda & Contra Costa · East Bay Regional Parks, CAL FIRE, USGS and Tukman Geospatial",
     },
-    { label: "Street trees", detail: "SF Public Works street trees · DataSF" },
+    {
+      label: "Street trees",
+      detail:
+        "SF Public Works street trees · DataSF, the Oakland Public Tree Inventory, and Berkeley's Arborwell street-tree survey",
+    },
     { label: "Streets", detail: "SF Basemap Street Centerlines · DataSF" },
     // SFMTA's feed licence requires this wording verbatim on anything derived from it, so the detail
     // line carries it rather than paraphrasing.
