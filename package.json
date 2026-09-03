@@ -73,7 +73,7 @@
     "lerc": "^4.2.0",
     "p-retry": "^8.0.0",
     "polygon-clipping": "^0.15.7",
-    "tailwindcss": "^4.3.2",
+    "tailwindcss": "^4.3.3",
     "typescript": "^6.0.3"
   }
 }
