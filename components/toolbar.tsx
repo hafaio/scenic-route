@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   FiCrosshair,
   FiDownload,
+  FiInbox,
   FiInfo,
   FiLoader,
   FiLogIn,
@@ -16,9 +17,10 @@ import {
 } from "react-icons/fi";
 import { CITIES, type City } from "../src/cities";
 import type { OverlayId } from "../src/overlays/registry";
-import { REPO_URL } from "./about-dialog";
 import CityDialog from "./city-dialog";
 import ClockControl from "./clock-control";
+import FeedbackDialog from "./feedback-dialog";
+import FeedbackInbox from "./feedback-inbox";
 import InstallDialog from "./install-dialog";
 import LayersControl from "./layers-control";
 import type { AuthState } from "./map-app";
@@ -85,6 +87,8 @@ export default function Toolbar({
   const [menuOpen, setMenuOpen] = useState<boolean>(false);
   const [cityDialogOpen, setCityDialogOpen] = useState<boolean>(false);
   const [installHelpOpen, setInstallHelpOpen] = useState<boolean>(false);
+  const [feedbackOpen, setFeedbackOpen] = useState<boolean>(false);
+  const [inboxOpen, setInboxOpen] = useState<boolean>(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const { installable, install } = useInstall();
 
@@ -130,6 +134,10 @@ export default function Toolbar({
       {installHelpOpen ? (
         <InstallDialog onClose={() => setInstallHelpOpen(false)} />
       ) : null}
+      {feedbackOpen ? (
+        <FeedbackDialog onClose={() => setFeedbackOpen(false)} />
+      ) : null}
+      {inboxOpen ? <FeedbackInbox onClose={() => setInboxOpen(false)} /> : null}
       <RouteToggle active={routing} onToggle={onToggleRouting} />
       <LayersControl
         city={city}
@@ -208,6 +216,20 @@ export default function Toolbar({
                 </span>
               </button>
             ) : null}
+            {isAdmin ? (
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  setMenuOpen(false);
+                  setInboxOpen(true);
+                }}
+                className={`${MENU_ITEM} ${MENU_DIVIDER}`}
+              >
+                <FiInbox />
+                Feedback inbox
+              </button>
+            ) : null}
             {signedIn && !isAdmin ? (
               <button
                 type="button"
@@ -272,24 +294,23 @@ export default function Toolbar({
                 </span>
               </button>
             ) : null}
-            {/* Opens a tab rather than routing anywhere, so it is an anchor: a menu item that leaves
-                the app should be middle-clickable like any other link. */}
-            <a
-              href={`${REPO_URL}/issues/new`}
-              target="_blank"
-              rel="noreferrer"
+            <button
+              type="button"
               role="menuitem"
-              onClick={() => setMenuOpen(false)}
+              onClick={() => {
+                setMenuOpen(false);
+                setFeedbackOpen(true);
+              }}
               className={`${MENU_ITEM} ${MENU_DIVIDER}`}
             >
               <FiMessageSquare />
               <span className="flex min-w-0 flex-col">
                 <span>Feedback</span>
                 <span className="mt-0.5 text-xs font-normal text-slate-400 dark:text-slate-500">
-                  Open an issue on GitHub
+                  Tell me about a problem or an idea
                 </span>
               </span>
-            </a>
+            </button>
             <button
               type="button"
               role="menuitem"

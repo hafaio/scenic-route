@@ -20,6 +20,7 @@ import {
   type AuthInfo,
   createPin,
   deletePin,
+  flushPendingFeedback,
   refreshClaims,
   signOutUser,
   updatePin,
@@ -502,6 +503,13 @@ export default function MapApp() {
     }
     return subscribeRouteTime(() => setRouteTimeTick((tick) => tick + 1));
   }, [shadeWeight, shelterWeight, allowSheds, allowFerries]);
+
+  // A note written while the device was offline is queued in Firestore's own cache, and that cache
+  // only drains once something has built the Firestore instance. A signed-out visitor builds nothing
+  // — no settings to sync, no pins to read — so their note needs this launch to go and fetch it.
+  useEffect(() => {
+    flushPendingFeedback().catch(() => {});
+  }, []);
 
   useEffect(() => {
     const unsubscribe = watchAuth((info) => {

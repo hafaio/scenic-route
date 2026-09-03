@@ -17,6 +17,7 @@ import {
   type Firestore,
   type FirestoreError,
   initializeFirestore,
+  limit,
   onSnapshot,
   orderBy,
   persistentLocalCache,
@@ -25,7 +26,9 @@ import {
   serverTimestamp,
   setDoc,
   updateDoc,
+  waitForPendingWrites,
 } from "firebase/firestore";
+import { type Feedback, feedbackConverter } from "./feedback";
 import { type Pin, type PinDraft, pinConverter } from "./pin";
 
 const firebaseConfig = {
@@ -38,6 +41,10 @@ const firebaseConfig = {
 };
 
 const PINS = "pins";
+const FEEDBACK = "feedback";
+
+// the newest notes; older ones stay reachable in the Firebase console
+const FEEDBACK_LIMIT = 200;
 
 export interface AuthInfo {
   user: User;
@@ -212,4 +219,101 @@ export async function updatePin(
 export async function deletePin(pinId: string): Promise<void> {
   const ref = doc(rawPinsCollection(), pinId);
   await deleteDoc(ref);
+}
+
+function rawFeedbackCollection(): CollectionReference {
+  return collection(ensureDb(), FEEDBACK);
+}
+
+// Whether a note is still sitting in Firestore's queue. The queue drains itself, but only once
+// something in the session has built the Firestore instance, and a signed-out visitor touches
+// nothing that does — so without this their note would wait in IndexedDB through every later visit.
+// The flag outlives the tab, which is the whole point; it is what a later launch reads to know it
+// has to open the connection at all.
+const PENDING_FEEDBACK_KEY = "scenic-route:feedback-pending";
+
+// Reached for rather than asked about, the way src/settings/store.ts reaches for localStorage: a
+// browser can refuse storage outright, and a note that cannot be bookkept is still worth sending.
+function markPendingFeedback(pending: boolean): void {
+  try {
+    if (pending) {
+      window.localStorage.setItem(PENDING_FEEDBACK_KEY, "1");
+    } else {
+      window.localStorage.removeItem(PENDING_FEEDBACK_KEY);
+    }
+  } catch {}
+}
+
+function feedbackPending(): boolean {
+  try {
+    return window.localStorage.getItem(PENDING_FEEDBACK_KEY) !== null;
+  } catch {
+    return false;
+  }
+}
+
+// Clears the flag once Firestore has nothing left to send, which is not the same moment as any one
+// note being acknowledged: a second note typed while the first was in flight is still in the queue,
+// and clearing on the first note's answer would leave the second for nobody to flush. A refused
+// write leaves the queue as surely as an accepted one, so this settles for both.
+async function clearPendingWhenDrained(): Promise<void> {
+  await waitForPendingWrites(ensureDb());
+  markPendingFeedback(false);
+}
+
+// Not awaited by the dialog: offline this write queues in the persistent cache and goes out on the
+// next launch, so a rejection here means the rules refused it, not that the sender is offline.
+export async function sendFeedback(text: string): Promise<void> {
+  markPendingFeedback(true);
+  try {
+    await addDoc(rawFeedbackCollection(), {
+      text,
+      createdAt: serverTimestamp(),
+    });
+  } finally {
+    await clearPendingWhenDrained();
+  }
+}
+
+// Sends what an earlier visit left queued, and is why the promise above ever resolves for a visitor
+// who is signed out. Firestore transmits its own queue as soon as it is running, so this only has to
+// make it run: waitForPendingWrites is both the ask that starts the connection and the answer to
+// when the queue is empty. It never resolves while the device is offline, which leaves the flag set
+// for the launch after this one.
+export async function flushPendingFeedback(): Promise<void> {
+  if (feedbackPending()) {
+    await clearPendingWhenDrained();
+  }
+}
+
+export function watchFeedback(
+  callback: (notes: Feedback[]) => void,
+  onError?: (error: FirestoreError) => void,
+): () => void {
+  // ordered on one field only, so this needs no composite index
+  const newest = query(
+    rawFeedbackCollection().withConverter(feedbackConverter),
+    orderBy("createdAt", "desc"),
+    limit(FEEDBACK_LIMIT),
+  );
+  return onSnapshot(
+    newest,
+    (snapshot) => {
+      callback(
+        snapshot.docs.map((docSnap) =>
+          docSnap.data({ serverTimestamps: "estimate" }),
+        ),
+      );
+    },
+    (error) => {
+      onError?.(error);
+    },
+  );
+}
+
+// Reading a note is the whole of dealing with it, so the only thing to do afterwards is throw it
+// away. There is no undo and no copy: the sender cannot see their note either, so this is the last
+// place it exists.
+export async function deleteFeedback(feedbackId: string): Promise<void> {
+  await deleteDoc(doc(rawFeedbackCollection(), feedbackId));
 }
