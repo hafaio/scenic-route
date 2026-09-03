@@ -25,8 +25,7 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
-import pRetry from "p-retry";
-import { cached } from "./cache";
+import { allFeatures, fetchArcgis } from "./arcgis";
 import type { Coord, Tree } from "./socrata";
 
 const OAKLAND_SERVICE =
@@ -60,51 +59,11 @@ const OAKLAND_ROW_FLOOR = 65_000;
 const BERKELEY_ROW_FLOOR = 45_000;
 
 const MAX_ATTEMPTS = 6;
-const RETRY_BASE_MS = 2_000;
-const RETRY_CAP_MS = 30_000;
 const REQUEST_TIMEOUT_MS = 120_000;
-const USER_AGENT =
-  "scenic-route/0.1 (+https://github.com/erikbrinkman/scenic-route)";
 
 interface GeoJsonFeature<Properties> {
   properties?: Properties;
   geometry?: { type?: string; coordinates?: [number, number] } | null;
-}
-
-interface GeoJsonPage<Properties> {
-  features?: GeoJsonFeature<Properties>[];
-  error?: { code: number; message: string };
-}
-
-// One page. ArcGIS reports a query error as a 200 with an `{ error }` body, so the status alone is
-// not enough — an unchecked error page would cache as a permanent empty page and truncate the layer.
-async function fetchPage<Properties>(
-  url: string,
-): Promise<GeoJsonFeature<Properties>[]> {
-  return await pRetry(
-    async () => {
-      const response = await fetch(url, {
-        headers: { "user-agent": USER_AGENT },
-        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-      });
-      if (!response.ok) {
-        throw new Error(`${response.status} ${response.statusText}`);
-      }
-      const body = (await response.json()) as GeoJsonPage<Properties>;
-      if (body.error) {
-        throw new Error(`ArcGIS ${body.error.code}: ${body.error.message}`);
-      } else if (!Array.isArray(body.features)) {
-        throw new Error("no features in the response");
-      }
-      return body.features;
-    },
-    {
-      retries: MAX_ATTEMPTS - 1,
-      minTimeout: RETRY_BASE_MS,
-      maxTimeout: RETRY_CAP_MS,
-      randomize: true,
-    },
-  );
 }
 
 // A whole point layer, paged. `order` is the layer's own object-id field: without an order an ArcGIS
@@ -123,65 +82,44 @@ async function fetchLayer<Properties>(
   pageSize: number,
   cache = true,
 ): Promise<GeoJsonFeature<Properties>[]> {
-  const features: GeoJsonFeature<Properties>[] = [];
-  for (let offset = 0; ; offset += pageSize) {
-    const url = new URL(`${service}/query`);
-    url.searchParams.set("where", "1=1");
-    url.searchParams.set("outFields", fields);
-    url.searchParams.set("returnGeometry", "true");
-    url.searchParams.set("outSR", "4326");
-    url.searchParams.set("orderByFields", order);
-    url.searchParams.set("f", "geojson");
-    url.searchParams.set("resultOffset", String(offset));
-    url.searchParams.set("resultRecordCount", String(pageSize));
-    const query = url.toString();
-    const page = cache
-      ? await cached(
-          `${name}-${offset}`,
-          query,
-          () => fetchPage<Properties>(query),
-          true,
-        )
-      : await fetchPage<Properties>(query);
-    features.push(...page);
-    if (page.length < pageSize) {
-      return features;
-    }
-  }
+  return await allFeatures<GeoJsonFeature<Properties>>({
+    pageUrl: (offset) => {
+      const url = new URL(`${service}/query`);
+      url.searchParams.set("where", "1=1");
+      url.searchParams.set("outFields", fields);
+      url.searchParams.set("returnGeometry", "true");
+      url.searchParams.set("outSR", "4326");
+      url.searchParams.set("orderByFields", order);
+      url.searchParams.set("f", "geojson");
+      url.searchParams.set("resultOffset", String(offset));
+      url.searchParams.set("resultRecordCount", String(pageSize));
+      return url.toString();
+    },
+    pageSize,
+    cacheName: cache ? name : null,
+    timeoutMs: REQUEST_TIMEOUT_MS,
+    attempts: MAX_ATTEMPTS,
+  });
 }
 
 // When the layer itself was last edited, off its own metadata: the survey's vintage, which is the
 // one thing about a frozen copy a reader has to be told and no row carries. Retried like a page,
 // because it is asked for after every one of them has been read and a blip here would throw the
-// whole snapshot away.
+// whole snapshot away — a 200 with no date in it included, which is why the check is the ladder's
+// rather than this function's.
 async function lastEditedOn(service: string): Promise<string> {
-  const edited = await pRetry(
-    async () => {
-      const response = await fetch(`${service}?f=json`, {
-        headers: { "user-agent": USER_AGENT },
-        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-      });
-      if (!response.ok) {
-        throw new Error(`${response.status} ${response.statusText}`);
+  const answer = await fetchArcgis<{
+    editingInfo?: { lastEditDate?: number };
+  }>(
+    `${service}?f=json`,
+    { timeoutMs: REQUEST_TIMEOUT_MS, attempts: MAX_ATTEMPTS },
+    ({ editingInfo }) => {
+      if (editingInfo?.lastEditDate === undefined) {
+        throw new Error(`${service}: no last edit date in the response`);
       }
-      const body = (await response.json()) as {
-        editingInfo?: { lastEditDate?: number };
-        error?: { code: number; message: string };
-      };
-      if (body.error) {
-        throw new Error(`ArcGIS ${body.error.code}: ${body.error.message}`);
-      } else if (body.editingInfo?.lastEditDate === undefined) {
-        throw new Error("no last edit date in the response");
-      }
-      return body.editingInfo.lastEditDate;
-    },
-    {
-      retries: MAX_ATTEMPTS - 1,
-      minTimeout: RETRY_BASE_MS,
-      maxTimeout: RETRY_CAP_MS,
-      randomize: true,
     },
   );
+  const edited = answer.editingInfo?.lastEditDate as number;
   return new Date(edited).toISOString().slice(0, 10);
 }
 

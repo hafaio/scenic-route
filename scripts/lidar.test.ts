@@ -1,33 +1,17 @@
 import { expect, test } from "bun:test";
 
 // The grid the staged DEM names its tiles on is the one thing this fetcher has to know for itself:
-// the tiler is handed the tiles that were fetched, so it cannot be asked which ones to fetch. That
-// makes the projection here a second implementation of the one in crates/tiler/src/heights.rs, and
-// these pin both halves of it — the arithmetic against PROJ, and the naming against a tile the
-// survey actually stages.
+// the tiler is handed the tiles that were fetched, so it cannot be asked which ones to fetch. These
+// pin the naming against tiles the survey actually stages; the projection underneath it is
+// scripts/canopy-raster.ts's, and its own test pins the arithmetic against PROJ.
 import {
   type DemSquare,
   demSquaresOf,
   EAST_BAY_WINDOW,
   OAKLAND_TEST_WINDOW,
-  PROJECTIONS,
-  project,
 } from "./lidar";
 
 const named = ({ name }: DemSquare): string => name;
-
-test("the grid agrees with PROJ", () => {
-  // The corner the staged tile USGS_1M_10_x56y419 ties its upper-left pixel to, (559994, 4190006),
-  // placed at this longitude and latitude by PROJ's own EPSG:26910 — the same pair
-  // crates/tiler/src/heights.rs checks its projection against.
-  const [easting, northing] = project(
-    PROJECTIONS.utm10n,
-    -122.3180159208427,
-    37.85553821693455,
-  );
-  expect(easting).toBeCloseTo(559_994, 2);
-  expect(northing).toBeCloseTo(4_190_006, 2);
-});
 
 test("the downtown window falls in the one tile it was measured on", () => {
   expect(demSquaresOf(OAKLAND_TEST_WINDOW, "utm10n").map(named)).toEqual([

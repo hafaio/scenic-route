@@ -530,12 +530,13 @@ export function statedSides(
 ): SidewalkSides {
   if (own.left !== "unstated" && own.right !== "unstated") {
     return own; // asked lazily, so New York's probe never pays for a match it cannot use
+  } else {
+    const tags = tagged();
+    return {
+      left: own.left === "unstated" ? tags.left : own.left,
+      right: own.right === "unstated" ? tags.right : own.right,
+    };
   }
-  const tags = tagged();
-  return {
-    left: own.left === "unstated" ? tags.left : own.left,
-    right: own.right === "unstated" ? tags.right : own.right,
-  };
 }
 
 // One tag value on a side-specific key (`sidewalk:left`, `sidewalk:right`, `sidewalk:both`).

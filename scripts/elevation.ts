@@ -12,11 +12,11 @@
 // same contract `scripts/chm.ts` has with the canopy height model.
 
 import { readFile } from "node:fs/promises";
-import pRetry from "p-retry";
 import { fetchEastBayLand } from "./alameda";
 import { cachedFile } from "./cache";
-import { inverseTmerc } from "./canopy-raster";
+import { forwardTmerc, inverseTmerc } from "./canopy-raster";
 import { boxOf } from "./geometry";
+import { fetchBytes, fetchJson } from "./http";
 import { buildLandTest } from "./land-filter";
 import {
   ALAMEDA_LIDAR,
@@ -26,15 +26,10 @@ import {
   fetchDemTiles,
   type LidarWindow,
   PROJECTIONS,
-  project,
 } from "./lidar";
 import type { Polygon } from "./overpass";
 
-const USER_AGENT =
-  "scenic-route/0.1 (+https://github.com/erikbrinkman/scenic-route)";
 const MAX_ATTEMPTS = 4;
-const RETRY_BASE_MS = 2_000;
-const RETRY_CAP_MS = 30_000;
 const PROGRESS_TILES = 50;
 const FETCH_WORKERS = 8;
 
@@ -76,33 +71,15 @@ interface StacPage {
   links?: { rel?: string; href?: string }[];
 }
 
-async function fetchJson<Value>(url: string): Promise<Value> {
-  return await pRetry(
-    async () => {
-      const response = await fetch(url, {
-        headers: { "user-agent": USER_AGENT },
-      });
-      if (!response.ok) {
-        throw new Error(`${response.status} ${response.statusText}`);
-      }
-      return (await response.json()) as Value;
-    },
-    {
-      retries: MAX_ATTEMPTS - 1,
-      minTimeout: RETRY_BASE_MS,
-      maxTimeout: RETRY_CAP_MS,
-      randomize: true,
-    },
-  );
-}
-
 // The collection paginates, and the last page's `next` link is what ends the walk — a page with no
 // features would otherwise loop on the same href for ever.
 async function tileHrefs(): Promise<string[]> {
   const hrefs: string[] = [];
   let url: string | null = `${WERK_COLLECTION}/items?limit=500`;
   while (url) {
-    const page: StacPage = await fetchJson<StacPage>(url);
+    const page: StacPage = await fetchJson<StacPage>(url, {
+      attempts: MAX_ATTEMPTS,
+    });
     const features = page.features ?? [];
     for (const feature of features) {
       const href = feature.assets?.data?.href;
@@ -114,14 +91,6 @@ async function tileHrefs(): Promise<string[]> {
     url = features.length > 0 && next ? next : null;
   }
   return hrefs;
-}
-
-async function download(url: string): Promise<Uint8Array> {
-  const response = await fetch(url, { headers: { "user-agent": USER_AGENT } });
-  if (!response.ok) {
-    throw new Error(`${response.status} ${response.statusText}`);
-  }
-  return new Uint8Array(await response.arrayBuffer());
 }
 
 // One cache entry per tile rather than one for the mosaic: a run interrupted halfway keeps what it
@@ -136,12 +105,7 @@ async function fetchTiles(prefix: string, hrefs: string[]): Promise<string[]> {
       const href = hrefs[index];
       const name = href.slice(href.lastIndexOf("/") + 1);
       paths[index] = await cachedFile(`${prefix}-${name}`, href, () =>
-        pRetry(() => download(href), {
-          retries: MAX_ATTEMPTS - 1,
-          minTimeout: RETRY_BASE_MS,
-          maxTimeout: RETRY_CAP_MS,
-          randomize: true,
-        }),
+        fetchBytes(href, { attempts: MAX_ATTEMPTS }),
       );
       done += 1;
       if (done % PROGRESS_TILES === 0 || done === hrefs.length) {
@@ -190,7 +154,7 @@ const ALAMEDA_SOURCE_URL =
 
 // The 10 km square of the staged grid a point falls in.
 function demSquareOf(lng: number, lat: number): string {
-  const [x, y] = project(PROJECTIONS[ALAMEDA_LIDAR.crs], lng, lat);
+  const { x, y } = forwardTmerc(PROJECTIONS[ALAMEDA_LIDAR.crs], lng, lat);
   return demSquareName(
     Math.floor(x / DEM_SQUARE_METERS),
     Math.floor(y / DEM_SQUARE_METERS),

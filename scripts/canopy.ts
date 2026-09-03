@@ -4,7 +4,7 @@
 // the tiler blurs it for the fill pyramid and samples it at every sidewalk for the routing
 // density. See scripts/README.md.
 
-import pRetry from "p-retry";
+import { fetchArcgis } from "./arcgis";
 import { cached } from "./cache";
 import type { Polygon } from "./overpass";
 
@@ -16,22 +16,17 @@ const SERVICE =
 
 const PAGE_SIZE = 2000; // the service's maxRecordCount; a larger resultRecordCount is capped here
 const MAX_ATTEMPTS = 6;
-const RETRY_BASE_MS = 5_000;
-const RETRY_CAP_MS = 30_000;
-const REQUEST_TIMEOUT_MS = 120_000; // only cuts off a request that hung, not one merely slow
+const RETRY_BASE_MS = 5_000; // longer than the shared ladder's: this service rate-limits
 // ~1,077,146 polygons at the last probe (2026-07-17). A floor, not an exact count: it catches a
 // server-side page cut that would otherwise pass for the end of the layer, but tolerates the
 // service growing or shrinking a little between refreshes.
 const EXPECTED_POLYGONS = 1_000_000;
-const USER_AGENT =
-  "scenic-route/0.1 (+https://github.com/erikbrinkman/scenic-route)";
 
-// The Esri JSON a `f=json` query returns: features carry `geometry.rings` (already lon/lat under
-// `outSR=4326`), and a query error arrives as a 200 with an `error` body rather than a bad status.
+// The Esri JSON a `f=json` query returns: features carry `geometry.rings`, already lon/lat under
+// `outSR=4326`.
 interface EsriResponse {
   features?: { geometry?: { rings?: [number, number][][] } }[];
   exceededTransferLimit?: boolean;
-  error?: { code: number; message: string };
 }
 
 export interface CanopyPolygons {
@@ -55,38 +50,24 @@ function pageUrl(offset: number): string {
   return url.toString();
 }
 
-// One page, retried over the service's rate limit. ArcGIS reports a query error as a 200 with an
-// `{ error }` body, so the status alone is not enough — an unchecked error page would otherwise
-// cache as a permanent empty page and truncate the layer.
+// One page, retried over the service's rate limit and asked again on its own longer ladder.
 async function fetchPage(url: string): Promise<EsriResponse> {
   try {
-    return await pRetry(
-      async () => {
-        const response = await fetch(url, {
-          headers: { "user-agent": USER_AGENT },
-          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-        });
-        if (!response.ok) {
-          throw new Error(`${response.status} ${response.statusText}`);
-        }
-        const body = (await response.json()) as EsriResponse;
-        if (body.error) {
-          throw new Error(`ArcGIS ${body.error.code}: ${body.error.message}`);
-        } else if (!Array.isArray(body.features)) {
-          throw new Error("no features in the response");
-        }
-        return body;
-      },
+    return await fetchArcgis<EsriResponse>(
+      url,
       {
-        retries: MAX_ATTEMPTS - 1,
-        minTimeout: RETRY_BASE_MS,
-        maxTimeout: RETRY_CAP_MS,
-        randomize: true,
+        attempts: MAX_ATTEMPTS,
+        minTimeoutMs: RETRY_BASE_MS,
         onFailedAttempt: ({ error, attemptNumber }) => {
           console.error(
             `  attempt ${attemptNumber}/${MAX_ATTEMPTS} failed: ${error}`,
           );
         },
+      },
+      ({ features }) => {
+        if (!Array.isArray(features)) {
+          throw new Error("no features in the response");
+        }
       },
     );
   } catch (error) {

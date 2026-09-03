@@ -6,7 +6,8 @@
 //
 // Nothing here fetches anything. scripts/alcc.ts holds the Alameda / Contra Costa source and the
 // height floor a mask is cut at; this file holds the geometry, which is the part the next county
-// reuses unchanged.
+// reuses unchanged. The transverse Mercator below is the ingest's only one, and is shared beyond
+// the canopy: scripts/lidar.ts projects with it to name the ground tiles it fetches.
 
 import type { Coord } from "./socrata";
 
@@ -15,8 +16,8 @@ const SEMI_MAJOR_METERS = 6_378_137.0;
 const INVERSE_FLATTENING = 298.257222101;
 
 // A transverse Mercator, named by the same five numbers crates/tiler/src/heights.rs resolves a CRS
-// to. The tiler only ever projects forward — degrees into a raster's grid — and this file only ever
-// projects back, because a traced ring is born in raster cells and has to leave in degrees.
+// to. Both directions are wanted: a lon/lat window goes forward to say which of a published grid's
+// tiles cover it, and a traced ring, born in raster cells, has to leave in degrees.
 export interface Tmerc {
   centralMeridian: number;
   latOrigin: number;
@@ -133,8 +134,9 @@ export function inverseTmerc(grid: Tmerc, x: number, y: number): Coord {
 }
 
 // Snyder's transverse Mercator series, forward: degrees to grid metres — the same series
-// crates/tiler/src/heights.rs projects a canopy vertex with, needed here to cut a lon/lat box down
-// to the raster tiles that cover it.
+// crates/tiler/src/heights.rs projects a canopy vertex with. It is what cuts a lon/lat box down to
+// the tiles of a grid that cover it, for the canopy rasters here and the staged DEM squares
+// scripts/lidar.ts fetches.
 export function forwardTmerc(
   grid: Tmerc,
   lng: number,
