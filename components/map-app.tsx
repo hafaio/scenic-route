@@ -28,6 +28,7 @@ import {
 } from "../src/firebase";
 import {
   type GeocodeResult,
+  INDEX_RESULT_TYPE,
   resolveSharedQuery,
   reverseGeocode,
   searchAddress,
@@ -116,9 +117,10 @@ import { CityProvider } from "./city-context";
 import FollowToggle from "./follow-toggle";
 import LayerLegend from "./layer-legend";
 import type { DestPrefill } from "./location-field";
-import type { MapTarget, PickMode } from "./map";
+import type { MapTarget, PickMode, SearchPin } from "./map";
 import PinEditor from "./pin-editor";
 import RoutePanel from "./route-panel";
+import SearchControl from "./search-control";
 import SettingsDialog from "./settings-dialog";
 import SignInDialog from "./sign-in-dialog";
 import Toolbar from "./toolbar";
@@ -156,6 +158,9 @@ const OVERLAY_KEY = "scenic-route:overlay";
 const RESNAP_METERS = 25; // a followed location must drift this far before the route recomputes
 // Street level, where the first fix frames you. Matches what the map's own follow camera zooms to.
 const LOCATED_ZOOM = 16;
+// Where a searched place is framed — the same street level, and only ever zoomed IN to: someone
+// already looking at one block asked where a park is, not to be pulled back out to see it.
+const SEARCH_PIN_ZOOM = 16;
 // How close to the route a POI must be to count as passed.
 const LANDMARK_PASS_METERS = 40;
 const ART_PASS_METERS = 40;
@@ -322,6 +327,9 @@ export default function MapApp() {
     }
   }, []);
   const [routingOpen, setRoutingOpen] = useState<boolean>(false);
+  // Search and directions are one panel slot, so the app holds both flags: opening either closes the
+  // other, and neither is restored when the other goes.
+  const [searchOpen, setSearchOpen] = useState<boolean>(false);
   const [manualStart, setManualStart] = useState<{
     lat: number;
     lng: number;
@@ -456,6 +464,10 @@ export default function MapApp() {
   // leaves the map where it is and lets a fresh route frame itself.
   const [initialCamera, setInitialCamera] = useState<Camera | null>(null);
   const [preframedDest, setPreframedDest] = useState<LatLng | null>(null);
+  // The one place the search has left on the map. It outlives the panel closing — that is what
+  // makes it a way of looking something up rather than a step in setting a destination — and a
+  // second search replaces it.
+  const [searchPin, setSearchPin] = useState<SearchPin | null>(null);
   // The live camera, tracked for the share link without re-rendering on every pan.
   const cameraRef = useRef<Camera | null>(null);
 
@@ -655,6 +667,23 @@ export default function MapApp() {
     }
   }, [city, dest, manualStart]);
 
+  // A searched pin belongs to the city it was found in exactly as the endpoints above do: its name
+  // came out of that city's index, the other city cannot draw it, and a share link would otherwise
+  // pair one city's key with the other city's point. Its own ref for the same reason theirs exists —
+  // a link's city lands in the same commit as the pin it carried, which is the pin arriving rather
+  // than a switch away from it.
+  const pinCityRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!searchPin) {
+      pinCityRef.current = null;
+    } else if (pinCityRef.current === null) {
+      pinCityRef.current = city.id;
+    } else if (pinCityRef.current !== city.id) {
+      pinCityRef.current = null;
+      setSearchPin(null);
+    }
+  }, [city, searchPin]);
+
   // Asking again, from a control the reader pressed — which is both what picks up a permission they
   // have just granted in Settings and, on iOS, the gesture WebKit would rather see a prompt come
   // from. Clearing the error first is what lets a second refusal re-raise a banner already dismissed.
@@ -753,18 +782,22 @@ export default function MapApp() {
     }
   }, [city]);
 
-  // The decoded index is forty megabytes and the search box is the only thing that reads it, so it
-  // is loaded when the panel that holds the box opens and dropped when it closes. Opening the panel
-  // is early enough that the tables are ready before anything is typed, and it spares every visitor
-  // who only ever looks at the map — on a phone already holding the graph and a screenful of tile
-  // canvases, that is the difference between a session iOS tolerates and one it kills.
+  // The decoded index is forty megabytes and two panels read it — the route fields and the search
+  // box — so it is loaded while either is open and dropped once neither is. Opening a panel is early
+  // enough that the tables are ready before anything is typed, and it spares every visitor who only
+  // ever looks at the map: on a phone already holding the graph and a screenful of tile canvases,
+  // that is the difference between a session iOS tolerates and one it kills.
+  //
+  // Both panels, not just the routing one. They share a slot, so opening the search closes the route
+  // panel — keyed on that alone this would tear the worker down underneath the box that was about to
+  // ask it something, and then never drop it again for a reader who only ever searches.
   useEffect(() => {
-    if (routingOpen) {
+    if (routingOpen || searchOpen) {
       warmNameIndex(city.id);
     } else {
       releaseNameIndex();
     }
-  }, [routingOpen, city]);
+  }, [routingOpen, searchOpen, city]);
 
   // Taking a layer out of the menu turns it off, the same way switching city does: a layer drawn on
   // the map with no row to turn it off by is a state the reader cannot get out of. Putting it back in
@@ -1142,27 +1175,20 @@ export default function MapApp() {
     setPanelMinimized((on) => !on);
   }, []);
 
-  // Reads the current value rather than toggling inside an updater: an updater must be pure, and
-  // both branches here are side effects. React invokes updaters twice in development to find exactly
-  // this, and the next effect added inside one would not be as forgiving as these are.
-  const handleToggleRouting = useCallback(() => {
-    if (routingOpen) {
-      // closing clears everything but keeps the slider value
-      setDest(null);
-      setManualStart(null);
-      setPickTarget(null);
-      setRouteState({ kind: "idle" });
-      routedForRef.current = null;
-      // The peek bar is a way of getting a computed route out of the way, so it has no meaning over
-      // an empty panel: without this, closing directions while minimized and opening them again
-      // brings back a slim bar with nothing in it and no obvious way to see the fields.
-      setPanelMinimized(false);
-    } else {
-      // warm the graph so the first route lands without a fetch stall
-      void loadRouting(city.id);
-    }
-    setRoutingOpen(!routingOpen);
-  }, [routingOpen, city.id]);
+  // Closing directions clears everything but the slider values. Its own control does this, and so
+  // does opening the search, which takes the slot the panel was in.
+  const closeRouting = useCallback(() => {
+    setDest(null);
+    setManualStart(null);
+    setPickTarget(null);
+    setRouteState({ kind: "idle" });
+    routedForRef.current = null;
+    // The peek bar is a way of getting a computed route out of the way, so it has no meaning over
+    // an empty panel: without this, closing directions while minimized and opening them again
+    // brings back a slim bar with nothing in it and no obvious way to see the fields.
+    setPanelMinimized(false);
+    setRoutingOpen(false);
+  }, []);
 
   const handleTreeWeight = useCallback((weight: number) => {
     setTreeWeight(weight);
@@ -1427,6 +1453,7 @@ export default function MapApp() {
     const stored: RouteUrlState = {
       start: null,
       dest: null,
+      pin: null,
       weights: storedWeights(),
       customHour: null,
       customDay: null,
@@ -1455,6 +1482,23 @@ export default function MapApp() {
     if (route.start) {
       applyPick("start", route.start.lat, route.start.lng);
     }
+    if (route.pin) {
+      // Carried as a bare point, like `from` and `to`, and named back the same way they are. The
+      // point is the index's own coordinates, so the lookup lands on the very row the sharer picked.
+      const { lat, lng } = route.pin;
+      setSearchPin({ lat, lng, label: "Dropped pin" });
+      reverseGeocode(lat, lng)
+        .then((place) => {
+          if (place) {
+            setSearchPin((pin) =>
+              pin && pin.lat === lat && pin.lng === lng
+                ? { ...pin, label: place.displayName }
+                : pin,
+            );
+          }
+        })
+        .catch(() => {});
+    }
     if (route.dest) {
       applyPick("dest", route.dest.lat, route.dest.lng);
       setRoutingOpen(true);
@@ -1471,7 +1515,9 @@ export default function MapApp() {
     // A destination names a city as surely as the city key does: it is a point in exactly one of
     // them, and it is what the visitor opened the link to see.
     const linked =
-      cityById(view.city) ?? (route.dest ? nearestCity(route.dest) : null);
+      cityById(view.city) ??
+      (route.dest ? nearestCity(route.dest) : null) ??
+      (route.pin ? nearestCity(route.pin) : null);
     linkedCityRef.current = linked !== null;
     if (linked) {
       setCity(linked);
@@ -1489,6 +1535,10 @@ export default function MapApp() {
       setInitialCamera(view.camera);
       setPreframedDest(route.dest);
       setFollowing(false); // else the first location fix yanks the shared camera away
+    } else if (route.pin) {
+      // A pin has no route whose bounds could frame it, so the link's framing is the pin itself.
+      setInitialCamera({ center: route.pin, zoom: SEARCH_PIN_ZOOM });
+      setFollowing(false);
     } else if (linked) {
       // A chosen city with no camera to go with it still has to frame that city before the map
       // settles: the camera is what decides which city is active, so opening on the default one and
@@ -1611,6 +1661,10 @@ export default function MapApp() {
     }
   }, []);
 
+  // Where the map is looking, for the search panel's coverage check. A function rather than a value
+  // because the camera is tracked in a ref: a pan must not re-render the app.
+  const mapCentre = useCallback(() => cameraRef.current?.center ?? null, []);
+
   // The link the share button copies: the route the hash already carries, plus the camera and overlay
   // set, which live in a URL only here.
   const composeShareUrl = useCallback((): string => {
@@ -1618,6 +1672,7 @@ export default function MapApp() {
     const params = encodeRoute({
       start: manualStart,
       dest,
+      pin: searchPin,
       weights,
       customHour: hour,
       customDay: day,
@@ -1633,7 +1688,7 @@ export default function MapApp() {
     }
     const { origin, pathname, search } = window.location;
     return `${origin}${pathname}${search}${formatHash(params)}`;
-  }, [manualStart, dest, weights, activeOverlays, city]);
+  }, [manualStart, dest, searchPin, weights, activeOverlays, city]);
 
   // A map tap sets the effective pick target's location; with nothing armed and a destination already
   // set, it does nothing.
@@ -1691,6 +1746,92 @@ export default function MapApp() {
       { enableHighAccuracy: true, timeout: 10_000 },
     );
   }, [userLocation]);
+
+  const handleSearchSelect = useCallback((result: GeocodeResult) => {
+    const { lat, lng, displayName } = result;
+    setSearchPin({ lat, lng, label: displayName });
+    const zoom = cameraRef.current?.zoom;
+    setTarget(
+      zoom === undefined || zoom < SEARCH_PIN_ZOOM
+        ? { lat, lng, zoom: SEARCH_PIN_ZOOM }
+        : { lat, lng },
+    );
+    // The map has just flown to the result, so following would drag it straight back.
+    setFollowing(false);
+  }, []);
+
+  const handleSearchPinRemove = useCallback(() => {
+    setSearchPin(null);
+  }, []);
+
+  // A found place becomes the route destination, so the search pin goes rather than the two sitting
+  // on the same spot in the same green. The pin has no handle of its own, so this is the only way to
+  // route to one, and the directions control is where it is asked for.
+  const routeToSearchPin = useCallback(
+    (pin: SearchPin) => {
+      const { lat, lng, label } = pin;
+      handleDestSelect({
+        placeId: `search:${lat},${lng}`,
+        lat,
+        lng,
+        displayName: label,
+        type: INDEX_RESULT_TYPE,
+        exact: false,
+      });
+      setSearchPin(null);
+      setSearchOpen(false);
+      setRoutingOpen(true);
+    },
+    [handleDestSelect],
+  );
+
+  // Reads the current values rather than toggling inside an updater: an updater must be pure, and
+  // these branches are side effects. React invokes updaters twice in development to find exactly
+  // this, and the next effect added inside one would not be as forgiving as these are.
+  const handleToggleRouting = useCallback(() => {
+    if (routingOpen) {
+      closeRouting();
+    } else if (searchOpen && searchPin !== null) {
+      // Asking for directions with a place already found means directions TO that place: an empty
+      // panel opening over the answer the reader is looking at would throw it away.
+      routeToSearchPin(searchPin);
+    } else {
+      setSearchOpen(false);
+      void loadRouting(city.id); // warm the graph so the first route lands without a fetch stall
+      setRoutingOpen(true);
+    }
+  }, [
+    routingOpen,
+    searchOpen,
+    searchPin,
+    closeRouting,
+    routeToSearchPin,
+    city.id,
+  ]);
+
+  // The search wants the panel slot directions are in, so opening it closes them — and closing it
+  // does not bring them back: whichever the reader opened last is the one that is open.
+  //
+  // A destination outlives the panel that set it, as a pin. Directions are a way of getting to a
+  // place the reader had already settled on, so dropping the place along with the route would throw
+  // away the part they chose. The search box stays empty: the pin is not something they typed here,
+  // and prefilling it would invite a re-search for a place already on the map.
+  const handleSearchOpen = useCallback(
+    (open: boolean) => {
+      setSearchOpen(open);
+      if (open) {
+        if (dest !== null) {
+          setSearchPin({
+            lat: dest.lat,
+            lng: dest.lng,
+            label: dest.label ?? "Dropped pin",
+          });
+        }
+        closeRouting();
+      }
+    },
+    [closeRouting, dest],
+  );
 
   const handlePinSelect = useCallback((pin: Pin) => {
     setEditing({ mode: "edit", pin });
@@ -1855,6 +1996,7 @@ export default function MapApp() {
           routeGraph={resultGraph}
           routeDest={routeDest}
           routeStart={routeStart}
+          searchPin={searchPin}
           pickMode={pickMode}
           onMapPick={handleMapPick}
           dragging={dragging}
@@ -1891,12 +2033,13 @@ export default function MapApp() {
         <UrlSync
           start={manualStart}
           dest={dest}
+          pin={searchPin}
           weights={weights}
           enabled={hashApplied}
         />
         <FollowToggle active={followLive} onToggle={handleToggleFollow} />
         {/* the active overlays' floating keys; bottom-left keeps them clear of the toolbar, follow
-          toggle, attribution, and the centered route panel */}
+          toggle, attribution, and the centered route and search panels */}
         <div className="pointer-events-none absolute bottom-3 left-3 z-[1000] max-w-[70vw]">
           <div className="pointer-events-auto space-y-2">
             <LayerLegend active={activeOverlays} city={city} />
@@ -1922,6 +2065,16 @@ export default function MapApp() {
             </button>
           </div>
         ) : null}
+        <SearchControl
+          city={city}
+          open={searchOpen}
+          pinned={searchPin !== null}
+          centre={mapCentre}
+          onOpenChange={handleSearchOpen}
+          onSelect={handleSearchSelect}
+          onDirections={handleToggleRouting}
+          onClear={handleSearchPinRemove}
+        />
         {routingOpen ? (
           <RoutePanel
             destPrefill={destPrefill}

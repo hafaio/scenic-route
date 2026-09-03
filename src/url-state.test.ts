@@ -40,11 +40,30 @@ test("every route field survives a round trip", () => {
   const state: RouteUrlState = {
     start: { lat: 40.712776, lng: -74.005974 },
     dest: { lat: 40.785091, lng: -73.968285 },
+    pin: { lat: 40.741895, lng: -73.989308 },
     weights,
     customHour: 14.25,
     customDay: "2026-12-21",
   };
   expect(roundTrip(state)).toEqual(state);
+});
+
+test("a searched pin travels on its own, without a route", () => {
+  const pin = { lat: 40.741895, lng: -73.989308 };
+  const hash = formatHash(encodeRoute({ ...DEFAULT_ROUTE_STATE, pin }));
+  expect(hash).toBe("#pin=40.741895,-73.989308");
+  expect(decodeRoute(hashParams(hash))).toEqual({
+    ...DEFAULT_ROUTE_STATE,
+    pin,
+  });
+});
+
+test("a rewrite owns the pin key, so clearing the pin drops it", () => {
+  const hash = replaceOwnKeys(
+    "#pin=40.741895,-73.989308&about",
+    encodeRoute(DEFAULT_ROUTE_STATE),
+  );
+  expect(hash).toBe("#about");
 });
 
 test("only the fields off their defaults are written", () => {

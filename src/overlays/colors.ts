@@ -102,3 +102,13 @@ export const SUBWAY_COLOR: Record<ThemeName, string> = {
   light: "#0062cf",
   dark: "#4d94ff",
 };
+
+// The teardrop the search drops on a place it found, in the app's own green. That green already
+// means a route destination and an admin's saved note, so a found place and a destination read
+// alike — which is close to true of them: the directions control turns one into the other. A step
+// lighter at night for the same reason the dot colours are, the saturated green being read against
+// paper white and going heavy on the night ground for a figure this small.
+export const SEARCH_PIN_COLOR: Record<ThemeName, string> = {
+  light: "#34d399", // emerald-400
+  dark: "#6ee7b7", // emerald-300
+};

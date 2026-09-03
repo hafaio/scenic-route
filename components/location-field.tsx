@@ -2,16 +2,8 @@
 
 import { useEffect, useRef, useState } from "react";
 import { FiCrosshair, FiNavigation, FiX } from "react-icons/fi";
-import { MdOutlineHome, MdOutlinePlace, MdSignpost } from "react-icons/md";
-import { PiTrainSimpleFill } from "react-icons/pi";
-import {
-  ADDRESS_RESULT_TYPE,
-  type GeocodeResult,
-  INDEX_RESULT_TYPE,
-  STREET_RESULT_TYPE,
-  SUBWAY_RESULT_TYPE,
-  searchAddress,
-} from "../src/geocode";
+import { type GeocodeResult, searchAddress } from "../src/geocode";
+import ResultGlyph from "./result-glyph";
 
 const SEARCH_DEBOUNCE_MS = 300;
 // The tallest the suggestions may ever be, before the room above the field is taken into account.
@@ -269,34 +261,7 @@ export default function LocationField({
                     : "text-slate-700 hover:bg-slate-50 dark:text-slate-200 dark:hover:bg-slate-700/60"
                 }`}
               >
-                {result.type === ADDRESS_RESULT_TYPE ? (
-                  // A house number out of the city's own address file, which is a door rather than
-                  // the whole street the signpost below stands for.
-                  <MdOutlineHome
-                    className="h-4 w-4 shrink-0 text-slate-400 dark:text-slate-500"
-                    aria-hidden="true"
-                  />
-                ) : result.type === SUBWAY_RESULT_TYPE ? (
-                  <PiTrainSimpleFill
-                    className="h-4 w-4 shrink-0 text-[#0062cf]"
-                    aria-hidden="true"
-                  />
-                ) : result.type === STREET_RESULT_TYPE ? (
-                  // A street is one point on the whole of it, which is a coarser answer than the
-                  // rest of the list gives. Its own glyph is what says so at a glance.
-                  <MdSignpost
-                    className="h-4 w-4 shrink-0 text-slate-400 dark:text-slate-500"
-                    aria-hidden="true"
-                  />
-                ) : result.type === INDEX_RESULT_TYPE ? (
-                  // A named place off the city's own index. One pin for all of them: the row carries
-                  // a category, but a glyph per category is 1,639 of them, and what the pin has to
-                  // say here is that this is a place rather than a door or a street.
-                  <MdOutlinePlace
-                    className="h-4 w-4 shrink-0 text-slate-400 dark:text-slate-500"
-                    aria-hidden="true"
-                  />
-                ) : null}
+                <ResultGlyph type={result.type} />
                 <span className="truncate">{result.displayName}</span>
               </button>
             </li>
