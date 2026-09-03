@@ -5,7 +5,7 @@
 
 import L from "leaflet";
 import { SEARCH_PIN_COLOR } from "../src/overlays/colors";
-import type { ThemeName } from "../src/theme/palette";
+import { hexToRgb, type ThemeName } from "../src/theme/palette";
 
 // The teardrop both dropped pins are cut from. The gradient id has to differ between them: the two
 // SVGs sit in one document, and a repeated id paints whichever was defined first.
@@ -37,9 +37,8 @@ export const savedIcon = L.divIcon({
 // teardrop: the gradient reads as the pin lit from above rather than as two authored colours, which
 // mixing toward black does not — that drains the colour to grey.
 function shaded(hex: string, scale: number): string {
-  const channels = [1, 3, 5].map(
-    (at) => Number.parseInt(hex.slice(at, at + 2), 16) / 255,
-  );
+  const { red, green, blue } = hexToRgb(hex);
+  const channels = [red, green, blue].map((channel) => channel / 255);
   const lightness = (Math.max(...channels) + Math.min(...channels)) / 2;
   const darker = lightness * scale;
   // How far each channel sits from the midpoint is rescaled by the room the darker midpoint leaves
