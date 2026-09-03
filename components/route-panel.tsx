@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 import {
   FiChevronDown,
   FiChevronUp,
@@ -135,6 +135,9 @@ interface RoutePanelProps {
   onArmStart: () => void;
   onArmDest: () => void;
   onToggleDirections: () => void;
+  // The hand-off to Google Maps, built by the app because only it holds the graph and the raw
+  // endpoints. Null until there is a route to hand over.
+  exportAction: ReactNode;
   onToggleMinimize: () => void;
   // Opens the settings page. The route preferences, since that is where a hidden factor's slider
   // went and what the reader is asking after when they tap the count.
@@ -267,6 +270,7 @@ export default function RoutePanel({
   onArmStart,
   onArmDest,
   onToggleDirections,
+  exportAction,
   onToggleMinimize,
   onSettings,
   onClose,
@@ -764,15 +768,24 @@ export default function RoutePanel({
 
         {status === "ready" && directions && directions.length > 0 ? (
           <>
-            <button
-              type="button"
-              onClick={onToggleDirections}
-              aria-expanded={directionsOpen}
-              className="mt-3 flex w-full items-center justify-center gap-2 rounded-xl bg-brand-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-brand-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2 dark:focus-visible:ring-offset-slate-800"
-            >
-              <MdOutlineDirectionsWalk className="h-4 w-4" aria-hidden="true" />
-              {directionsOpen ? "Hide directions" : "Get directions"}
-            </button>
+            {/* The export sits beside the maneuvers rather than in the toolbar because this is the
+                only place a computed route exists, so the control never appears with nothing to
+                hand over. */}
+            <div className="mt-3 flex items-stretch gap-2">
+              <button
+                type="button"
+                onClick={onToggleDirections}
+                aria-expanded={directionsOpen}
+                className="flex min-w-0 flex-1 items-center justify-center gap-2 rounded-xl bg-brand-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-brand-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2 dark:focus-visible:ring-offset-slate-800"
+              >
+                <MdOutlineDirectionsWalk
+                  className="h-4 w-4"
+                  aria-hidden="true"
+                />
+                {directionsOpen ? "Hide directions" : "Get directions"}
+              </button>
+              {exportAction}
+            </div>
             {directionsOpen ? (
               <ol className="mt-2 min-h-0 shrink space-y-1 overflow-y-auto overscroll-contain">
                 {directions.map((maneuver, index) => {
