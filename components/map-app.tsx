@@ -59,6 +59,7 @@ import {
   DEFAULT_SHELTER_WEIGHT,
   DEFAULT_TREE_WEIGHT,
   MAX_FERRY_WEIGHT,
+  MAX_HIGHWAY_WEIGHT,
   MAX_HILL_WEIGHT,
   MAX_INDUSTRIAL_WEIGHT,
   MAX_SHADE_WEIGHT,
@@ -199,7 +200,7 @@ function storedWeights(): RouteWeights {
     ferry: read("ferry", DEFAULT_FERRY_WEIGHT, 0, MAX_FERRY_WEIGHT),
     landmark: read("landmark", DEFAULT_LANDMARK_WEIGHT, 0, 1),
     art: read("art", DEFAULT_ART_WEIGHT, 0, 1),
-    highway: read("highway", DEFAULT_HIGHWAY_WEIGHT, 0, 1),
+    highway: read("highway", DEFAULT_HIGHWAY_WEIGHT, 0, MAX_HIGHWAY_WEIGHT),
     hill: read("hill", DEFAULT_HILL_WEIGHT, 0, MAX_HILL_WEIGHT),
     commercial: read("commercial", DEFAULT_COMMERCIAL_WEIGHT, 0, 1),
     industrial: read(
