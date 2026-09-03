@@ -4,6 +4,7 @@ import { projectX, projectY, unproject } from "./mercator";
 import { bucketize, type Polyline, readPolyline } from "./polylines";
 import type { IndustrialParams, TileCoords } from "./protocol";
 import type { TileRenderer } from "./renderer";
+import { themeName } from "./theme";
 import type { Cursor } from "./varint";
 
 // The manufacturing and industrial tax lots (magic INDL), drawn as filled polygons — an inspection
@@ -13,7 +14,6 @@ import type { Cursor } from "./varint";
 const TILE_SIZE = 256;
 const CELL_DEG = 0.005; // ~550 m buckets; a lot is filed under every cell its bounding box spans
 // At an alpha that leaves the streets and the water under a lot reading through.
-const FILL_COLOR = INDUSTRIAL_COLOR;
 const FILL_ALPHA = 0.45;
 // A lot smaller than this on screen is drawn as a square of it instead. At the citywide zooms a
 // tax lot is a fraction of a pixel, and antialiasing fades a fraction of a pixel to nothing —
@@ -115,7 +115,7 @@ function draw(
   const southEast = unproject(originX + TILE_SIZE, originY + TILE_SIZE, zoom);
 
   context.globalAlpha = FILL_ALPHA;
-  context.fillStyle = FILL_COLOR;
+  context.fillStyle = INDUSTRIAL_COLOR[themeName()];
   const drawn = new Set<number>();
   for (
     let cellX = Math.floor(northWest.lng / CELL_DEG);

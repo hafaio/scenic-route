@@ -25,7 +25,7 @@ export interface LinesParams {
   kind: "lines";
   url: string;
   format: "hway" | "ferr";
-  color: string;
+  color: Record<ThemeName, string>; // the stroke, per theme; the draw picks the worker's current one
 }
 
 export interface IndustrialParams {
@@ -47,7 +47,7 @@ export interface PoiParams {
   kind: "poi";
   url: string;
   magic: string;
-  color: string;
+  color: Record<ThemeName, string>; // the dot fill, per theme; the draw picks the worker's current one
   labelAnchor: "top" | "bottom";
 }
 

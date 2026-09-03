@@ -2,6 +2,7 @@
 
 import dynamic from "next/dynamic";
 import type { ReactNode } from "react";
+import type { IconType } from "react-icons";
 import type { City } from "../cities";
 import {
   MdAccountBalance,
@@ -22,6 +23,7 @@ import {
 } from "react-icons/pi";
 import ElevationLegend from "../../components/elevation-legend";
 import TreeLegend from "../../components/tree-legend";
+import { useMapTheme } from "../../components/use-map-theme";
 import { PALETTES, rgbCss, type ThemeName } from "../theme/palette";
 import {
   ART_COLOR,
@@ -95,20 +97,37 @@ export type OverlayId =
   | "scaffolding"
   | "elevation";
 
+// A menu glyph in the layer's own colour. Every one of those is a light/dark pair, so the glyph has
+// to read the theme the map is drawing in: a Tailwind tint only ever shows one half of the pair, and
+// on a night map that left the menu naming a colour the map was no longer painting.
+function LayerIcon({
+  Icon,
+  color,
+}: {
+  Icon: IconType;
+  color: Record<ThemeName, string>;
+}) {
+  const theme = useMapTheme();
+  return (
+    <Icon
+      className="h-4 w-4"
+      style={{ color: color[theme] }}
+      aria-hidden="true"
+    />
+  );
+}
+
 // A layer's menu text for the city it is being shown in.
 export function overlayLabel(overlay: OverlayDef, city: City): string {
   return typeof overlay.label === "string" ? overlay.label : overlay.label(city);
 }
 
-// The one colour this layer's key swatches it with, for the city's theme. A function where the
-// layer draws through a ramp rather than in a flat colour, since a ramp has a light and a dark set.
+// The one colour this layer's key swatches it with, in the theme the map is drawing in.
 export function overlaySwatch(
   overlay: OverlayDef,
   theme: ThemeName,
 ): string | null {
-  return typeof overlay.swatch === "function"
-    ? overlay.swatch(theme)
-    : overlay.swatch;
+  return overlay.swatch?.(theme) ?? null;
 }
 
 // Genus recolours every tree rather than adding a colour to the map, so it goes solo. The toggle
@@ -129,9 +148,10 @@ export interface OverlayDef {
   label: string | ((city: City) => string);
   icon: ReactNode; // menu glyph; a tinted one shows the layer's colour code
   render: () => ReactNode; // the Leaflet layer(s) this overlay mounts on the map
-  // The colour the multi-layer key swatches this one with, read off what the layer actually paints
-  // with so the two cannot drift. Null for a layer with no single colour to stand for it.
-  swatch: string | ((theme: ThemeName) => string) | null;
+  // The colour the layer key swatches this one with, read off what the layer actually paints
+  // with so the two cannot drift. Taken per theme, since every overlay's colour is a light/dark pair.
+  // Null for a layer with no single colour to stand for it.
+  swatch: ((theme: ThemeName) => string) | null;
   legend?: ReactNode; // floating key shown while this overlay is active
   // When on, no other overlay is, and turning on any other turns this off. Tree genus recolours
   // every tree, so it does not compose with the additive dot/line layers.
@@ -161,10 +181,8 @@ export const OVERLAYS: readonly OverlayDef[] = [
   {
     id: "commercial",
     label: "Commercial",
-    icon: (
-      <MdStorefront className="h-4 w-4 text-violet-600" aria-hidden="true" />
-    ),
-    swatch: COMMERCIAL_COLOR,
+    icon: <LayerIcon Icon={MdStorefront} color={COMMERCIAL_COLOR} />,
+    swatch: (theme) => COMMERCIAL_COLOR[theme],
     render: () => <DiningLayer />,
   },
   {
@@ -193,10 +211,8 @@ export const OVERLAYS: readonly OverlayDef[] = [
     // Whole landmarked neighbourhoods, not the individually landmarked buildings the "Landmarks"
     // overlay dots.
     label: "Historic",
-    icon: (
-      <MdMapsHomeWork className="h-4 w-4 text-indigo-700" aria-hidden="true" />
-    ),
-    swatch: HISTORIC_COLOR,
+    icon: <LayerIcon Icon={MdMapsHomeWork} color={HISTORIC_COLOR} />,
+    swatch: (theme) => HISTORIC_COLOR[theme],
     render: () => <HistoricLayer />,
   },
   {
@@ -204,10 +220,8 @@ export const OVERLAYS: readonly OverlayDef[] = [
     // Just "Businesses". Every one of these has been trading fifty years — that is the whole entry
     // condition — so saying so in the label would be labelling the only kind there is.
     label: "Businesses",
-    icon: (
-      <MdStorefront className="h-4 w-4 text-yellow-600" aria-hidden="true" />
-    ),
-    swatch: LEGACY_COLOR,
+    icon: <LayerIcon Icon={MdStorefront} color={LEGACY_COLOR} />,
+    swatch: (theme) => LEGACY_COLOR[theme],
     render: () => (
       <PoiLayer
         overlay="legacy"
@@ -221,13 +235,8 @@ export const OVERLAYS: readonly OverlayDef[] = [
   {
     id: "landmarks",
     label: "Landmarks",
-    icon: (
-      <MdAccountBalance
-        className="h-4 w-4 text-amber-500"
-        aria-hidden="true"
-      />
-    ),
-    swatch: LANDMARK_COLOR,
+    icon: <LayerIcon Icon={MdAccountBalance} color={LANDMARK_COLOR} />,
+    swatch: (theme) => LANDMARK_COLOR[theme],
     render: () => (
       <PoiLayer
         overlay="landmarks"
@@ -241,8 +250,8 @@ export const OVERLAYS: readonly OverlayDef[] = [
   {
     id: "art",
     label: "Public art",
-    icon: <MdPalette className="h-4 w-4 text-fuchsia-500" aria-hidden="true" />,
-    swatch: ART_COLOR,
+    icon: <LayerIcon Icon={MdPalette} color={ART_COLOR} />,
+    swatch: (theme) => ART_COLOR[theme],
     render: () => (
       <PoiLayer overlay="art" dir="art" magic="ARTW" color={ART_COLOR} labelAnchor="bottom" />
     ),
@@ -250,44 +259,36 @@ export const OVERLAYS: readonly OverlayDef[] = [
   {
     id: "ferries",
     label: "Ferry routes",
-    icon: <PiBoatFill className="h-4 w-4 text-blue-600" aria-hidden="true" />,
-    swatch: FERRY_COLOR,
+    icon: <LayerIcon Icon={PiBoatFill} color={FERRY_COLOR} />,
+    swatch: (theme) => FERRY_COLOR[theme],
     render: () => <LinesLayer overlay="ferries" dir="ferries" format="ferr" color={FERRY_COLOR} />,
   },
   {
     id: "subway",
     label: (city) => (city.id === "sf" ? "Muni & BART" : "Subway"),
-    icon: (
-      <PiTrainSimpleFill
-        className="h-4 w-4"
-        style={{ color: SUBWAY_COLOR }}
-        aria-hidden="true"
-      />
-    ),
-    swatch: SUBWAY_COLOR,
+    icon: <LayerIcon Icon={PiTrainSimpleFill} color={SUBWAY_COLOR} />,
+    swatch: (theme) => SUBWAY_COLOR[theme],
     render: () => <SubwayLayer />,
   },
   {
     id: "highways",
     label: "Highways",
-    icon: <MdDirectionsCar className="h-4 w-4 text-red-500" aria-hidden="true" />,
-    swatch: HIGHWAY_COLOR,
+    icon: <LayerIcon Icon={MdDirectionsCar} color={HIGHWAY_COLOR} />,
+    swatch: (theme) => HIGHWAY_COLOR[theme],
     render: () => <LinesLayer overlay="highways" dir="highways" format="hway" color={HIGHWAY_COLOR} />,
   },
   {
     id: "industrial",
     label: "Industrial",
-    icon: <MdFactory className="h-4 w-4 text-pink-600" aria-hidden="true" />,
-    swatch: INDUSTRIAL_COLOR,
+    icon: <LayerIcon Icon={MdFactory} color={INDUSTRIAL_COLOR} />,
+    swatch: (theme) => INDUSTRIAL_COLOR[theme],
     render: () => <IndustrialLayer />,
   },
   {
     id: "scaffolding",
     label: "Scaffolding",
-    icon: (
-      <MdConstruction className="h-4 w-4 text-orange-600" aria-hidden="true" />
-    ),
-    swatch: SHED_COLOR,
+    icon: <LayerIcon Icon={MdConstruction} color={SHED_COLOR} />,
+    swatch: (theme) => SHED_COLOR[theme],
     render: () => <ShedLayer />,
   },
   // Tree genus recolours every tree, so it sits last and is exclusive — it does not compose with the

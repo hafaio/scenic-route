@@ -7,6 +7,7 @@ import { SHED_COLOR } from "../src/overlays/colors";
 import { getResolvedDate, subscribeRouteTime } from "../src/route-time/store";
 import { loadGraph, type RoutingGraph } from "../src/routing/graph";
 import { loadSheds, type ShedHistory, shedDay } from "../src/routing/sheds";
+import { currentTheme } from "../src/theme/current";
 import CanvasGrid from "../src/tiles/canvas-grid";
 import { KEEP_BUFFER, tileRatio } from "../src/tiles/raster";
 import { repeatable } from "../src/tiles/repaint";
@@ -97,7 +98,7 @@ class ShedGrid extends CanvasGrid {
     });
 
     context.globalAlpha = SHED_ALPHA;
-    context.fillStyle = SHED_COLOR;
+    context.fillStyle = SHED_COLOR[currentTheme()];
     context.fill(path);
   }
 }

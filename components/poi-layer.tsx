@@ -5,6 +5,7 @@ import { useEffect } from "react";
 import { useMap } from "react-leaflet";
 import type { OverlayId } from "../src/overlays/registry";
 import { watchLayerStatus } from "../src/overlays/status";
+import type { ThemeName } from "../src/theme/palette";
 import WorkerTileLayer from "../src/tiles/layer";
 import { KEEP_BUFFER } from "../src/tiles/raster";
 import manifest from "../src/tree-cover/manifest.json";
@@ -32,7 +33,7 @@ export default function PoiLayer({
   overlay: OverlayId; // which menu row this instance is, since two of them share this component
   dir: string; // the served directory, e.g. "landmarks" — the blob is <dir>/<city>.bin
   magic: string; // the expected 4-byte magic, e.g. "LMRK"
-  color: string; // CSS fill colour for the dots
+  color: Record<ThemeName, string>; // CSS fill colour for the dots, per theme
   labelAnchor: "top" | "bottom"; // which side of the dot the label sits, to deconflict two POI layers
 }) {
   const map = useMap();

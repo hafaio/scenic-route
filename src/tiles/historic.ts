@@ -4,6 +4,7 @@ import { projectX, projectY, unproject } from "./mercator";
 import { bucketize, type Polyline, readPolyline } from "./polylines";
 import type { HistoricParams, TileCoords } from "./protocol";
 import type { TileRenderer } from "./renderer";
+import { themeName } from "./theme";
 import type { Cursor } from "./varint";
 
 // A city's designated historic districts (magic HDST), drawn as filled polygons — an inspection
@@ -14,7 +15,6 @@ import type { Cursor } from "./varint";
 const TILE_SIZE = 256;
 const CELL_DEG = 0.005; // ~550 m buckets; a district is filed under every cell its bounding box spans
 // At the industrial wash's alpha, so the streets and the buildings under a district read through.
-const FILL_COLOR = HISTORIC_COLOR;
 const FILL_ALPHA = 0.45;
 // A district smaller than this on screen is drawn as a square of it instead. Five of them are a
 // single building — St. Mark's Extension is 278 m² — and at the citywide zooms antialiasing fades a
@@ -118,7 +118,7 @@ function draw(
   const southEast = unproject(originX + TILE_SIZE, originY + TILE_SIZE, zoom);
 
   context.globalAlpha = FILL_ALPHA;
-  context.fillStyle = FILL_COLOR;
+  context.fillStyle = HISTORIC_COLOR[themeName()];
   const drawn = new Set<number>();
   for (
     let cellX = Math.floor(northWest.lng / CELL_DEG);

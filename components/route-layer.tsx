@@ -4,9 +4,11 @@ import L from "leaflet";
 import { useEffect, useMemo, useRef } from "react";
 import { Marker, Polyline, useMap } from "react-leaflet";
 import { CROSS_CITY_METERS } from "../src/cities";
+import { FERRY_COLOR } from "../src/overlays/colors";
 import { edgeKind, type RoutingGraph, subEdgePath } from "../src/routing/graph";
 import type { RouteResult, RouteStep } from "../src/routing/search";
 import type { Snap } from "../src/routing/snap";
+import { currentTheme } from "../src/theme/current";
 import CanvasGrid from "../src/tiles/canvas-grid";
 import { KEEP_BUFFER, tileRatio } from "../src/tiles/raster";
 import { repeatable } from "../src/tiles/repaint";
@@ -54,7 +56,6 @@ const MIN_WIDTH = 2.5;
 const CASING_EXTRA = 3; // white halo, ~1.5 px each side
 
 const ROUTE_COLOR = "#334155"; // slate-700: a neutral route that reads over any overlay colour
-const FERRY_COLOR = "#2563eb"; // blue-600: the over-water ferry legs, distinct from the walked line
 const CASING_COLOR = "#ffffff";
 const CONNECTOR_COLOR = "#94a3b8"; // slate-400
 const CONNECTOR_MIN_METERS = 15; // draw the dashed tapped->snapped link only past this gap
@@ -237,7 +238,7 @@ class RouteGrid extends CanvasGrid {
     context.lineWidth = width;
     context.strokeStyle = ROUTE_COLOR;
     context.stroke(walkPath);
-    context.strokeStyle = FERRY_COLOR;
+    context.strokeStyle = FERRY_COLOR[currentTheme()];
     context.stroke(ferryPath);
   }
 }
