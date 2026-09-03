@@ -15,7 +15,7 @@ las = { version = "0.11", default-features = false, features = ["laz"] }
 # reformat leaves every pass's stamp where it was — see Plan::hash_source_tokens
 proc-macro2 = "1.0"
 rand = { version = "0.9", default-features = false }
-rand_chacha = "0.9"
+rand_chacha = "0.10"
 rayon = "1.11"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
