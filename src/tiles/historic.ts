@@ -25,13 +25,14 @@ const MIN_DISTRICT_PX = 1.5;
 interface Districts {
   districts: Polyline[][]; // per district its rings, filled even-odd so an inner ring punches a hole
   // District indices filed by `${cellX},${cellY}`, so a tile draw gathers only the districts whose
-  // bounding box reaches it rather than all 187 of them.
+  // bounding box reaches it rather than all of them.
   buckets: Map<string, number[]>;
 }
 
 // HDST is the shared polygon layout (scripts/geometry.ts encodePolygons): a 40-byte header, then
 // `count` polygons, each a u16 ring count then per ring a u32 vertex count and varint (lng, lat)
-// deltas. Nothing in the tiler reads it — this overlay is the only reader.
+// deltas. The tiler reads the same file for the graph's historic discount
+// (crates/tiler/src/historic.rs), so a district drawn here is one the router prices.
 export function decodeHistoric(buffer: ArrayBuffer): Districts {
   const bytes = new Uint8Array(buffer);
   const view = new DataView(buffer);

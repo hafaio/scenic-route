@@ -79,6 +79,8 @@ const PLAN_PATH = join(
 interface PlanCity {
   id: string;
   alleys: boolean;
+  // Omitted for a region held to the surveyed pair the tiler defaults to. See EXISTENCE_CEILINGS.
+  existenceCeilings?: ExistenceCeilings;
   sources: ConventionSource[];
   shade?: {
     maxZoom: number;
@@ -147,6 +149,34 @@ async function codeFiles(): Promise<Record<string, string>> {
   return files;
 }
 
+// The existence gate's two ceilings per region — the share of derived sidewalk km the gate may drop,
+// and the 90th-percentile share of one half-kilometre cell's street km it may leave with no pavement
+// — read by crates/tiler/src/graph.rs. A region absent from here is held to 0.30/0.30, which is what
+// a municipal sidewalk survey implies: where one exists, a side coming back silent really is evidence
+// that the STRT per-side bits were never stamped.
+//
+// The Bay Area has no such survey. Even after the pipeline learned to read OSM's `sidewalk=*` tags
+// off the road centrelines — which took the region from 10.9% to 47.2% of side-km with any statement
+// on them at all — 45% of East Bay streets still have nobody saying whether a pavement exists. That
+// is a hole in OpenStreetMap rather than a source we failed to read, so over this region the guards
+// were measuring the wrong thing rather than measuring a bad build.
+//
+// So its ceilings sit just over what it actually measures rather than at a round number, and a real
+// regression still trips them. Measured on the 2026-08-30 build: 0.357 dropped, and 0.84 at the 90th
+// percentile over the region's 1,294 half-kilometre cells. At 0.88 the cell ceiling no longer catches
+// a neighbourhood quietly losing its pavement here — for this region it is a total-failure detector
+// and nothing finer. Read a later number against those two measurements rather than against the
+// ceilings: a few points is the drift of a year of OSM edits, and OSM gaining sidewalk statements
+// moves both DOWN, so an upward move of any size is worth opening.
+interface ExistenceCeilings {
+  droppedSidewalkFraction: number;
+  cellDemotedShare: number;
+}
+
+const EXISTENCE_CEILINGS: Record<string, ExistenceCeilings> = {
+  sf: { droppedSidewalkFraction: 0.39, cellDemotedShare: 0.88 },
+};
+
 // The two things the tiler cannot work out for itself, plus which committed sources this city has.
 // The sun grid is computed here because the client inverts the same module, and the DEM is resolved
 // here because fetching the mosaic is TypeScript's job.
@@ -166,6 +196,7 @@ async function planCity(city: City): Promise<PlanCity> {
     // The alley invariants assert New York's meaning of an alley; a city whose centreline has no such
     // class says so rather than being asked about it.
     alleys: city.streets.alleys ?? true,
+    existenceCeilings: EXISTENCE_CEILINGS[city.id],
     sources: present.filter((kind): kind is ConventionSource => kind !== null),
     ...(buckets.length > 0
       ? {
