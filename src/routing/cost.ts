@@ -80,7 +80,24 @@ export const MAX_LANDMARK_WEIGHT = 1;
 export const DEFAULT_LANDMARK_WEIGHT = 0.1;
 export const MAX_ART_WEIGHT = 1;
 export const DEFAULT_ART_WEIGHT = 0.1;
-export const MAX_HIGHWAY_WEIGHT = 1;
+// The third weight whose maximum is not 1, for the reason the other two are not: at 1 the slider
+// ran out of authority while there was still highway left to avoid. Measured over 300 trips per
+// city, seeded on streets fronting a highway and kept only where the slider-off route really walked
+// one (at least 10% of its length). A ceiling of 1 left 22.9% of the walk on highway frontage
+// against the ~15% the penalty can ever reach, and cost only 2.4% more walking to do it — two
+// thirds of what was removable, for almost nothing. At 3 it reaches 17.8% for 6.1% more walking,
+// which is about 90% of the attainable removal, and past 3 the frontage curve is flat while the
+// distance one is not: 5 buys four more points of removal for four more points of walking, and the
+// share of trips going 25% out of their way climbs from 4% at 1 to 21% at 8.
+//
+// New York and San Francisco agree on this to within a point of frontage at every setting. San
+// Francisco pays one to two points more walking for it, having fewer parallel streets to escape
+// onto, which argues for the low end of the knee rather than for a second number.
+//
+// The slider still reads 0-100% of this maximum, so raising it changes what the far end means, not
+// how it is shown. Admissibility is untouched — a penalty's minimum factor is 1, and `minMultiplier`
+// never sees it.
+export const MAX_HIGHWAY_WEIGHT = 3;
 // One of the two weights whose maximum is not 1 (industrial is the other), because at 1 the slider
 // ran out of authority before it ran out of hill. Measured across Potrero Hill: at full strength the chosen route still climbed a block
 // at or past 12% grade, and only at 2 did it stop using one at all (relief 614 m -> 431 m for 9%
@@ -231,6 +248,9 @@ export function maxSpeedFactor(graph: RoutingGraph): number {
   maxSpeedFactors.set(graph, best);
   return best;
 }
+// Unchanged by the raised ceiling above, so no existing route moves; it now reads 17% on the slider
+// rather than 50%. It already clears the bar industrial set for its own default: 0.5 moves 64% of
+// the seeded trips for 1.6% more walking, where industrial went to 1 because 0.5 moved under half.
 export const DEFAULT_HIGHWAY_WEIGHT = 0.5;
 // Hills start at zero, and now mean only what the name says: how much you MIND one, over and above
 // the time it costs. The time is charged whatever the slider reads, because the walking speed itself
