@@ -2094,6 +2094,7 @@ export default function MapApp() {
         />
         {routingOpen ? (
           <RoutePanel
+            city={city}
             exportAction={
               resultGraph && routeResult && exportOrigin && dest ? (
                 <GoogleMapsButton

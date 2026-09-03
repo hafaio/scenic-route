@@ -161,8 +161,7 @@ export function exactAddressMatch(
 //
 // Null is the answer the index has not arrived yet, which is not the same thing as "no such place":
 // a bar that says a park does not exist because the worker is still fetching has told the reader
-// something false. `searchAddress` below flattens the two, because the route fields have no row to
-// draw the difference in.
+// something false. Both boxes have a row that says which of the two it is, so both call this.
 export async function searchPlaces(
   query: string,
   cityId: string = activeCity().id,
@@ -226,6 +225,9 @@ export async function searchPlaces(
   }
 }
 
+// The same search for a caller with nowhere to say "not yet": resolving the words a shared link
+// carried, which happens with no list on screen and only after `awaitNameIndex` has already waited
+// the index out, so by the time this is asked null would mean the fetch failed outright.
 export async function searchAddress(
   query: string,
   cityId: string = activeCity().id,

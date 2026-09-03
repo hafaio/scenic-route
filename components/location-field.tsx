@@ -1,16 +1,31 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { FiCrosshair, FiNavigation, FiX } from "react-icons/fi";
-import { type GeocodeResult, searchAddress } from "../src/geocode";
-import ResultGlyph from "./result-glyph";
+import { type City, cityInSentence } from "../src/cities";
+import { type GeocodeResult, searchPlaces } from "../src/geocode";
+import { awaitNameIndex } from "../src/search/name-search";
+import ResultList, {
+  resultListKeyDown,
+  SEARCH_DEBOUNCE_MS,
+} from "./result-list";
 
-const SEARCH_DEBOUNCE_MS = 300;
 // The tallest the suggestions may ever be, before the room above the field is taken into account.
 const MAX_SUGGESTION_HEIGHT = 256;
 // Clearance kept above the list so it never sits flush against the top of the screen.
 const SUGGESTION_MARGIN = 8;
 const BLUR_CLOSE_MS = 120; // let a result click land before the blur closes the list
+
+// What the index has said about whatever is in the box. "Loading" is its own state rather than an
+// empty list, because a field that shows nothing while the city's places are still being fetched
+// tells a reader who typed early that their place does not exist.
+type Suggestions =
+  | { kind: "idle" } // nothing typed, so nothing asked
+  | { kind: "loading" } // asked, but this city's index has not arrived
+  | { kind: "answered"; results: GeocodeResult[] };
+
+const IDLE: Suggestions = { kind: "idle" };
+const NONE: readonly GeocodeResult[] = [];
 
 // Words the app put in a box, with whatever the index has already said about them.
 export interface DestPrefill {
@@ -19,6 +34,7 @@ export interface DestPrefill {
 }
 
 interface LocationFieldProps {
+  city: City; // named in the no-match row, so it says where the search looked
   label: string | null; // committed selection text; null shows the placeholder
   placeholder: string;
   leadingIcon: React.ReactNode;
@@ -44,6 +60,7 @@ interface LocationFieldProps {
 }
 
 export default function LocationField({
+  city,
   label,
   placeholder,
   leadingIcon,
@@ -60,9 +77,10 @@ export default function LocationField({
 }: LocationFieldProps) {
   // The in-progress typing; null means "not editing", so the box mirrors the committed label instead.
   const [draft, setDraft] = useState<string | null>(null);
-  const [results, setResults] = useState<GeocodeResult[]>([]);
+  const [suggestions, setSuggestions] = useState<Suggestions>(IDLE);
   const list = useRef<HTMLUListElement | null>(null);
   const [roomAbove, setRoomAbove] = useState<number>(MAX_SUGGESTION_HEIGHT);
+  const listId = useId();
 
   const [activeIndex, setActiveIndex] = useState<number>(-1);
   const [open, setOpen] = useState<boolean>(false);
@@ -73,20 +91,36 @@ export default function LocationField({
   useEffect(() => {
     if (prefill) {
       setDraft(prefill.text);
-      setResults(prefill.results);
+      setSuggestions({ kind: "answered", results: prefill.results });
       setActiveIndex(-1);
       setOpen(true);
     } else {
       setDraft(null);
-      setResults([]);
+      setSuggestions(IDLE);
       setActiveIndex(-1);
       setOpen(false);
     }
   }, [prefill]);
 
   const value = draft ?? label ?? "";
+  const results: readonly GeocodeResult[] =
+    suggestions.kind === "answered" ? suggestions.results : NONE;
   const showCurrentRow = Boolean(currentLocationLabel && onUseCurrentLocation);
-  const dropdownOpen = open && (showCurrentRow || results.length > 0);
+
+  // The one row that stands in for a list there is not: never both, since a bar saying nothing
+  // matched printed over matches contradicts itself. The search panel's warning about a map centre
+  // off the city has no twin here — a route endpoint is in the city by construction.
+  const notice =
+    suggestions.kind === "idle"
+      ? null
+      : suggestions.kind === "loading"
+        ? "Still loading this region's places…"
+        : results.length === 0
+          ? `No matches in ${cityInSentence(city)}.`
+          : null;
+
+  const dropdownOpen =
+    open && (showCurrentRow || notice !== null || results.length > 0);
 
   // Remeasured whenever the list opens or its contents change, because the field it hangs from moves
   // as the panel above it grows and shrinks. The deps are those changes, not anything the body
@@ -99,26 +133,41 @@ export default function LocationField({
     }
     const above = anchor.getBoundingClientRect().top - SUGGESTION_MARGIN;
     setRoomAbove(Math.max(0, Math.min(MAX_SUGGESTION_HEIGHT, above)));
-  }, [dropdownOpen, results.length]);
+  }, [dropdownOpen, results.length, notice]);
 
   // Debounced search driven off the draft only; an answer to a draft that has since been typed over
   // is dropped rather than shown, so a slow one can't overwrite a newer one. A null/empty draft
-  // searches nothing.
+  // searches nothing. An index that has not arrived answers null, which is shown as such rather than
+  // waited on — and then asked again once it lands, because a reader who finishes typing before the
+  // file does would otherwise sit on "still loading" until they pressed another key.
   useEffect(() => {
     const trimmed = draft?.trim() ?? "";
     if (!trimmed) {
-      setResults([]);
+      setSuggestions(IDLE);
       setActiveIndex(-1);
       return;
     }
     let stale = false;
+    const show = (hits: GeocodeResult[] | null): void => {
+      if (!stale) {
+        setSuggestions(
+          hits === null
+            ? { kind: "loading" }
+            : { kind: "answered", results: hits },
+        );
+        setActiveIndex(-1);
+        setOpen(true);
+      }
+    };
     const timer = window.setTimeout(() => {
-      searchAddress(trimmed)
-        .then((hits) => {
-          if (!stale) {
-            setResults(hits);
-            setActiveIndex(-1);
-            setOpen(true);
+      searchPlaces(trimmed)
+        .then(async (hits) => {
+          show(hits);
+          if (hits === null) {
+            await awaitNameIndex(city.id);
+            if (!stale) {
+              show(await searchPlaces(trimmed));
+            }
           }
         })
         .catch(() => {});
@@ -127,12 +176,12 @@ export default function LocationField({
       stale = true;
       window.clearTimeout(timer);
     };
-  }, [draft]);
+  }, [draft, city]);
 
   // Every commit path snaps the draft back to null so the box shows the freshly committed label.
   const commit = (): void => {
     setDraft(null);
-    setResults([]);
+    setSuggestions(IDLE);
     setActiveIndex(-1);
     setOpen(false);
   };
@@ -161,22 +210,10 @@ export default function LocationField({
   const handleKeyDown = (
     event: React.KeyboardEvent<HTMLInputElement>,
   ): void => {
-    if (!open || results.length === 0) {
-      return;
-    }
-    if (event.key === "ArrowDown") {
-      event.preventDefault();
-      setActiveIndex((index) => (index + 1) % results.length);
-    } else if (event.key === "ArrowUp") {
-      event.preventDefault();
-      setActiveIndex((index) => (index - 1 + results.length) % results.length);
-    } else if (event.key === "Enter") {
-      event.preventDefault();
-      const chosen = results[activeIndex] ?? results[0];
-      if (chosen) {
-        select(chosen);
-      }
-    } else if (event.key === "Escape") {
+    const handled =
+      open &&
+      resultListKeyDown(event, results, activeIndex, setActiveIndex, select);
+    if (!handled && event.key === "Escape") {
       setOpen(false);
     }
   };
@@ -196,6 +233,13 @@ export default function LocationField({
         placeholder={placeholder}
         aria-label={placeholder}
         autoComplete="off"
+        role="combobox"
+        aria-expanded={dropdownOpen}
+        aria-controls={listId}
+        aria-autocomplete="list"
+        aria-activedescendant={
+          activeIndex >= 0 ? `${listId}-${activeIndex}` : undefined
+        }
         className="w-full rounded-xl border border-slate-200 bg-slate-50 py-2.5 pl-9 pr-16 text-sm text-slate-800 outline-none transition placeholder:text-slate-400 focus:border-brand-400 focus:bg-white focus:ring-2 focus:ring-brand-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:placeholder:text-slate-500 dark:focus:border-brand-500 dark:focus:bg-slate-900 dark:focus:ring-brand-500/20"
       />
       <div className="absolute inset-y-0 right-1.5 flex items-center gap-0.5">
@@ -227,46 +271,35 @@ export default function LocationField({
         // Opens UPWARD out of the route panel, which is why that panel takes no overflow of its own.
         // That leaves this list the one surface whose room cannot be written down: it is anchored to
         // a field that moves as the panel grows, so the cap is measured rather than declared — the
-        // same invariant as every other menu, arrived at the only way this one can.
-        <ul
-          ref={list}
+        // same invariant as every other menu, arrived at the only way this one can. Opaque and
+        // padded because it hangs over the map: the rows are pills, and a pill against the edge of a
+        // menu with a skin of its own reads as a mistake.
+        <ResultList
+          listId={listId}
+          listRef={list}
+          results={results}
+          activeIndex={activeIndex}
+          onHover={setActiveIndex}
+          onPick={select}
+          notice={notice}
+          leadingAction={
+            showCurrentRow && currentLocationLabel
+              ? {
+                  icon: (
+                    <FiNavigation
+                      className="h-4 w-4 shrink-0"
+                      aria-hidden="true"
+                    />
+                  ),
+                  label: currentLocationLabel,
+                  onPick: useCurrentLocation,
+                  tone: "brand",
+                }
+              : null
+          }
           style={{ maxHeight: roomAbove }}
-          className="absolute bottom-full left-0 z-10 mb-1 w-full overflow-y-auto overscroll-contain rounded-xl bg-white shadow-xl ring-1 ring-black/5 dark:bg-slate-800 dark:ring-white/10"
-        >
-          {showCurrentRow ? (
-            <li>
-              <button
-                type="button"
-                // Keep focus on the input so the click always lands; a blur here would race the
-                // close timer and swallow the selection.
-                onMouseDown={(event) => event.preventDefault()}
-                onClick={useCurrentLocation}
-                className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm font-medium text-brand-700 hover:bg-slate-50 dark:text-brand-300 dark:hover:bg-slate-700/60"
-              >
-                <FiNavigation className="h-4 w-4 shrink-0" aria-hidden="true" />
-                {currentLocationLabel}
-              </button>
-            </li>
-          ) : null}
-          {results.map((result, index) => (
-            <li key={result.placeId}>
-              <button
-                type="button"
-                onMouseDown={(event) => event.preventDefault()}
-                onClick={() => select(result)}
-                onMouseEnter={() => setActiveIndex(index)}
-                className={`flex w-full items-center gap-2 px-3 py-2 text-left text-sm ${
-                  index === activeIndex
-                    ? "bg-brand-50 text-brand-700 dark:bg-brand-500/10 dark:text-brand-300"
-                    : "text-slate-700 hover:bg-slate-50 dark:text-slate-200 dark:hover:bg-slate-700/60"
-                }`}
-              >
-                <ResultGlyph type={result.type} />
-                <span className="truncate">{result.displayName}</span>
-              </button>
-            </li>
-          ))}
-        </ul>
+          className="absolute bottom-full left-0 z-10 mb-1 w-full rounded-xl bg-white p-1 shadow-xl ring-1 ring-black/5 dark:bg-slate-800 dark:ring-white/10"
+        />
       ) : null}
     </div>
   );

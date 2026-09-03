@@ -27,6 +27,7 @@ import {
   MdTurnSlightRight,
   MdUTurnLeft,
 } from "react-icons/md";
+import type { City } from "../src/cities";
 import type { GeocodeResult } from "../src/geocode";
 import {
   formatDistance,
@@ -50,6 +51,7 @@ import LocationField, { type DestPrefill } from "./location-field";
 import { useSettings } from "./use-settings";
 
 interface RoutePanelProps {
+  city: City; // the endpoint fields name it when they have no match to show
   startLabel: string | null; // null leaves the start empty (routing falls back to the live location)
   destLabel: string | null;
   startSet: boolean; // a manual start is set (so it can be reset)
@@ -218,6 +220,7 @@ function maneuverIcon(maneuver: Maneuver) {
 }
 
 export default function RoutePanel({
+  city,
   startLabel,
   destLabel,
   startSet,
@@ -556,6 +559,7 @@ export default function RoutePanel({
 
         <div className="mt-3 space-y-2">
           <LocationField
+            city={city}
             label={startLabel}
             placeholder={
               hasLiveLocation ? "My location" : "Pick a starting point"
@@ -574,6 +578,7 @@ export default function RoutePanel({
             onUseCurrentLocation={onUseCurrentLocation}
           />
           <LocationField
+            city={city}
             label={destLabel}
             placeholder="Where to?"
             leadingIcon={<FiSearch className="h-4 w-4" aria-hidden="true" />}

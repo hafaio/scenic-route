@@ -1,13 +1,16 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { FiSearch, FiX } from "react-icons/fi";
 import { MdDirectionsWalk } from "react-icons/md";
 import { type City, cityInSentence, containsPoint } from "../src/cities";
 import { type GeocodeResult, searchPlaces } from "../src/geocode";
 import { awaitNameIndex } from "../src/search/name-search";
 import type { LatLng } from "../src/url-state";
-import ResultGlyph from "./result-glyph";
+import ResultList, {
+  resultListKeyDown,
+  SEARCH_DEBOUNCE_MS,
+} from "./result-list";
 
 // Finding a place without asking for directions. The route panel's fields reach the same index, but
 // they reach it by making you name an endpoint first; this drops a pin and moves the map, and leaves
@@ -17,14 +20,14 @@ import ResultGlyph from "./result-glyph";
 // thing — a place to type where you want to go — and they share the slot: the app closes one when it
 // opens the other (components/map-app.tsx), so the copied classes below never have to stack.
 //
-// The query itself is `searchAddress`'s pipeline, debounced here the same way the route fields
-// debounce it. Everything else is deliberately not shared with them: every commit path closes them,
-// and they carry a map-pick crosshair and a "My location" row that a search has no use for.
+// The rows, and the one row that stands in for them, are the route fields' own (components/
+// result-list.tsx), so the same index reads the same way in both. What is not shared is the
+// lifecycle: every commit path closes them, and they carry a map-pick crosshair and a "My location"
+// row that a search has no use for.
 //
 // The open panel is a component of its own, which is what makes closing it mean anything: the words
 // typed into it and the answer they got are held there and go with it.
 
-const SEARCH_DEBOUNCE_MS = 300;
 // The route panel's own wrapper and card, verbatim: centred on a phone, pinned bottom-right on sm+,
 // and capped in `dvh` rather than `vh` because on a phone `100vh` is the viewport with the browser
 // chrome retracted. See components/route-panel.tsx for the whole of that reasoning.
@@ -155,6 +158,7 @@ function SearchPanel({
   const [activeIndex, setActiveIndex] = useState<number>(-1);
   const [listOpen, setListOpen] = useState<boolean>(false);
   const input = useRef<HTMLInputElement | null>(null);
+  const listId = useId();
 
   useEffect(() => {
     input.current?.focus();
@@ -239,25 +243,12 @@ function SearchPanel({
     input.current?.focus();
   };
 
+  const rows = listOpen && results !== null ? results : [];
+
   const handleKeyDown = (
     event: React.KeyboardEvent<HTMLInputElement>,
   ): void => {
-    if (!listOpen || results === null || results.length === 0) {
-      return;
-    }
-    if (event.key === "ArrowDown") {
-      event.preventDefault();
-      setActiveIndex((index) => (index + 1) % results.length);
-    } else if (event.key === "ArrowUp") {
-      event.preventDefault();
-      setActiveIndex((index) => (index - 1 + results.length) % results.length);
-    } else if (event.key === "Enter") {
-      event.preventDefault();
-      const chosen = results[activeIndex] ?? results[0];
-      if (chosen) {
-        select(chosen);
-      }
-    }
+    resultListKeyDown(event, rows, activeIndex, setActiveIndex, select);
   };
 
   // Nothing to show yet is nothing drawn; once an answer lands there is either a list or the one row
@@ -321,6 +312,13 @@ function SearchPanel({
           placeholder="Search for a place"
           aria-label="Search for a place"
           autoComplete="off"
+          role="combobox"
+          aria-expanded={notice !== null || rows.length > 0}
+          aria-controls={listId}
+          aria-autocomplete="list"
+          aria-activedescendant={
+            activeIndex >= 0 ? `${listId}-${activeIndex}` : undefined
+          }
           className="w-full rounded-xl border border-slate-200 bg-slate-50 py-2.5 pl-9 pr-10 text-sm text-slate-800 outline-none transition placeholder:text-slate-400 focus:border-brand-400 focus:bg-white focus:ring-2 focus:ring-brand-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:placeholder:text-slate-500 dark:focus:border-brand-500 dark:focus:bg-slate-900 dark:focus:ring-brand-500/20"
         />
         {value ? (
@@ -335,33 +333,19 @@ function SearchPanel({
         ) : null}
       </div>
 
-      {notice ? (
-        <p className="mt-3 text-sm text-slate-500 dark:text-slate-400">
-          {notice}
-        </p>
-      ) : listOpen && results !== null && results.length > 0 ? (
+      {notice !== null || rows.length > 0 ? (
         // Scrolls inside the card rather than lengthening it, the way the panel's own tall
-        // sections do — the cap above is what the reader's screen can hold.
-        <ul className="mt-2 min-h-0 shrink space-y-0.5 overflow-y-auto overscroll-contain">
-          {results.map((result, index) => (
-            <li key={result.placeId}>
-              <button
-                type="button"
-                onMouseDown={(event) => event.preventDefault()}
-                onClick={() => select(result)}
-                onMouseEnter={() => setActiveIndex(index)}
-                className={`flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left text-sm ${
-                  index === activeIndex
-                    ? "bg-brand-50 text-brand-700 dark:bg-brand-500/10 dark:text-brand-300"
-                    : "text-slate-700 hover:bg-slate-50 dark:text-slate-200 dark:hover:bg-slate-700/60"
-                }`}
-              >
-                <ResultGlyph type={result.type} />
-                <span className="truncate">{result.displayName}</span>
-              </button>
-            </li>
-          ))}
-        </ul>
+        // sections do — the cap above is what the reader's screen can hold. No skin of its
+        // own: the card is its skin, which is the other half of the route fields' asymmetry.
+        <ResultList
+          listId={listId}
+          results={rows}
+          activeIndex={activeIndex}
+          onHover={setActiveIndex}
+          onPick={select}
+          notice={notice}
+          className="mt-2 min-h-0 shrink"
+        />
       ) : null}
     </>
   );
