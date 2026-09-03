@@ -268,6 +268,31 @@ async function fetchCityDistricts(
   }
 }
 
+// The districts as one shape per piece of ground rather than one per register entry. The overlay
+// fills each polygon separately at 45% alpha, so two polygons over the same block composite to about
+// 70% and the block reads as a darker, differently-coloured district — which is what Oakland's do:
+// its two registers, the city's own survey of areas and the preservation zoning that overlays them,
+// describe the same blocks, and five of the eight zones sit almost exactly on a survey area. New
+// York nests districts inside their own expansions (Carnegie Hill inside Expanded Carnegie Hill) for
+// the same effect at a third of the area.
+//
+// Only appearance changes. The graph's discount is a length fraction over an OR of the polygons
+// (`contains_point` in crates/tiler/src/geometry.rs), which is this union already, so every edge
+// keeps the byte it had. Holes are what a union produces and both readers take them: the overlay
+// fills even-odd across a polygon's rings and the sampler counts them the same way.
+async function dissolve(polygons: readonly Polygon[]): Promise<Polygon[]> {
+  const { union } = await import("polygon-clipping");
+  const rings = polygons.map((polygon) =>
+    polygon.map((ring) =>
+      ring.map(({ lat, lng }): [number, number] => [lng, lat]),
+    ),
+  );
+  const merged = union(rings as Parameters<typeof union>[0]);
+  return merged.map((polygon) =>
+    polygon.map((ring) => ring.map(([lng, lat]) => ({ lat, lng }))),
+  );
+}
+
 export async function ingestHistoric(
   cityId: string,
   land: LandContext,
@@ -279,7 +304,8 @@ export async function ingestHistoric(
     cityId,
     land,
   );
-  const bytes = encodePolygons(HISTORIC_MAGIC, HISTORIC_FORMAT, polygons);
+  const dissolved = await dissolve(polygons);
+  const bytes = encodePolygons(HISTORIC_MAGIC, HISTORIC_FORMAT, dissolved);
   const file = `${cityId}.bin`;
   await writeFile(join(HISTORIC_DIR, file), bytes);
 
@@ -287,12 +313,13 @@ export async function ingestHistoric(
   const mib = (bytes.length / 1024 / 1024).toFixed(2);
   console.error(
     `historic: ${districts} districts kept (${offLand} off land), ` +
-      `${polygons.length} polygon parts, ${mib} MiB in ${seconds}s`,
+      `${polygons.length} polygon parts dissolved to ${dissolved.length}, ` +
+      `${mib} MiB in ${seconds}s`,
   );
   return {
     file,
     format: HISTORIC_FORMAT,
-    count: polygons.length,
+    count: dissolved.length,
     bytes: bytes.length,
     sha256: createHash("sha256").update(bytes).digest("hex"),
   };

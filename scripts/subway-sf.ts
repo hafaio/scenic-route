@@ -4,6 +4,17 @@
 // agencies, and 511.org's regional feed, which would carry both, needs an API key this pipeline does
 // not hold. Display only: this is a walking router, nothing here enters the routing graph or any of
 // its inputs. Layout: scripts/README.md.
+//
+// The whole of both feeds is drawn, and NOTHING here is clipped to the region. Every other source in
+// this pipeline is cut at the land mask (scripts/land.ts), because every other source is walked on:
+// a street or a tree outside the mask is ground the router would have to answer for. Rail is not.
+// BART's tube crosses open water, its lines run out to Antioch and Berryessa, and half its stations
+// stand in towns this region's mask has never heard of — cutting them at the shoreline severed the
+// tube in the middle of the bay and dropped 28 of BART's 50 stations, which is a map of a network
+// nobody rides. What the feeds hold IS the network, so the network is what is drawn.
+//
+// The one place the extent still matters is search, which must not offer a destination the routing
+// graph cannot reach: scripts/search-index.ts keeps the stations inside the region's own bounds.
 
 import { createHash } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
@@ -15,7 +26,6 @@ import {
   type GtfsRow,
   parseGtfs,
 } from "./gtfs";
-import { type LandContext, loadLandContext } from "./land";
 import type { Coord } from "./socrata";
 import {
   chooseLines,
@@ -67,13 +77,6 @@ const DEFAULT_TEXT_COLOR = "000000";
 // St is three stops over 245 m), which is exactly what this must not merge.
 const STATION_MERGE_METERS = 100;
 
-// Refining a boundary crossing by bisection: 16 halvings put the cut within 5 cm of the boundary
-// even on the longest shape segment in either feed, Muni's 2.8 km one.
-const BOUNDARY_BISECTIONS = 16;
-// A clipped piece shorter than this is a shape grazing the city on its way past — a few metres of
-// line that reads as a speck, not as service. Half a short block.
-const MIN_PIECE_METERS = 50;
-
 // A route as its feed describes it, before the variant selection decides what is drawn. `routeIds`
 // is plural because BART splits each line into a northbound and a southbound route_id.
 interface FeedRoute {
@@ -112,82 +115,14 @@ function readShapes(feed: GtfsFeed): Map<string, Coord[]> {
   return shapes;
 }
 
-// The point on the segment where it crosses the city boundary, to within BOUNDARY_BISECTIONS
-// halvings, returned on the inside so the drawn line never steps out.
-function boundaryPoint(
-  inside: Coord,
-  outside: Coord,
-  onLand: (coord: Coord) => boolean,
-): Coord {
-  let near = inside;
-  let far = outside;
-  for (let step = 0; step < BOUNDARY_BISECTIONS; step++) {
-    const middle = {
-      lat: (near.lat + far.lat) / 2,
-      lng: (near.lng + far.lng) / 2,
-    };
-    if (onLand(middle)) {
-      near = middle;
-    } else {
-      far = middle;
-    }
-  }
-  return near;
-}
-
-function lengthMeters(line: readonly Coord[]): number {
-  let total = 0;
-  for (let index = 1; index < line.length; index++) {
-    total += haversineMeters(line[index - 1], line[index]);
-  }
-  return total;
-}
-
-// The parts of a shape that are in the city, cut at the shoreline and the county line — the same
-// land polygons every other source here is clipped with, so the transit lines stop where the streets
-// and the canopy do. A shape that leaves and comes back (none in these feeds, but BART's tube and
-// Muni's Presidio edges are one bad polygon away from it) comes back as several pieces.
-function clipToCity(
-  points: readonly Coord[],
-  onLand: (coord: Coord) => boolean,
-): Coord[][] {
-  const pieces: Coord[][] = [];
-  let piece: Coord[] = [];
-  let previous: Coord | null = null;
-  let previousInside = false;
-  const flush = (): void => {
-    if (piece.length >= 2 && lengthMeters(piece) >= MIN_PIECE_METERS) {
-      pieces.push(piece);
-    }
-    piece = [];
-  };
-  for (const point of points) {
-    const inside = onLand(point);
-    if (inside) {
-      if (!previousInside && previous !== null) {
-        piece.push(boundaryPoint(point, previous, onLand));
-      }
-      piece.push(point);
-    } else if (previousInside && previous !== null) {
-      piece.push(boundaryPoint(previous, point, onLand));
-      flush();
-    }
-    previous = point;
-    previousInside = inside;
-  }
-  flush();
-  return pieces;
-}
-
 // Every shape the given route_ids run, as drawn: the trips on it (what ranks the variants), whether
-// it is a primary shape, and its geometry clipped to the city. A shape used by trips in both
-// directions counts as primary — it is track the route runs, whichever way round it was recorded.
+// it is a primary shape, and its geometry. A shape used by trips in both directions counts as
+// primary — it is track the route runs, whichever way round it was recorded.
 function shapeVariants(
   feed: GtfsFeed,
   shapes: ReadonlyMap<string, Coord[]>,
   routeIds: readonly string[],
   isPrimary: (trip: GtfsRow) => boolean,
-  onLand: (coord: Coord) => boolean,
 ): ShapeVariant[] {
   const wanted = new Set(routeIds);
   const counted = new Map<string, { primary: boolean; trips: number }>();
@@ -214,7 +149,7 @@ function shapeVariants(
       shapeId,
       primary,
       trips,
-      lines: clipToCity(points, onLand),
+      lines: [points],
     });
   }
   return variants;
@@ -222,7 +157,7 @@ function shapeVariants(
 
 // Muni's rail, in the order a legend reads: the Metro lines and the F first (route_type 0), then the
 // cable cars, alphabetically within each — the feed publishes no route_sort_order to defer to.
-function muniRoutes(feed: GtfsFeed, land: LandContext): FeedRoute[] {
+function muniRoutes(feed: GtfsFeed): FeedRoute[] {
   const shapes = readShapes(feed);
   const rows = feed.routes
     .filter((row) => MUNI_ROUTE_TYPES.has(row.route_type))
@@ -243,7 +178,6 @@ function muniRoutes(feed: GtfsFeed, land: LandContext): FeedRoute[] {
       shapes,
       [row.route_id],
       (trip) => trip.direction_id === "0",
-      land.onLand,
     ),
   }));
 }
@@ -254,11 +188,7 @@ function muniRoutes(feed: GtfsFeed, land: LandContext): FeedRoute[] {
 // lower-numbered route_id's shapes are the primary ones, the other's have to reach track they do not
 // already cover. Drawing them apart would put every BART line on the map twice, in one colour, under
 // two names no station sign uses.
-//
-// A line with nothing left after the clip is dropped — Orange (Richmond to Berryessa) and Grey (the
-// Oakland airport connector) never enter San Francisco, and a line the city does not see is not part
-// of its map.
-function bartRoutes(feed: GtfsFeed, land: LandContext): FeedRoute[] {
+function bartRoutes(feed: GtfsFeed): FeedRoute[] {
   const shapes = readShapes(feed);
   const byColor = new Map<string, GtfsRow[]>();
   for (const row of feed.routes) {
@@ -292,7 +222,6 @@ function bartRoutes(feed: GtfsFeed, land: LandContext): FeedRoute[] {
         shapes,
         ordered.map((row) => row.route_id),
         (trip) => trip.route_id === primary.route_id,
-        land.onLand,
       ),
     });
   }
@@ -316,7 +245,6 @@ function feedStations(
   feed: GtfsFeed,
   routeOfTrip: ReadonlyMap<string, number>,
   complexes: ReadonlyMap<string, number>,
-  onLand: (coord: Coord) => boolean,
 ): TransitStation[] {
   const stopRow = new Map(feed.stops.map((stop) => [stop.stop_id, stop]));
   const masks = new Map<string, number>();
@@ -339,15 +267,13 @@ function feedStations(
       console.error(`  station ${stationId}: no coordinate, dropped`);
       continue;
     }
-    if (onLand({ lat, lng })) {
-      stations.push({
-        lat,
-        lng,
-        name: row.stop_name?.trim() ?? "",
-        routeMask,
-        complex: complexes.get(stationId) ?? 0,
-      });
-    }
+    stations.push({
+      lat,
+      lng,
+      name: row.stop_name?.trim() ?? "",
+      routeMask,
+      complex: complexes.get(stationId) ?? 0,
+    });
   }
   return stations;
 }
@@ -447,17 +373,16 @@ async function ingestSubwaySf(cityId: string): Promise<void> {
   const started = performance.now();
   await mkdir(SUBWAY_DIR, { recursive: true });
 
-  const land = await loadLandContext(cityId);
   const muni = parseGtfs(await fetchGtfsZipFile(MUNI_CACHE_KEY, MUNI_FEED_URL));
   const bart = parseGtfs(await fetchGtfsZipFile(BART_CACHE_KEY, BART_FEED_URL));
 
-  const muniFeedRoutes = muniRoutes(muni, land);
-  const bartFeedRoutes = bartRoutes(bart, land);
+  const muniFeedRoutes = muniRoutes(muni);
+  const bartFeedRoutes = bartRoutes(bart);
   const routes: TransitRoute[] = [];
   for (const route of [...muniFeedRoutes, ...bartFeedRoutes]) {
     const lines = chooseLines(route.variants);
     if (lines.length === 0) {
-      console.error(`  ${route.shortName}: nothing inside the city, dropped`);
+      console.error(`  ${route.shortName}: no shape to draw, dropped`);
       continue;
     }
     // No route_sort_order in either feed, so the display order is the one built above and the field
@@ -483,13 +408,11 @@ async function ingestSubwaySf(cityId: string): Promise<void> {
       muni,
       tripRouteIndex(muni, muniFeedRoutes, indexOf),
       muniComplexes,
-      land.onLand,
     ),
     ...feedStations(
       bart,
       tripRouteIndex(bart, bartFeedRoutes, indexOf),
       bartComplexes,
-      land.onLand,
     ),
   ]);
 

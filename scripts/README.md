@@ -250,14 +250,14 @@ in its own band.
 | --- | --- | --- |
 | trees | **NYC**: ForMS "Forestry Tree Points", Socrata `hn5i-inap`. **SF**: Public Works street trees, DataSF `tkzw-k3nq`. **East Bay**: the Oakland Public Tree Inventory (ArcGIS, live) and Berkeley's Arborwell survey (a committed copy, see below) | standing trees only — no stumps, empty pits or planting sites; a trunk diameter in inches is read to size each crown, and the species to give it a genus. Drives the genus overlay ONLY: cover and shade come from the canopy polygons |
 | streets | NYC CSCL street centerline, Socrata `inkn-q76z` | `rw_type` in 1, 5, 6, 7, 10 = street, boardwalk, path/trail, step street, alley, plus pedestrian bridges/tunnels (3, 4) where `nonped != 'V'` |
-| land | **NYC**: borough boundaries (water areas excluded), Socrata `gthc-hcne`. **Bay Area**: SF's analysis neighbourhoods, DataSF `j2bu-swwd`, unioned with seven Alameda County city limits (`Administrative_Boundaries/2`) less the Census TIGER tidal water that legal boundary runs out into | the population the cover distribution is taken over, and the clip that drops New Jersey — and, in the Bay Area, the bay itself and southern Marin |
+| land | **NYC**: borough boundaries (water areas excluded), Socrata `gthc-hcne`. **Bay Area**: SF's analysis neighbourhoods, DataSF `j2bu-swwd`, unioned with seven Alameda County city limits (`Administrative_Boundaries/2`) and the ridge parkland above Oakland (CPAD `cpad_2024a_holdingsgdb`), less the Census TIGER tidal water that legal boundary runs out into | the population the cover distribution is taken over, and the clip that drops New Jersey — and, in the Bay Area, the bay itself and southern Marin |
 | canopy | **NYC**: the 2017 LiDAR tree canopy, ArcGIS `TreeCanopy2017_Simplified_1ft`. **SF**: the 2013 Urban Forest Plan canopy analysis, DataSF `ni2e-vpbg`. **East Bay**: the Alameda / Contra Costa 1 m lidar canopy height model, thresholded and vectorized here (`scripts/alcc.ts` + `scripts/canopy-raster.ts`) | the *measured* canopy footprint the cover field is blurred from, a committed source, magic `CNPY` — feeds the density blobs and, through them, routing; see below |
 | canopy heights | **NYC**: the 1 m LiDAR canopy height model of Ma et al. 2023, figshare doi `10.6084/m9.figshare.20522895` (`NY_CHM_10Int260m.tif`, CC BY 4.0). **SF**: band 2 of the same 3DEP tiles the terrain overlay reads. **East Bay**: the Alameda / Contra Costa 1 m lidar CHM, the same raster its canopy cover is traced from | rasters cached but never committed; `tiler ingest` samples each per canopy polygon and writes the result *into* the `CNPY` file — a region may name several, and a polygon keeps the reading of whichever covered it — see below |
 | paths | OSM pedestrian/park ways (footway/path/pedestrian/steps/cycleway/bridleway/track) plus park drives (roads closed to through motor traffic), via Overpass | the park, greenway and car-free-drive network CSCL lacks; a separate committed source, magic `PATH` — see below and "Binary layouts" |
 | sidewalks | OSM `footway=sidewalk`/`crossing`/`traffic_island` ways via Overpass; the city's own survey — NYC's planimetric SIDEWALK polygons, Socrata `52n9-sdep` (`sub_code` 380000 = street right-of-way), or SF's 2014 Sidewalk Widths study; and the `sidewalk`/`sidewalk:left`/`sidewalk:right`/`sidewalk:both` tags OSM puts on the **road** | the ways are a committed source, magic `SWLK`; the three together settle the four per-side sidewalk bits of every offsetted `STRT` record, and the ways themselves are the walking network wherever they exist — see below and "Binary layouts" |
 | ferries | the two NYC ferry GTFS feeds — Staten Island Ferry (NYC DOT) and NYC Ferry (Hornblower, via Connexionz) | consolidated to a time-independent ferry graph, a committed source, magic `FERR` — OSM- and canopy-independent, read by a later phase's routing graph, not the cover pipeline; see below and "Binary layouts" |
 | subway | the MTA's subway GTFS feed, `https://rrgtfsfeeds.s3.amazonaws.com/gtfs_subway.zip` | the 29 routes as 93 polylines (every shape variant the feed runs that draws track nothing else does) and the 496 stations, with the colours and names the MTA publishes for each route and, per station, the set of routes that genuinely serve it and the complex `transfers.txt` puts it in; a committed source, magic `SBWY` — **display only**, it enters no routing input (this is a walking router and nobody walks the subway); see below and "Binary layouts" |
-| transit (Bay Area) | SFMTA's Muni GTFS, `https://muni-gtfs.apps.sfmta.com/data/muni_gtfs-current.zip`, and BART's, `https://www.bart.gov/dev/schedules/google_transit.zip` — both keyless | Muni's rail (the six Metro lines, the F streetcar, the three cable cars) and **all six BART lines**, as 54 polylines clipped to the region's land, and the 282 stations (no complexes: neither feed publishes a transfer between two of its stations), in the **same `SBWY`** blob New York's subway ships as; **display only**, it enters no routing input. Muni is San Francisco's alone; BART is what makes this a regional layer rather than a city one; see below |
+| transit (Bay Area) | SFMTA's Muni GTFS, `https://muni-gtfs.apps.sfmta.com/data/muni_gtfs-current.zip`, and BART's, `https://www.bart.gov/dev/schedules/google_transit.zip` — both keyless | Muni's rail (the six Metro lines, the F streetcar, the three cable cars) and **all six BART lines**, as 49 polylines drawn whole rather than cut at the region, and the 310 stations (no complexes: neither feed publishes a transfer between two of its stations), in the **same `SBWY`** blob New York's subway ships as; **display only**, it enters no routing input. Muni is San Francisco's alone; BART is what makes this a regional layer rather than a city one; see below |
 | legacy | SF Legacy Business Registry (ArcGIS, Office of Small Business) and NY State Historic Business Preservation Registry (ArcGIS, State Parks) | businesses trading 50+ years, at their register's own point; a committed POI source, magic `LGCY` — overlay only, no per-edge byte; see "Binary layouts" |
 | landmarks | **NYC**: LPC Individual Landmark Sites, Socrata `buis-pvji`. **SF**: Planning's Article 10 landmarks, `rzic-39gi`. **East Bay**: the California OHP's Built Environment Resource Directory for Alameda County, geocoded against the county's address points and parcels (`scripts/alameda.ts`) | designated historic/touristy sites as points — ~1.5k in New York, 458 in the Bay Area; a committed POI source, magic `LMRK` — fanned out into a per-edge routing discount, not the cover pipeline. **The East Bay's are a different kind of designation from the other two** — federal and state, not a local register, because neither Oakland's nor Berkeley's is published as data; see "Binary layouts" |
 | art | **NYC**: PDC Outdoor Public Art Inventory (Socrata `2pg3-gcaa`). **SF**: the Civic Art Collection, the 1% Art Program and the StreetSmArts murals. Everywhere: OSM `tourism=artwork` via Overpass | public art and murals (OSM carries the murals a city inventory is thin on), deduped by proximity; a committed POI source, magic `ARTW` — its own routing discount, distinct scenery from landmarks. The East Bay has no city inventory worth reading — Oakland's Socrata set is frozen at 2013 and 59 of its 90 rows share one placeholder coordinate — so its 371 works are OSM's, which the region-wide Overpass query already returns; see "Binary layouts" |
@@ -984,19 +984,24 @@ within a Muni route: the lower-numbered `route_id`'s shapes are the primary ones
 to reach track they do not already cover. Drawing them apart would put every BART line on the map
 twice, in one colour, under two names no station sign uses.
 
-**Lines that leave the region are clipped, not dropped — unless nothing is left.** Every shape is cut
-against the **same land polygons every other source here is clipped with**, the crossing found by
-bisection, so BART stops at the shoreline and the county line where the streets and the canopy do
-rather than running out to the corner of a bounding box. A piece shorter than 50 m is dropped as a
-graze. Each of the four trunk lines survives on **both** sides of the water, and **Orange** (Richmond
-to Berryessa) and **Grey** (the Oakland airport connector) survive too — they never enter San
-Francisco, but they run the length of the East Bay. That is **16 routes**, all six of BART's.
+**Nothing here is clipped to the region.** This is the one source in the pipeline that is not, and
+the exception is the point: every other one is cut at the land mask because every other one is walked
+on, and ground outside the mask is ground the router would have to answer for. Rail is display only.
+The Transbay Tube runs 5.8 km under the bay, which is not land; BART's lines run out to Antioch and
+Berryessa; half its stations stand in towns the mask has never heard of. Cutting the shapes at the
+shoreline severed the tube in the middle of the water, ended four lines on the bounding rectangle in
+the Berkeley hills and at South San Francisco, and wrote **22 of BART's 50 stations**. What the feeds
+hold is the network, so the network is what is drawn — all **16 routes**, both agencies whole.
 
-This is the one place in the pipeline where a shape genuinely **leaves the land and comes back**: the
-Transbay Tube runs 5.8 km under the bay, which is not land, so each trunk line is cut at the
-Embarcadero and picked up again at West Oakland and comes back as two pieces rather than a chord
-drawn across the water. `clipToCity` was written to split that way and this is what finally exercises
-it — before the region grew east, every drawn line was one contiguous piece.
+The client half matches: `components/subway-layer.tsx` is the one overlay that passes Leaflet no
+`bounds`, since the region's rectangle is not this layer's extent and nothing in the manifest
+describes what is. The worker's spatial index holds only what the file holds, so a tile past the
+network draws nothing.
+
+The extent still governs **search**, because a result is a destination and the graph can only route
+to ground it was built over: `scripts/search-index.ts` keeps the stations that stand on the region's
+land. That is the land and not the rectangle, which would still offer Daly City, Colma, Orinda,
+Lafayette and El Cerrito Plaza.
 
 **Colours, names and order.** All from `routes.txt`: Muni publishes a colour and text colour per
 route (the Metro lines' own hues, `B49A36` for the F and all three cable cars) and long names in caps
@@ -1014,19 +1019,19 @@ at any of them: 149 of the 152 same-named rail pairs are inside 100 m (76 inside
 left out are genuinely different stops sharing a name (19th Ave & Randolph St is three stops spread
 over 245 m). The rule runs over both agencies together; BART's own `parent_station` collapse happens
 first, and its entrances (`location_type` 2) never appear in `stop_times` and so never reach it.
-That is **282 stations** — 260 Muni, all in San Francisco, and 22 BART. Eight of BART's are in the
-city (Embarcadero, Montgomery, Powell, Civic Center, 16th St, 24th St, Glen Park, Balboa Park; Daly
-City is in San Mateo County and outside the region) and **fourteen are in the East Bay**: West
-Oakland, 12th Street, 19th Street, Lake Merritt, MacArthur, Rockridge, Ashby, Downtown Berkeley,
-North Berkeley, Fruitvale, Coliseum, San Leandro, Bay Fair and Oakland International Airport.
+That is **310 stations** — 260 Muni, all in San Francisco, and all **50 of BART's**, from Richmond and
+Antioch to Berryessa, Dublin/Pleasanton and Millbrae. Twenty-two of them stand on the region's own
+land (eight in the city, fourteen in the East Bay); the other twenty-eight are drawn where the
+network goes and are the ones search leaves out.
 
 **Neither feed publishes a complex.** Muni ships no `transfers.txt` at all, and BART's 40 rows are
 all platform-to-platform *inside* one station (`K10-1` to `K10-2` at MacArthur), so neither agency
 says anywhere that two of its stations are one place. Every San Francisco station record therefore
 carries complex id **0**, and the client falls back to the geometric rule for the whole city — the
 one New York no longer needs: records within 60 m, or within 160 m under the same canonical name.
-That is 282 records down to **231 markers**, unchanged by the transfer work: the fourteen East Bay
-stations are kilometres from anything and merge with nothing.
+That is 310 records down to **259 markers**, unchanged by the transfer work: the East Bay and
+outer-branch stations are kilometres from anything and merge with nothing. 231 of those markers
+stand on the region's land, which is the set search offers.
 
 What the merge does *not* fold is a place the feed gives two different names — the Metro's
 underground stations are named per direction ("Metro Powell Station/Downtown" and
@@ -1319,6 +1324,10 @@ serves and report success.
     {
       "id": "sf",             // must name a manifest city; every manifest city needs an entry
       "alleys": false,        // does the centreline classify alleys? (default true — New York's meaning)
+      "existenceCeilings": {          // the existence gate's two ceilings (default 0.30/0.30, what a
+        "droppedSidewalkFraction": 0.39, // municipal sidewalk survey implies); omit to take that
+        "cellDemotedShare": 0.88         // default. scripts/write-plan.ts says why these two
+      },
       "sources": ["sidewalks", "ferries", "landmarks", "art", "highways", "industrial", "historic", "buildings"],
       "shade": {              // omit for a city whose year yields no above-horizon bin
         "maxZoom": 14,
@@ -1751,14 +1760,22 @@ graph then reads 0 and the slider gates itself off, so the factor lights up from
 existence alone — the only thing it does not light up by itself is the hand-authored per-city
 overlay list in `src/cities.ts`.
 
-A district whose boundary is a multi-part MultiPolygon expands to several polygon records, as `INDL`
-splits a multi-part lot. Districts are clipped to the coastline by whether **any vertex** is on land
-rather than by their centroid, for the reason the industrial lots are: a boundary drawn around a
-waterfront block runs out over the water, and the harbour districts (Governors Island, Ellis Island,
-South Street Seaport; Northeast Waterfront) meet the coastline only at the shore. At the 2026-08-22
-read no district anywhere missed entirely: New York's 159 districts are 187 records, 23,002 vertices,
-59.4 KiB, and the Bay Area's 89 are 96 records, 20.7 KiB. Small enough to commit plainly — these are
-the one `data/*.bin` **not** tracked by git-LFS.
+A district whose boundary is a multi-part MultiPolygon starts as several parts, as `INDL` splits a
+multi-part lot. Districts are clipped to the coastline by whether **any vertex** is on land rather
+than by their centroid, for the reason the industrial lots are: a boundary drawn around a waterfront
+block runs out over the water, and the harbour districts (Governors Island, Ellis Island, South
+Street Seaport; Northeast Waterfront) meet the coastline only at the shore. At the 2026-08-22 read no
+district anywhere missed entirely.
+
+The parts are then **dissolved**, so a record is a piece of designated ground rather than a register
+entry. Two registers describe Oakland's old blocks — the city's survey of primary-importance areas
+and the preservation zoning laid over it — and five of the eight zones sit almost on top of a survey
+area; New York nests districts inside their own later expansions. The overlay fills each record
+separately at 45% alpha, so an overlap composited to about 70% and read as a different, darker kind
+of district. The union is what the router already saw: `contains_point` ORs its candidates, so no
+edge's discount moves. New York's 159 districts come to 113 records and 57.9 KiB, the Bay Area's 89
+to 82 records and 16.6 KiB. Small enough to commit plainly — these are the one `data/*.bin` **not**
+tracked by git-LFS.
 
 New York's geometry comes from the **LPC's own ArcGIS FeatureServer**, not from Socrata. The
 dataset the city catalogues as "Historic Districts (Map)" (`xbvj-gfnw`) is a map *visualization*,
@@ -2526,26 +2543,19 @@ decoding that one street's run, the way `src/search/addresses.ts` reads it. With
 past 31,678 postings** (`st`, over 1,133 dictionary tokens) — measured, not estimated, and the reason
 nothing in the query path needs a cap.
 
-| | New York | San Francisco |
+| | New York | Bay Area |
 | --- | --- | --- |
-| documents | 325,838 | 54,093 |
+| documents | 325,838 | 59,618 |
 | — places | 310,472 | 49,268 |
-| — streets | 11,938 | 2,771 |
-| — landmarks, art, stations, legacy | 1,458 / 1,088 / 464 / 50 | 360 / 1,111 / 217 / 271 |
+| — streets | 11,938 | 7,966 |
+| — landmarks, art, stations, legacy | 1,458 / 1,088 / 464 / 50 | 458 / 1,329 / 231 / 271 |
 | — neighborhoods | 368 | 95 |
-| distinct tokens | 101,221 | 30,477 |
-| postings | 1,050,380 | 169,421 |
-| largest posting list | `inc` 13,872 | `san` 2,909 |
-| heaviest 2-char prefix | `st` 31,678 | `st` 6,186 |
-| raw | 12.94 MB | 2.23 MB |
-| **gzipped** | **7.62 MB** | **1.30 MB** |
-
-The Bay Area column is **the last index that was built, and it is behind its sources**: since it was
-written the region gained 98 East Bay landmarks and 14 East Bay BART stations, so its 360 and 217
-should read 458 and 231. It cannot be rebuilt until the region's routing graph builds — the index
-carries the street names the graph holds and ADDR does not, so `scripts/search-index.ts` refuses to
-run without `public/routing/sf.bin`. The numbers above will move on the first `bun run
-build-tiles:graph` that succeeds.
+| distinct tokens | 101,221 | 32,025 |
+| postings | 1,050,380 | 187,006 |
+| largest posting list | `inc` 13,872 | `san` 2,954 |
+| heaviest 2-char prefix | `st` 31,678 | `st` 8,689 |
+| raw | 12.94 MB | 2.40 MB |
+| **gzipped** | **7.62 MB** | **1.39 MB** |
 
 | offset | type | field |
 | --- | --- | --- |
@@ -4034,6 +4044,57 @@ and stopping at San Leandro keeps `boxOf(land)` on the built-up shore instead of
 ridge to Livermore. Hayward and everything south of it, the Livermore Valley cities and the
 unincorporated pockets below San Leandro are out — a later decision, not an oversight.
 
+##### The mask is drawn round the area, not round the cities
+
+The line is not the city limits. The shadiest ground in the region is the regional parkland along the
+ridge above Oakland, and every acre of it is unincorporated, so seven city limits cut all of it off.
+`EAST_BAY_PARKLANDS` in `scripts/alameda.ts` adds it back, from CPAD — the state's protected-areas
+register, which records a park as the parcels it was assembled from.
+
+**A park is admitted only where every layer this region offers reaches it**, and one layer decides it.
+Canopy is fine everywhere in these hills: the ALCC height model is Alameda *and* Contra Costa, and it
+reads 95–100% covered cells over the parks with crowns to 226 ft. The county centreline runs past its
+own county line (287 segments over Redwood, most of them unincorporated); OSM has the trails (407 foot
+ways); and every county address point in Redwood already carries one of the seven municipal codes, so
+the address filter drops nothing and search gains no hole. **The ground is what decides.** The 2021
+Alameda County lidar the terrain is read from stops at about the county line, nothing else stages a
+1 m mosaic over these hills, and a park the flight missed would route as flat under a blank terrain
+overlay with nothing in the build to say so — the missing-square guard cannot catch it, because the
+squares *are* staged and merely hold nodata inside. Sampled at 400 interior points per park:
+
+| park | 3DEP ground | verdict |
+| --- | ---: | --- |
+| Reinhardt Redwood Regional Park | **99.5%** | in |
+| Roberts Regional Recreation Area | **100%** | in |
+| Tilden Regional Park | 50.0% | out |
+| Tilden Nature Area | 18.5% | out |
+| Sibley Volcanic Regional Preserve | 14.5% | out |
+| Huckleberry Botanic Regional Preserve | 16.0% | out |
+
+Half of Tilden and five sixths of Sibley have no ground at all, which is why the two parks that
+prompted this are the two it could not take. Anthony Chabot (88.2%) and Lake Chabot (83.8%) are out
+for the same reason and one more: they are the first ground east of `boxOf(land)`, and taking them
+would carry the whole tile plan over the ridge. Claremont Canyon, Leona Heights and Temescal all
+measure 100% and are named nowhere, because Oakland's and Berkeley's limits already have them.
+
+Roberts is in for the reason Piedmont is: it sits inside Redwood, and leaving it out would put a hole
+in the park rather than a boundary around it.
+
+Two cleanups make this arrive as ground rather than as geometry. CPAD's 61 holdings do not quite meet
+each other, so the parkland is unioned on its own, its interior rings dropped and its specks under
+1 ha discarded — three of them, the largest 1,724 m². And CPAD's park edge and the county's city edge
+are the same line surveyed twice, leaving eleven gaps along it, the largest 25,491 m²; those are
+filled. Neither touches water: the seven limits less the tidal polygons come out as four pieces with
+**zero** interior rings, measured, so every hole in this mask is two sources disagreeing about a line.
+The result is 226.85 km² of East Bay land becoming **234.54 km²** — 7.69 km² added — still four
+polygons with no holes, and `boxOf(land)` unmoved to the digit, so no tile the plan cuts changes shape.
+
+One layer does **not** follow the mask out there, and it is worth saying which. The building
+footprints are clipped to Overture's outlines for the same seven municipalities and are read before
+the mask exists, so the 26 structures inside these two parks — restrooms, a shed, a training centre, a
+car park, across 1,905 acres — are not read and cast no shade. The shade that matters in a redwood
+forest is the canopy's, and that is measured.
+
 Which brings the third trap, after the two above: **nobody publishes a shoreline-clipped boundary
 here.** Alameda County's city limits are legal limits, and Oakland's, Berkeley's and Alameda's run
 out over their tidelands as far as −122.347, most of the way to Yerba Buena Island. So the shoreline
@@ -4099,13 +4160,28 @@ Bay's paved sides from 37.8% to 45.6% of side-km. It is left as no statement bec
 at the drawn ways, which the mapped bits already read, and it points at nothing where the way was
 never drawn.
 
-**And the existence gate's two build guards still fire on this region.**
-`MAX_DROPPED_SIDEWALK_FRACTION` reads **0.357** against its 0.30 ceiling, down from 0.581 before the
-tags; `MAX_CELL_DEMOTED_SHARE` reads a 90th-percentile **0.84** over the region's 1,294 half-kilometre
-cells against the same 0.30, down from 0.988. Both were calibrated against two cities that have a
-survey, and a region where half the streets have no statement from any source is the case they were
-never held against — so this remains information rather than a verdict, and the numbers stand as
-measured rather than the ceilings being moved to fit them. New York is untouched: 0.144 dropped,
-0.094 at the cell 90th percentile, 97.2% of alley km demoted, 25 phantom sidewalks, all to the digit
-what it read before.
+**The existence gate's two build guards are now per region**, on the pattern of the ferry wait cap.
+The region reads **0.357** dropped sidewalk km, down from 0.581 before the tags, and a
+90th-percentile **0.84** demoted share over its 1,294 half-kilometre cells, down from 0.988. Both
+guards were calibrated at 0.30 against two cities that have a municipal survey, and a region where
+half the streets have no statement from anybody is the case they were never held against: what they
+were catching here is the hole in OSM, not a bad build. So the Bay Area gets ceilings of its own —
+**0.39** and **0.88**, just over what it measures rather than at a round number, so a real regression
+still trips them — and the pair sit in `existence_ceilings` in `crates/tiler/src/graph.rs` with the
+measured figures beside them. Compare a later build against 0.357 and 0.84, not against the
+ceilings; OSM gaining sidewalk statements moves both down, so an upward move of any size is worth
+opening. New York keeps 0.30 and is untouched: 0.144 dropped, 0.094 at the cell 90th percentile,
+97.2% of alley km demoted, 25 phantom sidewalks, all to the digit what it read before. San
+Francisco does NOT keep it — the widened region kept the `sf` id, so the city builds as part of the
+Bay Area and is guarded by the region's looser pair. Its own streets are surveyed and would hold
+0.30 easily; a regression confined to them could hide under 0.39 diluted by the East Bay's
+coverage. Splitting the measurement per city is the fix if that ever matters.
+
+**As built on 2026-08-30, over the widened mask**, the region reads **0.3576** dropped against its
+0.39 ceiling and **0.8288** at the cell 90th percentile against 0.88, over 1,306 cells — the parkland
+brought 12 more cells and moved neither guard, which is the answer you would want: 58.9 km of trail
+is 58.9 km of walking surface nobody had to state the existence of. New York re-ran in the same build
+and came back **byte-for-byte identical**, 0.1439 and 0.0935 against its unchanged 0.30, same
+`keyHash` 8a852e58375bbe41. The figures written beside the constants in `graph.rs` are the
+pre-widening pair the ceilings were set from; these are what ships.
 

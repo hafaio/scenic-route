@@ -524,10 +524,14 @@ function toPathSegments(
   return { segments, onLandCount };
 }
 
-// Land-clips the measured canopy polygons the same ring-midpoint way the paths and OSM trees are
+// Land-clips the measured canopy CROWNS the same ring-midpoint way the paths and OSM trees are
 // clipped: a polygon is kept if the midpoint vertex of its outer ring is on land. The ArcGIS
 // service is NYC Parks' own LiDAR and carries essentially no New Jersey / Westchester spill, but
 // the clip is applied for parity with the other polygon sources and to guard a future re-extent.
+//
+// One vertex decides the whole polygon, which is the whole answer for a crown — a few metres across,
+// and the coastline either holds it or does not. It is no answer at all for a polygon the mask runs
+// through the middle of, so a source with those cuts its own and arrives as `landCut`.
 function clipCanopyToLand(
   polygons: Polygon[],
   onLand: (coord: Coord) => boolean,
@@ -692,7 +696,14 @@ interface CitySources {
   streets: (land: LandContext) => Promise<Segment[]>;
   trees: () => Promise<Tree[]>;
   canopy: () => Promise<{
+    // Crowns, to be kept or dropped whole against the land here.
     polygons: Polygon[];
+    // Polygons the source has already cut on the land itself, which are taken as they stand. A
+    // source whose polygons are bigger than the coastline's own detail has to do its own clipping,
+    // because `clipCanopyToLand` decides a whole polygon on one vertex of it: the East Bay's canopy
+    // is traced in 256 m blocks and the mask runs through the middle of the boundary ones
+    // (scripts/alcc.ts). Empty for a city whose canopy is crowns.
+    landCut: Polygon[];
     fetched: number;
     dropped: number;
   }>;
@@ -749,7 +760,9 @@ const NYC: CitySources = {
   land: fetchNycLand,
   streets: fetchNycStreets,
   trees: fetchNycTrees,
-  canopy: fetchCanopyPolygons,
+  // Every one of these polygons is a crown, so none arrives pre-cut and the land clip below decides
+  // all of them.
+  canopy: async () => ({ ...(await fetchCanopyPolygons()), landCut: [] }),
   chm: async () => [
     {
       paths: [await fetchChmRaster()],
@@ -805,13 +818,14 @@ const SF: CitySources = {
     ...(await fetchSfTrees()),
     ...(await fetchEastBayTrees()),
   ],
-  // The two halves' polygons in one list: nothing downstream reads which half a polygon came from,
-  // and the height pass finds each one under whichever survey covers it.
+  // Apart only because the East Bay's are traced blocks already cut on the land and the city's are
+  // crowns that are not; past the clip nothing downstream reads which half a polygon came from.
   canopy: async () => {
     const city = await fetchSfCanopyPolygons();
     const eastBay = await eastBayCanopy();
     return {
-      polygons: [...city.polygons, ...eastBay.polygons],
+      polygons: city.polygons,
+      landCut: eastBay.polygons,
       fetched: city.fetched + eastBay.fetched,
       dropped: city.dropped + eastBay.dropped,
     };
@@ -897,7 +911,10 @@ async function fetchCity(CITY: CitySources): Promise<void> {
   // fill pyramid and `tiler ingest` samples it at every sidewalk for the routing density.
   console.error(`${CITY.id}: fetching tree canopy polygons`);
   const canopy = await CITY.canopy();
-  const canopyOnLand = clipCanopyToLand(canopy.polygons, onLand);
+  const canopyOnLand = [
+    ...clipCanopyToLand(canopy.polygons, onLand),
+    ...canopy.landCut,
+  ];
   const canopyReferenceLat = (landBox.south + landBox.north) / 2;
   const canopySquareKilometers = canopySquareKm(
     canopyOnLand,
