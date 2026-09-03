@@ -1,6 +1,6 @@
-// `bun run scripts/ferries.ts` (and, in the full pipeline, tree-data-fetch): downloads the two NYC
-// ferry GTFS feeds, collapses their whole schedule into one time-independent ferry graph, and
-// writes it as data/ferries/nyc.bin (magic FERR). It also freezes the raw feed zips under
+// `bun run scripts/ferries.ts --city <id>` (and, in the full pipeline, tree-data-fetch): downloads
+// one city's ferry GTFS feeds, collapses their whole schedule into one time-independent ferry graph,
+// and writes it as data/ferries/<id>.bin (magic FERR). It also freezes the raw feed zips under
 // data/ferries/ so a later time-of-day pass can re-derive from the exact feeds this build read.
 //
 // Time-independence: every trip is cut into consecutive-stop segments; a segment's crossing time is
@@ -12,36 +12,85 @@
 import { createHash } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { COORD_SCALE, haversineMeters, writeVarint, zigzag } from "./geometry";
+import { parseArgs } from "node:util";
+import {
+  COORD_SCALE,
+  EARTH_RADIUS_METERS,
+  haversineMeters,
+  writeVarint,
+  zigzag,
+} from "./geometry";
 import { fetchGtfsZip, type GtfsFeed, parseGtfs } from "./gtfs";
+import { type LandContext, loadLandContext } from "./land";
 import type { Coord } from "./socrata";
 
 export interface FeedSource {
-  id: string; // namespaces stop ids, so the two feeds' stop ids cannot collide
+  id: string; // namespaces stop ids, so one city's feeds' stop ids cannot collide
   name: string;
   zipFile: string; // the frozen raw feed, committed under data/ferries/
   url: string;
   cacheKey: string;
 }
 
-// The two feeds, both verified reachable. SI Ferry is NYC DOT's own download (behind an Akamai
-// edge that needs a browser User-Agent); NYC Ferry is Hornblower's feed served through Connexionz.
-export const FEEDS: readonly FeedSource[] = [
-  {
-    id: "si",
-    name: "Staten Island Ferry",
-    zipFile: "siferry-gtfs.zip",
-    url: "https://www.nyc.gov/html/dot/downloads/misc/siferry-gtfs.zip",
-    cacheKey: "gtfs-siferry",
-  },
-  {
-    id: "nyc",
-    name: "NYC Ferry",
-    zipFile: "nycferry-gtfs.zip",
-    url: "https://nycferry.connexionz.net/rtt/public/utility/gtfs.aspx",
-    cacheKey: "gtfs-nycferry",
-  },
-];
+// Each city's feeds, all verified reachable. Nothing is ever read across two cities — a feed id only
+// has to be unique within its own city's list.
+//
+// New York: SI Ferry is NYC DOT's own download (behind an Akamai edge that needs a browser
+// User-Agent); NYC Ferry is Hornblower's feed served through Connexionz.
+//
+// San Francisco: WETA / SF Bay Ferry, published keyless and open under ODC-BY. The licence is stated
+// only on https://sanfranciscobayferry.com/developers/ — the feed's own feed_info.feed_license
+// column is empty — so that page is the whole of the permission. This city is San Francisco plus the
+// East Bay, two land masses a pedestrian cannot walk between (nobody walks the Bay Bridge), so
+// unlike New York's, these boats are not scenery: they are the only crossing the router has.
+//
+// Golden Gate Transit's ferries are deliberately absent, for two independent reasons. Every one of
+// its five ferry routes serves Marin — Sausalito, Larkspur, Tiburon, Angel Island — which is outside
+// this city's land, so all it could contribute is another San Francisco pier and no crossing anyone
+// could walk off. And an exhaustive search turned up no licence or terms of use for its feed
+// anywhere: no developer page, no feed_info.txt, nothing in its sitemap, where WETA's ODC-BY is
+// written down in plain words.
+const CITY_FEEDS: Readonly<Record<string, readonly FeedSource[]>> = {
+  nyc: [
+    {
+      id: "si",
+      name: "Staten Island Ferry",
+      zipFile: "siferry-gtfs.zip",
+      url: "https://www.nyc.gov/html/dot/downloads/misc/siferry-gtfs.zip",
+      cacheKey: "gtfs-siferry",
+    },
+    {
+      id: "nyc",
+      name: "NYC Ferry",
+      zipFile: "nycferry-gtfs.zip",
+      url: "https://nycferry.connexionz.net/rtt/public/utility/gtfs.aspx",
+      cacheKey: "gtfs-nycferry",
+    },
+  ],
+  sf: [
+    {
+      id: "weta",
+      name: "SF Bay Ferry",
+      zipFile: "sfbayferry-gtfs.zip",
+      url: "https://gtfs.sanfranciscobayferry.com/gtfs.zip",
+      cacheKey: "gtfs-sfbayferry",
+    },
+  ],
+};
+
+// The cities that have ferries at all, in the order the daily schedule job walks them.
+export const FERRY_CITIES: readonly string[] = Object.keys(CITY_FEEDS);
+
+export function feedsOf(cityId: string): readonly FeedSource[] {
+  const feeds = CITY_FEEDS[cityId];
+  if (!feeds) {
+    throw new Error(
+      `no ferry feeds for ${cityId}; known: ${FERRY_CITIES.join(", ")}`,
+    );
+  } else {
+    return feeds;
+  }
+}
 
 const DATA_DIR = join(import.meta.dirname, "..", "data");
 const FERRY_DIR = join(DATA_DIR, "ferries");
@@ -56,11 +105,67 @@ const WAIT_CAP_SECONDS = 600; // half a headway is charged as wait, but never mo
 const KEY_SEPARATOR = "|"; // joins a stop pair into a segment key; a stop key has no NUL
 export const FERRY_ROUTE_TYPE = "4"; // GTFS route_type; the NYC Ferry feed also carries shuttle buses (3)
 
-// Stops dropped for now: the Rockaway peninsula is not connected to the rest of the routable
-// walking network (its bridges' pedestrian status is unmodeled), so a ferry-only stub there routes
-// nowhere. Revisit once that connection exists — Phase 2's snapping should own this once it can see
-// graph connectivity.
-export const EXCLUDED_STOP_NAMES = new Set(["Rockaway"]);
+// Stops dropped by GTFS stop_name, per city, before either artifact sees them — the FERR graph here
+// and the FSCH timetable in ferry-schedule.ts read the same list, so the two describe one network.
+// A name rather than a stop id because the same list has to hold for a feed that renumbers.
+//
+// New York: the Rockaway peninsula is not connected to the rest of the routable walking network (its
+// bridges' pedestrian status is unmodeled), so a ferry-only stub there routes nowhere. Revisit once
+// that connection exists — Phase 2's snapping should own this once it can see graph connectivity.
+//
+// San Francisco: four WETA terminals stand on land this city does not cover, so a boat to one of
+// them lands the router outside every source it has. Richmond is in Contra Costa County; South San
+// Francisco is in San Mateo County; Vallejo and Mare Island are both in Solano County. The city's
+// land is San Francisco plus the East Bay cities as far as San Leandro, and reaches none of them.
+const EXCLUDED_STOP_NAMES: Readonly<Record<string, ReadonlySet<string>>> = {
+  nyc: new Set(["Rockaway"]),
+  sf: new Set([
+    "Richmond Ferry Terminal",
+    "South San Francisco Ferry Terminal",
+    "Vallejo Ferry Terminal",
+    "Mare Island Ferry Terminal",
+  ]),
+};
+
+// Empty for a ferry city that excludes nothing, so only a city with a reason to drop a stop is
+// listed above.
+export function excludedStopNames(cityId: string): ReadonlySet<string> {
+  return EXCLUDED_STOP_NAMES[cityId] ?? new Set<string>();
+}
+
+// A stop further than this from the city's land is warned about. Ferry terminals stand at the end of
+// piers and breakwaters, hundreds of metres out over water the land polygons do not include, so the
+// tolerance cannot be zero; 500 m clears every terminal in either city while still being far short
+// of the next town's waterfront.
+const LAND_TOLERANCE_METERS = 500;
+// `onLand` answers about a point, not a distance, so the neighbourhood is sampled: rings of bearings
+// at a third, two thirds and the whole of the tolerance. At the widest ring the samples are 195 m
+// apart, finer than any shoreline that could hide a whole waterfront between two of them.
+const LAND_PROBE_RINGS = 3;
+const LAND_PROBE_BEARINGS = 16;
+
+function nearLand(stop: Coord, onLand: (coord: Coord) => boolean): boolean {
+  if (onLand(stop)) {
+    return true;
+  } else {
+    const metersPerLat = (Math.PI / 180) * EARTH_RADIUS_METERS;
+    const metersPerLng = metersPerLat * Math.cos((stop.lat * Math.PI) / 180);
+    for (let ring = 1; ring <= LAND_PROBE_RINGS; ring++) {
+      const radius = (LAND_TOLERANCE_METERS * ring) / LAND_PROBE_RINGS;
+      for (let step = 0; step < LAND_PROBE_BEARINGS; step++) {
+        const bearing = (2 * Math.PI * step) / LAND_PROBE_BEARINGS;
+        const probe = {
+          lat: stop.lat + (radius * Math.cos(bearing)) / metersPerLat,
+          lng: stop.lng + (radius * Math.sin(bearing)) / metersPerLng,
+        };
+        if (onLand(probe)) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+}
 
 // One consolidated stop, in geographic coordinates with its GTFS name — deliberately NOT snapped
 // to the routing graph (that is Phase 2). `key` is `${feed}:${stopId}`, unique across both feeds.
@@ -275,12 +380,14 @@ interface FerryGraph {
 // One feed's contribution to the graph: its active trips cut into consecutive-stop segments, each
 // segment's crossing and departure samples accumulated, and one representative shape sub-path kept
 // per segment for drawing. Feeds are kept separate — a stop is `${feed}:${id}`, so the two
-// St. George berths are not fused here; that conflation is Phase 2's job. Returns the active-route
-// count so the ingest can log it.
+// St. George berths are not fused here; that conflation is Phase 2's job. San Francisco's Ferry
+// Building is the same case inside a single feed: gates E, F and G are three stop_ids about 30 m
+// apart, and they stay three stops. Returns the active-route count so the ingest can log it.
 function consolidate(
   feed: GtfsFeed,
   feedId: string,
   referenceDate: number,
+  excluded: ReadonlySet<string>,
   accumulator: Accumulator,
 ): number {
   const { stops, segments, crossings, departures, segmentRoutes, routeNames } =
@@ -362,8 +469,8 @@ function consolidate(
       const fromName = stopRow.get(from.stop_id)?.stop_name;
       const toName = stopRow.get(to.stop_id)?.stop_name;
       if (
-        (fromName !== undefined && EXCLUDED_STOP_NAMES.has(fromName)) ||
-        (toName !== undefined && EXCLUDED_STOP_NAMES.has(toName))
+        (fromName !== undefined && excluded.has(fromName)) ||
+        (toName !== undefined && excluded.has(toName))
       ) {
         continue;
       }
@@ -466,6 +573,7 @@ function consolidate(
 
 function buildGraph(
   feeds: { source: FeedSource; feed: GtfsFeed }[],
+  excluded: ReadonlySet<string>,
 ): FerryGraph {
   const referenceDate = Number(
     new Date().toISOString().slice(0, 10).replace(/-/g, ""),
@@ -481,7 +589,13 @@ function buildGraph(
 
   let activeRoutes = 0;
   for (const { source, feed } of feeds) {
-    activeRoutes += consolidate(feed, source.id, referenceDate, accumulator);
+    activeRoutes += consolidate(
+      feed,
+      source.id,
+      referenceDate,
+      excluded,
+      accumulator,
+    );
   }
 
   for (const [segmentKey, segment] of accumulator.segments) {
@@ -685,22 +799,53 @@ export interface FerrySource {
   sha256: string;
 }
 
-// Fetches both feeds (cached), freezes their raw zips under data/ferries/, consolidates them into
-// the time-independent graph and writes data/ferries/nyc.bin. Returns the file's stats. Callable on
-// its own (`bun run scripts/ferries.ts`) and from the tree-data ingest's fetch half.
+// Fetches the city's feeds (cached), freezes their raw zips under data/ferries/, consolidates them
+// into the time-independent graph and writes data/ferries/<id>.bin. Returns the file's stats.
+// Callable on its own (`bun run scripts/ferries.ts --city <id>`) and from the tree-data ingest's
+// fetch half.
 export async function ingestFerries(cityId: string): Promise<FerrySource> {
   const started = performance.now();
   await mkdir(FERRY_DIR, { recursive: true });
 
   const loaded: { source: FeedSource; feed: GtfsFeed }[] = [];
-  for (const source of FEEDS) {
+  for (const source of feedsOf(cityId)) {
     console.error(`ferries: fetching ${source.name}`);
     const zip = await fetchGtfsZip(source.cacheKey, source.url);
     await writeFile(join(FERRY_DIR, source.zipFile), zip);
     loaded.push({ source, feed: parseGtfs(zip) });
   }
 
-  const graph = buildGraph(loaded);
+  const graph = buildGraph(loaded, excludedStopNames(cityId));
+
+  // A kept terminal that stands off the city's land is one the graph pass will snap to whichever
+  // walking node happens to be nearest — which, across a strait, is the wrong shore, silently. This
+  // reports that rather than preventing it: an operator adding a service to a new town is news the
+  // exclusion list above should then be told about, not a reason to fail a build.
+  //
+  // And the land test is several services away — DataSF, Alameda GIS, CPAD and TIGERweb for `sf`,
+  // Socrata for `nyc` — while nothing but this warning reads it. One of them being unreachable costs
+  // the check and says so; it does not cost the artifact.
+  let land: LandContext | null = null;
+  try {
+    land = await loadLandContext(cityId);
+  } catch (error) {
+    console.error(
+      `ferries: WARNING no terminal was checked against ${cityId}'s land, ` +
+        `the land test being unavailable: ${error}`,
+    );
+  }
+  if (land) {
+    for (const stop of graph.stops) {
+      if (!nearLand(stop, land.onLand)) {
+        console.error(
+          `ferries: WARNING ${stop.name} (${stop.lat}, ${stop.lng}) is over ` +
+            `${LAND_TOLERANCE_METERS} m from ${cityId}'s land; it will snap to the nearest ` +
+            "shore wherever that is",
+        );
+      }
+    }
+  }
+
   const bytes = encodeFerries(graph);
   const file = `${cityId}.bin`;
   await writeFile(join(FERRY_DIR, file), bytes);
@@ -739,6 +884,12 @@ export async function ingestFerries(cityId: string): Promise<FerrySource> {
   };
 }
 
+// `--city` defaults to New York, the city that had ferries first. `--refresh` belongs to
+// scripts/cache.ts, which reads process.argv for itself; it is named here only so parseArgs does not
+// reject it.
 if (import.meta.main) {
-  await ingestFerries("nyc");
+  const { values } = parseArgs({
+    options: { city: { type: "string" }, refresh: { type: "boolean" } },
+  });
+  await ingestFerries(values.city ?? "nyc");
 }

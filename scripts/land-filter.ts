@@ -11,7 +11,9 @@ const LAT_BANDS = 512; // horizontal strips, matching the Rust index
 // Even-odd is counted per polygon and only the polygons a query touched are cleared, so two
 // overlapping borough parts do not cancel each other out and a query does not pay to reset a
 // parity array the size of the whole set.
-export function buildLandTest(polygons: Polygon[]): (coord: Coord) => boolean {
+export function buildLandTest(
+  polygons: readonly Polygon[],
+): (coord: Coord) => boolean {
   const fromLat: number[] = [];
   const fromLng: number[] = [];
   const toLat: number[] = [];

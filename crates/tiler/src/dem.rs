@@ -5,6 +5,12 @@
 //! reads a set, indexes it by ground extent, and resamples it onto a regular longitude/latitude
 //! grid — the `Field` everything downstream actually reads.
 //!
+//! A set can be several MOSAICS rather than one. A city is not obliged to lie inside a single
+//! survey: the Bay Area's ground is San Francisco's five-band 3DEP product on the city's own
+//! state-plane zone plus the East Bay's staged bare-earth DEM on UTM 10N, published years apart on
+//! grids that share no origin. So a `Dem` holds a list of mosaics, each with its own projection,
+//! band and spatial index, over one shared list of tiles.
+//!
 //! Only one decoded tile is held at a time, because a city of float32 at one metre is gigabytes. So
 //! the resample visits points GROUPED BY TILE rather than in grid order, and decodes each tile
 //! exactly once per resample; the same sweep in row order re-decodes every tile on every row.
@@ -20,7 +26,7 @@ use std::fs::File;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 
-use tiff::decoder::{Decoder, DecodingResult};
+use tiff::decoder::{Decoder, DecodingResult, Limits};
 use tiff::tags::Tag;
 
 use crate::Fallible;
@@ -44,6 +50,10 @@ pub struct TileGrid {
     pub origin_y: f64,
     pub cell: f64,
     pub bands: usize,
+    /// Which of a `Dem`'s mosaics this tile came from, and so which projection its ground
+    /// coordinates are in and which band of it carries the surface. A tile read on its own belongs
+    /// to the only mosaic there is.
+    pub mosaic: usize,
 }
 
 impl TileGrid {
@@ -88,86 +98,227 @@ pub fn read_tile_grid(path: &Path) -> Fallible<TileGrid> {
         origin_y: tie[4],
         cell: scale[0],
         bands,
+        mosaic: 0,
     })
 }
 
-/// A mosaic of tiles on one projection, sampled at a band.
-pub struct Dem {
+/// A mosaic as a caller hands it over: the tiles of one survey, the projection they are published
+/// on, and which band of them carries the surface to read.
+pub struct MosaicTiles {
+    pub projection: Tmerc,
+    pub band: usize,
+    pub paths: Vec<PathBuf>,
+}
+
+/// A mosaic as an open `Dem` holds it. Its tiles live in the `Dem`'s one list, so what is left here
+/// is how to get onto its grid and how to find a tile on it.
+struct Mosaic {
     projection: Tmerc,
     band: usize,
+    /// A coarse grid over this mosaic's extent, so finding the tile under a point is a lookup rather
+    /// than a scan of several hundred boxes.
+    ///
+    /// One index per mosaic rather than one keyed by (mosaic, x, y), because the keys are PROJECTED
+    /// METRES and two projections are two different spaces: San Francisco's CS13 puts its origin
+    /// under Twin Peaks and UTM 10N puts its own on the equator, so the same ground falls in cells
+    /// thousands apart and a cell that is one tile wide on one grid is meaningless on the other.
+    /// Keying by mosaic as well would keep the spaces apart but would still leave one `index_cell`
+    /// for both, sized to whichever survey stages the bigger tiles — 10 km squares against 2 km
+    /// ones here. A lookup then costs one probe per mosaic, of which a city has one or two.
+    index: HashMap<(i64, i64), Vec<usize>>,
+    index_cell: f64,
+}
+
+/// A ground surface: one or more mosaics, each on its own projection and band, sampled at a
+/// longitude and latitude.
+pub struct Dem {
+    mosaics: Vec<Mosaic>,
+    /// Every mosaic's tiles in one list, each carrying the index of the mosaic it came from, so a
+    /// tile position means the same thing to every reader here and to every caller holding one.
     tiles: Vec<TileGrid>,
     /// The tile whose samples are currently decoded, and its values. Only one is held: a caller that
     /// sweeps in raster order never revisits, and holding a whole city of float32 would be gigabytes.
     loaded: Option<(usize, Vec<f32>)>,
-    /// A coarse grid over the mosaic's extent, so finding the tile under a point is a lookup rather
-    /// than a scan of several hundred boxes.
-    index: HashMap<(i64, i64), Vec<usize>>,
-    index_cell: f64,
     pub decoded: usize,
 }
 
 impl Dem {
-    /// Reads every tile's georeferencing up front — a few hundred header reads — and indexes them.
-    /// No pixels are decoded until a resample asks for them.
+    /// One mosaic, which is what a caller reading a single survey's tiles wants.
     pub fn open(paths: &[PathBuf], projection: Tmerc, band: usize) -> Fallible<Dem> {
-        let tiles = paths
-            .iter()
-            .map(|path| read_tile_grid(path))
-            .collect::<Fallible<Vec<TileGrid>>>()?;
-        if tiles.is_empty() {
-            return Err("an elevation mosaic with no tiles".into());
-        }
-        for tile in &tiles {
-            if band >= tile.bands {
-                return Err(format!(
-                    "{}: band {band} asked for, {} in the file",
-                    tile.path.display(),
-                    tile.bands
-                )
-                .into());
-            }
-        }
-        // One index cell per tile-sized square of ground, taken from the largest tile so no tile
-        // spans more cells than it has to.
-        let index_cell = tiles
-            .iter()
-            .map(|tile| (tile.max_x() - tile.min_x()).max(tile.max_y() - tile.min_y()))
-            .fold(1.0_f64, f64::max);
-        let mut index: HashMap<(i64, i64), Vec<usize>> = HashMap::new();
-        for (position, tile) in tiles.iter().enumerate() {
-            let x0 = (tile.min_x() / index_cell).floor() as i64;
-            let x1 = (tile.max_x() / index_cell).floor() as i64;
-            let y0 = (tile.min_y() / index_cell).floor() as i64;
-            let y1 = (tile.max_y() / index_cell).floor() as i64;
-            for x in x0..=x1 {
-                for y in y0..=y1 {
-                    index.entry((x, y)).or_default().push(position);
-                }
-            }
-        }
-        Ok(Dem {
+        Dem::open_mosaics(&[MosaicTiles {
             projection,
             band,
+            paths: paths.to_vec(),
+        }])
+    }
+
+    /// Reads every tile's georeferencing up front — a few hundred header reads — and indexes them,
+    /// mosaic by mosaic. No pixels are decoded until a resample asks for them.
+    pub fn open_mosaics(mosaics: &[MosaicTiles]) -> Fallible<Dem> {
+        if mosaics.is_empty() {
+            return Err("an elevation source with no mosaics".into());
+        }
+        let mut tiles: Vec<TileGrid> = Vec::new();
+        let mut opened: Vec<Mosaic> = Vec::new();
+        for (position, mosaic) in mosaics.iter().enumerate() {
+            let first = tiles.len();
+            for path in &mosaic.paths {
+                let mut tile = read_tile_grid(path)?;
+                if mosaic.band >= tile.bands {
+                    return Err(format!(
+                        "{}: band {} asked for, {} in the file",
+                        tile.path.display(),
+                        mosaic.band,
+                        tile.bands
+                    )
+                    .into());
+                }
+                tile.mosaic = position;
+                tiles.push(tile);
+            }
+            let own = &tiles[first..];
+            if own.is_empty() {
+                return Err("an elevation mosaic with no tiles".into());
+            }
+            // One index cell per tile-sized square of ground, taken from the largest tile so no tile
+            // spans more cells than it has to.
+            let index_cell = own
+                .iter()
+                .map(|tile| (tile.max_x() - tile.min_x()).max(tile.max_y() - tile.min_y()))
+                .fold(1.0_f64, f64::max);
+            let mut index: HashMap<(i64, i64), Vec<usize>> = HashMap::new();
+            for (offset, tile) in own.iter().enumerate() {
+                let x0 = (tile.min_x() / index_cell).floor() as i64;
+                let x1 = (tile.max_x() / index_cell).floor() as i64;
+                let y0 = (tile.min_y() / index_cell).floor() as i64;
+                let y1 = (tile.max_y() / index_cell).floor() as i64;
+                for x in x0..=x1 {
+                    for y in y0..=y1 {
+                        index.entry((x, y)).or_default().push(first + offset);
+                    }
+                }
+            }
+            opened.push(Mosaic {
+                projection: mosaic.projection,
+                band: mosaic.band,
+                index,
+                index_cell,
+            });
+        }
+        Ok(Dem {
+            mosaics: opened,
             tiles,
             loaded: None,
-            index,
-            index_cell,
             decoded: 0,
         })
     }
 
-    /// Which tile covers a longitude and latitude, without decoding anything.
+    /// Which tile covers a longitude and latitude, without decoding anything. Every mosaic is asked,
+    /// since they are on different grids: the point is projected once per mosaic, and each answer is
+    /// compared only against that mosaic's own tiles. Two surveys that overlap on the ground — the
+    /// bay is flown from both sides — are settled by the plan's order, first mosaic wins.
     pub fn tile_of(&mut self, lng: f64, lat: f64) -> Option<usize> {
-        let (x, y) = self.projection.forward(lng, lat);
-        self.tile_at(x, y)
+        for mosaic in &self.mosaics {
+            let (x, y) = mosaic.projection.forward(lng, lat);
+            let key = (
+                (x / mosaic.index_cell).floor() as i64,
+                (y / mosaic.index_cell).floor() as i64,
+            );
+            let found = mosaic.index.get(&key).and_then(|nearby| {
+                nearby
+                    .iter()
+                    .copied()
+                    .find(|&position| self.tiles[position].contains(x, y))
+            });
+            if found.is_some() {
+                return found;
+            }
+        }
+        None
     }
 
     /// The reading at a point that is known to fall in `position`, decoding that tile if it is not
     /// the one already held. Callers that visit points grouped by tile pay one decode per tile.
     pub fn sample_in(&mut self, position: usize, lng: f64, lat: f64) -> Fallible<Option<f32>> {
         self.load(position)?;
-        let (x, y) = self.projection.forward(lng, lat);
+        let (x, y) = self.mosaics[self.tiles[position].mosaic]
+            .projection
+            .forward(lng, lat);
         Ok(self.read(position, x, y))
+    }
+
+    /// The mosaic's readings over a regular grid in the mosaic's OWN projection: the upper-left
+    /// corner of cell (0, 0) at (`origin_x`, `origin_y`), cells `cell` metres square, row-major, NaN
+    /// where no tile covers a cell.
+    ///
+    /// The other readers take a longitude and latitude, which a caller already working in projected
+    /// metres cannot supply — nothing here inverts the projection. Filled tile by tile for the same
+    /// reason `resample` buckets by tile: a grid a kilometre wide crosses tiles on every row, and
+    /// sweeping in row order would decode each of them once per row.
+    ///
+    /// Refused outright on a `Dem` of several mosaics: "projected metres" would then name more than
+    /// one space, and the tiles of the wrong one would be picked up by a box comparison that is
+    /// arithmetically fine and geographically nonsense. A caller in projected metres has one grid in
+    /// mind and has to open the mosaic it belongs to.
+    pub fn sample_grid(
+        &mut self,
+        origin_x: f64,
+        origin_y: f64,
+        cell: f64,
+        width: usize,
+        height: usize,
+    ) -> Fallible<Vec<f32>> {
+        if self.mosaics.len() > 1 {
+            return Err(format!(
+                "a grid in projected metres sampled from a DEM of {} mosaics, which are on {} \
+                 different projections",
+                self.mosaics.len(),
+                self.mosaics.len()
+            )
+            .into());
+        }
+        let east = origin_x + width as f64 * cell;
+        let south = origin_y - height as f64 * cell;
+        let reaching: Vec<usize> = (0..self.tiles.len())
+            .filter(|&position| {
+                let tile = &self.tiles[position];
+                tile.min_x() < east
+                    && tile.max_x() > origin_x
+                    && tile.min_y() < origin_y
+                    && tile.max_y() > south
+            })
+            .collect();
+        let mut values = vec![f32::NAN; width * height];
+        for position in reaching {
+            self.load(position)?;
+            let tile = &self.tiles[position];
+            let span = |from: f64, to: f64, limit: usize| {
+                (from.floor().clamp(0.0, limit as f64) as usize)
+                    ..(to.ceil().clamp(0.0, limit as f64) as usize)
+            };
+            let columns = span(
+                (tile.min_x() - origin_x) / cell,
+                (tile.max_x() - origin_x) / cell,
+                width,
+            );
+            let rows = span(
+                (origin_y - tile.max_y()) / cell,
+                (origin_y - tile.min_y()) / cell,
+                height,
+            );
+            for row in rows {
+                let y = origin_y - (row as f64 + 0.5) * cell;
+                for column in columns.clone() {
+                    let x = origin_x + (column as f64 + 0.5) * cell;
+                    // Tiles overlap by a few pixels, so a cell two of them cover keeps whichever
+                    // carried a reading rather than the last one visited.
+                    if let Some(value) = self.read(position, x, y) {
+                        values[row * width + column] = value;
+                    }
+                }
+            }
+        }
+        Ok(values)
     }
 
     /// The cell at a projected point in an already-decoded tile.
@@ -179,25 +330,14 @@ impl Dem {
             return None;
         }
         let (_, values) = self.loaded.as_ref()?;
-        let index = (row as usize * tile.width + column as usize) * tile.bands + self.band;
+        let band = self.mosaics[tile.mosaic].band;
+        let index = (row as usize * tile.width + column as usize) * tile.bands + band;
         let value = values.get(index).copied().unwrap_or(f32::NAN);
         if value.is_finite() && value > NODATA_BELOW {
             Some(value)
         } else {
             None
         }
-    }
-
-    fn tile_at(&self, x: f64, y: f64) -> Option<usize> {
-        let key = (
-            (x / self.index_cell).floor() as i64,
-            (y / self.index_cell).floor() as i64,
-        );
-        self.index
-            .get(&key)?
-            .iter()
-            .copied()
-            .find(|&position| self.tiles[position].contains(x, y))
     }
 
     fn load(&mut self, position: usize) -> Fallible<()> {
@@ -209,7 +349,12 @@ impl Dem {
             return Ok(());
         }
         let tile = &self.tiles[position];
-        let mut decoder = Decoder::new(BufReader::new(File::open(&tile.path)?))?;
+        // The decoder's default ceiling is half a gigabyte of decoded image and it rejects anything
+        // over it outright. San Francisco's tiles are 2.7 MB each and never came near it; the staged
+        // 1 m DEM is 10012 x 10012 float32, 401 MB a tile, and every one of them failed to open.
+        // Holding one is what this already promises to do.
+        let mut decoder =
+            Decoder::new(BufReader::new(File::open(&tile.path)?))?.with_limits(Limits::unlimited());
         let values = match decoder.read_image()? {
             DecodingResult::F32(values) => values,
             DecodingResult::U16(values) => values.iter().map(|&v| f32::from(v)).collect(),
@@ -762,5 +907,150 @@ mod tests {
     fn a_zero_reach_leaves_the_mask_exactly_as_it_was() {
         let set = vec![false, true, false, false];
         assert_eq!(dilate(&set, 2, 2, 0), set);
+    }
+}
+
+#[cfg(test)]
+mod mosaic_tests {
+    use std::fs::{self, File};
+    use std::io::BufWriter;
+    use std::path::{Path, PathBuf};
+
+    use tiff::encoder::{TiffEncoder, colortype};
+    use tiff::tags::Tag;
+
+    use super::{Dem, MosaicTiles};
+    use crate::heights::{SF_CS13, UTM_10N};
+
+    /// A point in each survey's own ground: the CS13 origin under Twin Peaks, and downtown Oakland.
+    const IN_SAN_FRANCISCO: (f64, f64) = (-122.45, 37.75);
+    const IN_THE_EAST_BAY: (f64, f64) = (-122.27, 37.80);
+
+    const SIDE: usize = 40;
+
+    /// A tile file of this test's own. The tests run at once, and one of them truncating a tile
+    /// another is part way through reading is an end-of-file error with nothing to say about the
+    /// code under it.
+    fn scratch(test: &str, name: &str) -> PathBuf {
+        let dir = std::env::temp_dir()
+            .join(format!("tiler-dem-test-{}", std::process::id()))
+            .join(test);
+        fs::create_dir_all(&dir).expect("a scratch directory");
+        dir.join(name)
+    }
+
+    fn georeference<Colour: colortype::ColorType, Writer: std::io::Write + std::io::Seek>(
+        image: &mut tiff::encoder::ImageEncoder<
+            '_,
+            Writer,
+            Colour,
+            tiff::encoder::TiffKindStandard,
+        >,
+        origin_x: f64,
+        origin_y: f64,
+    ) {
+        image
+            .encoder()
+            .write_tag(Tag::ModelPixelScaleTag, &[1.0, 1.0, 0.0][..])
+            .expect("the pixel scale");
+        image
+            .encoder()
+            .write_tag(
+                Tag::ModelTiepointTag,
+                &[0.0, 0.0, 0.0, origin_x, origin_y, 0.0][..],
+            )
+            .expect("the tiepoint");
+    }
+
+    /// One metre cells, `SIDE` of them a side, every cell reading `value`.
+    fn write_flat(path: &Path, origin_x: f64, origin_y: f64, value: f32) {
+        let mut encoder =
+            TiffEncoder::new(BufWriter::new(File::create(path).expect("a tile"))).expect("a tiff");
+        let mut image = encoder
+            .new_image::<colortype::Gray32Float>(SIDE as u32, SIDE as u32)
+            .expect("an image");
+        georeference(&mut image, origin_x, origin_y);
+        image
+            .write_data(&vec![value; SIDE * SIDE])
+            .expect("the samples");
+    }
+
+    /// The same, three bands a pixel — the shape of the 3DEP product, whose ground is one band of
+    /// five.
+    fn write_three_band(path: &Path, origin_x: f64, origin_y: f64, bands: [f32; 3]) {
+        let mut encoder =
+            TiffEncoder::new(BufWriter::new(File::create(path).expect("a tile"))).expect("a tiff");
+        let mut image = encoder
+            .new_image::<colortype::RGB32Float>(SIDE as u32, SIDE as u32)
+            .expect("an image");
+        georeference(&mut image, origin_x, origin_y);
+        let samples: Vec<f32> = std::iter::repeat_n(bands, SIDE * SIDE).flatten().collect();
+        image.write_data(&samples).expect("the samples");
+    }
+
+    /// San Francisco on CS13 reading its only band, the East Bay on UTM 10N reading its third: two
+    /// surveys whose metres are thousands apart and whose bands are not the same number.
+    fn two_surveys(test: &str) -> Dem {
+        let (sf_x, sf_y) = SF_CS13.forward(IN_SAN_FRANCISCO.0, IN_SAN_FRANCISCO.1);
+        let (east_x, east_y) = UTM_10N.forward(IN_THE_EAST_BAY.0, IN_THE_EAST_BAY.1);
+        let west = scratch(test, "cs13.tif");
+        let east = scratch(test, "utm10n.tif");
+        write_flat(&west, sf_x - 20.0, sf_y + 20.0, 110.0);
+        write_three_band(&east, east_x - 20.0, east_y + 20.0, [1.0, 2.0, 33.0]);
+        Dem::open_mosaics(&[
+            MosaicTiles {
+                projection: SF_CS13,
+                band: 0,
+                paths: vec![west],
+            },
+            MosaicTiles {
+                projection: UTM_10N,
+                band: 2,
+                paths: vec![east],
+            },
+        ])
+        .expect("a two-mosaic dem")
+    }
+
+    #[test]
+    fn a_point_is_read_through_its_own_survey_s_projection_and_band() {
+        let mut dem = two_surveys("own-projection-and-band");
+        let west = dem
+            .tile_of(IN_SAN_FRANCISCO.0, IN_SAN_FRANCISCO.1)
+            .expect("san francisco's tile");
+        let east = dem
+            .tile_of(IN_THE_EAST_BAY.0, IN_THE_EAST_BAY.1)
+            .expect("the east bay's tile");
+        assert_ne!(west, east);
+        // One projection for both would put each point in the other grid's empty quarter of the
+        // world, and neither tile would be found at all.
+        assert_eq!(
+            dem.sample_in(west, IN_SAN_FRANCISCO.0, IN_SAN_FRANCISCO.1)
+                .expect("a reading"),
+            Some(110.0)
+        );
+        assert_eq!(
+            dem.sample_in(east, IN_THE_EAST_BAY.0, IN_THE_EAST_BAY.1)
+                .expect("a reading"),
+            Some(33.0)
+        );
+    }
+
+    #[test]
+    fn a_grid_in_projected_metres_is_refused_when_the_mosaics_disagree_on_the_metre() {
+        let test = "mosaics-disagree";
+        let (east_x, east_y) = UTM_10N.forward(IN_THE_EAST_BAY.0, IN_THE_EAST_BAY.1);
+        let error = two_surveys(test)
+            .sample_grid(east_x - 20.0, east_y + 20.0, 1.0, SIDE, SIDE)
+            .expect_err("a refusal");
+        assert!(error.to_string().contains("mosaics"), "{error}");
+
+        // The same grid off the same tile, opened as the one mosaic it belongs to, is answered.
+        let east = scratch(test, "utm10n.tif");
+        let mut alone = Dem::open(&[east], UTM_10N, 2).expect("the east bay's mosaic on its own");
+        let values = alone
+            .sample_grid(east_x - 20.0, east_y + 20.0, 1.0, SIDE, SIDE)
+            .expect("a grid");
+        assert!(values.iter().all(|&value| value == 33.0));
     }
 }

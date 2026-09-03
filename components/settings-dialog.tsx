@@ -602,7 +602,7 @@ export default function SettingsDialog({
           <Section
             id="layers"
             wanted={section === "layers"}
-            caption="The order of the layers menu, and which layers it offers. One order for every city — each shows the layers it has data for."
+            caption="The order of the layers menu, and which layers it offers. One order for every region — each shows the layers it has data for."
           >
             <LayerRows />
           </Section>

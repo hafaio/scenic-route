@@ -250,7 +250,7 @@ in its own band.
 | --- | --- | --- |
 | trees | NYC ForMS "Forestry Tree Points", Socrata `hn5i-inap` | ~899k rows at `tpstructure='Full'` — standing trees only, no stumps or empty pits; `dbh` (trunk inches) is read to size each crown |
 | streets | NYC CSCL street centerline, Socrata `inkn-q76z` | `rw_type` in 1, 5, 6, 7, 10 = street, boardwalk, path/trail, step street, alley, plus pedestrian bridges/tunnels (3, 4) where `nonped != 'V'` |
-| land | NYC borough boundaries (water areas excluded), Socrata `gthc-hcne` | the population the cover distribution is taken over, and the clip that drops New Jersey |
+| land | **NYC**: borough boundaries (water areas excluded), Socrata `gthc-hcne`. **Bay Area**: SF's analysis neighbourhoods, DataSF `j2bu-swwd`, unioned with seven Alameda County city limits (`Administrative_Boundaries/2`) less the Census TIGER tidal water that legal boundary runs out into | the population the cover distribution is taken over, and the clip that drops New Jersey — and, in the Bay Area, the bay itself and southern Marin |
 | canopy | NYC's 2017 LiDAR tree canopy, ArcGIS `TreeCanopy2017_Simplified_1ft` | the *measured* canopy footprint the cover field is blurred from, a committed source, magic `CNPY` — feeds the density blobs and, through them, routing; see below |
 | canopy heights | the 1 m LiDAR canopy height model of Ma et al. 2023, figshare doi `10.6084/m9.figshare.20522895` (`NY_CHM_10Int260m.tif`, CC BY 4.0) | a 243 MiB uint16 GeoTIFF of decimetres over UTM 18N, cached but never committed; `tiler ingest` samples it per canopy polygon and writes the result *into* the `CNPY` file — see below |
 | paths | OSM pedestrian/park ways (footway/path/pedestrian/steps/cycleway/bridleway/track) plus park drives (roads closed to through motor traffic), via Overpass | the park, greenway and car-free-drive network CSCL lacks; a separate committed source, magic `PATH` — see below and "Binary layouts" |
@@ -425,6 +425,57 @@ source-over instead, which double-scales the cross term and comes out ~25% too d
 The same crowns cast the same shadows across the **routing** edges, in the SHDB artifact below, and
 the client composites them there with the same tau — so a shade-seeking route walks the tree line,
 not just the north side of the street.
+
+### The LiDAR building surface (`tiler ndsm`, the East Bay's roof heights)
+
+Oakland and Berkeley publish no building heights worth the name. Overture carries a height for 59%
+of downtown Oakland's footprints and 71% of Berkeley's, and where that height came from a
+machine-learning model rather than an OSM tag it caps out at 32.5 m — every mid-rise flattened, and
+Berkeley's Evans Hall given 25.5 m against a real ~40. Everything else enumerated (both cities' and
+the county's own GIS, the assessor's roll, USA Structures, NGA 2012) is either collapsed the same
+way or has no footprints at all. So the heights are **measured from the 2021 county LiDAR**, which
+means building the surface product nobody staged.
+
+`scripts/lidar.ts` fetches two things and reads neither. The **point cloud** comes from the Entwine
+Point Tile indexes of `CA_AlamedaCo_{1,2,3}_2021` on `s3://usgs-lidar-public` — an octree of small
+LAZ nodes addressed `depth-x-y-z`, walked from the root over the city's window, descending only into
+nodes whose cube reaches it and stopping at the level whose point spacing is 1.83 m. Each level is a
+spatially unbiased subsample of the whole cube rather than a tier of a pyramid, so truncating the
+walk is a resolution cut and not a spatial one, and the levels above the last one are fetched too:
+the rasterizer takes their union. One level finer costs 3.8x the bytes and moves a per-building
+height by 0.74 m mean absolute, which no shade computation can see. All three subprojects are
+queried and unioned — their index cubes overlap and their point coverage does not, so a window
+inside subproject 2's stated bounds can hold none of its points and all of subproject 3's, which is
+exactly what happens over Evans Hall. The **ground** comes from the staged 1 m bare-earth DEM of
+`CA_AlamedaCounty_2021_B21`, picked by 10 km tile out of the project's own link list, from the
+`prd-tnm` S3 mirror rather than rockyweb (24 MB/s against under 1). Both are US-government public
+domain; every node and every tile is its own permanent `.cache/` entry, so an interrupted run
+resumes where it stopped.
+
+`tiler ndsm --params .build/ndsm.json` does the rest, and reads only files. It decodes the nodes,
+keeps the returns of **class 1** — this flight carries no building or vegetation class at all, so
+roofs, walls, trees and rooftop plant are one class, and ground, water and noise are the ones that
+leave — projects them onto the DEM's own UTM 10N grid, and bins them to **1 m cells holding the
+highest return**. Subtracting the DEM cell for cell turns that into height above ground: the exact
+shape of San Francisco's band 2, so the polygon sampler in `crates/tiler/src/heights.rs` reads it
+with nothing changed but the ceiling that drops a cell (65 m is a defect for a crown and the Clorox
+building for a roof). A footprint's height is then the same **75th percentile** a crown's is.
+
+The percentile is the whole trick, and cell-max binning is what lets it work unaided. A wall return
+shares its cell with the roof edge above it and the maximum keeps the roof, so no footprint erosion
+is needed; masts and antennas are real returns (one downtown roof of 84 m carries one at 126.7 m)
+which is why the maximum itself is not taken; and the median reads the podium of a merged
+tower-plus-podium footprint — Overture gives the Kaiser Center one polygon, whose median is 63 m
+against its 119 m tower. Measured over the 32 downtown-Oakland buildings whose height is an OSM
+tag: median error **-3.2 m**, mean absolute **5.5 m**, and 343 of the 345 footprints in the test
+window get a height at all (the two that miss are sheds under 6 m2). Two towers read far under
+their tags — 1900 Broadway at 10.7 m against 120.4, Forma at 3.0 m against 73 — because they were
+building sites when the flight happened; that is the one failure the merge rule below has to catch.
+
+What is built so far is the fetch and the raster: a window, its nDSM, and the measurement. Wiring it
+into `data/buildings/<id>.bin` needs the merge rule (lidar first, an OSM-sourced height where lidar
+reads under 70% of it, an ML height never), the DEM-gap fill for the bay-side tiles the survey
+staged nothing for, and the per-city params — none of which is here yet.
 
 ### The pedestrian and park paths (`PATH` v1)
 
@@ -876,9 +927,10 @@ the first. `bun run scripts/tree-data-fetch.ts --city sf --refresh` takes the fl
 Raw source reads are cached in `.cache/` (gitignored), keyed by the request itself — **including the
 Socrata host**, since two cities can publish the same 4x4 dataset id and an entry serving one city's
 rows for the other's read would parse and count as if it were right — and never expire on their own — including the rasters, which are kept as files rather than as JSON
-because the tiler reads them off disk itself: New York's 243 MiB canopy height model, and San
-Francisco's 651 3DEP tiles at 1.77 GB. The sources move about once a year, so a re-run wants whatever it
-read last time — not a fresher copy it did not ask for.
+because the tiler reads them off disk itself: New York's 243 MiB canopy height model, and the Bay
+Area's two DEM mosaics — San Francisco's 651 tiles at 1.77 GB and the East Bay's 9 at 1.57 GB. The
+sources move about once a year, so a re-run wants whatever it read last time — not a fresher copy it
+did not ask for.
 
 `SOCRATA_APP_TOKEN`, when set, buys a request budget of its own. It only matters on a host whose
 address is shared with strangers, so CI has one and a workstation does not need one.
@@ -1020,8 +1072,8 @@ empty directory still passes.
 `scripts/*.ts` is no longer hashed at all: everything the scripts contribute reaches the stamps as
 plan values (the sun grid, the resolved DEM) or as `data/**` bytes, so an
 ingest-script edit alone is correctly not a rebuild until it changes what it ingests. The DEM mosaic
-enters as its sorted tile names and byte sizes rather than 1.77 GB of pixels, the 3DEP tiles being
-immutable upstream products in content-named cache entries. Measured: a build with nothing changed
+enters as every mosaic's sorted tile names and byte sizes rather than 3.34 GB of pixels, the 3DEP
+tiles being immutable upstream products in content-named cache entries. Measured: a build with nothing changed
 reaches the shade pass in 0.7 s where a cold one took 278 s, and adding one source only the
 commercial pass reads reran that pass alone, leaving the 262 s of caster chunks untouched.
 
@@ -1074,11 +1126,13 @@ serves and report success.
           }
         ]
       },
-      "elevation": {          // omit for a city with no elevation product: flat edges, no terrain overlay
-        "crs": "sf-cs13",     // "sf-cs13" or "utm18n" — a GeoTIFF names an EPSG code, not the parameters
-        "band": 0,            // which band carries the ground (default 0)
-        "tiles": ["/…/x30y415.tif", "…"] // the mosaic, listed rather than pathed through a temp file
-      }
+      "elevation": [          // omit for a city with no elevation product: flat edges, no terrain overlay
+        {                     // one entry per SURVEY; where two overlap on the ground, the first wins
+          "crs": "sf-cs13",   // "sf-cs13", "utm10n" or "utm18n" — a GeoTIFF names an EPSG code, not the parameters
+          "band": 0,          // which band carries the ground (default 0)
+          "tiles": ["/…/x30y415.tif", "…"] // the mosaic, listed rather than pathed through a temp file
+        }
+      ]
     }
   ]
 }
@@ -1569,7 +1623,9 @@ pavement, OSM's own way is the sidewalk edge, and the per-stretch exclusivity un
 `public/routing/<id>.bin` cuts the derived offset back out of exactly the stretches it covers, so a
 side OSM maps end to end gets no derived edge at all. Both sources are needed and neither alone will
 do — OSM's silence is ambiguous (a mapping gap or genuinely no pavement: 40.5% of Bronx km is
-unmapped where only 24.0% is really bare), the survey's is authoritative. Demotion is never deletion:
+unmapped where only 24.0% is really bare), the survey's is authoritative. **The East Bay has no
+survey at all**, so its per-side bits rest on the ambiguous source alone; "The pedestrian network
+here is thinner" below has the measured coverage and what it costs. Demotion is never deletion:
 an alley has no sidewalk, but you walk the alley. Measured, the gate's own bits leave **15.4% of the
 two-sides-a-street an unconditional derivation would place** with no pavement from either source
 (Manhattan 11.0%, Brooklyn 11.1%, Queens 14.9%, the Bronx 17.2%, Staten Island 24.7%) and demote
@@ -1811,6 +1867,22 @@ graph stamp fails. `scripts/ferry-schedule.ts` writes it,
 `src/routing/ferry-schedule.ts` reads it, and the router falls back to the baked figure whenever it
 is missing.
 
+**In the Bay Area that fallback is not a graceful degradation, it is a wrong answer.** New York's
+ferries compete with bridges, so a city routing on the baked figure merely misprices a boat it did
+not have to take. San Francisco and the East Bay are joined by nothing else — every ferry edge there
+is a cut edge of the graph — and the baked figure is a crossing plus half a headway capped at ten
+minutes, available at every hour of the clock. Without this artifact a walk planned at three in the
+morning crosses the bay on a boat that is not sailing, and nothing says so. With it, the ninety-minute
+wait cap makes the edge cost Infinity and the router answers **no route**, which is the truth.
+
+SF Bay Ferry's committed record holds **51 lanes over 7 services, 392 departures**, in effect from
+2026-08-28. What that means for the crossing: the Ferry Building sails to Oakland from 07:05 to
+21:20 on a weekday and Oakland sails back from 05:55 to 17:00, with the evening return going from
+Gate G; **nothing crosses between about 22:40 and 05:55**, and a walk planned inside that window has
+no route between the two halves at all. Note also that the Ferry Building is **three terminals**, not
+one — the feed names Gates E, F and G as separate stops, and they carry different lanes — so a walker
+is routed to the gate their boat leaves from and walks between them on land like anyone else.
+
 Two files per city, both **committed and never LFS-tracked** (raw.githubusercontent serves an LFS
 file's pointer text, which would break the client fetch — the same rule as `public/sheds/`):
 
@@ -1873,20 +1945,39 @@ writes an after-midnight sailing as the previous day's 25:10.
 ### `public/addresses/<city>.bin.gz` — every street address, magic `ADDR` (v1, derived, **committed**)
 
 The routing graph already carries street names, so the part of "312 Court St" that is not on the
-device is the house number. Each city publishes its own address file — NYC AddressPoint
-(`uf93-f8nk`, 967,871 rows) and SF EAS (`ramy-di5m`, 388,568) — and `bun run update-addresses`
-(`scripts/addresses.ts`) reads both through their **CSV export**, which answers a whole dataset in one
-request where the JSON API pages it. The format is frozen in `src/search/address-format.ts`: the
-builder and the client share its house-number helpers and its borough table, so neither can drift
-into its own idea of what "12-34" means.
+device is the house number. A city here is a **list of feeds**, because a city is not always one
+publisher's idea of one:
+
+| city | feed | rows read | read as |
+| --- | --- | ---: | --- |
+| New York | NYC AddressPoint (`uf93-f8nk`) | 967,871 | one CSV export |
+| Bay Area | SF EAS (`ramy-di5m`) | 388,568 | one CSV export |
+| Bay Area | Alameda County `Address_Points` | 296,494 | ArcGIS feature service, paged |
+
+`bun run update-addresses` (`scripts/addresses.ts`) concatenates a city's feeds and encodes them
+**once**, so a name occurring in two of them is two streets in the artifact rather than one run
+spanning the bay. The Socrata feeds come down through their **CSV export**, which answers a whole
+dataset in one request where the JSON API pages it; the county's is a feature service and is paged at
+10,000 rows a request (five times the layer's own page, under `maxRecordCountFactor`) and cached a
+page at a time, the way `scripts/alameda.ts` reads the same server's centreline.
+
+The county publishes 636,418 points for all fourteen of its municipalities. The seven this map covers
+— Alameda, Albany, Berkeley, Emeryville, Oakland, Piedmont, San Leandro, the same set the land and
+the centreline are cut to — are **296,494** of them, and the rest are left where they are: a street
+the graph does not have is a search result that goes nowhere. A floor of 250,000 on what the paged
+read returns fails the build rather than shipping a city whose search box cannot find half its doors.
+
+The format is frozen in `src/search/address-format.ts`: the builder and the client share its
+house-number helpers and its borough table, so neither can drift into its own idea of what "12-34"
+means.
 
 Committed, like `public/ferry-schedule/` and for the same reason — nothing in a build or a deploy
 writes it — and **never LFS-tracked**. A monthly job re-reads both cities and rewrites it, described
 under the search index below. Stored **gzipped**: Pages serves `.bin` uncompressed, so this
 is a third smaller both in the repo and against the Pages cap, and the client inflates it with
-`DecompressionStream`. New York is 2.53 MB gzipped over 967,230 addresses on 9,387 streets, San
-Francisco 0.46 MB over 224,201 on 2,070 — 2.6 and 2.0 bytes an address, which is cheaper than one
-zoom level of any pyramid.
+`DecompressionStream`. New York is 2.53 MB gzipped over 967,230 addresses on 9,387 streets, the Bay
+Area 1.09 MB over 472,223 on 6,414 — 2.6 and 2.3 bytes an address, which is cheaper than one zoom
+level of any pyramid.
 
 | offset | type | field |
 | --- | --- | --- |
@@ -1895,7 +1986,7 @@ zoom level of any pyramid.
 | 5 | varint | name blob bytes |
 | .. | UTF-8 | the street names, `"\n"`-joined, **ascending** |
 | .. | varint | place blob bytes |
-| .. | UTF-8 | the places, `"\n"`-joined, ascending; **empty for a city that is one place** |
+| .. | UTF-8 | the places, `"\n"`-joined, ascending; **empty for a city that is one place** (neither is, today) |
 | .. | varint | street count |
 
 Then that many streets, ordered by (name, place), each of them a `nameIndex`, a `placeIndex`, a
@@ -1917,9 +2008,17 @@ five Court Streets, one in Staten Island and one in Brooklyn; run together they 
 Court St" with whichever the sort happened to put first and show no sign that it had chosen. The
 place costs less than nothing — a borough's run is geographically tight, so the coordinate deltas get
 *smaller*, and New York's 8,215 names spread over 9,387 streets came out 54 KB smaller gzipped than
-the merged file did. San Francisco, which gains the two indices and no split, grew by 6 KB. New York's places are the five boroughs, mapped from AddressPoint's `boroughcode`
-through `NYC_BOROUGHS`; San Francisco is one place, so its place blob is empty, every street's
-`placeIndex` is 0, and the client shows nothing beside the street name.
+the merged file did. New York's places are the five boroughs, mapped from AddressPoint's
+`boroughcode` through `NYC_BOROUGHS`.
+
+The Bay Area's eight are San Francisco and the seven East Bay municipalities, and the artifact is why
+they are needed rather than merely tidy: **5th Street runs in Berkeley, Oakland and Alameda**, Park
+Street in five of the eight, and Park Avenue in three. San Francisco's own rows carried the empty
+place while it was the only half of the city; they carry the city's name now, because a street with
+nothing beside it in a file where every other one says which town it is in reads as a missing label
+rather than as the one place that needs none. `MAX_PLACES` in `src/search/search-format.ts` is 15,
+so the eight leave room for seven more municipalities before the search index's place nibble runs
+out.
 
 A house number is three parts because the two cities disagree about what one is. `major` is the
 number everyone has; `minor` is Queens' hyphen ("25-07" is house 7 on block 25, and sorts by both);
@@ -1931,16 +2030,25 @@ sign on the house says.
 
 Coordinates are quantized to 1e-5° (1.1 m north-south, 0.85 m across at these latitudes) — a pin
 lands on the right building, and a finer grid would spend a byte an address on noise the sources do
-not have. San Francisco's file is **per unit**, so one six-flat is six rows of one address; addresses
+not have. Both Bay Area feeds are **per unit**, so one six-flat is six rows of one address; addresses
 identical in number and in quantized position are collapsed within their street, which is what takes
-its 388,544 readable rows down to 224,201. New York's file is per address and loses only 450 that way.
+the region's 684,921 readable rows down to 472,223. New York's file is per address and loses only 450
+that way.
 
 Street names are stored exactly as the source writes them, upper case and all, and the client
-prettifies for display: keeping both spellings would mean shipping both. Rows that cannot be carried
+prettifies for display (`src/routing/street-names.ts`): keeping both spellings would mean shipping
+both. The East Bay brought a second abbreviation tradition with it — Alameda County writes `AV`,
+`BL`, `TE`, `PW`, `CI` where New York and San Francisco write `AVE`, `BLVD`, `TER`, `PKWY`, `CIR`,
+and 1,131 of the region's 4,500 East Bay streets end in `AV` alone — so the prettifier's table now
+carries both. Only county spellings that occur in **no** New York or San Francisco street name were
+added: its `CRES`, `CV`, `PK` and `PT` do occur in New York, meaning the same words, and expanding
+them would rewrite twenty-six of its names and the committed search index built over them. Rows that cannot be carried
 are **counted and reported** rather than dropped quietly — 191 in New York, all a shape the format has
-no room for (a letter inside the hyphen, "2701-B8", the buildings of one complex), and 24 in San
-Francisco, all half addresses whose suffix is "½" rather than a letter. A New York row whose
-`boroughcode` is not one of the five would join them; today every row has one.
+no room for (a letter inside the hyphen, "2701-B8", the buildings of one complex), and 141 in the Bay
+Area — 24 San Francisco half addresses whose suffix is "½" rather than a letter, and 117 Alameda
+County ones written the other way round, "489.5". A New York row whose `boroughcode` is not one of
+the five would join them, as would a county row whose `MUN` is not one of the seven; today every row
+has one.
 
 ### `data/places/<city>.jsonl` — the named places (derived, gitignored, **intermediate**)
 
@@ -2442,19 +2550,47 @@ the client's to take.
 The city's ground as three **data channels**, baked by the elevation pass from the DEM mosaic.
 z9-z16; a tile with no ground under it is not written and the client reads the 404 as transparent.
 
-The DEM is several hundred one-metre GeoTIFFs on the city's own projected grid — for San Francisco
-the 3DEP campaign `CA_SanFrancisco_1_B23`, 651 five-band float32 COGs (DTM, DSM, canopy height,
-slope, aspect), CC0, enumerated from a STAC collection and cached whole (1.7 GB) but never shipped.
+The DEM is several hundred one-metre GeoTIFFs on a projected grid, and a city may need **more than
+one survey**: the Bay Area's two halves were flown years apart by different programmes, on grids that
+share no origin.
+
+| mosaic | campaign | tiles | cached | product | grid |
+| --- | --- | ---: | ---: | --- | --- |
+| San Francisco | `CA_SanFrancisco_1_B23` (NASA WERK) | 651 | 1.77 GB | five-band float32 COG — DTM, DSM, canopy height, slope, aspect | NAD83(2011) / San Francisco CS13, `sf-cs13` |
+| East Bay | `CA_AlamedaCounty_2021_B21` (USGS 3DEP) | 9 | 1.57 GB | single-band bare-earth DTM | UTM zone 10N, `utm10n` |
+
+Both are public domain and keyless, and neither is ever shipped — they are cached, sampled, and then
+not needed again. San Francisco's is enumerated from a STAC collection. The East Bay's is fetched
+**through `scripts/lidar.ts`**, which already stages exactly these nine tiles for the roof-height
+pass, off the project's own `0_file_download_links.txt` — a plain list with no API in front of it —
+and names its cache entries after the campaign and the square. Sharing that fetch is not tidiness:
+the tiles are 1.57 GB, and two functions asking for the same nine files under two names would
+download the county twice and keep both copies. They come off **`prd-tnm.s3.amazonaws.com`**, the
+bucket USGS stages to; the same files on `rockyweb.usgs.gov` come at under a megabyte a second.
+
+A 3DEP project stages **whole 10 km squares**, and this one stages nothing for the bay-dominated
+blocks off Bay Farm Island — quite correctly, since they are water. So what `scripts/elevation.ts`
+checks before it uses the answer is not that the grid is complete but that **no square holding a
+street is missing from it**: every vertex of the region's land is projected onto the same UTM grid,
+and the eight squares they land in all have to be staged. The region's own box would be the wrong
+test — its south-west corner is open bay, twelve kilometres off Bay Farm — and a square with no tile
+reads downstream as flat ground rather than as absent ground, which is why it is checked at all.
+
+Where the two mosaics overlap — the bay is flown from both sides — **the plan's order settles it**,
+and San Francisco leads, because its own five-band product is what this city was measured against.
+Its band 2 is also the only canopy-height source here; the East Bay's DTM has no such band, which is
+why the tree-shade pyramid does not travel with the elevation.
+
 `crates/tiler/src/dem.rs` reads a set of such tiles as one surface and resamples it into a regular
 longitude/latitude field, which is what the pyramid and the graph's relief bake each read rather than
 the mosaic itself. Within one resample every tile is decoded exactly once — the cells are visited
 grouped by tile, and visiting them in grid order instead re-decodes every tile on every row, which
 measured 37,204 decodes of 651 tiles against 616. Two readers want it, though, and neither field is
 written down: the elevation pass at z14 and the graph pass at z15, over different grids and different
-bounds. So a build resamples it twice, once, or not at all — a city's mosaic is opened only for the
+bounds. So a build resamples it twice, once, or not at all — a city's mosaics are opened only for the
 readers that are actually going to run, and the graph's relief column is cached, so a build whose
 terrain and graph are both current opens nothing. What the one process buys is the open: when both
-do run, `build` indexes the 1.77 GB of tiles once and hands the same `Dem` to both.
+do run, `build` indexes the 3.34 GB of tiles once and hands the same `Dem` to both.
 
 Nothing in the tile is coloured. **R** is the height across the city's own range, **G** the relief
 shade divided by the most `hillshade` can return (1.15, which is what fits the brightening a lit
@@ -3557,3 +3693,69 @@ and `boxOf(land)` feeds the manifest bounds, every Overpass query and the whole 
 tree register's coordinates are only as good as its geocoder: 55 SF street trees carry a placeholder
 in the north Pacific, which is why the ingest land-clips the points before taking the city's bounds
 over them.
+
+### The Bay Area's second half: the East Bay
+
+`sf` is San Francisco *and* the East Bay under one id, twelve kilometres of water apart and joined
+only by the ferry edges `scripts/ferries.ts` builds — the arrangement Staten Island already has. The
+id stays `sf`, because it names every artifact on disk, every service-worker cache key and every link
+anyone has already shared; the *name* is "Bay Area", because the region is what this grows into and
+the two halves it holds today are where it starts rather than what it is.
+
+The East Bay half is seven contiguous bayshore municipalities — Albany, Berkeley, Emeryville,
+Oakland, Piedmont, Alameda and San Leandro. They are a set rather than a list: one Alameda County
+centreline and one county address file cover exactly them, so this is one ingest the way New York's
+five boroughs are; Piedmont is an enclave that would otherwise leave a hole in the middle of Oakland;
+and stopping at San Leandro keeps `boxOf(land)` on the built-up shore instead of carrying it over the
+ridge to Livermore. Hayward and everything south of it, the Livermore Valley cities and the
+unincorporated pockets below San Leandro are out — a later decision, not an oversight.
+
+Which brings the third trap, after the two above: **nobody publishes a shoreline-clipped boundary
+here.** Alameda County's city limits are legal limits, and Oakland's, Berkeley's and Alameda's run
+out over their tidelands as far as −122.347, most of the way to Yerba Buena Island. So the shoreline
+is *subtracted* rather than read — Census TIGER areal hydrography, codes H2051 (bay, estuary, gulf or
+sound) and H2053 (ocean), which between them are San Francisco Bay, the Oakland Estuary that
+separates Alameda island from Oakland, San Leandro Bay and Seaplane Harbour. Lakes and reservoirs
+carry their own codes and are deliberately left in the land: Lake Merritt has no streets on it, and
+punching it out would only add rings. Southern Marin needs no subtracting at all — Sausalito is
+nearer the Ferry Building than San Leandro is, so the bounding rectangle reaches it, but no Marin
+polygon is read, and it is absent for exactly the reason New Jersey is absent from New York.
+
+#### The pedestrian network here is thinner, and that is the honest headline
+
+Read this before trusting an East Bay route. The graph's per-side existence gate wants two
+independent sources — OSM's own sidewalk ways, and the city's own survey — because OSM's silence is
+ambiguous between a mapping gap and genuinely bare kerb. **In the East Bay there is no survey at
+all.** Neither Alameda County nor Oakland's nor Berkeley's open-data portals publish one; the
+searches that turned up New York's planimetric ROW polygons and San Francisco's 2014 Sidewalk Widths
+study turn up damage service-requests here and nothing else. So the per-side bits rest on OSM alone,
+and OSM here is half mapped:
+
+| place | OSM sidewalk ways | crossing ways | road ways | sidewalk : road |
+| --- | ---: | ---: | ---: | ---: |
+| San Francisco | 14,629 | 13,353 | 12,733 | **1.15** |
+| Berkeley | 1,212 | 1,096 | 2,938 | **0.41** |
+| Oakland | 3,248 | 3,212 | 10,009 | **0.32** |
+
+Counted inside each place's OSM admin boundary on 2026-08-27, over the same way classes the SWLK and
+STRT extracts use (`footway=sidewalk`, `footway=crossing`, and
+`residential|primary|secondary|tertiary|unclassified|living_street` for the roads). Splitting
+granularity varies between mappers, so the ratio is the number to read and not the raw counts. Only
+Oakland and Berkeley were measured; Alameda, Albany, Emeryville, Piedmont and San Leandro were not,
+and there is no reason to expect them to be better.
+
+What that means on the ground: **many East Bay streets will carry a sidewalk on one side or on
+neither**, where in San Francisco the pair is usually drawn or surveyed. A street both of whose sides
+come back silent is demoted to its centreline as a path edge — never deleted, so you can still walk
+it, but the route is drawn down the middle of the road rather than along a pavement, and nothing
+per-side (the shade bake, the tree cover, the shed placement) has two sides to distinguish. Expect
+more of that here than in either existing city.
+
+Two things could narrow the gap, and neither is done. Oakland and Berkeley tag `sidewalk=*` on 3,880
+and 2,231 *roads* respectively — a per-side statement on the centreline itself, which is exactly what
+the survey source supplies elsewhere, and which this pipeline does not read from OSM at all. And the
+existence gate's build guards (`MAX_DROPPED_SIDEWALK_FRACTION`, `MAX_CELL_DEMOTED_SHARE`, both 0.30
+in `crates/tiler/src/graph.rs`) were calibrated against two cities that both have a survey; a region
+where half the streets have neither source is the case they were never held against, so whichever
+way they land on the first full build is information rather than a verdict.
+

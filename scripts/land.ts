@@ -1,6 +1,7 @@
 // Each city's land polygons and the shoreline test every ingest clips its source with, shared so
 // the streets, paths, trees, canopy, and scenic-factor ingests all cut the same coastline.
 
+import { fetchEastBayLand } from "./alameda";
 import { boxOf } from "./geometry";
 import { buildLandTest } from "./land-filter";
 import type { Bounds } from "./manifest";
@@ -65,8 +66,25 @@ export async function landContextOf(
   return { onLand: buildLandTest(land), box: boxOf(land) };
 }
 
+// The Bay Area as one shape: San Francisco's analysis neighbourhoods and the seven East Bay cities,
+// unioned. The two are separated by twelve kilometres of water and joined only by the ferry edges
+// scripts/ferries.ts builds — the same arrangement Staten Island has in New York, and the reason the
+// union is a plain concatenation: the parts do not touch, so there is nothing to merge.
+//
+// Southern Marin lies inside the rectangle this reaches over — Sausalito is nearer the Ferry
+// Building than San Leandro is — and is excluded the way New Jersey is excluded from New York, by
+// never being entered. No Marin polygon is read here, so every source clipped to this shape simply
+// has no Marin in it.
+export async function fetchBayAreaLand(): Promise<Polygon[]> {
+  const [sanFrancisco, eastBay] = await Promise.all([
+    fetchSfLand(),
+    fetchEastBayLand(),
+  ]);
+  return [...sanFrancisco, ...eastBay];
+}
+
 // For the standalone ingests, which are handed a city id on the command line and nothing else.
 export async function loadLandContext(cityId: string): Promise<LandContext> {
-  const fetchLand = cityId === "sf" ? fetchSfLand : fetchNycLand;
+  const fetchLand = cityId === "sf" ? fetchBayAreaLand : fetchNycLand;
   return await landContextOf(fetchLand);
 }

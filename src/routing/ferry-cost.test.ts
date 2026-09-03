@@ -3,176 +3,12 @@ import {
   edgeMultiplier,
   effSeconds,
   FERRY_FLOOR,
-  type RouteWeights,
   WALK_METERS_PER_SECOND,
 } from "./cost";
-import {
-  clearEdgePathCache,
-  NO_GEOMETRY,
-  otherEnd,
-  type RoutingGraph,
-} from "./graph";
+import { buildGraph, snapAtNode, weights } from "./ferry.fixture";
+import { clearEdgePathCache, otherEnd, type RoutingGraph } from "./graph";
 import { findRoute, type RouteResult } from "./search";
-import { haversineMeters, type Snap } from "./snap";
-
-const SCALE = 1e-6;
-const NAME_NONE = 0xffff;
-const KIND_SIDEWALK = 0;
-const KIND_FERRY = 4;
-
-const weights = (
-  tree: number,
-  ferry: number,
-  allowFerries: boolean,
-): RouteWeights => ({
-  tree,
-  ferry,
-  landmark: 0,
-  art: 0,
-  highway: 0,
-  hill: 0,
-  commercial: 0,
-  industrial: 0,
-  historic: 0,
-  shade: 0,
-  shelter: 0,
-  allowFerries,
-  allowSheds: true,
-});
-
-interface NodeSpec {
-  lat: number;
-  lng: number;
-}
-
-interface EdgeSpec {
-  a: number;
-  b: number;
-  ferry: boolean;
-  cover: number; // 0..1, walking edges only
-  durationSeconds: number; // ferry edges only
-}
-
-// Build a synthetic routing graph from nodes and edges. Every edge is a straight line, so its
-// length is the geodesic span between its two (quantized-and-reconstructed) endpoints — exactly the
-// coordinates the A* heuristic reads, which keeps the walking lower bound admissible by construction.
-function buildGraph(nodes: NodeSpec[], edges: EdgeSpec[]): RoutingGraph {
-  const nodeCount = nodes.length;
-  const edgeCount = edges.length;
-  const nodeQx = new Int32Array(nodeCount);
-  const nodeQy = new Int32Array(nodeCount);
-  for (let node = 0; node < nodeCount; node++) {
-    nodeQx[node] = Math.round(nodes[node].lng / SCALE);
-    nodeQy[node] = Math.round(nodes[node].lat / SCALE);
-  }
-  const nodeLat = (node: number): number => nodeQy[node] * SCALE;
-  const nodeLng = (node: number): number => nodeQx[node] * SCALE;
-
-  const edgeNodeA = new Uint32Array(edgeCount);
-  const edgeNodeB = new Uint32Array(edgeCount);
-  const edgeLength = new Float32Array(edgeCount);
-  const edgeCover = new Uint8Array(edgeCount);
-  const edgeKindSide = new Uint8Array(edgeCount);
-  const edgeDurationSeconds = new Float32Array(edgeCount);
-  const edgeNameId = new Uint16Array(edgeCount).fill(NAME_NONE);
-  const edgeGeomOffset = new Uint32Array(edgeCount).fill(NO_GEOMETRY);
-  const edgeGeomCount = new Uint16Array(edgeCount);
-  const ferryEdges: number[] = [];
-  const adjacency: number[][] = Array.from({ length: nodeCount }, () => []);
-  let maxCoverByte = 0;
-  for (let edge = 0; edge < edgeCount; edge++) {
-    const spec = edges[edge];
-    edgeNodeA[edge] = spec.a;
-    edgeNodeB[edge] = spec.b;
-    edgeLength[edge] = haversineMeters(
-      nodeLat(spec.a),
-      nodeLng(spec.a),
-      nodeLat(spec.b),
-      nodeLng(spec.b),
-    );
-    if (spec.ferry) {
-      edgeKindSide[edge] = KIND_FERRY;
-      edgeDurationSeconds[edge] = spec.durationSeconds;
-      ferryEdges.push(edge);
-    } else {
-      edgeKindSide[edge] = KIND_SIDEWALK;
-      const coverByte = Math.round(spec.cover * 255);
-      edgeCover[edge] = coverByte;
-      maxCoverByte = Math.max(maxCoverByte, coverByte);
-    }
-    adjacency[spec.a].push(edge);
-    adjacency[spec.b].push(edge);
-  }
-
-  const csr = new Uint32Array(nodeCount + 1);
-  const flatAdjacency = new Uint32Array(2 * edgeCount);
-  let cursor = 0;
-  for (let node = 0; node < nodeCount; node++) {
-    csr[node] = cursor;
-    for (const edge of adjacency[node]) {
-      flatAdjacency[cursor] = edge;
-      cursor += 1;
-    }
-  }
-  csr[nodeCount] = cursor;
-
-  return {
-    nodeCount,
-    edgeCount,
-    originLng: 0,
-    originLat: 0,
-    scale: SCALE,
-    nodeQx,
-    nodeQy,
-    csr,
-    adjacency: flatAdjacency,
-    edgeNodeA,
-    edgeNodeB,
-    edgeLength,
-    edgeGeomOffset,
-    edgeGeomCount,
-    edgeCover,
-    edgeNameId,
-    edgeKindSide,
-    maxCover: maxCoverByte / 255,
-    edgeLandmark: new Uint8Array(edgeCount),
-    edgeArt: new Uint8Array(edgeCount),
-    edgeHighway: new Uint8Array(edgeCount),
-    edgeAscent: new Uint8Array(edgeCount),
-    edgeDescent: new Uint8Array(edgeCount),
-    maxRelief: 0,
-    edgeCommercial: new Uint8Array(edgeCount),
-    edgeIndustrial: new Uint8Array(edgeCount),
-    edgeHistoric: new Uint8Array(edgeCount),
-    maxLandmark: 0,
-    maxArt: 0,
-    maxCommercial: 0,
-    maxIndustrial: 0,
-    maxHistoric: 0,
-    shade: null,
-    edgeDurationSeconds,
-    ferryEdges: Uint32Array.from(ferryEdges),
-    names: [],
-    geometry: new Uint8Array(0),
-  } as unknown as RoutingGraph;
-}
-
-// A start/dest snap sitting exactly on a node, entered through one of its incident walking edges
-// (snaps never land on a ferry). metersFromA is 0 or the full length so the virtual point coincides
-// with the node.
-function snapAtNode(graph: RoutingGraph, node: number, walkEdge: number): Snap {
-  const atA = graph.edgeNodeA[walkEdge] === node;
-  return {
-    edge: walkEdge,
-    metersFromA: atA ? 0 : graph.edgeLength[walkEdge],
-    point: {
-      lat: graph.nodeQy[node] * graph.scale,
-      lng: graph.nodeQx[node] * graph.scale,
-    },
-    distanceMeters: 0,
-    component: 0,
-  };
-}
+import type { Snap } from "./snap";
 
 // The reference optimum: a plain Dijkstra (heuristic identically 0, no early exit) over effective
 // seconds, using exactly findRoute's virtual-source and virtual-goal partial-edge semantics.
@@ -319,6 +155,26 @@ const graphB = buildGraph(
 const walkEdgeB0 = 3; // walking edge 0 -> 4, for a snap at node 0
 const walkEdgeB3 = 4; // walking edge 4 -> 3, for a snap at node 3
 
+// Fixture C — the Bay Area's shape: two land masses with NO walking edge between them, joined by
+// one ferry. Every fixture above has a walk to fall back on, so none of them asks what the heuristic
+// does when the only path crosses water five times faster than anyone walks. Kept separate from the
+// scenarios above because barring its ferry leaves no path at all, and those assert one.
+const graphC = buildGraph(
+  [
+    { lat: 37.7749, lng: -122.4394 }, // 0 west, a long walk in
+    { lat: 37.7955, lng: -122.3937 }, // 1 west pier
+    { lat: 37.7955, lng: -122.2777 }, // 2 east pier
+    { lat: 37.8272, lng: -122.2513 }, // 3 east, a long walk out
+  ],
+  [
+    { a: 0, b: 1, ferry: false, cover: 0.3, durationSeconds: 0 },
+    { a: 1, b: 2, ferry: true, cover: 0, durationSeconds: 1500 },
+    { a: 2, b: 3, ferry: false, cover: 0.3, durationSeconds: 0 },
+  ],
+);
+const walkEdgeC0 = 0; // walking edge 0 -> 1
+const walkEdgeC3 = 2; // walking edge 2 -> 3
+
 const TREE_WEIGHTS = [0, 0.4, 1];
 const FERRY_WEIGHTS = [0, 0.4, 1];
 const ALLOW = [true, false];
@@ -392,6 +248,45 @@ test("A* effective cost matches the Dijkstra oracle across the weight matrix", (
   }
   // 3 scenarios x 3 tree x 3 ferry x 2 allow.
   expect(combinations).toBe(54);
+});
+
+test("the sole crossing is optimal, and barring it leaves no route", () => {
+  const start = snapAtNode(graphC, 0, walkEdgeC0);
+  const dest = snapAtNode(graphC, 3, walkEdgeC3);
+  for (const treeWeight of TREE_WEIGHTS) {
+    for (const ferryWeight of FERRY_WEIGHTS) {
+      const label = `C tw=${treeWeight} fw=${ferryWeight}`;
+      const result = findRoute(
+        graphC,
+        start,
+        dest,
+        weights(treeWeight, ferryWeight, true),
+      );
+      expect(result, label).not.toBeNull();
+      const optimum = dijkstraCost(
+        graphC,
+        start,
+        dest,
+        treeWeight,
+        ferryWeight,
+        true,
+      );
+      const cost = effectiveCostOf(
+        graphC,
+        result as RouteResult,
+        treeWeight,
+        ferryWeight,
+      );
+      // A twelve-kilometre boat against a 1.3 m/s walking bound is the widest gap the ferry credit
+      // has to close; over-estimate here and the search would settle for something worse or, with
+      // nothing worse to settle for, wander.
+      expect(Math.abs(cost - optimum), label).toBeLessThan(1e-3);
+      expect(
+        findRoute(graphC, start, dest, weights(treeWeight, ferryWeight, false)),
+        label,
+      ).toBeNull();
+    }
+  }
 });
 
 test("the big-shortcut route boards the ferry when it is allowed", () => {

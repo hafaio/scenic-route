@@ -35,7 +35,7 @@ use std::time::Instant;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::dem::Dem;
+use crate::dem::{Dem, MosaicTiles};
 use crate::manifest::{City, Manifest};
 use crate::{
     Fallible, canopy, caster_chunks, chunks, commercial, elevation, genus_field, graph,
@@ -109,7 +109,7 @@ const SHADE_CODE: [&str; 6] = [
 /// no scope is a function of, and the one edit that leaves a stale pyramid standing. Nothing but
 /// that test reads it, since the epoch these belong to is every file the plan carries.
 #[cfg(test)]
-const OUTSIDE_SHADE: [&str; 25] = [
+const OUTSIDE_SHADE: [&str; 26] = [
     "association.rs",
     "build.rs",
     "canopy.rs",
@@ -131,6 +131,7 @@ const OUTSIDE_SHADE: [&str; 25] = [
     "ingest.rs",
     "invariants.rs",
     "main.rs",
+    "ndsm.rs",
     "relief.rs",
     "sampling.rs",
     "scenic.rs",
@@ -147,9 +148,13 @@ const BUILD_FILES: [&str; 4] = [
     "rust-toolchain.toml",
 ];
 
-/// One city's DEM. The mosaic is several hundred tiles, so the plan lists them; the projection is
-/// named because a GeoTIFF carries an EPSG code and not the parameters, so something has to know
-/// what 7131 is.
+/// One mosaic of a city's DEM. A mosaic is several hundred tiles, so the plan lists them; the
+/// projection is named because a GeoTIFF carries an EPSG code and not the parameters, so something
+/// has to know what 7131 is.
+///
+/// A city carries a LIST of these, because a city need not lie inside one survey: the Bay Area's
+/// ground is San Francisco's five-band 3DEP product on the city's own state-plane zone plus the East
+/// Bay's staged bare-earth DEM on UTM 10N, and the two share neither a grid nor a band.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Elevation {
@@ -172,10 +177,10 @@ struct PlanCity {
     /// The sun-position grid, absent for a city whose year yields no above-horizon bin.
     #[serde(default)]
     shade: Option<shade::Params>,
-    /// Absent for a city with no elevation product; then every edge is flat and no terrain overlay
+    /// Empty for a city with no elevation product; then every edge is flat and no terrain overlay
     /// is rendered.
     #[serde(default)]
-    elevation: Option<Elevation>,
+    elevation: Vec<Elevation>,
 }
 
 fn classifies_alleys() -> bool {
@@ -651,30 +656,41 @@ fn field(digest: &mut Sha256, bytes: &[u8]) {
     digest.update([0]);
 }
 
-/// A mosaic's identity: which tiles, how big, and how they are georeferenced — not 1.77 GB of
-/// pixels. The 3DEP tiles are immutable upstream products fetched into content-named cache entries,
-/// so hashing them every build would buy nothing for the ten seconds of reading.
-fn dem_identity(digest: &mut Sha256, elevation: Option<&Elevation>) -> Fallible<()> {
-    let Some(elevation) = elevation else {
+/// A DEM's identity: for every mosaic, which tiles, how big, and how they are georeferenced — not
+/// 1.77 GB of pixels. The 3DEP tiles are immutable upstream products fetched into content-named
+/// cache entries, so hashing them every build would buy nothing for the ten seconds of reading.
+///
+/// Every mosaic, so a city that gains a second survey re-runs the elevation and relief passes rather
+/// than keeping a pyramid that stops at the county line. In the plan's order, which is the order the
+/// tiles are read in and so the order an overlap between two surveys is settled by; the tiles within
+/// a mosaic are sorted, since which cache entries a fetch happened to fill first says nothing.
+fn dem_identity(digest: &mut Sha256, elevation: &[Elevation]) -> Fallible<()> {
+    if elevation.is_empty() {
         field(digest, b"no elevation");
         return Ok(());
-    };
-    field(digest, elevation.crs.as_bytes());
-    field(digest, &elevation.band.to_le_bytes());
-    let mut tiles: Vec<(String, u64)> = elevation
-        .tiles
-        .iter()
-        .map(|tile| {
-            let bytes = fs::metadata(tile)
-                .map_err(|error| format!("{}: {error}", tile.display()))?
-                .len();
-            Ok((file_name(tile), bytes))
-        })
-        .collect::<Fallible<Vec<(String, u64)>>>()?;
-    tiles.sort();
-    for (name, bytes) in tiles {
-        field(digest, name.as_bytes());
-        field(digest, &bytes.to_le_bytes());
+    }
+    // The counts, so the boundary between one mosaic's tiles and the next mosaic's projection is in
+    // the digest and not merely implied by the order the fields happen to fall in.
+    field(digest, &elevation.len().to_le_bytes());
+    for mosaic in elevation {
+        field(digest, mosaic.crs.as_bytes());
+        field(digest, &mosaic.band.to_le_bytes());
+        field(digest, &mosaic.tiles.len().to_le_bytes());
+        let mut tiles: Vec<(String, u64)> = mosaic
+            .tiles
+            .iter()
+            .map(|tile| {
+                let bytes = fs::metadata(tile)
+                    .map_err(|error| format!("{}: {error}", tile.display()))?
+                    .len();
+                Ok((file_name(tile), bytes))
+            })
+            .collect::<Fallible<Vec<(String, u64)>>>()?;
+        tiles.sort();
+        for (name, bytes) in tiles {
+            field(digest, name.as_bytes());
+            field(digest, &bytes.to_le_bytes());
+        }
     }
     Ok(())
 }
@@ -865,7 +881,7 @@ impl<'a> Stamps<'a> {
     fn elevation(&mut self, city: &City, planned: &PlanCity) -> Fallible<String> {
         let mut digest = self.open("elevation");
         field(&mut digest, city.id.as_bytes());
-        dem_identity(&mut digest, planned.elevation.as_ref())?;
+        dem_identity(&mut digest, &planned.elevation)?;
         let land = self.plan.data.join("land").join(&city.field.land.file);
         self.file(&mut digest, &land)?;
         Ok(hex(&digest.finalize()))
@@ -975,7 +991,7 @@ impl<'a> Stamps<'a> {
 
         let mut relief = self.open("graph-relief");
         field(&mut relief, base.as_bytes());
-        dem_identity(&mut relief, planned.elevation.as_ref())?;
+        dem_identity(&mut relief, &planned.elevation)?;
         let mut commercial_key = self.open("graph-commercial");
         field(&mut commercial_key, base.as_bytes());
         field(&mut commercial_key, commercial.as_bytes());
@@ -1542,15 +1558,20 @@ pub fn run(plan_file: &Path, jobs: Option<usize>, selection: &Selection) -> Fall
                 elevation_passes[index].is_fresh(),
             )
             .runs();
-        if let Some(elevation) = &planned.elevation
-            && (terrain_runs || graph_reads_dem)
-        {
-            let dem = Dem::open(
-                &elevation.tiles,
-                heights::projection(&elevation.crs)?,
-                elevation.band,
-            )
-            .map_err(|error| format!("{}'s DEM: {error}", planned.id))?;
+        if !planned.elevation.is_empty() && (terrain_runs || graph_reads_dem) {
+            let mosaics = planned
+                .elevation
+                .iter()
+                .map(|mosaic| {
+                    Ok(MosaicTiles {
+                        projection: heights::projection(&mosaic.crs)?,
+                        band: mosaic.band,
+                        paths: mosaic.tiles.clone(),
+                    })
+                })
+                .collect::<Fallible<Vec<MosaicTiles>>>()?;
+            let dem = Dem::open_mosaics(&mosaics)
+                .map_err(|error| format!("{}'s DEM: {error}", planned.id))?;
             dems.insert(planned.id.as_str(), dem);
         }
     }
@@ -1671,7 +1692,7 @@ pub fn run(plan_file: &Path, jobs: Option<usize>, selection: &Selection) -> Fall
         let verdict = selection.verdict(PassName::Elevation, Some(&city.id), pass.is_fresh());
         if !selection.selected(PassName::Elevation, Some(&city.id)) {
             verdict.announce(Some(&city.id));
-        } else if planned.elevation.is_none() {
+        } else if planned.elevation.is_empty() {
             pass.clear()?;
         } else if !verdict.runs() {
             verdict.announce(Some(&city.id));
@@ -1809,7 +1830,7 @@ pub fn run(plan_file: &Path, jobs: Option<usize>, selection: &Selection) -> Fall
                     .canopy
                     .as_ref()
                     .map(|layer| plan.data.join("canopy").join(&layer.file)),
-                elevation_bounds: planned.elevation.is_some().then_some(city.bounds),
+                elevation_bounds: (!planned.elevation.is_empty()).then_some(city.bounds),
                 alleys: planned.alleys,
                 cache: Some(graph_keys[index].clone()),
                 probe: false,
@@ -2111,7 +2132,7 @@ mod tests {
                                       "samples": [{"east": 0.5, "north": 0.5,
                                                    "shadowPerHeight": 2.7}]}]}},
               {"id": "sf", "alleys": false,
-               "elevation": {"crs": "sf-cs13", "band": 0, "tiles": ["a.tif", "b.tif"]}}
+               "elevation": [{"crs": "sf-cs13", "band": 0, "tiles": ["a.tif", "b.tif"]}]}
             ]"#,
         );
 
@@ -2126,7 +2147,8 @@ mod tests {
         assert_eq!(nyc.source(Path::new("data"), Source::Art), None);
         let sf = &plan.cities[1];
         assert!(!sf.alleys);
-        assert_eq!(sf.elevation.as_ref().expect("a dem").tiles.len(), 2);
+        assert_eq!(sf.elevation.len(), 1);
+        assert_eq!(sf.elevation[0].tiles.len(), 2);
     }
 
     #[test]
@@ -3424,7 +3446,7 @@ mod tests {
                 r#"[{"id": "nyc", "alleys": true,
                      "sources": ["sidewalks", "landmarks", "art", "highways"]},
                     {"id": "sf", "alleys": false, "sources": ["sidewalks", "buildings"],
-                     "elevation": {"crs": "sf-cs13", "band": 0, "tiles": ["a.tif"]}}]"#
+                     "elevation": [{"crs": "sf-cs13", "band": 0, "tiles": ["a.tif"]}]}]"#
             )),
             before
         );

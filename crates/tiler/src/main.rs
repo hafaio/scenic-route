@@ -35,6 +35,7 @@ mod industrial;
 mod ingest;
 mod invariants;
 mod manifest;
+mod ndsm;
 mod raster;
 mod relief;
 mod sampling;
@@ -117,6 +118,14 @@ enum Command {
         #[arg(long)]
         report: PathBuf,
     },
+    /// Bin a LiDAR point cloud into a height-above-ground raster and measure the roof height of
+    /// every footprint over it. The cloud and the ground tiles arrive cached by scripts/lidar.ts.
+    Ndsm {
+        #[arg(long)]
+        params: PathBuf,
+        #[arg(long)]
+        report: PathBuf,
+    },
     /// Stamp what the graph's durable key space is a function of — the plan's own per-city sources
     /// decision, and the bytes of the files it names — for the shed guard. Builds nothing.
     GraphInputs {
@@ -151,6 +160,7 @@ fn run() -> Fallible<()> {
             force,
         } => build::run(&plan, jobs, &build::Selection::new(&only, force)?),
         Command::Ingest { params, report } => ingest::run(&params, &report),
+        Command::Ndsm { params, report } => ndsm::run(&params, &report),
         Command::GraphInputs { plan, report } => build::graph_inputs(&plan, &report),
         // The durable-key probe: the graph pipeline over a committed fixture, reported as the
         // `keyHash` of its stats line. It is handed only the three sources that can put a key in the

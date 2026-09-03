@@ -221,8 +221,8 @@ export default function Toolbar({
                 Check again
               </button>
             ) : null}
-            {/* One row that opens the picker, rather than one row per city: the menu holds the
-                app's own actions, and a list that grows with every city added would crowd them
+            {/* One row that opens the picker, rather than one row per region: the menu holds the
+                app's own actions, and a list that grows with every region added would crowd them
                 out and eventually scroll. */}
             {CITIES.length > 1 ? (
               <button
@@ -236,7 +236,7 @@ export default function Toolbar({
               >
                 <span className="flex min-w-0 items-center gap-2">
                   <FiMap className="shrink-0" />
-                  City
+                  Region
                 </span>
                 <span className="ml-auto truncate text-xs font-normal text-slate-400 dark:text-slate-500">
                   {city.name}

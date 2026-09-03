@@ -95,6 +95,17 @@ pub const UTM_18N: Tmerc = Tmerc {
     false_northing: 0.0,
 };
 
+/// NAD83 / UTM zone 10N — EPSG:26910, the staged 1 m bare-earth DEM over the East Bay and the grid
+/// the surface model binned from its point cloud is written on. Plain NAD83 rather than the 2011
+/// realization, which is the same five numbers.
+pub const UTM_10N: Tmerc = Tmerc {
+    central_meridian: -123.0,
+    lat_origin: 0.0,
+    scale_factor: 0.9996,
+    false_easting: 500_000.0,
+    false_northing: 0.0,
+};
+
 /// NAD83(2011) / San Francisco CS13 — EPSG:7131, the 3DEP topographic COGs.
 pub const SF_CS13: Tmerc = Tmerc {
     central_meridian: -122.45,
@@ -110,6 +121,7 @@ pub const SF_CS13: Tmerc = Tmerc {
 pub fn projection(name: &str) -> crate::Fallible<Tmerc> {
     match name {
         "sf-cs13" => Ok(SF_CS13),
+        "utm10n" => Ok(UTM_10N),
         "utm18n" => Ok(UTM_18N),
         other => Err(format!("unknown projection {other}").into()),
     }
@@ -397,6 +409,9 @@ enum BandReader<'a> {
     Mosaic {
         tiles: &'a [TileGrid],
         source_band: usize,
+        /// The reading a cell is dropped above, in metres. What is implausible depends on what is
+        /// being measured: a 65 m crown is a defect and a 65 m roof is the Clorox building.
+        ceiling_meters: f64,
     },
 }
 
@@ -450,6 +465,7 @@ fn fill_single(
 fn fill_mosaic(
     tiles: &[TileGrid],
     source_band: usize,
+    ceiling_meters: f64,
     cells: &mut [u16],
     band: usize,
     grid: &Grid,
@@ -491,7 +507,7 @@ fn fill_mosaic(
                 let value = values[(row * tile.width + column) * tile.bands + source_band];
                 if value.is_finite()
                     && value > MOSAIC_FLOOR_METERS
-                    && f64::from(value) <= IMPLAUSIBLE_CROWN_METERS
+                    && f64::from(value) <= ceiling_meters
                 {
                     cells[left + column] = (value * 10.0) as u16;
                 }
@@ -517,9 +533,19 @@ fn sample_band(
     cells[..rows * grid.width].fill(NODATA);
     let skipped = match source {
         BandReader::Single(decoder) => fill_single(decoder, cells, band, grid, rows)?,
-        BandReader::Mosaic { tiles, source_band } => {
-            fill_mosaic(tiles, *source_band, cells, band, grid, rows)?
-        }
+        BandReader::Mosaic {
+            tiles,
+            source_band,
+            ceiling_meters,
+        } => fill_mosaic(
+            tiles,
+            *source_band,
+            *ceiling_meters,
+            cells,
+            band,
+            grid,
+            rows,
+        )?,
     };
 
     let mut result = BandResult {
@@ -580,6 +606,7 @@ fn sample_band(
 fn sample(
     source: &Source,
     tiles: &[TileGrid],
+    ceiling_meters: f64,
     grid: &Grid,
     shapes: &Shapes,
     bands: &Bands,
@@ -598,6 +625,7 @@ fn sample(
                     Source::Mosaic { band, .. } => Some(BandReader::Mosaic {
                         tiles,
                         source_band: *band,
+                        ceiling_meters,
                     }),
                 };
                 (reader, vec![NODATA; grid.width * grid.tile])
@@ -690,35 +718,57 @@ fn describe(heights_m: &[f64], areas: &[u32]) -> usize {
     measured.len()
 }
 
-pub fn run(args: &Args) -> Fallible<Report> {
+/// What a raster held under a set of polygons: each polygon's readings in decimetres, sorted, and
+/// how many cells it covered whether or not they carried one.
+pub struct Measured {
+    pub values: Vec<Vec<u16>>,
+    pub cells: Vec<u32>,
+    pub skipped_tiles: usize,
+}
+
+/// The lowest reading `quantile` of a polygon's cells are at or below — nearest rank — and 0, which
+/// means unknown and which no real height can collide with, for a polygon that caught no cell.
+pub fn percentile_dm(sorted: &[u16], quantile: f64) -> u16 {
+    let rank = (sorted.len() as f64 * quantile).ceil() as usize;
+    sorted.get(rank.max(1) - 1).copied().unwrap_or(0)
+}
+
+/// Every polygon's readings from one raster. The canopy pass takes the 75th percentile of these and
+/// so does the building pass; what separates them is `ceiling_meters`, the reading a mosaic cell is
+/// dropped above, which for a crown is a defect filter and for a roof is off.
+pub fn measure(
+    polygons: &[Polygon],
+    raster: &Source,
+    projection: Tmerc,
+    ceiling_meters: f64,
+) -> Fallible<Measured> {
     let started = Instant::now();
-    let mut canopy = binfmt::read_canopy(&args.canopy)?;
-    let tiles: Vec<TileGrid> = match &args.raster {
+    let tiles: Vec<TileGrid> = match raster {
         Source::Single(_) => Vec::new(),
         Source::Mosaic { paths, .. } => paths
             .iter()
             .map(|path| read_tile_grid(path))
             .collect::<Fallible<Vec<TileGrid>>>()?,
     };
-    let grid = match &args.raster {
-        Source::Single(path) => read_grid(&mut open(path)?, args.projection)?,
-        Source::Mosaic { .. } => mosaic_grid(&tiles, args.projection)?,
+    let grid = match raster {
+        Source::Single(path) => read_grid(&mut open(path)?, projection)?,
+        Source::Mosaic { .. } => mosaic_grid(&tiles, projection)?,
     };
     eprintln!(
-        "  [{:>5.1}s] {} canopy polygons against a {} x {} raster of {} m cells{}",
+        "  [{:>5.1}s] {} polygons against a {} x {} raster of {} m cells{}",
         started.elapsed().as_secs_f64(),
-        canopy.polygons.len(),
+        polygons.len(),
         grid.width,
         grid.height,
         grid.cell,
-        match &args.raster {
+        match raster {
             Source::Single(_) => String::new(),
             Source::Mosaic { paths, band } =>
                 format!(", mosaicked from {} tiles at band {band}", paths.len()),
         }
     );
 
-    let shapes = project(&canopy.polygons, &grid);
+    let shapes = project(polygons, &grid);
     let bands = bucket_bands(&shapes, &grid);
     eprintln!(
         "  [{:>5.1}s] {} vertices projected into the raster's grid",
@@ -726,9 +776,17 @@ pub fn run(args: &Args) -> Fallible<Report> {
         shapes.xs.len()
     );
 
-    let sampled = sample(&args.raster, &tiles, &grid, &shapes, &bands, started)?;
-    let mut areas = vec![0u32; canopy.polygons.len()];
-    let mut values: Vec<Vec<u16>> = vec![Vec::new(); canopy.polygons.len()];
+    let sampled = sample(
+        raster,
+        &tiles,
+        ceiling_meters,
+        &grid,
+        &shapes,
+        &bands,
+        started,
+    )?;
+    let mut cells = vec![0u32; polygons.len()];
+    let mut values: Vec<Vec<u16>> = vec![Vec::new(); polygons.len()];
     let mut skipped_tiles = 0;
     let mut skipped_cells = 0;
     for band in sampled {
@@ -736,7 +794,7 @@ pub fn run(args: &Args) -> Fallible<Report> {
         skipped_cells += band.skipped_cells;
         for reading in band.readings {
             let polygon = reading.polygon as usize;
-            areas[polygon] += reading.cells;
+            cells[polygon] += reading.cells;
             values[polygon].extend(reading.values);
         }
     }
@@ -744,20 +802,33 @@ pub fn run(args: &Args) -> Fallible<Report> {
         "  [{:>5.1}s] {skipped_tiles} raster tiles would not decode, holding {skipped_cells} polygon cells",
         started.elapsed().as_secs_f64()
     );
+    for sample in &mut values {
+        sample.sort_unstable();
+    }
+    Ok(Measured {
+        values,
+        cells,
+        skipped_tiles,
+    })
+}
 
-    let heights: Vec<u16> = values
-        .iter_mut()
-        .map(|sample| {
-            sample.sort_unstable();
-            // Nearest-rank: the lowest reading three quarters of the cells are at or below, and 0
-            // — the unknown sentinel — when the polygon caught no cell at all.
-            let rank = (sample.len() as f64 * HEIGHT_PERCENTILE).ceil() as usize;
-            sample.get(rank.max(1) - 1).copied().unwrap_or(0)
-        })
+pub fn run(args: &Args) -> Fallible<Report> {
+    let started = Instant::now();
+    let mut canopy = binfmt::read_canopy(&args.canopy)?;
+    let sampled = measure(
+        &canopy.polygons,
+        &args.raster,
+        args.projection,
+        IMPLAUSIBLE_CROWN_METERS,
+    )?;
+    let heights: Vec<u16> = sampled
+        .values
+        .iter()
+        .map(|sample| percentile_dm(sample, HEIGHT_PERCENTILE))
         .collect();
     canopy.set_heights_dm(&heights);
     fs::write(&args.canopy, &canopy.bytes)?;
-    let measured = describe(&canopy.heights_m(), &areas);
+    let measured = describe(&canopy.heights_m(), &sampled.cells);
     eprintln!(
         "  [{:>5.1}s] wrote {}",
         started.elapsed().as_secs_f64(),
@@ -767,13 +838,13 @@ pub fn run(args: &Args) -> Fallible<Report> {
     Ok(Report {
         polygons: canopy.polygons.len(),
         measured,
-        skipped_tiles,
+        skipped_tiles: sampled.skipped_tiles,
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{SF_CS13, Tmerc, UTM_18N};
+    use super::{SF_CS13, Tmerc, UTM_10N, UTM_18N};
 
     /// Every transverse Mercator maps its own origin onto its false easting and northing exactly, so
     /// this catches the meridional arc at the origin parallel being dropped — the one term a UTM
@@ -782,6 +853,7 @@ mod tests {
     fn a_grid_origin_lands_on_its_false_origin() {
         for (grid, lng, lat, east, north) in [
             (UTM_18N, -75.0, 0.0, 500_000.0, 0.0),
+            (UTM_10N, -123.0, 0.0, 500_000.0, 0.0),
             (SF_CS13, -122.45, 37.75, 48_000.0, 24_000.0),
         ] {
             let (x, y) = grid.forward(lng, lat);
@@ -798,6 +870,16 @@ mod tests {
         let (x, y) = SF_CS13.forward(-122.404_585_177_429_87, 37.799_543_921_926_79);
         assert!((x - 52_000.0).abs() < 0.5, "easting {x} not 52000");
         assert!((y - 29_500.0).abs() < 0.5, "northing {y} not 29500");
+    }
+
+    /// Checked against PROJ's own EPSG:26910 rather than against this code: the corner the staged
+    /// DEM tile USGS_1M_10_x56y419 ties its upper-left pixel to, (559994, 4190006), placed by PROJ
+    /// at this longitude and latitude.
+    #[test]
+    fn utm_10n_agrees_with_a_published_tile() {
+        let (x, y) = UTM_10N.forward(-122.318_015_920_842_7, 37.855_538_216_934_55);
+        assert!((x - 559_994.0).abs() < 0.5, "easting {x} not 559994");
+        assert!((y - 4_190_006.0).abs() < 0.5, "northing {y} not 4190006");
     }
 
     /// A degenerate grid — unit scale, no offsets, origin on the equator — is the identity on
