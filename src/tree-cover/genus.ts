@@ -5,7 +5,7 @@
 // means "London plane" has to keep meaning it in both themes, so the map and the legend show these
 // exact hues whichever theme is on.
 
-import type { Rgb } from "../theme/palette";
+import { hexToRgb, type Rgb } from "../theme/palette";
 
 export const OTHER_GENUS_ID = 11;
 
@@ -28,11 +28,7 @@ const PALETTE: readonly string[] = [
   "#9ca3af", // Other — neutral medium grey
 ];
 
-export const GENUS_COLORS: readonly Rgb[] = PALETTE.map((hex) => ({
-  red: Number.parseInt(hex.slice(1, 3), 16),
-  green: Number.parseInt(hex.slice(3, 5), 16),
-  blue: Number.parseInt(hex.slice(5, 7), 16),
-}));
+export const GENUS_COLORS: readonly Rgb[] = PALETTE.map(hexToRgb);
 
 export const GENUS_COUNT = GENUS_COLORS.length;
 

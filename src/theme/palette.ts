@@ -47,12 +47,18 @@ export interface Ramp {
 // The most stops the shader's uniform array holds. Raising it is a shader edit as well as this one.
 export const STOPS_LIMIT = 8;
 
-function stops(...hexes: string[]): readonly Rgb[] {
-  return hexes.map((hex) => ({
+// Splits a "#rrggbb" literal into channels. Colours are authored as hex because that is how they
+// are read, compared and pasted between here and a design tool; everything that draws wants numbers.
+export function hexToRgb(hex: string): Rgb {
+  return {
     red: Number.parseInt(hex.slice(1, 3), 16),
     green: Number.parseInt(hex.slice(3, 5), 16),
     blue: Number.parseInt(hex.slice(5, 7), 16),
-  }));
+  };
+}
+
+function stops(...hexes: string[]): readonly Rgb[] {
+  return hexes.map(hexToRgb);
 }
 
 // A single-hue sequential teal/mint ramp, strictly monotonic in lightness so more green always reads

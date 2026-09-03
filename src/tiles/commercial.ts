@@ -1,6 +1,6 @@
 import { COMMERCIAL_COLOR } from "../overlays/colors";
 import { decodeStreetChunk } from "../streets/chunk";
-import type { ThemeName } from "../theme/palette";
+import { hexToRgb, type ThemeName } from "../theme/palette";
 import { resolveUrl } from "./base-url";
 import { projectX, projectY, unproject } from "./mercator";
 import type { CommercialParams, TileCoords } from "./protocol";
@@ -49,9 +49,7 @@ const BAND_OPACITY = 0.45;
 // The band's stroke wants the overlay's violet as channels rather than as hex, so both themes' are
 // parsed once up front.
 function channels(hex: string): readonly [number, number, number] {
-  const [red, green, blue] = [1, 3, 5].map((at) =>
-    Number.parseInt(hex.slice(at, at + 2), 16),
-  );
+  const { red, green, blue } = hexToRgb(hex);
   return [red, green, blue];
 }
 
