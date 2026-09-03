@@ -1,3 +1,4 @@
+import { COMMERCIAL_COLOR } from "../overlays/colors";
 import { decodeStreetChunk } from "../streets/chunk";
 import { resolveUrl } from "./base-url";
 import { projectX, projectY, unproject } from "./mercator";
@@ -44,11 +45,12 @@ const COMMERCIAL_FRACTION = 0.5;
 // big-box canyons, keeps brownstone-height retail strips. (255 m "no buildings" also fails this.)
 const LOW_RISE_METERS = 25;
 
-// Violet-700 (#6d28d9), distinct from the green canopy and the scenic overlays. A qualifying block is
-// this one uniform violet — the overlay is binary on/off (no intensity grading yet). Lower opacity
-// than a thin line would take: the band is fat and neighbouring bands overlap at corners, so it stays
-// airy, and the whole (opaque) band composite is applied at this single opacity.
-const VIOLET_RGB = "109, 40, 217";
+// The band composites at one flat opacity — lower than a thin line would take, since the band is fat
+// and neighbouring bands overlap at corners, so it stays airy. The rgba() writes below want the
+// overlay's violet as channels rather than as hex.
+const VIOLET_RGB = [1, 3, 5]
+  .map((at) => Number.parseInt(COMMERCIAL_COLOR.slice(at, at + 2), 16))
+  .join(", ");
 const BAND_OPACITY = 0.45;
 
 // The vector band's ground width: the roadway plus the frontage lots on both sides, so it reads as the

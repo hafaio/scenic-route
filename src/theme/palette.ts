@@ -224,6 +224,11 @@ export function rampAt(
   };
 }
 
+// One stop of a ramp as CSS, for the keys that swatch a ramped overlay with a single colour off it.
+export function rgbCss({ red, green, blue }: Rgb): string {
+  return `rgb(${Math.round(red)} ${Math.round(green)} ${Math.round(blue)})`;
+}
+
 // One point on a ramp as CSS, for the overlays drawn with a 2D context rather than through the
 // shader.
 export function rampCss(ramp: Ramp, value: number, opacity = 1): string {

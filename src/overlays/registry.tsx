@@ -22,6 +22,19 @@ import {
 } from "react-icons/pi";
 import ElevationLegend from "../../components/elevation-legend";
 import TreeLegend from "../../components/tree-legend";
+import { PALETTES, rgbCss, type ThemeName } from "../theme/palette";
+import {
+  ART_COLOR,
+  COMMERCIAL_COLOR,
+  FERRY_COLOR,
+  HIGHWAY_COLOR,
+  HISTORIC_COLOR,
+  INDUSTRIAL_COLOR,
+  LANDMARK_COLOR,
+  LEGACY_COLOR,
+  SHED_COLOR,
+  SUBWAY_COLOR,
+} from "./colors";
 
 // The Leaflet layer components touch `window` at import, so they load only in the browser —
 // the same ssr:false isolation the map itself uses. That also lets the layers control import
@@ -87,6 +100,17 @@ export function overlayLabel(overlay: OverlayDef, city: City): string {
   return typeof overlay.label === "string" ? overlay.label : overlay.label(city);
 }
 
+// The one colour this layer's key swatches it with, for the city's theme. A function where the
+// layer draws through a ramp rather than in a flat colour, since a ramp has a light and a dark set.
+export function overlaySwatch(
+  overlay: OverlayDef,
+  theme: ThemeName,
+): string | null {
+  return typeof overlay.swatch === "function"
+    ? overlay.swatch(theme)
+    : overlay.swatch;
+}
+
 // Genus recolours every tree rather than adding a colour to the map, so it goes solo. The toggle
 // handler holds to that a click at a time; a whole set arriving at once — a link's `layers`, or the
 // remembered one — has to be held to it here, or a hand-written `#layers=genus,canopy` draws both.
@@ -105,40 +129,14 @@ export interface OverlayDef {
   label: string | ((city: City) => string);
   icon: ReactNode; // menu glyph; a tinted one shows the layer's colour code
   render: () => ReactNode; // the Leaflet layer(s) this overlay mounts on the map
+  // The colour the multi-layer key swatches this one with, read off what the layer actually paints
+  // with so the two cannot drift. Null for a layer with no single colour to stand for it.
+  swatch: string | ((theme: ThemeName) => string) | null;
   legend?: ReactNode; // floating key shown while this overlay is active
   // When on, no other overlay is, and turning on any other turns this off. Tree genus recolours
   // every tree, so it does not compose with the additive dot/line layers.
   exclusive?: boolean;
 }
-
-// The dot colours match the route panel's scenery sliders (landmark amber, art fuchsia), so the map
-// and the controls read as one palette.
-const LANDMARK_COLOR = "#f59e0b"; // amber-500
-// A mustard gold, distinct from the landmark amber because the two sit near each other on the map
-// and price different things: a landmark is a designated BUILDING, these are businesses still
-// trading in one. Distinct from the commercial overlay's violet for the same reason — that is where
-// the shops are, this is which of them have been there fifty years.
-//
-// A step lighter than the yellow-700 it started as, and the reason is the LABEL rather than the
-// dot: names are drawn in the dot's own colour over a black halo (src/tiles/labels.ts), and a dark
-// fill on a dark halo comes out as mud. The other POI colours are already light enough to carry
-// that; this one was not.
-const LEGACY_COLOR = "#ca8a04"; // yellow-600
-const ART_COLOR = "#d946ef"; // fuchsia-500
-const FERRY_COLOR = "#2563eb"; // blue-600, the route layer's ferry-leg colour
-// The subway draws each route in the MTA's own published colour (in subway.ts); only its menu glyph
-// is tinted here, to the A/C/E blue the feed publishes, so the switcher still reads as a colour code.
-const HIGHWAY_COLOR = "#ef4444"; // red-500
-// The industrial overlay fills its lots in pink-600 (in src/tiles/industrial.ts, at the alpha the
-// wash needs); only its menu glyph is tinted here, so the switcher still reads as the layer's
-// colour code.
-// The historic-districts overlay fills each district in indigo-700 (in src/tiles/historic.ts, at
-// the same alpha the industrial wash uses); only its menu glyph is tinted here, so the switcher still
-// reads as the layer's colour code.
-// Scaffolding draws its own orange-600 bands (in shed-layer.tsx); only its menu glyph is tinted
-// here, so the switcher still reads as the layer's colour code.
-// The "cute commercial" overlay is a heat field with its own violet ramp (in dining-layer.tsx); only
-// its menu glyph is tinted here, to violet-600, so the switcher still reads as the layer's colour code.
 
 // The single source of truth for the overlay switcher: this ordered array drives both the layers
 // control menu and what the map mounts. Adding a layer (highways, ferries, building-shade) is one
@@ -150,6 +148,9 @@ export const OVERLAYS: readonly OverlayDef[] = [
     // teal-600, the ramp's own mid stop — the icon says what the layer paints rather than
     // inheriting the menu's text colour, as every other overlay's does.
     icon: <PiTreeFill className="h-4 w-4 text-teal-600" aria-hidden="true" />,
+    // The stop a leafy street lands on, rather than either end: the faint end is bare ground and the
+    // full end is cover almost nowhere reaches.
+    swatch: (theme) => rgbCss(PALETTES[theme].canopy.stops[4]),
     render: () => (
       <>
         <CanopyLayer />
@@ -163,18 +164,27 @@ export const OVERLAYS: readonly OverlayDef[] = [
     icon: (
       <MdStorefront className="h-4 w-4 text-violet-600" aria-hidden="true" />
     ),
+    swatch: COMMERCIAL_COLOR,
     render: () => <DiningLayer />,
   },
   {
     id: "shade",
     label: "Shade",
     icon: <MdWbShade className="h-4 w-4 text-slate-500" aria-hidden="true" />,
+    // Shade is one colour at varying strength, so the ramp has a single stop to take.
+    swatch: (theme) => rgbCss(PALETTES[theme].shade.stops[0]),
     render: () => <ShadeLayer />,
   },
   {
     id: "elevation",
     label: "Elevation",
     icon: <MdTerrain className="h-4 w-4 text-amber-700" aria-hidden="true" />,
+    // The summit end of the hypsometric ramp — the brown the layer reads as, where the valley green
+    // it starts at would be mistaken for the canopy.
+    swatch: (theme) => {
+      const { stops } = PALETTES[theme].elevation;
+      return rgbCss(stops[stops.length - 1]);
+    },
     render: () => <ElevationLayer />,
     legend: <ElevationLegend />,
   },
@@ -186,6 +196,7 @@ export const OVERLAYS: readonly OverlayDef[] = [
     icon: (
       <MdMapsHomeWork className="h-4 w-4 text-indigo-700" aria-hidden="true" />
     ),
+    swatch: HISTORIC_COLOR,
     render: () => <HistoricLayer />,
   },
   {
@@ -196,6 +207,7 @@ export const OVERLAYS: readonly OverlayDef[] = [
     icon: (
       <MdStorefront className="h-4 w-4 text-yellow-600" aria-hidden="true" />
     ),
+    swatch: LEGACY_COLOR,
     render: () => (
       <PoiLayer
         overlay="legacy"
@@ -215,6 +227,7 @@ export const OVERLAYS: readonly OverlayDef[] = [
         aria-hidden="true"
       />
     ),
+    swatch: LANDMARK_COLOR,
     render: () => (
       <PoiLayer
         overlay="landmarks"
@@ -229,6 +242,7 @@ export const OVERLAYS: readonly OverlayDef[] = [
     id: "art",
     label: "Public art",
     icon: <MdPalette className="h-4 w-4 text-fuchsia-500" aria-hidden="true" />,
+    swatch: ART_COLOR,
     render: () => (
       <PoiLayer overlay="art" dir="art" magic="ARTW" color={ART_COLOR} labelAnchor="bottom" />
     ),
@@ -237,6 +251,7 @@ export const OVERLAYS: readonly OverlayDef[] = [
     id: "ferries",
     label: "Ferry routes",
     icon: <PiBoatFill className="h-4 w-4 text-blue-600" aria-hidden="true" />,
+    swatch: FERRY_COLOR,
     render: () => <LinesLayer overlay="ferries" dir="ferries" format="ferr" color={FERRY_COLOR} />,
   },
   {
@@ -244,22 +259,26 @@ export const OVERLAYS: readonly OverlayDef[] = [
     label: (city) => (city.id === "sf" ? "Muni & BART" : "Subway"),
     icon: (
       <PiTrainSimpleFill
-        className="h-4 w-4 text-[#0062cf]"
+        className="h-4 w-4"
+        style={{ color: SUBWAY_COLOR }}
         aria-hidden="true"
       />
     ),
+    swatch: SUBWAY_COLOR,
     render: () => <SubwayLayer />,
   },
   {
     id: "highways",
     label: "Highways",
     icon: <MdDirectionsCar className="h-4 w-4 text-red-500" aria-hidden="true" />,
+    swatch: HIGHWAY_COLOR,
     render: () => <LinesLayer overlay="highways" dir="highways" format="hway" color={HIGHWAY_COLOR} />,
   },
   {
     id: "industrial",
     label: "Industrial",
     icon: <MdFactory className="h-4 w-4 text-pink-600" aria-hidden="true" />,
+    swatch: INDUSTRIAL_COLOR,
     render: () => <IndustrialLayer />,
   },
   {
@@ -268,6 +287,7 @@ export const OVERLAYS: readonly OverlayDef[] = [
     icon: (
       <MdConstruction className="h-4 w-4 text-orange-600" aria-hidden="true" />
     ),
+    swatch: SHED_COLOR,
     render: () => <ShedLayer />,
   },
   // Tree genus recolours every tree, so it sits last and is exclusive — it does not compose with the
@@ -276,6 +296,7 @@ export const OVERLAYS: readonly OverlayDef[] = [
     id: "genus",
     label: "Tree genus",
     icon: <PiTreeStructureFill className="h-4 w-4" aria-hidden="true" />,
+    swatch: null, // a colour per genus, and its own key to spend them in
     render: () => <GenusLayer />,
     legend: <TreeLegend />,
     exclusive: true,
