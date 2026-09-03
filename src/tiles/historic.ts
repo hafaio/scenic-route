@@ -1,3 +1,4 @@
+import { HISTORIC_COLOR } from "../overlays/colors";
 import { resolveUrl } from "./base-url";
 import { projectX, projectY, unproject } from "./mercator";
 import { bucketize, type Polyline, readPolyline } from "./polylines";
@@ -12,10 +13,8 @@ import type { Cursor } from "./varint";
 
 const TILE_SIZE = 256;
 const CELL_DEG = 0.005; // ~550 m buckets; a district is filed under every cell its bounding box spans
-// Indigo-700, at the industrial wash's alpha so the streets and the buildings under a district read
-// through. Far enough from the pink industrial lots, the violet commercial field and the amber
-// landmark dots to tell apart as a wash.
-const FILL_COLOR = "#4338ca";
+// At the industrial wash's alpha, so the streets and the buildings under a district read through.
+const FILL_COLOR = HISTORIC_COLOR;
 const FILL_ALPHA = 0.45;
 // A district smaller than this on screen is drawn as a square of it instead. Five of them are a
 // single building — St. Mark's Extension is 278 m² — and at the citywide zooms antialiasing fades a

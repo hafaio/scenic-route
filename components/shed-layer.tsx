@@ -3,6 +3,7 @@
 import L from "leaflet";
 import { useEffect } from "react";
 import { useMap } from "react-leaflet";
+import { SHED_COLOR } from "../src/overlays/colors";
 import { getResolvedDate, subscribeRouteTime } from "../src/route-time/store";
 import { loadGraph, type RoutingGraph } from "../src/routing/graph";
 import { loadSheds, type ShedHistory, shedDay } from "../src/routing/sheds";
@@ -39,7 +40,6 @@ const MAX_ZOOM = 20;
 const TILE_SIZE = 256;
 
 const MIN_WIDTH = 1.5; // px, so a city-wide view still shows where the scaffolding is
-const SHED_COLOR = "#ea580c"; // orange-600, construction against the map's greens and blues
 const SHED_ALPHA = 0.75; // the basemap's street still reads through the band
 
 // Zoom 0 is the whole world in 256 px, which a double resolves far past z20.

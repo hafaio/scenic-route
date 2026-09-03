@@ -113,6 +113,7 @@ import {
 import AboutDialog from "./about-dialog";
 import { CityProvider } from "./city-context";
 import FollowToggle from "./follow-toggle";
+import LayerLegend from "./layer-legend";
 import type { DestPrefill } from "./location-field";
 import type { MapTarget, PickMode } from "./map";
 import PinEditor from "./pin-editor";
@@ -1893,10 +1894,11 @@ export default function MapApp() {
           enabled={hashApplied}
         />
         <FollowToggle active={followLive} onToggle={handleToggleFollow} />
-        {/* the active overlays' floating keys (genus only today); bottom-left keeps them clear of the
-          toolbar, follow toggle, attribution, and the centered route panel */}
+        {/* the active overlays' floating keys; bottom-left keeps them clear of the toolbar, follow
+          toggle, attribution, and the centered route panel */}
         <div className="pointer-events-none absolute bottom-3 left-3 z-[1000] max-w-[70vw]">
           <div className="pointer-events-auto space-y-2">
+            <LayerLegend active={activeOverlays} city={city} />
             {OVERLAYS.filter((overlay) => activeOverlays.has(overlay.id)).map(
               (overlay) =>
                 overlay.legend ? (

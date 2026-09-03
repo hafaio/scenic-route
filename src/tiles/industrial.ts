@@ -1,3 +1,4 @@
+import { INDUSTRIAL_COLOR } from "../overlays/colors";
 import { resolveUrl } from "./base-url";
 import { projectX, projectY, unproject } from "./mercator";
 import { bucketize, type Polyline, readPolyline } from "./polylines";
@@ -11,9 +12,8 @@ import type { Cursor } from "./varint";
 
 const TILE_SIZE = 256;
 const CELL_DEG = 0.005; // ~550 m buckets; a lot is filed under every cell its bounding box spans
-// Pink-600, at an alpha that leaves the streets and the water under a lot reading through. Far
-// enough from the red highway lines and the violet commercial field to tell apart as a wash.
-const FILL_COLOR = "#db2777";
+// At an alpha that leaves the streets and the water under a lot reading through.
+const FILL_COLOR = INDUSTRIAL_COLOR;
 const FILL_ALPHA = 0.45;
 // A lot smaller than this on screen is drawn as a square of it instead. At the citywide zooms a
 // tax lot is a fraction of a pixel, and antialiasing fades a fraction of a pixel to nothing —
