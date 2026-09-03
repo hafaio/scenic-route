@@ -54,7 +54,8 @@ use crate::sidewalks::{self, FLAG_NON_VEHICULAR};
 pub const FLAG_VEHICULAR_ONLY: u8 = 1 << 0;
 pub const FLAG_STRUCTURE: u8 = 1 << 2;
 // The per-side sidewalk bits `scripts/sidewalks.ts` stamps into every offsetted record: whether OSM
-// maps a sidewalk on that side, and whether the city's planimetric ROW-sidewalk polygons draw one.
+// maps a sidewalk way on that side, and whether a survey says there is pavement there — the city's
+// own where it publishes one, and OSM's `sidewalk=*` tag on the road itself where it does not.
 const FLAG_OSM_LEFT: u8 = 1 << 3;
 const FLAG_OSM_RIGHT: u8 = 1 << 4;
 const FLAG_SURVEYED_LEFT: u8 = 1 << 5;
@@ -367,8 +368,8 @@ fn swlk_kind(road_type: u8) -> u8 {
 }
 
 /// The existence gate: which sides of an offsetted street have pavement at all — OSM maps a sidewalk
-/// there, or the city's planimetric survey draws one. See DESIGN.md, "Whether there is pavement at
-/// all" and "The existence gate".
+/// way there, or a survey says so. See DESIGN.md, "Whether there is pavement at all" and "The
+/// existence gate".
 ///
 /// Existing is not the same as being *derived*: a stretch OSM has mapped exists because OSM's own
 /// way is in the graph, and `trim_derived` cuts every stretch `Association::covered` names back out
@@ -3982,8 +3983,45 @@ fn topology(args: &Args) -> Fallible<Base> {
             100.0 * MAX_CELL_DEMOTED_SHARE
         ));
     }
+    let dropped_fraction = 1.0 - kept_side_km / derived_side_km;
+    let demoted_alley_fraction = demoted_alley_km / alley_km;
+    // The gate's two guards. Neither is a tolerance on the data: each catches the rule being wrong.
+    // Both are shares, so each needs its denominator to exist before the share means anything — a
+    // gate handed no offsettable street and no alley at all would otherwise report a perfect city,
+    // which is why that floor is the one failure that still stops the build where it stands: past
+    // it the two shares below are meaningless rather than merely bad.
+    if !args.probe {
+        if derived_side_km < MIN_DERIVED_SIDEWALK_KM || (args.alleys && alley_km < MIN_ALLEY_KM) {
+            return Err(format!(
+                "the gate was handed {derived_side_km:.1} km of derived sidewalk and {alley_km:.1} \
+                 km of alley, under the {MIN_DERIVED_SIDEWALK_KM:.0} / {MIN_ALLEY_KM:.0} km \
+                 floors: the two shares below are held over those, so an empty one passes them both"
+            )
+            .into());
+        }
+        if dropped_fraction > MAX_DROPPED_SIDEWALK_FRACTION {
+            broken.push(format!(
+                "the existence gate dropped {:.1}% of derived sidewalk km, over the {:.0}% \
+                 ceiling: the STRT per-side bits look unstamped, which reads as a city with no \
+                 pavement",
+                100.0 * dropped_fraction,
+                100.0 * MAX_DROPPED_SIDEWALK_FRACTION
+            ));
+        }
+        if args.alleys && demoted_alley_fraction < MIN_DEMOTED_ALLEY_FRACTION {
+            broken.push(format!(
+                "only {:.1}% of alley km demoted to its centreline, under the {:.0}% floor: alleys \
+                 have no sidewalks, so a build that keeps them has the gate the wrong way round",
+                100.0 * demoted_alley_fraction,
+                100.0 * MIN_DEMOTED_ALLEY_FRACTION
+            ));
+        }
+    }
     // Every one of these is a bound on a whole city, so `key-probe` — the same pipeline over a
-    // fixture of a few hundred blocks — reports them and holds none of them.
+    // fixture of a few hundred blocks — reports them and holds none of them. They are collected and
+    // raised together rather than one at a time: a build that breaks two of them has two things to
+    // say, and a city whose gate is being read for the first time needs every one of the numbers,
+    // not whichever the first check happened to be.
     if !broken.is_empty() && !args.probe {
         return Err(broken.join("; and ").into());
     }
@@ -3997,41 +4035,6 @@ fn topology(args: &Args) -> Fallible<Base> {
         .count();
     let max_ordinal = edge_ordinals.iter().copied().max().unwrap_or(0);
     let key_hash = key_space_hash(&v2_edges, &edge_ordinals);
-
-    let dropped_fraction = 1.0 - kept_side_km / derived_side_km;
-    let demoted_alley_fraction = demoted_alley_km / alley_km;
-    // The gate's two guards. Neither is a tolerance on the data: each catches the rule being wrong.
-    // Both are shares, so each needs its denominator to exist before the share means anything — a
-    // gate handed no offsettable street and no alley at all would otherwise report a perfect city.
-    if !args.probe {
-        if derived_side_km < MIN_DERIVED_SIDEWALK_KM || (args.alleys && alley_km < MIN_ALLEY_KM) {
-            return Err(format!(
-                "the gate was handed {derived_side_km:.1} km of derived sidewalk and {alley_km:.1} \
-                 km of alley, under the {MIN_DERIVED_SIDEWALK_KM:.0} / {MIN_ALLEY_KM:.0} km \
-                 floors: the two shares below are held over those, so an empty one passes them both"
-            )
-            .into());
-        }
-        if dropped_fraction > MAX_DROPPED_SIDEWALK_FRACTION {
-            return Err(format!(
-                "the existence gate dropped {:.1}% of derived sidewalk km, over the {:.0}% \
-                 ceiling: the STRT per-side bits look unstamped, which reads as a city with no \
-                 pavement",
-                100.0 * dropped_fraction,
-                100.0 * MAX_DROPPED_SIDEWALK_FRACTION
-            )
-            .into());
-        }
-        if args.alleys && demoted_alley_fraction < MIN_DEMOTED_ALLEY_FRACTION {
-            return Err(format!(
-                "only {:.1}% of alley km demoted to its centreline, under the {:.0}% floor: alleys \
-                 have no sidewalks, so a build that keeps them has the gate the wrong way round",
-                100.0 * demoted_alley_fraction,
-                100.0 * MIN_DEMOTED_ALLEY_FRACTION
-            )
-            .into());
-        }
-    }
 
     let largest_fraction = if node_count > 0 {
         largest_component as f64 / node_count as f64
