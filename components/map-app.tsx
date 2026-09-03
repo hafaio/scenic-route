@@ -116,6 +116,7 @@ import {
 import AboutDialog from "./about-dialog";
 import { CityProvider } from "./city-context";
 import FollowToggle from "./follow-toggle";
+import GoogleMapsButton from "./google-maps-button";
 import LayerLegend from "./layer-legend";
 import type { DestPrefill } from "./location-field";
 import type { MapTarget, PickMode, SearchPin } from "./map";
@@ -1971,6 +1972,14 @@ export default function MapApp() {
         : null,
     [routeResult, directions, userLocation],
   );
+  // What the reader asked for rather than what we snapped it to. Google re-snaps every coordinate to
+  // its own network, and handing it our sidewalk point can put it across the street from the door.
+  const exportOrigin = manualStart
+    ? { lat: manualStart.lat, lng: manualStart.lng }
+    : routableLocation
+      ? { lat: routableLocation.lat, lng: routableLocation.lng }
+      : null;
+
   // Start marker position: the snapped route start, else the manual start, else — while the routing
   // panel is open — the live location, so the start sits pre-dropped and draggable atop the location
   // dot before any destination is picked (drag it to set a manual start; it tracks the fix until then).
@@ -2085,6 +2094,17 @@ export default function MapApp() {
         />
         {routingOpen ? (
           <RoutePanel
+            exportAction={
+              resultGraph && routeResult && exportOrigin && dest ? (
+                <GoogleMapsButton
+                  graph={resultGraph}
+                  route={routeResult}
+                  weights={weights}
+                  start={exportOrigin}
+                  dest={dest}
+                />
+              ) : null
+            }
             destPrefill={destPrefill}
             startLabel={
               manualStart
