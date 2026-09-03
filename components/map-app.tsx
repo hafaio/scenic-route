@@ -33,6 +33,7 @@ import {
   searchAddress,
 } from "../src/geocode";
 import {
+  applyExclusivity,
   isOverlayId,
   OVERLAYS,
   type OverlayId,
@@ -1475,8 +1476,12 @@ export default function MapApp() {
     }
     const overlays = view.overlays ?? storedOverlays();
     if (overlays) {
-      // unknown ids (a stale "trees" from before the canopy switch) are dropped
-      setActiveOverlays(new Set(overlays.filter(isOverlayId)));
+      // unknown ids (a stale "trees" from before the canopy switch) are dropped, and a set that
+      // names an exclusive layer alongside others is cut back to it — the invariant the toggle
+      // handler keeps has to hold however the set arrives
+      setActiveOverlays(
+        new Set(applyExclusivity(overlays.filter(isOverlayId))),
+      );
     }
     if (view.camera) {
       setInitialCamera(view.camera);
