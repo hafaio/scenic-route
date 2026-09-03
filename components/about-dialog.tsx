@@ -3,6 +3,7 @@
 import { useEffect } from "react";
 import { FiExternalLink, FiMapPin, FiX } from "react-icons/fi";
 import { SiGithub } from "react-icons/si";
+import { cityInSentence } from "../src/cities";
 import { useCity } from "./city-context";
 
 interface AboutDialogProps {
@@ -41,9 +42,9 @@ function Source({ label, detail, licence }: DataSource) {
   );
 }
 
-// The credits are per city, because the sources are: no two cities publish their canopy, their
+// The credits are per region, because the sources are: no two cities publish their canopy, their
 // landmarks or their industrial land the same way, and a single list would credit New York for a map
-// of San Francisco. Only the active city's are shown, which is also what keeps a licence that names
+// of the Bay Area. Only the active region's are shown, which is also what keeps a licence that names
 // one city's terms — SFMTA's below — attached to the map it actually governs.
 const CITY_SOURCES: Record<string, readonly DataSource[]> = {
   nyc: [
@@ -241,14 +242,14 @@ export default function AboutDialog({ onClose }: AboutDialogProps) {
 
         <div className="mt-5 space-y-3 text-sm leading-relaxed text-slate-600 dark:text-slate-300">
           <p>
-            Scenic Route finds nicer ways to walk across {active.name}. Use
-            Directions to plan a path — weighting it toward tree cover, sun or
-            shade, shelter from the rain, landmarks, public art, historic
-            districts, nice commercial streets and ferries, and away from
-            highways, industrial areas and scaffolding — or switch between the
-            map overlays to explore what's around you. Which of those a city
-            offers depends on what it publishes; the sliders say so when one is
-            missing.
+            Scenic Route finds nicer ways to walk across{" "}
+            {cityInSentence(active)}. Use Directions to plan a path — weighting
+            it toward tree cover, sun or shade, shelter from the rain,
+            landmarks, public art, historic districts, nice commercial streets
+            and ferries, and away from highways, industrial areas and
+            scaffolding — or switch between the map overlays to explore what's
+            around you. Which of those a region offers depends on what its
+            cities publish; the sliders say so when one is missing.
           </p>
           <p>
             To use it, tap the layers button to toggle overlays like tree canopy

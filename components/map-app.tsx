@@ -10,6 +10,7 @@ import {
   type CityBounds,
   citiesInView,
   cityById,
+  cityInSentence,
   containsPoint,
   DEFAULT_CITY,
   nearestCity,
@@ -259,7 +260,7 @@ function messageFor(
   if (reason === "disconnected") {
     return "No walkable connection in the street data — likely separated by water.";
   } else if (point && !containsPoint(city, point)) {
-    return `That point is outside ${city.name}. A route has to stay within one city.`;
+    return `That point is outside ${cityInSentence(city)}, and a route cannot leave it.`;
   } else {
     return "That point is more than 300 m from a walkable street.";
   }

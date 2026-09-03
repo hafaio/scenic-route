@@ -1,6 +1,10 @@
-// The cities the app covers, and which of them a point belongs to. Exactly one city is active at a
-// time: it owns the routing graph, the tile pyramids and the overlay set, so switching city swaps all
-// three and two cities' data are never on screen together.
+// The places the app covers, and which of them a point belongs to. Exactly one is active at a time:
+// it owns the routing graph, the tile pyramids and the overlay set, so switching swaps all three and
+// two of them are never on screen together.
+//
+// "City" is the code's word for one of these and stays that way, but one of them is now a region —
+// `sf` is San Francisco and the East Bay together, named "Bay Area" — so the reader-facing word is
+// "region" and a name may need an article. See `cityInSentence`.
 
 import type { OverlayId } from "./overlays/registry";
 import manifest from "./tree-cover/manifest.json";
@@ -23,6 +27,10 @@ export interface City {
   overlays: readonly OverlayId[];
   // Kerb to the baked sidewalk line, the offset the graph pass lays this city's sidewalks at.
   sidewalkInsetMeters: number;
+  // How long a walker here will stand on a pier before the ferry stops being a way to get anywhere.
+  // Absent means the default in src/routing/cost.ts. Set it where the timetable is thin AND the water
+  // cannot be walked round, since that combination turns "wait too long" into "no route".
+  maxFerryWaitSeconds?: number;
 }
 
 // Authored per city rather than derived from the artifacts on disk: a city may have the data for a
@@ -43,16 +51,16 @@ const OVERLAYS_BY_CITY: Record<string, readonly OverlayId[]> = {
     "shade",
     "scaffolding",
   ],
-  // San Francisco has no scaffolding feed to build a shed layer from, and its ferries are behind a
-  // 511.org key this pipeline does not hold. Commercial waits on its own signals being wired up.
-  // Its rail is Muni's and BART's rather than a subway, but it is the same artifact and the same
-  // layer, so it rides under the same id.
+  // No scaffolding feed here to build a shed layer from, and commercial waits on its own signals
+  // being wired up. Its rail is Muni's and BART's rather than a subway, but it is the same artifact
+  // and the same layer, so it rides under the same id.
   sf: [
     "canopy",
     "genus",
     "elevation",
     "landmarks",
     "art",
+    "ferries",
     "subway",
     "highways",
     "industrial",
@@ -61,6 +69,16 @@ const OVERLAYS_BY_CITY: Record<string, readonly OverlayId[]> = {
     "shade",
   ],
 };
+
+// The ids whose name takes a definite article mid-sentence: "outside New York City", but "outside
+// the Bay Area". Nothing in the name itself says which, and the wrong answer shows up in every
+// sentence the name appears in, so it is authored here beside the overlay list.
+const ARTICLED_NAMES: ReadonlySet<string> = new Set(["sf"]);
+
+// The name as it reads inside a sentence rather than as a label.
+export function cityInSentence(city: City): string {
+  return ARTICLED_NAMES.has(city.id) ? `the ${city.name}` : city.name;
+}
 
 const METERS_PER_DEGREE_LAT = 111_320;
 
@@ -73,6 +91,15 @@ export const CITY_ZOOM = 13;
 // animated crossing and reports what it finds over the ocean in between, which is nothing.
 export const CROSS_CITY_METERS = 120_000;
 
+// Authored, not measured. New York keeps the default: its ferry runs every 30-60 minutes all night
+// and a bridge is always there, so a wait past the cap simply means the search walks. The Bay is the
+// other case — the only way across on foot, with a 140-minute midday gap in the timetable — where a
+// short cap does not reroute a walker, it refuses them. 150 minutes clears that gap; the price is
+// that a route may propose a long wait, which is at least a true answer.
+const MAX_FERRY_WAIT_BY_CITY: Record<string, number> = {
+  sf: 150 * 60,
+};
+
 export const CITIES: readonly City[] = manifest.cities.map((city) => ({
   id: city.id,
   name: city.name,
@@ -83,6 +110,7 @@ export const CITIES: readonly City[] = manifest.cities.map((city) => ({
   },
   overlays: OVERLAYS_BY_CITY[city.id] ?? [],
   sidewalkInsetMeters: city.streets.sidewalkInsetMeters,
+  maxFerryWaitSeconds: MAX_FERRY_WAIT_BY_CITY[city.id],
 }));
 
 export const DEFAULT_CITY: City = CITIES[0];

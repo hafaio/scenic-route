@@ -132,11 +132,11 @@ test("a city graph is recognisable, so eviction can leave it alone", () => {
   expect(isGraph("casters/5232/6162.bin")).toBe(false);
 });
 
-// The basemap answers for the whole planet; this app routes across two cities of it. Panning across
+// The basemap answers for the whole planet; this app routes across two regions of it. Panning across
 // an ocean must not fill the cache with ground nothing else in the app knows anything about.
 const CITIES = [
   { west: -74.2555, south: 40.4968, east: -73.6995, north: 40.9155 }, // New York
-  { west: -122.5141, south: 37.7068, east: -122.3607, north: 37.8325 }, // San Francisco
+  { west: -122.5155, south: 37.6674, east: -122.1143, north: 37.9071 }, // the Bay Area
 ];
 
 test("a basemap tile over a city is cached, under a key without its API key", () => {

@@ -7,7 +7,8 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-const CACHE_DIR = join(import.meta.dirname, "..", ".cache");
+// Also where a build input too big to hold in memory is cut up — see scripts/alcc.ts.
+export const CACHE_DIR = join(import.meta.dirname, "..", ".cache");
 
 const REFRESH =
   process.argv.includes("--refresh") || process.env.REFRESH === "1";

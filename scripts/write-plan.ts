@@ -11,7 +11,7 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 import manifest from "../src/tree-cover/manifest.json";
-import { fetchElevationRaster } from "./elevation";
+import { fetchElevationMosaics } from "./elevation";
 import {
   computeShadeBuckets,
   SHADE_MAX_SHADOW_METERS,
@@ -85,7 +85,9 @@ interface PlanCity {
     maxShadowMeters: number;
     buckets: ReturnType<typeof computeShadeBuckets>;
   };
-  elevation?: { crs: string; band: number; tiles: string[] };
+  // Every survey this city's ground is read from, in the order the tiler resolves them: where two
+  // overlap, the first wins. Omitted for a city with no DEM at all.
+  elevation?: { crs: string; band: number; tiles: string[] }[];
 }
 
 // What the nine argv lists carried, in one document. Its schema is documented in scripts/README.md
@@ -158,7 +160,7 @@ async function planCity(city: City): Promise<PlanCity> {
   // share neither what an index means nor how many indices exist. Empty when the year yields no
   // above-horizon bin, and then the city gets no shade pyramid and no per-edge bake.
   const buckets = computeShadeBuckets(city.id);
-  const raster = KEY_SPACE ? null : await fetchElevationRaster(city.id);
+  const mosaics = KEY_SPACE ? [] : await fetchElevationMosaics(city.id);
   return {
     id: city.id,
     // The alley invariants assert New York's meaning of an alley; a city whose centreline has no such
@@ -174,13 +176,13 @@ async function planCity(city: City): Promise<PlanCity> {
           },
         }
       : {}),
-    ...(raster
+    ...(mosaics.length > 0
       ? {
-          elevation: {
-            crs: raster.crs,
-            band: raster.band,
-            tiles: raster.paths,
-          },
+          elevation: mosaics.map((mosaic) => ({
+            crs: mosaic.crs,
+            band: mosaic.band,
+            tiles: mosaic.paths,
+          })),
         }
       : {}),
   };

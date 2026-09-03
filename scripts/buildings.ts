@@ -10,6 +10,7 @@
 import { createHash } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { fetchEastBayBuildings } from "./east-bay-buildings";
 import { encodeBuildings, type HeightedBuilding } from "./geometry";
 import { type LandContext, loadLandContext } from "./land";
 import type { SourceFile } from "./manifest";
@@ -91,8 +92,16 @@ async function nycBuildings(land: LandContext): Promise<HeightedBuilding[]> {
 export type BuildingSource = (land: LandContext) => Promise<HeightedBuilding[]>;
 
 export const NYC_BUILDINGS: BuildingSource = nycBuildings;
-export const SF_BUILDINGS: BuildingSource = (land) =>
-  fetchSfBuildings(land.onLand);
+
+// Both sides of the bay in one artifact, because they are one city here: San Francisco's own
+// footprints carry a LiDAR median on the row, and Oakland's and Berkeley's are measured for
+// themselves by `tiler ndsm` because nobody publishes them (scripts/east-bay.ts). The East Bay half
+// throws rather than returning nothing if the measurement has not been run — a city that silently
+// loses half its walls would cast half a shadow and say so nowhere.
+export const SF_BUILDINGS: BuildingSource = async (land) => [
+  ...(await fetchSfBuildings(land.onLand)),
+  ...(await fetchEastBayBuildings()),
+];
 
 export async function ingestBuildings(
   cityId: string,

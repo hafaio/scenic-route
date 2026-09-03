@@ -4,27 +4,48 @@
 // actually occur, a leading directional expands, and a number right before a type is ordinalized.
 
 // Uppercase street-type abbreviation -> expanded word.
+//
+// Two abbreviation traditions are in here, because two of them are published. New York and San
+// Francisco write AVE, BLVD, TER, PKWY, CIR; Alameda County writes AV, BL, TE, PW, CI for the same
+// words, and 1,131 of the East Bay's 4,500 streets end in AV alone — left out, most of a region's
+// street names would read "Ashby Av".
+//
+// Only the county spellings that occur in NO New York or San Francisco street name are here, which
+// is why its CRES, CV, PK and PT are missing: those four DO occur in New York, meaning the same
+// words, and expanding them would rewrite twenty-six of its names and the committed search index
+// built over them for a cosmetic gain in a city this change is not about.
 const TYPE_WORDS: Readonly<Record<string, string>> = {
   ST: "Street",
   AVE: "Avenue",
+  AV: "Avenue",
   RD: "Road",
   DR: "Drive",
   BLVD: "Boulevard",
+  BL: "Boulevard",
   PL: "Place",
   CT: "Court",
   TER: "Terrace",
+  TE: "Terrace",
   LN: "Lane",
   PKWY: "Parkway",
+  PW: "Parkway",
   EXPY: "Expressway",
   HWY: "Highway",
   BR: "Bridge",
   PLZ: "Plaza",
+  PZ: "Plaza",
   SQ: "Square",
   PROM: "Promenade",
   BDWK: "Boardwalk",
   TRL: "Trail",
   CIR: "Circle",
+  CI: "Circle",
   ALY: "Alley",
+  WY: "Way",
+  LP: "Loop",
+  PA: "Path",
+  WK: "Walk",
+  CM: "Common",
 };
 
 // Leading directional letter -> expanded word (only expanded in the first token, so "AVE N" stays
