@@ -381,11 +381,6 @@ export default function RoutePanel({
       return factor ? [{ ...factor, ...factorState[key] }] : [];
     },
   );
-  // Every scenic factor gets a summary chip — the slider's own icon and tint with the route's mean
-  // intensity for it — shown regardless of weight, for reference. Ferry is presence-only (the "· ferry"
-  // suffix), so it stays out of the chip row. Shelter stays out too, and deliberately: a percentage
-  // beside a raindrop reads as a forecast of how dry you will stay, and the tree half of that number
-  // is extrapolated from about four studied trees. It is a preference, not a prediction.
   // A factor the city has no data for is dropped outright rather than greyed. It would cost nothing
   // and mean nothing here, and a disabled control still claims the city has the thing. A factor the
   // reader has hidden in Settings goes the same way, though its weight keeps pricing the route.
@@ -412,7 +407,18 @@ export default function RoutePanel({
         hiddenGate.has(gate.key) && !gateOpen[gate.key] && gateHere[gate.key],
     ).length;
 
-  const factorChips = factors.filter(
+  // Both chip rows are status displays, so they carry only what is acting: a preference at zero
+  // weight is not bending this route, and one the reader is not asking for is not reported on —
+  // not in the collapsed peek, not against the route it did not shape. Expanded, the same list is
+  // the control surface and stays complete: a zero slider is the only handle for raising that
+  // preference again.
+  const actingFactors = factors.filter((factor) => factor.weight !== 0);
+  // The route summary chips: the slider's own icon and tint with the route's mean intensity for it.
+  // Ferry is presence-only (the "· ferry" suffix), so it stays out of the chip row. Shelter stays
+  // out too, and deliberately: a percentage beside a raindrop reads as a forecast of how dry you
+  // will stay, and the tree half of that number is extrapolated from about four studied trees. It
+  // is a preference, not a prediction.
+  const factorChips = actingFactors.filter(
     (factor) => factor.key !== "ferry" && factor.key !== "shelter",
   );
   // A factor whose data is missing AND which the reader has asked for: the route on screen is not
@@ -639,17 +645,25 @@ export default function RoutePanel({
               expanding the section. */}
           {sceneryOpen ? null : (
             <div className="chip-row mt-1 shrink-0 gap-2">
-              {factors.map((factor) => (
-                <span
-                  key={factor.key}
-                  className={`flex items-center gap-0.5 text-[11px] font-semibold tabular-nums ${
-                    factor.disabled || factor.lost ? "opacity-40" : factor.tint
-                  }`}
-                >
-                  <factor.Icon className="h-3.5 w-3.5" aria-hidden={true} />
-                  {factorPercent(factor, factor.weight)}
+              {actingFactors.length > 0 ? (
+                actingFactors.map((factor) => (
+                  <span
+                    key={factor.key}
+                    className={`flex items-center gap-0.5 text-[11px] font-semibold tabular-nums ${
+                      factor.disabled || factor.lost
+                        ? "opacity-40"
+                        : factor.tint
+                    }`}
+                  >
+                    <factor.Icon className="h-3.5 w-3.5" aria-hidden={true} />
+                    {factorPercent(factor, factor.weight)}
+                  </span>
+                ))
+              ) : (
+                <span className="text-[11px] font-medium text-slate-400 dark:text-slate-500">
+                  Scenery off
                 </span>
-              ))}
+              )}
             </div>
           )}
 
