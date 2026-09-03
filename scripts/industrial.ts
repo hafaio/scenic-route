@@ -15,8 +15,8 @@
 import { createHash } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import pRetry from "p-retry";
 import { fetchEastBayIndustrial } from "./alameda";
+import { fetchArcgis } from "./arcgis";
 import { cached } from "./cache";
 import { encodePolygons } from "./geometry";
 import { type LandContext, loadLandContext } from "./land";
@@ -36,15 +36,11 @@ const SERVICE =
 const WHERE = "LandUse = '06'";
 const PAGE_SIZE = 2000;
 const MAX_ATTEMPTS = 6;
-const RETRY_BASE_MS = 5_000;
-const RETRY_CAP_MS = 30_000;
-const REQUEST_TIMEOUT_MS = 120_000;
+const RETRY_BASE_MS = 5_000; // longer than the shared ladder's: this service rate-limits
 // 9,295 lots matched the `where` at the last probe (2026-08-19). A floor, not an exact count: it
 // catches a server-side page cut that would pass for the end of the layer, but tolerates the city
 // reclassifying a few lots between refreshes.
 const EXPECTED_LOTS = 9_000;
-const USER_AGENT =
-  "scenic-route/0.1 (+https://github.com/erikbrinkman/scenic-route)";
 
 type GeoJsonGeometry =
   | { type: "Polygon"; coordinates: [number, number][][] }
@@ -54,11 +50,9 @@ interface LotFeature {
   geometry?: GeoJsonGeometry | null;
 }
 
-// A GeoJSON query still reports a failure the Esri way: a 200 carrying an `error` body.
 interface LotPage {
   features?: LotFeature[];
   properties?: { exceededTransferLimit?: boolean };
-  error?: { code: number; message: string };
 }
 
 // One page's request URL, ordered by OBJECTID so `resultOffset` paging is stable: without an order
@@ -78,33 +72,21 @@ function pageUrl(offset: number): string {
 
 async function fetchPage(url: string): Promise<LotPage> {
   try {
-    return await pRetry(
-      async () => {
-        const response = await fetch(url, {
-          headers: { "user-agent": USER_AGENT },
-          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-        });
-        if (!response.ok) {
-          throw new Error(`${response.status} ${response.statusText}`);
-        }
-        const body = (await response.json()) as LotPage;
-        if (body.error) {
-          throw new Error(`ArcGIS ${body.error.code}: ${body.error.message}`);
-        } else if (!Array.isArray(body.features)) {
-          throw new Error("no features in the response");
-        }
-        return body;
-      },
+    return await fetchArcgis<LotPage>(
+      url,
       {
-        retries: MAX_ATTEMPTS - 1,
-        minTimeout: RETRY_BASE_MS,
-        maxTimeout: RETRY_CAP_MS,
-        randomize: true,
+        attempts: MAX_ATTEMPTS,
+        minTimeoutMs: RETRY_BASE_MS,
         onFailedAttempt: ({ error, attemptNumber }) => {
           console.error(
             `  attempt ${attemptNumber}/${MAX_ATTEMPTS} failed: ${error}`,
           );
         },
+      },
+      ({ features }) => {
+        if (!Array.isArray(features)) {
+          throw new Error("no features in the response");
+        }
       },
     );
   } catch (error) {

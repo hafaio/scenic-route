@@ -28,6 +28,7 @@ import { join } from "node:path";
 import pRetry from "p-retry";
 import { cached } from "./cache";
 import { encodePoints, type NamedPoint } from "./geometry";
+import { USER_AGENT } from "./http";
 import { type LandContext, loadLandContext } from "./land";
 import type { SourceFile } from "./manifest";
 
@@ -41,8 +42,6 @@ const LEGACY_FORMAT = 1;
 // twenty to thirty — is what makes one dot mean the same thing in both cities.
 const MIN_AGE_YEARS = 50;
 
-const USER_AGENT =
-  "scenic-route/0.1 (+https://github.com/erikbrinkman/scenic-route)";
 const REQUEST_TIMEOUT_MS = 60_000;
 const MAX_ATTEMPTS = 3;
 const RETRY_BASE_MS = 2_000;

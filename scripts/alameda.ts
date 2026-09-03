@@ -23,9 +23,11 @@
 //     coverage; it is materially thinner than either existing city's and it is meant to be read.
 
 import { readFile } from "node:fs/promises";
+import { allFeatures, envelopeQuery, fetchFeatures } from "./arcgis";
 import { cached, cachedFile } from "./cache";
 import { parseCsv } from "./csv";
 import { densify, type NamedPoint } from "./geometry";
+import { USER_AGENT } from "./http";
 import type { LandContext } from "./land";
 import type { Polygon } from "./overpass";
 import type { Coord } from "./socrata";
@@ -37,8 +39,6 @@ import {
   toInt,
 } from "./streets";
 
-const USER_AGENT =
-  "scenic-route/0.1 (+https://github.com/erikbrinkman/scenic-route)";
 const REQUEST_TIMEOUT_MS = 120_000;
 
 export const EAST_BAY_ATTRIBUTION = "Alameda County GIS";
@@ -211,30 +211,6 @@ interface GeoJsonFeature<Properties> {
   properties?: Properties;
 }
 
-interface GeoJsonPage<Properties> {
-  features?: GeoJsonFeature<Properties>[];
-  error?: { code: number; message: string };
-}
-
-async function fetchGeoJson<Properties>(
-  url: string,
-): Promise<GeoJsonFeature<Properties>[]> {
-  const response = await fetch(url, {
-    headers: { "user-agent": USER_AGENT },
-    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-  });
-  if (!response.ok) {
-    throw new Error(`${response.status} ${response.statusText}`);
-  }
-  const body = (await response.json()) as GeoJsonPage<Properties>;
-  if (body.error) {
-    throw new Error(`ArcGIS ${body.error.code}: ${body.error.message}`);
-  } else if (!Array.isArray(body.features)) {
-    throw new Error("no features in the response");
-  }
-  return body.features;
-}
-
 // Both a Polygon and a MultiPolygon as the one ring-of-rings list the rest of the pipeline uses.
 function ringsOf(geometry: GeoJsonGeometry | null | undefined): Ring[][] {
   if (!geometry) {
@@ -296,7 +272,7 @@ async function fetchCityLimits(): Promise<Ring[][]> {
   url.searchParams.set("outSR", "4326");
   url.searchParams.set("f", "geojson");
   const features = await cached("alameda-city-limits", url.toString(), () =>
-    fetchGeoJson<{ DIST_NAME?: string }>(url.toString()),
+    fetchFeatures<GeoJsonFeature<{ DIST_NAME?: string }>>(url.toString()),
   );
   const named = new Set(
     features.map((feature) => feature.properties?.DIST_NAME ?? ""),
@@ -322,7 +298,7 @@ async function fetchParkland(): Promise<Ring[][]> {
   url.searchParams.set("outSR", "4326");
   url.searchParams.set("f", "geojson");
   const features = await cached("cpad-east-bay-parkland", url.toString(), () =>
-    fetchGeoJson<{ UNIT_NAME?: string }>(url.toString()),
+    fetchFeatures<GeoJsonFeature<{ UNIT_NAME?: string }>>(url.toString()),
   );
   const named = new Set(
     features.map((feature) => feature.properties?.UNIT_NAME ?? ""),
@@ -354,25 +330,18 @@ async function fetchParkland(): Promise<Ring[][]> {
 async function fetchTidalWater(box: Box): Promise<Ring[][]> {
   const url = new URL(HYDRO_SERVICE);
   url.searchParams.set("where", `MTFCC IN ${TIDAL_WATER_CODES}`);
-  url.searchParams.set(
-    "geometry",
-    JSON.stringify({
-      xmin: box.west - WATER_MARGIN_DEGREES,
-      ymin: box.south - WATER_MARGIN_DEGREES,
-      xmax: box.east + WATER_MARGIN_DEGREES,
-      ymax: box.north + WATER_MARGIN_DEGREES,
-      spatialReference: { wkid: 4326 },
-    }),
-  );
-  url.searchParams.set("geometryType", "esriGeometryEnvelope");
-  url.searchParams.set("inSR", "4326");
-  url.searchParams.set("spatialRel", "esriSpatialRelIntersects");
+  envelopeQuery(url, {
+    west: box.west - WATER_MARGIN_DEGREES,
+    south: box.south - WATER_MARGIN_DEGREES,
+    east: box.east + WATER_MARGIN_DEGREES,
+    north: box.north + WATER_MARGIN_DEGREES,
+  });
   url.searchParams.set("outFields", "NAME");
   url.searchParams.set("returnGeometry", "true");
   url.searchParams.set("outSR", "4326");
   url.searchParams.set("f", "geojson");
   const features = await cached("tigerweb-east-bay-water", url.toString(), () =>
-    fetchGeoJson<{ NAME?: string }>(url.toString()),
+    fetchFeatures<GeoJsonFeature<{ NAME?: string }>>(url.toString()),
   );
   if (features.length === 0) {
     throw new Error("TIGERweb returned no water over the East Bay");
@@ -486,19 +455,7 @@ function streetPageUrl(offset: number, box: Box): string {
   const url = new URL(`${EAST_BAY_STREET_SOURCE_URL}/query`);
   url.searchParams.set("where", "1=1");
   url.searchParams.set("outFields", "CLASS,SFEATYP,STREET,SEGID");
-  url.searchParams.set(
-    "geometry",
-    JSON.stringify({
-      xmin: box.west,
-      ymin: box.south,
-      xmax: box.east,
-      ymax: box.north,
-      spatialReference: { wkid: 4326 },
-    }),
-  );
-  url.searchParams.set("geometryType", "esriGeometryEnvelope");
-  url.searchParams.set("inSR", "4326");
-  url.searchParams.set("spatialRel", "esriSpatialRelIntersects");
+  envelopeQuery(url, box);
   url.searchParams.set("returnGeometry", "true");
   url.searchParams.set("outSR", "4326");
   // Without an order, an ArcGIS layer may repeat or skip rows between `resultOffset` pages.
@@ -515,21 +472,11 @@ function streetPageUrl(offset: number, box: Box): string {
 async function fetchCountyStreets(
   box: Box,
 ): Promise<GeoJsonFeature<StreetRow>[]> {
-  const features: GeoJsonFeature<StreetRow>[] = [];
-  for (let offset = 0; ; offset += PAGE_SIZE) {
-    const url = streetPageUrl(offset, box);
-    const page = await cached(
-      `alameda-streets-${offset}`,
-      url,
-      () => fetchGeoJson<StreetRow>(url),
-      true,
-    );
-    features.push(...page);
-    if (page.length < PAGE_SIZE) {
-      break;
-    }
-  }
-  return features;
+  return await allFeatures<GeoJsonFeature<StreetRow>>({
+    pageUrl: (offset) => streetPageUrl(offset, box),
+    pageSize: PAGE_SIZE,
+    cacheName: "alameda-streets",
+  });
 }
 
 // The county centreline as STRT segments, clipped to the city's land. A segment is kept when either
@@ -684,19 +631,7 @@ function parcelPageUrl(offset: number, box: Box, where: string): string {
   const url = new URL(PARCEL_SERVICE);
   url.searchParams.set("where", where);
   url.searchParams.set("outFields", "UseCode");
-  url.searchParams.set(
-    "geometry",
-    JSON.stringify({
-      xmin: box.west,
-      ymin: box.south,
-      xmax: box.east,
-      ymax: box.north,
-      spatialReference: { wkid: 4326 },
-    }),
-  );
-  url.searchParams.set("geometryType", "esriGeometryEnvelope");
-  url.searchParams.set("inSR", "4326");
-  url.searchParams.set("spatialRel", "esriSpatialRelIntersects");
+  envelopeQuery(url, box);
   url.searchParams.set("returnGeometry", "true");
   url.searchParams.set("outSR", "4326");
   // Without an order, an ArcGIS layer may repeat or skip rows between `resultOffset` pages.
@@ -755,20 +690,11 @@ export async function fetchEastBayIndustrial(
   land: LandContext,
 ): Promise<EastBayIndustrial> {
   const { onLand, box } = land;
-  const features: GeoJsonFeature<ParcelRow>[] = [];
-  for (let offset = 0; ; offset += PAGE_SIZE) {
-    const url = parcelPageUrl(offset, box, INDUSTRIAL_USE_CODES);
-    const page = await cached(
-      `alameda-industrial-${offset}`,
-      url,
-      () => fetchGeoJson<ParcelRow>(url),
-      true,
-    );
-    features.push(...page);
-    if (page.length < PAGE_SIZE) {
-      break;
-    }
-  }
+  const features = await allFeatures<GeoJsonFeature<ParcelRow>>({
+    pageUrl: (offset) => parcelPageUrl(offset, box, INDUSTRIAL_USE_CODES),
+    pageSize: PAGE_SIZE,
+    cacheName: "alameda-industrial",
+  });
   if (features.length < EAST_BAY_INDUSTRIAL_FLOOR) {
     throw new Error(
       `Alameda County's parcels answered ${features.length} industrial parcels over the city's box, too few to be the whole of it`,
@@ -818,46 +744,32 @@ export async function fetchEastBayIndustrial(
   return { polygons, parcels: parcels + publicParcels, publicParcels, offLand };
 }
 
-// The regional layer's publicly-owned industrial polygons over the city's box, paged and cached the
-// same way. Its native CRS is UTM 10N, so the query asks for `outSR=4326` like every other here.
+// The regional layer's native CRS is UTM 10N, so its query asks for `outSR=4326` like every other
+// here.
+function regionalPageUrl(offset: number, box: Box): string {
+  const url = new URL(REGIONAL_LAND_USE_SERVICE);
+  url.searchParams.set("where", REGIONAL_PUBLIC_INDUSTRIAL);
+  url.searchParams.set("outFields", "elu_use_code");
+  envelopeQuery(url, box);
+  url.searchParams.set("returnGeometry", "true");
+  url.searchParams.set("outSR", "4326");
+  url.searchParams.set("orderByFields", "OBJECTID");
+  url.searchParams.set("f", "geojson");
+  url.searchParams.set("resultOffset", String(offset));
+  url.searchParams.set("resultRecordCount", String(PAGE_SIZE));
+  return url.toString();
+}
+
+// Its publicly-owned industrial polygons over the city's box, paged and cached the same way the
+// assessor's parcels are.
 async function fetchPublicIndustrial(
   box: Box,
 ): Promise<GeoJsonFeature<unknown>[]> {
-  const features: GeoJsonFeature<unknown>[] = [];
-  for (let offset = 0; ; offset += PAGE_SIZE) {
-    const url = new URL(REGIONAL_LAND_USE_SERVICE);
-    url.searchParams.set("where", REGIONAL_PUBLIC_INDUSTRIAL);
-    url.searchParams.set("outFields", "elu_use_code");
-    url.searchParams.set(
-      "geometry",
-      JSON.stringify({
-        xmin: box.west,
-        ymin: box.south,
-        xmax: box.east,
-        ymax: box.north,
-        spatialReference: { wkid: 4326 },
-      }),
-    );
-    url.searchParams.set("geometryType", "esriGeometryEnvelope");
-    url.searchParams.set("inSR", "4326");
-    url.searchParams.set("spatialRel", "esriSpatialRelIntersects");
-    url.searchParams.set("returnGeometry", "true");
-    url.searchParams.set("outSR", "4326");
-    url.searchParams.set("orderByFields", "OBJECTID");
-    url.searchParams.set("f", "geojson");
-    url.searchParams.set("resultOffset", String(offset));
-    url.searchParams.set("resultRecordCount", String(PAGE_SIZE));
-    const page = await cached(
-      `sfei-public-industrial-${offset}`,
-      url.toString(),
-      () => fetchGeoJson<unknown>(url.toString()),
-      true,
-    );
-    features.push(...page);
-    if (page.length < PAGE_SIZE) {
-      break;
-    }
-  }
+  const features = await allFeatures<GeoJsonFeature<unknown>>({
+    pageUrl: (offset) => regionalPageUrl(offset, box),
+    pageSize: PAGE_SIZE,
+    cacheName: "sfei-public-industrial",
+  });
   if (features.length < EAST_BAY_PUBLIC_INDUSTRIAL_FLOOR) {
     throw new Error(
       `MTC's land use answered ${features.length} publicly-owned industrial polygons over the city's box, too few to be the whole of it`,
@@ -918,7 +830,7 @@ async function fetchOaklandLayer(
   url.searchParams.set("f", "geojson");
   url.searchParams.set("resultRecordCount", String(PAGE_SIZE));
   return await cached(cacheName, url.toString(), () =>
-    fetchGeoJson<unknown>(url.toString()),
+    fetchFeatures<GeoJsonFeature<unknown>>(url.toString()),
   );
 }
 
@@ -1222,29 +1134,10 @@ async function geocodeBatches<Key>(
       ...(await cached(
         `${cacheName}-${start}`,
         where,
-        async () => {
-          const response = await fetch(service, {
-            method: "POST",
-            headers: {
-              "user-agent": USER_AGENT,
-              "content-type": "application/x-www-form-urlencoded",
-            },
+        () =>
+          fetchFeatures<GeoJsonFeature<Record<string, string>>>(service, {
             body,
-            signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-          });
-          if (!response.ok) {
-            throw new Error(`${response.status} ${response.statusText}`);
-          }
-          const page = (await response.json()) as GeoJsonPage<
-            Record<string, string>
-          >;
-          if (page.error) {
-            throw new Error(`ArcGIS ${page.error.code}: ${page.error.message}`);
-          } else if (!Array.isArray(page.features)) {
-            throw new Error("no features in the response");
-          }
-          return page.features;
-        },
+          }),
         true,
       )),
     );

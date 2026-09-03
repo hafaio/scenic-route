@@ -34,6 +34,7 @@ import {
   UTM_10N,
 } from "./canopy-raster";
 import { boxOf } from "./geometry";
+import { fetchJson, retryLadder, USER_AGENT } from "./http";
 import { buildLandTest } from "./land-filter";
 import type { Polygon } from "./overpass";
 
@@ -82,11 +83,7 @@ const MINIMUM_SQUARE_METERS = 4;
 
 const FETCH_WORKERS = 8;
 const MAX_ATTEMPTS = 4;
-const RETRY_BASE_MS = 2_000;
-const RETRY_CAP_MS = 30_000;
 const PROGRESS_TILES = 250;
-const USER_AGENT =
-  "scenic-route/0.1 (+https://github.com/erikbrinkman/scenic-route)";
 
 // Where the height tiles the tiler samples are cut. They are build inputs the tiler opens itself,
 // like San Francisco's 3DEP tiles, and are never committed.
@@ -103,30 +100,12 @@ interface ServiceInfo {
   pixelType?: string;
 }
 
-async function fetchJson<Value>(url: string): Promise<Value> {
-  return await pRetry(
-    async () => {
-      const response = await fetch(url, {
-        headers: { "user-agent": USER_AGENT },
-      });
-      if (!response.ok) {
-        throw new Error(`${response.status} ${response.statusText}`);
-      }
-      return (await response.json()) as Value;
-    },
-    {
-      retries: MAX_ATTEMPTS - 1,
-      minTimeout: RETRY_BASE_MS,
-      maxTimeout: RETRY_CAP_MS,
-      randomize: true,
-    },
-  );
-}
-
 // The five things a wrong assumption here would corrupt rather than break: the grid the tiles are
 // cut on, the level whose cells are metres, and that the cells are float heights on UTM zone 10.
 async function checkService(): Promise<void> {
-  const info = await fetchJson<ServiceInfo>(`${SERVICE}?f=json`);
+  const info = await fetchJson<ServiceInfo>(`${SERVICE}?f=json`, {
+    attempts: MAX_ATTEMPTS,
+  });
   const tiles = info.tileInfo;
   const lod = tiles?.lods?.find((entry) => entry.level === LEVEL);
   const problems: string[] = [];
@@ -164,28 +143,20 @@ async function fetchTile(
 ): Promise<Float32Array | null> {
   const url = `${SERVICE}/tile/${LEVEL}/${row}/${column}`;
   const path = await cachedFile(`alcc-chm-${LEVEL}`, url, async () =>
-    pRetry(
-      async () => {
-        const response = await fetch(url, {
-          headers: { "user-agent": USER_AGENT },
-        });
-        // Cached as no bytes rather than as an error: a tile off the raster stays off it, and a
-        // re-run should not ask again.
-        if (response.status === 404) {
-          return new Uint8Array(0);
-        }
-        if (!response.ok) {
-          throw new Error(`${response.status} ${response.statusText}`);
-        }
-        return new Uint8Array(await response.arrayBuffer());
-      },
-      {
-        retries: MAX_ATTEMPTS - 1,
-        minTimeout: RETRY_BASE_MS,
-        maxTimeout: RETRY_CAP_MS,
-        randomize: true,
-      },
-    ),
+    pRetry(async () => {
+      const response = await fetch(url, {
+        headers: { "user-agent": USER_AGENT },
+      });
+      // Cached as no bytes rather than as an error: a tile off the raster stays off it, and a
+      // re-run should not ask again.
+      if (response.status === 404) {
+        return new Uint8Array(0);
+      }
+      if (!response.ok) {
+        throw new Error(`${response.status} ${response.statusText}`);
+      }
+      return new Uint8Array(await response.arrayBuffer());
+    }, retryLadder(MAX_ATTEMPTS)),
   );
   const bytes = await readFile(path);
   if (bytes.byteLength === 0) {
