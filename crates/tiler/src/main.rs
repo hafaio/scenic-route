@@ -195,6 +195,7 @@ fn run() -> Fallible<()> {
                 shade_dir: None,
                 elevation_bounds: None,
                 alleys: true,
+                existence_ceilings: graph::SURVEYED_CEILINGS,
                 canopy: None,
                 cache: None,
                 probe: true,

@@ -339,6 +339,18 @@ The gate is guarded in both directions because it reads bits another program sta
 whose per-side bits were never written reads as "no sidewalk anywhere", which would silently strip
 the city of pavement, so an implausible drop is a build error rather than a graph.
 
+**How much silence is implausible is a property of the region, not of the gate.** New York publishes
+a municipal sidewalk survey, so a side coming back silent there really is evidence of unstamped
+bits, and both its guards sit at 0.30 — two to three times what the city measures. San Francisco
+publishes one too and would hold that ceiling on its own streets, but it no longer has a build of
+its own: the widened region kept its `sf` id, so the city is guarded with the East Bay. The Bay Area
+publishes none, and even after the pipeline learned to read OSM's
+`sidewalk=*` tags off the road centrelines, 45% of East Bay streets still have nobody stating
+whether a pavement exists. That is a hole in OpenStreetMap, so over that region a 0.30 ceiling was
+measuring the map rather than the build. The ceilings are therefore authored per region — as the
+ferry wait cap already is — and the Bay's sit just over what it measures, not at a round number, so
+a real regression still trips them.
+
 ### The centreline dogleg
 
 Observed live at Pearl and Water Street: a route walks the sidewalk, turns 90° **into the middle of

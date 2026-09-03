@@ -34,7 +34,7 @@ import {
   UTM_10N,
 } from "./canopy-raster";
 import { boxOf } from "./geometry";
-import type { Bounds } from "./manifest";
+import { buildLandTest } from "./land-filter";
 import type { Polygon } from "./overpass";
 
 const SERVICE =
@@ -206,10 +206,78 @@ export interface AlccCanopy {
   dropped: number; // components dropped as smaller than the minimum
   tiles: number; // raster tiles the window covers
   covered: number; // of those, the ones holding any canopy at all
+  offLand: number; // blocks dropped as wholly outside the land mask
+  cutOnLand: number; // blocks the mask ran through, cut on it
   canopyCells: number; // cells above the floor, i.e. square metres of canopy
   droppedCells: number;
   vertices: number;
   heightTiles: string[]; // the height rasters, for the tiler's mosaic sampler
+}
+
+// What the land mask leaves of one traced block, and whether the mask ran through it.
+interface CutBlock {
+  pieces: Polygon[]; // empty where the block is wholly off the land
+  cut: boolean;
+}
+
+// Cuts a traced block on the land mask.
+//
+// Every other canopy source here is a crown — a polygon a few metres across, which the shoreline
+// either holds or does not — and `clipCanopyToLand` in scripts/tree-data-fetch.ts keeps or drops one
+// whole on a single vertex of it. A traced block is a piece of one 256 m raster tile, and along the
+// region's edge the mask runs through the MIDDLE of it: deciding those whole is what drew the canopy
+// and the shade layer's boundary as a 256 m staircase of kept and dropped blocks.
+//
+// The decision is read off the outer ring's vertices, and what that can miss is a mask edge crossing
+// BETWEEN two consecutive vertices while holding neither — the rings are simplified to
+// SIMPLIFY_METERS, so there is no vertex spacing to appeal to. What it costs when it happens is
+// bounded by the same span: a sliver cut off one corner of a block, not the block. The 256 m error
+// this replaced needed only one vertex to fall the wrong way.
+function landCutter(land: Polygon[]): (polygon: Polygon) => Promise<CutBlock> {
+  const onLand = buildLandTest(land);
+  // polygon-clipping's vocabulary, as scripts/alameda.ts spells it: a ring is [lng, lat] pairs.
+  const toRings = (polygon: Polygon) =>
+    polygon.map((ring) =>
+      ring.map(({ lat, lng }): [number, number] => [lng, lat]),
+    );
+  // Each land polygon with its own box, so a block is clipped against the piece of coastline it
+  // stands on rather than against every ring in the region. A polygon whose box misses the block's
+  // cannot meet the block, so this changes what comes back by nothing.
+  const mask = land.map((polygon) => ({
+    rings: toRings(polygon),
+    box: boxOf([polygon]),
+  }));
+  return async (polygon: Polygon) => {
+    const outer = polygon[0];
+    let inside = 0;
+    for (const vertex of outer) {
+      inside += onLand(vertex) ? 1 : 0;
+    }
+    if (inside === outer.length) {
+      return { pieces: [polygon], cut: false };
+    } else if (inside === 0) {
+      return { pieces: [], cut: false };
+    }
+    const box = boxOf([polygon]);
+    const near = mask.filter(
+      ({ box: land }) =>
+        land.west <= box.east &&
+        land.east >= box.west &&
+        land.south <= box.north &&
+        land.north >= box.south,
+    );
+    const { intersection } = await import("polygon-clipping");
+    const cut = intersection(
+      toRings(polygon) as Parameters<typeof intersection>[0],
+      near.map(({ rings }) => rings) as Parameters<typeof intersection>[0],
+    );
+    return {
+      pieces: cut.map((piece) =>
+        piece.map((ring) => ring.map(([lng, lat]) => ({ lat, lng }))),
+      ),
+      cut: true,
+    };
+  };
 }
 
 // The window's polygons and its height tiles, in one pass over the raster.
@@ -221,11 +289,14 @@ export interface AlccCanopy {
 // seams — two abutting polygons where there was one — and buys a bounded polygon everywhere. The
 // cover field cannot tell the difference, because the union of the pieces is the same set of cells;
 // the crown height can, and reads more locally for it.
-export async function fetchAlccCanopy(box: Bounds): Promise<AlccCanopy> {
+export async function fetchAlccCanopy(land: Polygon[]): Promise<AlccCanopy> {
   const started = performance.now();
   await checkService();
   await load();
   await mkdir(HEIGHT_DIR, { recursive: true });
+
+  const box = boxOf(land);
+  const cut = landCutter(land);
 
   // The lon/lat box's own corners projected, then grown to whole tiles: a box is not a rectangle on
   // the grid, so the four corners' extremes cover it and a little more.
@@ -256,6 +327,8 @@ export async function fetchAlccCanopy(box: Bounds): Promise<AlccCanopy> {
     dropped: 0,
     tiles: count,
     covered: 0,
+    offLand: 0,
+    cutOnLand: 0,
     canopyCells: 0,
     droppedCells: 0,
     vertices: 0,
@@ -347,8 +420,16 @@ export async function fetchAlccCanopy(box: Bounds): Promise<AlccCanopy> {
       const polygon: Polygon = rings.map((ring) =>
         ringToCoords(ring, grid, column * TILE, row * TILE),
       );
-      result.vertices += polygon.reduce((sum, ring) => sum + ring.length, 0);
-      result.polygons.push(polygon);
+      const { pieces, cut: onBoundary } = await cut(polygon);
+      if (pieces.length === 0) {
+        result.offLand += 1;
+      } else if (onBoundary) {
+        result.cutOnLand += 1;
+      }
+      for (const piece of pieces) {
+        result.vertices += piece.reduce((sum, ring) => sum + ring.length, 0);
+        result.polygons.push(piece);
+      }
     }
     result.fetched += traced.polygons.length + traced.dropped;
     result.dropped += traced.dropped;
@@ -358,19 +439,20 @@ export async function fetchAlccCanopy(box: Bounds): Promise<AlccCanopy> {
   console.error(
     `  alcc: ${result.polygons.length} polygons, ${result.vertices} vertices, ` +
       `${(result.canopyCells / 1e6).toFixed(2)} km2 of canopy over ${result.covered} of ${count} tiles ` +
-      `(${result.dropped} specks under ${MINIMUM_SQUARE_METERS} m2 dropped, holding ${(result.droppedCells / 1e6).toFixed(3)} km2)`,
+      `(${result.dropped} specks under ${MINIMUM_SQUARE_METERS} m2 dropped, holding ${(result.droppedCells / 1e6).toFixed(3)} km2; ` +
+      `${result.offLand} blocks off the land mask dropped, ${result.cutOnLand} cut on it)`,
   );
   return result;
 }
 
-// The East Bay's own pass, resolved from its land rather than stated as four numbers: the window
-// asked of the raster is the ground the ingest will clip to, so the two cannot drift apart. Held,
+// The East Bay's own pass, handed its land rather than four numbers: the window asked of the raster
+// is that land's own box and the tracing is cut on the land itself, so neither can drift from it. Held,
 // because the ingest asks the same pass for two different things — the cover polygons and the paths
 // of the height tiles — and the tracing behind them is minutes of work that the tile cache does not
 // save. The tiles are cached on disk; the polygons traced from them are not.
 let eastBay: Promise<AlccCanopy> | null = null;
 
 export function eastBayCanopy(): Promise<AlccCanopy> {
-  eastBay ??= (async () => fetchAlccCanopy(boxOf(await fetchEastBayLand())))();
+  eastBay ??= (async () => fetchAlccCanopy(await fetchEastBayLand()))();
   return eastBay;
 }

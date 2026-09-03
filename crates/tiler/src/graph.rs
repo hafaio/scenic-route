@@ -32,6 +32,8 @@ use std::fs;
 use std::ops::ControlFlow;
 use std::path::PathBuf;
 
+use serde::Deserialize;
+
 use crate::Fallible;
 use crate::association;
 use crate::binfmt::{self, SIDES, write_varint, zigzag};
@@ -64,12 +66,34 @@ const FLAG_SURVEYED_RIGHT: u8 = 1 << 6;
 // The existence gate's two guards, checked against the finished build: an implausible drop is a
 // STRT file whose per-side bits were never stamped, and a build the gate does not take the alleys in
 // has the rule the wrong way round. DESIGN.md, "The existence gate".
-const MAX_DROPPED_SIDEWALK_FRACTION: f64 = 0.30;
 const MIN_DEMOTED_ALLEY_FRACTION: f64 = 0.95;
 const ALLEY: u8 = 10;
 // SWLK record byte 20: the kind of OSM way. 21 is a crossing and 22 a traffic island, both of which
 // become crossing edges — the island is the middle of the crossing it chains through.
 const SWLK_SIDEWALK: u8 = 20;
+
+/// The two ceilings the existence gate is held to: the share of derived sidewalk km the gate
+/// dropped, and the 90th-percentile share of one half-kilometre cell's street km left with no
+/// pavement at all. Both bound the same failure — a STRT file whose per-side bits went unstamped
+/// reads as a region with no pavement anywhere — but what counts as an implausible silence depends
+/// on how much of the region anybody ever surveyed, so they are authored per region in the plan
+/// (scripts/write-plan.ts, which carries what each region's numbers were measured against), on the
+/// pattern of `maxFerryWaitSeconds` in src/cities.ts.
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExistenceCeilings {
+    pub dropped_sidewalk_fraction: f64,
+    pub cell_demoted_share: f64,
+}
+
+/// What a region with a municipal sidewalk survey is held to, and what a plan naming no ceiling of
+/// its own gets: where a survey exists, a side coming back silent really is evidence that the bits
+/// were never stamped. New York is the only region taking these now, and it reads 0.144 dropped and
+/// 0.094 at the cell 90th percentile, against a ceiling at two to three times that.
+pub const SURVEYED_CEILINGS: ExistenceCeilings = ExistenceCeilings {
+    dropped_sidewalk_fraction: 0.30,
+    cell_demoted_share: 0.30,
+};
 
 // GRPH edge flags, distinct from the STRT record flags above. Contraction requires equal GRPH
 // flags, so they never mix within one edge.
@@ -231,11 +255,10 @@ const MAX_PHANTOM_SIDEWALKS: usize = 200;
 // something other than a repair claiming to be one. 50 m is the 99th percentile's own room — over
 // the 40 m a build without the kerb cuts reaches, under the reach that makes them.
 const MAX_LINK_P99_METERS: f64 = 50.0;
-// A tenth of the city's half-kilometre cells are over 9.4% streets the gate found no pavement on.
+// A tenth of New York's half-kilometre cells are over 9.4% streets the gate found no pavement on.
 // The failure this bounds is a whole neighbourhood's survey going missing while the citywide average
 // hides it: a borough is about a fifth of the 2,877 scored cells, so a borough at ~100% unpaved puts
-// the 90th percentile itself at 1.0. 30% is three times what the city measures and nowhere near it.
-const MAX_CELL_DEMOTED_SHARE: f64 = 0.30;
+// the 90th percentile itself at 1.0. Its ceiling is per region — `existence_ceilings`.
 // Every bound above is held over a population the build classifies for itself, so each one passes
 // on the empty set: stop `road_types == ALLEY` matching and there is no stranded alley km, no mouth
 // that fails to reach pavement, no phantom on a street the gate never called one-sided, and no link
@@ -303,6 +326,8 @@ pub struct Args {
     pub elevation_bounds: Option<crate::manifest::Bounds>,
     /// Whether this city's centreline classifies alleys — see the alley bounds in `run`.
     pub alleys: bool,
+    /// The existence gate's two ceilings for this region, out of the plan.
+    pub existence_ceilings: ExistenceCeilings,
     // The measured canopy, read twice over: for the direct-canopy record byte, and — when the shade
     // bake runs — for the crowns that occlude the edges alongside the buildings.
     pub canopy: Option<PathBuf>,
@@ -3973,14 +3998,15 @@ fn topology(args: &Args) -> Fallible<Base> {
             link_lengths.p99_meters, link_lengths.longest_meters
         ));
     }
-    if pavement_cells.p90_demoted_share > MAX_CELL_DEMOTED_SHARE {
+    let ceilings = args.existence_ceilings;
+    if pavement_cells.p90_demoted_share > ceilings.cell_demoted_share {
         broken.push(format!(
             "a tenth of the city's {} half-kilometre cells are over {:.0}% streets with no \
              pavement, over the {:.0}% ceiling: a neighbourhood has lost its sidewalks while the \
              citywide average hid it",
             pavement_cells.cells,
             100.0 * pavement_cells.p90_demoted_share,
-            100.0 * MAX_CELL_DEMOTED_SHARE
+            100.0 * ceilings.cell_demoted_share
         ));
     }
     let dropped_fraction = 1.0 - kept_side_km / derived_side_km;
@@ -3999,13 +4025,13 @@ fn topology(args: &Args) -> Fallible<Base> {
             )
             .into());
         }
-        if dropped_fraction > MAX_DROPPED_SIDEWALK_FRACTION {
+        if dropped_fraction > ceilings.dropped_sidewalk_fraction {
             broken.push(format!(
                 "the existence gate dropped {:.1}% of derived sidewalk km, over the {:.0}% \
                  ceiling: the STRT per-side bits look unstamped, which reads as a city with no \
                  pavement",
                 100.0 * dropped_fraction,
-                100.0 * MAX_DROPPED_SIDEWALK_FRACTION
+                100.0 * ceilings.dropped_sidewalk_fraction
             ));
         }
         if args.alleys && demoted_alley_fraction < MIN_DEMOTED_ALLEY_FRACTION {

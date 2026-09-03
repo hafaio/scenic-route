@@ -136,7 +136,7 @@ test("a city graph is recognisable, so eviction can leave it alone", () => {
 // an ocean must not fill the cache with ground nothing else in the app knows anything about.
 const CITIES = [
   { west: -74.2555, south: 40.4968, east: -73.6995, north: 40.9155 }, // New York
-  { west: -122.5155, south: 37.6674, east: -122.1143, north: 37.9071 }, // the Bay Area
+  { west: -122.5141, south: 37.6655, east: -122.114, north: 37.9059 }, // the Bay Area
 ];
 
 test("a basemap tile over a city is cached, under a key without its API key", () => {

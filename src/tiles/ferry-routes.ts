@@ -2,14 +2,18 @@
 // the identity ./polylines stacks the lanes by where routes share a stretch of water.
 //
 // The colours are the `route_color` each feed publishes for the route, read straight off
-// `routes.txt` in the two frozen GTFS zips under `data/ferries/` — NYC Ferry (Hornblower, via
-// Connexionz) for the seven NYC Ferry routes, NYC DOT for the Staten Island Ferry. That is the
-// operator's real branding: East River is NYC Ferry's teal, the Staten Island Ferry its orange.
+// `routes.txt` in the frozen GTFS zips under `data/ferries/` — NYC Ferry (Hornblower, via
+// Connexionz) for the seven NYC Ferry routes, NYC DOT for the Staten Island Ferry, and San
+// Francisco Bay Ferry for the Bay's four. That is the operator's real branding: East River is NYC
+// Ferry's teal, the Staten Island Ferry its orange, Oakland & Alameda the green on WETA's own map.
 //
 // The key is the route's display name, which is what a FERR segment carries (record byte 18, an
-// index into the file's name blob) — `route_long_name` in both feeds. This is a display table and
+// index into the file's name blob) — `route_long_name` in every feed. This is a display table and
 // not an artifact field on purpose: a colour is a rendering choice over a handful of stable names,
 // so changing one should not cost a re-ingest of the network.
+//
+// Both cities' routes share the one table: a name here is a `route_long_name` from one operator's
+// feed, and no two of them collide.
 const ROUTE_COLORS: Record<string, string> = {
   Astoria: "#ff6b00",
   "East River": "#00839c",
@@ -19,6 +23,10 @@ const ROUTE_COLORS: Record<string, string> = {
   "South Brooklyn": "#ffd100",
   "St. George": "#d0006f",
   "Staten Island Ferry": "#ff8330",
+  "Alameda Seaplane": "#df7a1c",
+  "Harbor Bay": "#c74a5d",
+  "Oakland & Alameda": "#4fab47",
+  "Oakland Alameda Water Shuttle": "#ffd400",
 };
 
 export interface RouteStyle {
