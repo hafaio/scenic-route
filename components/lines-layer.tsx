@@ -5,6 +5,7 @@ import { useEffect } from "react";
 import { useMap } from "react-leaflet";
 import type { OverlayId } from "../src/overlays/registry";
 import { watchLayerStatus } from "../src/overlays/status";
+import type { ThemeName } from "../src/theme/palette";
 import WorkerTileLayer from "../src/tiles/layer";
 import { KEEP_BUFFER } from "../src/tiles/raster";
 import manifest from "../src/tree-cover/manifest.json";
@@ -29,7 +30,7 @@ export default function LinesLayer({
   overlay: OverlayId; // which menu row this instance is, since two of them share this component
   dir: string; // the served directory, e.g. "highways" — the blob is <dir>/<city>.bin
   format: "hway" | "ferr"; // which binary layout to decode
-  color: string; // CSS stroke colour
+  color: Record<ThemeName, string>; // CSS stroke colour, per theme
 }) {
   const map = useMap();
   const active = useCity();

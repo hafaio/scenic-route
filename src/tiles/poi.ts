@@ -3,6 +3,7 @@ import { drawLabels, type PlacedLabels, placeLabels } from "./labels";
 import { projectX, projectY, unproject } from "./mercator";
 import type { PoiParams, TileCoords } from "./protocol";
 import type { TileRenderer } from "./renderer";
+import { themeName } from "./theme";
 import { type Cursor, readVarint } from "./varint";
 
 // A point-of-interest overlay: the committed POI points (landmarks, public art) drawn as coloured
@@ -128,7 +129,8 @@ function drawTileLabels(
   context: OffscreenCanvasRenderingContext2D,
   points: Points,
   coords: TileCoords,
-  { color, labelAnchor }: PoiParams,
+  color: string,
+  labelAnchor: PoiParams["labelAnchor"],
 ): void {
   const above = labelAnchor === "top";
   drawLabels(
@@ -153,6 +155,7 @@ function draw(
   const originX = coords.x * TILE_SIZE;
   const originY = coords.y * TILE_SIZE;
   const radius = dotRadius(zoom);
+  const fill = params.color[themeName()];
 
   const northWest = unproject(originX, originY, zoom);
   const southEast = unproject(originX + TILE_SIZE, originY + TILE_SIZE, zoom);
@@ -164,7 +167,7 @@ function draw(
 
   context.lineWidth = 1;
   context.strokeStyle = "rgba(20, 20, 20, 0.4)";
-  context.fillStyle = params.color;
+  context.fillStyle = fill;
   for (let cellX = cellX0; cellX <= cellX1; cellX++) {
     for (let cellY = cellY0; cellY <= cellY1; cellY++) {
       const cell = points.buckets.get(`${cellX},${cellY}`);
@@ -191,7 +194,7 @@ function draw(
   }
 
   if (zoom >= LABEL_MIN_ZOOM) {
-    drawTileLabels(context, points, coords, params);
+    drawTileLabels(context, points, coords, fill, params.labelAnchor);
   }
 }
 

@@ -192,7 +192,7 @@ const params: LinesParams = {
   kind: "lines",
   url: "test",
   format: "ferr",
-  color: "#2563eb",
+  color: { light: "#2563eb", dark: "#60a5fa" },
 };
 
 // A crossing bending its way east along a fixed row of tiles, so it enters and leaves several of
@@ -360,7 +360,8 @@ test("a route takes its operator's colour, and an unknown one the layer's", () =
   const strokes = new Set(
     drawTile(data, 9650, 12317, zoom).map(({ stroke }) => stroke),
   );
-  expect(strokes).toEqual(new Set(["#00839c", params.color]));
+  // The worker has been told no theme, so it draws in its light default.
+  expect(strokes).toEqual(new Set(["#00839c", params.color.light]));
 });
 
 test("highway lines keep their corners and the layer's own colour", () => {
@@ -372,7 +373,7 @@ test("highway lines keep their corners and the layer's own colour", () => {
     "moveTo",
     ...points.slice(1).map(() => "lineTo"),
   ]);
-  expect(drawn[0].stroke).toBe(params.color);
+  expect(drawn[0].stroke).toBe(params.color.light);
   // Loose by a pixel hundredth: the artifact quantizes coordinates to 1e-6°.
   expect(drawn[1].args[0]).toBeCloseTo(projectX(points[1].lng, zoom), 1);
   expect(drawn[1].args[1]).toBeCloseTo(projectY(points[1].lat, zoom), 1);

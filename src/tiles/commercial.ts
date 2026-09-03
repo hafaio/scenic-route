@@ -1,9 +1,11 @@
 import { COMMERCIAL_COLOR } from "../overlays/colors";
 import { decodeStreetChunk } from "../streets/chunk";
+import type { ThemeName } from "../theme/palette";
 import { resolveUrl } from "./base-url";
 import { projectX, projectY, unproject } from "./mercator";
 import type { CommercialParams, TileCoords } from "./protocol";
 import type { TileRenderer } from "./renderer";
+import { themeName } from "./theme";
 
 // The "commercial" overlay. It highlights whole blocks, not points. The heavy work — snapping ~800k
 // PLUTO land-use lots and ~1M building footprints onto every street segment — is done at BUILD TIME by
@@ -46,12 +48,22 @@ const COMMERCIAL_FRACTION = 0.5;
 const LOW_RISE_METERS = 25;
 
 // The band composites at one flat opacity — lower than a thin line would take, since the band is fat
-// and neighbouring bands overlap at corners, so it stays airy. The rgba() writes below want the
-// overlay's violet as channels rather than as hex.
-const VIOLET_RGB = [1, 3, 5]
-  .map((at) => Number.parseInt(COMMERCIAL_COLOR.slice(at, at + 2), 16))
-  .join(", ");
+// and neighbouring bands overlap at corners, so it stays airy.
 const BAND_OPACITY = 0.45;
+
+// The band's stroke and the raster's pixels both want the overlay's violet as channels rather than
+// as hex, so both themes' are parsed once up front.
+function channels(hex: string): readonly [number, number, number] {
+  const [red, green, blue] = [1, 3, 5].map((at) =>
+    Number.parseInt(hex.slice(at, at + 2), 16),
+  );
+  return [red, green, blue];
+}
+
+const BAND_CHANNELS: Record<ThemeName, readonly [number, number, number]> = {
+  light: channels(COMMERCIAL_COLOR.light),
+  dark: channels(COMMERCIAL_COLOR.dark),
+};
 
 // The vector band's ground width: the roadway plus the frontage lots on both sides, so it reads as the
 // commercial BLOCK strip rather than a centreline over the street. A NYC lot is ~30 m deep, the road
@@ -353,7 +365,8 @@ function compositeBand(
   offContext.lineCap = "square";
   offContext.lineJoin = "miter";
   offContext.lineWidth = width;
-  offContext.strokeStyle = `rgba(${VIOLET_RGB}, 1)`;
+  const [red, green, blue] = BAND_CHANNELS[themeName()];
+  offContext.strokeStyle = `rgba(${red}, ${green}, ${blue}, 1)`;
   offContext.stroke(path);
   context.globalAlpha = BAND_OPACITY;
   context.drawImage(
@@ -506,9 +519,7 @@ function drawRaster(
   rasterImage ??= new ImageData(RASTER_GRID, RASTER_GRID);
   const image = rasterImage;
   image.data.fill(0); // reused across tiles: clear the previous tile's marked cells first
-  const [red, green, blue] = VIOLET_RGB.split(",").map((part) =>
-    Number.parseInt(part, 10),
-  );
+  const [red, green, blue] = BAND_CHANNELS[themeName()];
   const alpha = Math.round(255 * RASTER_OPACITY);
   for (let cell = 0; cell < grid.length; cell++) {
     if (grid[cell] === 0) {

@@ -12,6 +12,7 @@ import {
 } from "./polylines";
 import type { LinesParams, TileCoords } from "./protocol";
 import type { TileRenderer } from "./renderer";
+import { themeName } from "./theme";
 import type { Cursor } from "./varint";
 
 // A line overlay: the committed highway/rail nuisance lines (magic HWAY) or the ferry route segments
@@ -228,6 +229,7 @@ function draw(
   const originY = coords.y * TILE_SIZE;
   const northWest = unproject(originX, originY, zoom);
   const southEast = unproject(originX + TILE_SIZE, originY + TILE_SIZE, zoom);
+  const stroke = color[themeName()];
 
   context.lineWidth = LINE_WIDTH_PX;
   context.lineJoin = "round";
@@ -273,7 +275,7 @@ function draw(
               offset * (ribbon?.normalY[vertex] ?? 0),
           );
         }
-        context.strokeStyle = ribbon?.color ?? color;
+        context.strokeStyle = ribbon?.color ?? stroke;
         context.beginPath();
         if (ribbon) {
           roundedPath(context, pixelX, pixelY);
