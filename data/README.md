@@ -54,7 +54,9 @@ wholesale), **`art/nyc.bin`** (which folds in OSM `tourism=artwork`), **`highway
 `outdoor_seating`). It reaches **`streets/nyc.bin`** too, for four bits a record: CSCL's own
 geometry carries no OSM, but the per-side "OSM maps a sidewalk here" bits are derived from the
 sidewalk extract, and this repository's line has been to let share-alike follow the derivation
-rather than argue de-minimis.
+rather than argue de-minimis. In `streets/sf.bin` the other two bits reach OSM as well, since the
+East Bay's "a survey says there is pavement here" bits come from OSM's `sidewalk=*` road tags rather
+than from a municipal survey — the same line, drawn the same way.
 
 `landmarks/nyc.bin`, `buildings/nyc.bin`, `landuse/nyc.bin`, and `openstreets/nyc.bin` are pure
 **NYC Open Data** (no OSM), so they carry no share-alike obligation — see below.

@@ -227,6 +227,68 @@ export async function fetchPaths(
   return ways;
 }
 
+// One OSM road way that says, on the centreline itself, what its own kerbs carry. This is OSM's
+// *other* way of recording a pavement — the four `sidewalk` keys — and it is a per-side statement
+// about the road rather than a way of its own, so it is fetched apart from the footways above and
+// read against the city centreline it matches rather than added to the walking network. The values
+// are handed on raw: what each one means, and which key beats which, is `scripts/sidewalks.ts`.
+export interface SidewalkTaggedRoad {
+  id: number;
+  sidewalk?: string; // `sidewalk` — both/left/right/yes/no/none/separate
+  left?: string; // `sidewalk:left`
+  right?: string; // `sidewalk:right`
+  both?: string; // `sidewalk:both`
+  points: Coord[];
+}
+
+// The road classes a city centreline can be. Motorways are left out — no centreline this pipeline
+// ingests is one, so a tagged motorway could only ever match the frontage road beside it.
+const ROAD_CLASSES =
+  '["highway"~"^(trunk|primary|secondary|tertiary)(_link)?$|' +
+  '^(unclassified|residential|living_street|service|road|busway)$"]';
+const SIDEWALK_KEYS = [
+  "sidewalk",
+  "sidewalk:left",
+  "sidewalk:right",
+  "sidewalk:both",
+];
+
+// One clause per key rather than a key regex: Overpass returns a way once however many clauses it
+// matches, and naming the four keys keeps `sidewalk:left:surface` and its kin out of the answer.
+export async function fetchSidewalkTags(
+  south: number,
+  west: number,
+  north: number,
+  east: number,
+): Promise<SidewalkTaggedRoad[]> {
+  const box = `${south},${west},${north},${east}`;
+  const union = SIDEWALK_KEYS.map(
+    (key) => `way${ROAD_CLASSES}["${key}"](${box});`,
+  ).join("");
+  const query = `[out:json][timeout:${QUERY_TIMEOUT_SECONDS}];(${union});out geom;`;
+  const elements = await overpassQuery("overpass-sidewalk-tags", query);
+  const roads: SidewalkTaggedRoad[] = [];
+  for (const element of elements) {
+    if (element.type !== "way" || element.id === undefined) {
+      continue;
+    }
+    const geometry = element.geometry ?? [];
+    if (geometry.length < 2) {
+      continue;
+    }
+    const tags = element.tags ?? {};
+    roads.push({
+      id: element.id,
+      sidewalk: tags.sidewalk,
+      left: tags["sidewalk:left"],
+      right: tags["sidewalk:right"],
+      both: tags["sidewalk:both"],
+      points: toCoords(geometry),
+    });
+  }
+  return roads;
+}
+
 // One OSM way describing a street's own pavement: which of the three `footway` values it carries,
 // and the same geometry/name/structure a PathWay does.
 export interface SidewalkWay {

@@ -264,14 +264,16 @@ see `t > 1`. τ is still applied once to the finished crown layer, so the pyrami
 ## The walking network
 
 Where OSM maps a sidewalk, that way *is* the sidewalk edge. CSCL's centrelines supply a per-side
-offset only on the sides OSM leaves, and only where OSM or the city's planimetric survey says there
+offset only on the sides OSM leaves, and only where a source — OSM's own sidewalk ways, the city's
+survey, or OSM's `sidewalk=*` tag on the road itself — says there
 is pavement there at all — a street both of whose sides come back silent is demoted to its own
 centreline rather than deleted, because you walk an alley. `scripts/README.md` says how it is built.
 This is why the seam between the two datasets is cut where it is.
 
 ### Whether there is pavement at all
 
-Two sources answer it and neither alone can. **OSM's silence is ambiguous** — a mapping gap or a
+Two sources answer it and neither alone can, and a third stands behind the second where a city
+publishes none. **OSM's silence is ambiguous** — a mapping gap or a
 genuinely bare kerb — and it is worst exactly where it would do most damage: OSM is silent on both
 sides of 40.5% of Bronx street km, and only 24.0% of that is really bare, against 82.1% of the 7.6%
 it is silent on in Brooklyn. The gaps fall in contiguous neighbourhoods
@@ -286,7 +288,24 @@ Centerline" (`a9xv-vek9`) looks like the obvious dataset and is not: it captures
 walkways and explicitly excludes the street right-of-way, so it cannot answer the sidedness question
 at all. The polygon layer can, and it is NYC Open Data rather than ODbL.
 
-Both sources are read the same way — a side counts when half its samples hit, not when one lucky
+**OSM records a pavement two ways, and reading only one of them is reading half the source.** A
+sidewalk is either drawn as its own way or stated on the road with a `sidewalk`, `sidewalk:left`,
+`sidewalk:right` or `sidewalk:both` tag, and which form a city uses is a mapping culture rather than
+a fact about its streets: San Francisco and New York draw the ways, the East Bay largely tags the
+roads. So the tags are read too, matched to the centreline they describe and turned round where OSM
+digitized the street the other way — but only on a side the city's own survey leaves unstated, since
+a survey is one trace of the whole city where a tag is one mapper's note on one way. A city with a
+survey is therefore untouched by them: New York's probe answers every side, and its per-side bits
+came back byte-for-byte identical when the tags were added. A region without one — the East Bay —
+gets its whole answer from them. `scripts/README.md` has the values, the match and the measurements.
+
+**Three states, not two.** `sidewalk=no` is a mapper saying the kerb is bare, and an untagged road
+says nothing at all; a survey row reading NONE is a statement where a missing row is not. Only a
+stated pavement sets a bit, so bare and unstated leave the same four bits — but they are held apart
+because a stated bare stops a weaker source being asked, and because a region that is largely
+unstated is missing *data* where one that is largely bare is missing *pavement*.
+
+Every source is read the same way — a side counts when half its samples hit, not when one lucky
 point does — so a driveway or a corner cannot decide a whole segment. The stations are the **centres
 of equal pieces** of the segment rather than every step from its start: a CSCL segment ends at a
 junction, so a station standing on an end vertex takes its perpendicular offset into the *cross*
@@ -308,8 +327,8 @@ they read 20.6%, 61.2% and 66.9%.
 
 ### The existence gate
 
-A side keeps its derived sidewalk edge only where the two sources above say there is pavement on it:
-OSM maps a sidewalk there, or the survey draws one. A street both of whose sides come back silent
+A side keeps its derived sidewalk edge only where a source above says there is pavement on it:
+OSM maps a sidewalk way there, or a survey does. A street both of whose sides come back silent
 keeps no sidewalk at all and is **demoted to its centreline as a path edge, never deleted** — an
 alley has no sidewalk, but you walk the alley, and so do the people on any street the city never
 paved a side of. Alleys fall out of the rule with no special case of their own, which is the check
