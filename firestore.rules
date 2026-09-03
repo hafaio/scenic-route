@@ -28,5 +28,20 @@ service cloud.firestore {
         && request.resource.data.lastModifier == request.auth.uid;
       allow delete: if isAdmin();
     }
+
+    // Anonymous feedback. Anyone may drop a note in; only admins ever see it
+    // again, and reading one is the whole of dealing with it, so the only other
+    // thing an admin does is delete it. Nothing may ever be edited: a note says
+    // what its sender wrote or it is gone. The create rule is the abuse bound —
+    // exactly two fields, a hard length cap, and a server-clock timestamp.
+    match /feedback/{feedbackId} {
+      allow read: if isAdmin();
+      allow create: if request.resource.data.keys().hasOnly(['text', 'createdAt'])
+        && request.resource.data.text is string
+        && request.resource.data.text.size() > 0
+        && request.resource.data.text.size() <= 2000
+        && request.resource.data.createdAt == request.time;
+      allow delete: if isAdmin();
+    }
   }
 }
