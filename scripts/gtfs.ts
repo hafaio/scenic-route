@@ -1,12 +1,13 @@
 // A minimal GTFS reader for the ferry and subway ingests: it downloads a feed zip (through the disk
 // cache), unzips it in memory and parses the handful of CSV tables they read. It leans on
 // node:zlib for the one deflate step and parses the central directory by hand, so it pulls in no
-// zip or csv dependency. See scripts/README.md.
+// zip dependency; the CSV reader it parses the tables with is scripts/csv.ts. See scripts/README.md.
 
 import { readFile } from "node:fs/promises";
 import { inflateRawSync } from "node:zlib";
 import pRetry from "p-retry";
 import { cached, cachedFile } from "./cache";
+import { type CsvRow, parseCsv } from "./csv";
 
 // A browser-ish User-Agent: NYC DOT's Akamai edge answers the plain download with a 403 unless the
 // request looks like a browser. The NYC Ferry endpoint does not care, but the header is harmless
@@ -20,7 +21,7 @@ const RETRY_CAP_MS = 30_000;
 
 // One parsed GTFS table: the header row keys each record, so a column is read by its name and a
 // column a feed omits simply comes back undefined rather than shifting every field.
-export type GtfsRow = Record<string, string>;
+export type GtfsRow = CsvRow;
 
 // The tables the ferry consolidation reads. calendar_dates and frequencies are often empty (a
 // header only) or absent; either way they parse to an empty array.
@@ -155,66 +156,6 @@ function unzip(bytes: Uint8Array): Map<string, Uint8Array> {
     cursor += 46 + nameLength + extraLength + commentLength;
   }
   return files;
-}
-
-// A GTFS CSV field. Handles RFC 4180 quoting (a "" inside a quoted field is one literal quote) and
-// both CRLF and LF line breaks; a leading UTF-8 BOM on the first cell is stripped so the first
-// header name is not read as "﻿route_id".
-function parseCsv(text: string): GtfsRow[] {
-  const clean = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
-  const rows: string[][] = [];
-  let field = "";
-  let record: string[] = [];
-  let quoted = false;
-  for (let index = 0; index < clean.length; index++) {
-    const char = clean[index];
-    if (quoted) {
-      if (char === '"') {
-        if (clean[index + 1] === '"') {
-          field += '"';
-          index += 1;
-        } else {
-          quoted = false;
-        }
-      } else {
-        field += char;
-      }
-    } else if (char === '"') {
-      quoted = true;
-    } else if (char === ",") {
-      record.push(field);
-      field = "";
-    } else if (char === "\n" || char === "\r") {
-      if (char === "\r" && clean[index + 1] === "\n") {
-        index += 1;
-      }
-      record.push(field);
-      field = "";
-      if (record.length > 1 || record[0] !== "") {
-        rows.push(record);
-      }
-      record = [];
-    } else {
-      field += char;
-    }
-  }
-  if (field !== "" || record.length > 0) {
-    record.push(field);
-    if (record.length > 1 || record[0] !== "") {
-      rows.push(record);
-    }
-  }
-  if (rows.length === 0) {
-    return [];
-  }
-  const header = rows[0];
-  return rows.slice(1).map((cells) => {
-    const row: GtfsRow = {};
-    for (let column = 0; column < header.length; column++) {
-      row[header[column]] = cells[column] ?? "";
-    }
-    return row;
-  });
 }
 
 // The name of a table within the zip, matched by basename so a feed that nests its files under a

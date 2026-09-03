@@ -1,11 +1,12 @@
-// `bun run scripts/landmarks.ts`: fetches the NYC LPC individual-landmark sites and writes them as
-// data/landmarks/nyc.bin (magic LMRK) — the historic/touristy POIs a later phase fans out over the
-// walking graph into a per-edge "passes a landmark" routing discount. Points only; no overlay ships
-// this batch. Layout: scripts/README.md.
+// `bun run scripts/landmarks.ts [city]`: fetches a city's designated landmarks and writes them as
+// data/landmarks/<id>.bin (magic LMRK) — the historic/touristy POIs a later phase fans out over the
+// walking graph into a per-edge "passes a landmark" routing discount. Points, where the historic
+// districts beside them are areas. Layout: scripts/README.md.
 
 import { createHash } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { fetchEastBayLandmarks } from "./alameda";
 import { encodePoints, type NamedPoint } from "./geometry";
 import { type LandContext, loadLandContext } from "./land";
 import type { SourceFile } from "./manifest";
@@ -63,8 +64,17 @@ async function nycLandmarks(land: LandContext): Promise<NamedPoint[]> {
 export type LandmarkSource = (land: LandContext) => Promise<NamedPoint[]>;
 
 export const NYC_LANDMARKS: LandmarkSource = nycLandmarks;
-export const SF_LANDMARKS: LandmarkSource = (land) =>
-  fetchSfLandmarks(land.onLand);
+// Two halves, and they are not the same kind of register: San Francisco's is its own Article 10
+// list, the East Bay's is the state inventory's federal and state designations, because neither
+// Oakland's local register nor Berkeley's is published as data at all. `scripts/alameda.ts` has what
+// that costs; the difference is visible on the map and is worth knowing about before reading it.
+export const SF_LANDMARKS: LandmarkSource = async (land) => {
+  const [city, eastBay] = await Promise.all([
+    fetchSfLandmarks(land.onLand),
+    fetchEastBayLandmarks(land),
+  ]);
+  return [...city, ...eastBay];
+};
 
 export async function ingestLandmarks(
   cityId: string,
