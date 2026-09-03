@@ -2,10 +2,11 @@
 // data/industrial/<id>.bin (magic INDL) — the lot POLYGONS, drawn by the industrial overlay and
 // sampled per edge into the graph's industrial-frontage penalty. Layout: scripts/README.md.
 //
-// The two cities do not share a source, because the thing being asked for is land USE and no two
-// cities record it the same way. New York publishes a per-lot class and the whole ingest is one
-// `where`; San Francisco publishes floor area per category and a separate zoning map, and the rule
-// that reads them lives in scripts/sf.ts.
+// No two of these places record land USE the same way, so no two share a source. New York publishes
+// a per-lot class and the whole ingest is one `where`; San Francisco publishes floor area per
+// category and a separate zoning map, and the rule that reads them lives in scripts/sf.ts; the East
+// Bay — the other half of the same region — publishes the assessor's own use code on the parcel
+// geometry, read in scripts/alameda.ts. The Bay Area artifact is the last two concatenated.
 //
 // New York's geometry comes from DCP's MAPPLUTO ArcGIS FeatureServer, not from Socrata: the Socrata
 // copy of PLUTO (`64uk-42ks`, which scripts/landuse.ts reads) carries lot CENTROIDS and its `geom`
@@ -15,6 +16,7 @@ import { createHash } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import pRetry from "p-retry";
+import { fetchEastBayIndustrial } from "./alameda";
 import { cached } from "./cache";
 import { encodePolygons } from "./geometry";
 import { type LandContext, loadLandContext } from "./land";
@@ -188,12 +190,22 @@ async function fetchCityLots(cityId: string, land: LandContext): Promise<Lots> {
   if (cityId === "nyc") {
     return await fetchLots(land);
   } else if (cityId === "sf") {
-    const { polygons, parcels, dominant, zoned, offLand } =
-      await fetchSfIndustrial(land.onLand);
+    // Two halves, two registers of land use, one artifact: San Francisco's floor-area table and
+    // Alameda County's assessor use codes. Nothing downstream reads which half a polygon came from.
+    const [city, eastBay] = await Promise.all([
+      fetchSfIndustrial(land.onLand),
+      fetchEastBayIndustrial(land),
+    ]);
     console.error(
-      `  industrial: ${dominant} PDR-dominant parcels, ${zoned} unbuilt in industrial zoning`,
+      `  industrial: ${city.dominant} PDR-dominant parcels, ${city.zoned} unbuilt in industrial zoning,` +
+        ` ${eastBay.parcels - eastBay.publicParcels} East Bay parcels on an industrial use code` +
+        ` and ${eastBay.publicParcels} tax-exempt`,
     );
-    return { polygons, lots: parcels, offLand };
+    return {
+      polygons: [...city.polygons, ...eastBay.polygons],
+      lots: city.parcels + eastBay.parcels,
+      offLand: city.offLand + eastBay.offLand,
+    };
   } else {
     throw new Error(`no industrial land-use source for ${cityId}`);
   }

@@ -257,15 +257,15 @@ in its own band.
 | sidewalks | OSM `footway=sidewalk`/`crossing`/`traffic_island` ways via Overpass; the city's own survey — NYC's planimetric SIDEWALK polygons, Socrata `52n9-sdep` (`sub_code` 380000 = street right-of-way), or SF's 2014 Sidewalk Widths study; and the `sidewalk`/`sidewalk:left`/`sidewalk:right`/`sidewalk:both` tags OSM puts on the **road** | the ways are a committed source, magic `SWLK`; the three together settle the four per-side sidewalk bits of every offsetted `STRT` record, and the ways themselves are the walking network wherever they exist — see below and "Binary layouts" |
 | ferries | the two NYC ferry GTFS feeds — Staten Island Ferry (NYC DOT) and NYC Ferry (Hornblower, via Connexionz) | consolidated to a time-independent ferry graph, a committed source, magic `FERR` — OSM- and canopy-independent, read by a later phase's routing graph, not the cover pipeline; see below and "Binary layouts" |
 | subway | the MTA's subway GTFS feed, `https://rrgtfsfeeds.s3.amazonaws.com/gtfs_subway.zip` | the 29 routes as 93 polylines (every shape variant the feed runs that draws track nothing else does) and the 496 stations, with the colours and names the MTA publishes for each route and, per station, the set of routes that genuinely serve it and the complex `transfers.txt` puts it in; a committed source, magic `SBWY` — **display only**, it enters no routing input (this is a walking router and nobody walks the subway); see below and "Binary layouts" |
-| transit (San Francisco) | SFMTA's Muni GTFS, `https://muni-gtfs.apps.sfmta.com/data/muni_gtfs-current.zip`, and BART's, `https://www.bart.gov/dev/schedules/google_transit.zip` — both keyless | Muni's rail (the six Metro lines, the F streetcar, the three cable cars) and the four BART lines that run through the city, as 42 polylines clipped to the city's land, and the 268 stations (no complexes: neither feed publishes a transfer between two of its stations), in the **same `SBWY`** blob New York's subway ships as; **display only**, it enters no routing input; see below |
+| transit (Bay Area) | SFMTA's Muni GTFS, `https://muni-gtfs.apps.sfmta.com/data/muni_gtfs-current.zip`, and BART's, `https://www.bart.gov/dev/schedules/google_transit.zip` — both keyless | Muni's rail (the six Metro lines, the F streetcar, the three cable cars) and **all six BART lines**, as 54 polylines clipped to the region's land, and the 282 stations (no complexes: neither feed publishes a transfer between two of its stations), in the **same `SBWY`** blob New York's subway ships as; **display only**, it enters no routing input. Muni is San Francisco's alone; BART is what makes this a regional layer rather than a city one; see below |
 | legacy | SF Legacy Business Registry (ArcGIS, Office of Small Business) and NY State Historic Business Preservation Registry (ArcGIS, State Parks) | businesses trading 50+ years, at their register's own point; a committed POI source, magic `LGCY` — overlay only, no per-edge byte; see "Binary layouts" |
-| landmarks | NYC LPC Individual Landmark Sites, Socrata `buis-pvji` | ~1.5k designated historic/touristy sites, taken at their WGS84 centroid; a committed POI source, magic `LMRK` — fanned out into a per-edge routing discount, not the cover pipeline; see "Binary layouts" |
-| art | NYC PDC Outdoor Public Art Inventory (Socrata `2pg3-gcaa`) + OSM `tourism=artwork` via Overpass | public art and murals (OSM carries the murals the PDC set is thin on), deduped by proximity; a committed POI source, magic `ARTW` — its own routing discount, distinct scenery from landmarks; see "Binary layouts" |
+| landmarks | **NYC**: LPC Individual Landmark Sites, Socrata `buis-pvji`. **SF**: Planning's Article 10 landmarks, `rzic-39gi`. **East Bay**: the California OHP's Built Environment Resource Directory for Alameda County, geocoded against the county's address points and parcels (`scripts/alameda.ts`) | designated historic/touristy sites as points — ~1.5k in New York, 458 in the Bay Area; a committed POI source, magic `LMRK` — fanned out into a per-edge routing discount, not the cover pipeline. **The East Bay's are a different kind of designation from the other two** — federal and state, not a local register, because neither Oakland's nor Berkeley's is published as data; see "Binary layouts" |
+| art | **NYC**: PDC Outdoor Public Art Inventory (Socrata `2pg3-gcaa`). **SF**: the Civic Art Collection, the 1% Art Program and the StreetSmArts murals. Everywhere: OSM `tourism=artwork` via Overpass | public art and murals (OSM carries the murals a city inventory is thin on), deduped by proximity; a committed POI source, magic `ARTW` — its own routing discount, distinct scenery from landmarks. The East Bay has no city inventory worth reading — Oakland's Socrata set is frozen at 2013 and 59 of its 90 rows share one placeholder coordinate — so its 371 works are OSM's, which the region-wide Overpass query already returns; see "Binary layouts" |
 | highways | OSM limited-access highways (`motorway`/`trunk` + ramps) and above-ground rail (surface, open cut, or elevated — anything not `tunnel`), via Overpass | the lines walking near is unpleasant, as polylines; a committed source, magic `HWAY` — proximity to it is a per-edge routing *penalty*; never itself routed; see "Binary layouts" |
 | buildings | **NYC**: NYC Building Footprints, Socrata `5zhs-2jue` (`feature_code=2100` with a positive `height_roof`, feet→metres). **SF**: DataSF `ynuv-fyni`, whose rows carry their own LiDAR height (`hgt_median_m`) and ground (`gnd_min_m`). **East Bay**: Overture's footprints (ODbL) with the heights `tiler ndsm` measures off the 2021 county LiDAR, merged by `scripts/east-bay-buildings.ts` | 867,920 footprints in New York and 426,509 in the Bay Area, each with its roof height; a committed source, magic `BLDG` — the walls the **building-shade** factor raises to cast shadows, for both the shade overlay pyramid and the signed per-edge shade routing bake; see "Binary layouts" and "The LiDAR building surface" |
 | landuse | NYC PLUTO, Socrata `64uk-42ks` (lots with `landuse` 1..5) | 788,591 tax lots, each with a land-use class byte; a committed source, magic `PLUT` — the commercial-vs-residential signal for the **commercial-area** overlay; see "Binary layouts" |
-| industrial | **NYC**: PLUTO's tax-lot polygons, DCP's MAPPLUTO ArcGIS FeatureServer (`services5.arcgis.com/.../MAPPLUTO/FeatureServer/0`), `LandUse = '06'`. **SF**: DataSF Land Use `c5ge-t6pj` + Zoning `3i4a-hu95`, the rule in `scripts/sf.ts` | industrial land as **polygons** — 9,295 lots in New York, 2,574 parcels in San Francisco; a committed source, magic `INDL` — drawn as an overlay so the city's industrial land can be seen, and sampled per edge into the graph's industrial-frontage penalty (GRPH byte 36). New York's geometry has to come from ArcGIS: the Socrata copy of PLUTO is lot centroids and its `geom` column is null on every row. See "Binary layouts" |
-| historic | **NYC**: LPC **Historic Districts** ArcGIS FeatureServer (`services5.arcgis.com/Oos4pNA2538iVFA1/.../Historic_Districts/FeatureServer/0`). **SF**: DataSF **Historic Districts** `63x5-g3m4`, filtered to `a10='Listed' OR a11='Listed'` | the designated historic districts as **polygons** — whole landmarked neighbourhoods (Park Slope, Brooklyn Heights, Greenwich Village …; Jackson Square, Telegraph Hill, Alamo Square …), not the individual buildings `landmarks` carries; 159 districts in New York, 23 in San Francisco; a committed source, magic `HDST` — drawn as an overlay, and sampled per edge into the graph's historic-district discount (GRPH byte 37). Each city's obvious Socrata copy is a decoy: see "Binary layouts" |
+| industrial | **NYC**: PLUTO's tax-lot polygons, DCP's MAPPLUTO ArcGIS FeatureServer (`services5.arcgis.com/.../MAPPLUTO/FeatureServer/0`), `LandUse = '06'`. **SF**: DataSF Land Use `c5ge-t6pj` + Zoning `3i4a-hu95`, the rule in `scripts/sf.ts`. **East Bay**: Alameda County's assessor parcels (`services5.arcgis.com/.../Parcels/FeatureServer/0`), `UseCode` in the 4xxx industrial band, plus MTC/SFEI Existing Land Use 2020 for the tax-exempt land no roll carries (`scripts/alameda.ts`) | industrial land as **polygons** — 9,295 lots in New York and 6,269 parcels in the Bay Area (2,573 in San Francisco, 3,696 in the East Bay); a committed source, magic `INDL` — drawn as an overlay so the region's industrial land can be seen, and sampled per edge into the graph's industrial-frontage penalty (GRPH byte 36). New York's geometry has to come from ArcGIS: the Socrata copy of PLUTO is lot centroids and its `geom` column is null on every row. See "Binary layouts" |
+| historic | **NYC**: LPC **Historic Districts** ArcGIS FeatureServer (`services5.arcgis.com/Oos4pNA2538iVFA1/.../Historic_Districts/FeatureServer/0`). **SF**: DataSF **Historic Districts** `63x5-g3m4`, filtered to `a10='Listed' OR a11='Listed'`. **East Bay**: Oakland's `HistoricDistrict_API_shp` and the S-7/S-20 preservation combining zones (`services.arcgis.com/9tC74aDHuml0x5Yz`); Berkeley publishes none | the designated historic districts as **polygons** — whole landmarked neighbourhoods (Park Slope, Brooklyn Heights, Greenwich Village …; Jackson Square, Telegraph Hill, Alamo Square …; Old Oakland, Preservation Park, the Lake Merritt shore …), not the individual buildings `landmarks` carries; 159 districts in New York, 89 in the Bay Area (23 in San Francisco, 66 in the East Bay); a committed source, magic `HDST` — drawn as an overlay, and sampled per edge into the graph's historic-district discount (GRPH byte 37). Each place's obvious copy is a decoy: see "Binary layouts" |
 | dining | NYC Dining Out `fpeh-f7ci` + OSM `outdoor_seating` via Overpass | outdoor-dining points; a committed source, magic `DINE` — a "cute" signal for the commercial overlay |
 | openstreets | NYC DOT Open Streets `uiay-nctu` (non-school), sampled every ~10 m | Open Streets corridor points; a committed source, magic `OSTR` — a "cute" signal for the commercial overlay |
 
@@ -984,14 +984,19 @@ within a Muni route: the lower-numbered `route_id`'s shapes are the primary ones
 to reach track they do not already cover. Drawing them apart would put every BART line on the map
 twice, in one colour, under two names no station sign uses.
 
-**Lines that leave the city are clipped, not dropped — unless nothing is left.** Every shape is cut
+**Lines that leave the region are clipped, not dropped — unless nothing is left.** Every shape is cut
 against the **same land polygons every other source here is clipped with**, the crossing found by
-bisection, so BART stops at the shoreline where the streets and the canopy do rather than running out
-over the bay to the corner of a bounding box. A piece shorter than 50 m is dropped as a graze. What
-survives is 13.05 km of each BART line, Embarcadero to Balboa Park; **Orange** (Richmond to Berryessa)
-and **Grey** (the Oakland airport connector) never enter San Francisco at all and are dropped whole,
-as is anything of Muni's that leaves — nothing does. Neither feed has a shape that leaves the city and
-comes back, so every drawn line is one contiguous piece. That leaves **14 routes**.
+bisection, so BART stops at the shoreline and the county line where the streets and the canopy do
+rather than running out to the corner of a bounding box. A piece shorter than 50 m is dropped as a
+graze. Each of the four trunk lines survives on **both** sides of the water, and **Orange** (Richmond
+to Berryessa) and **Grey** (the Oakland airport connector) survive too — they never enter San
+Francisco, but they run the length of the East Bay. That is **16 routes**, all six of BART's.
+
+This is the one place in the pipeline where a shape genuinely **leaves the land and comes back**: the
+Transbay Tube runs 5.8 km under the bay, which is not land, so each trunk line is cut at the
+Embarcadero and picked up again at West Oakland and comes back as two pieces rather than a chord
+drawn across the water. `clipToCity` was written to split that way and this is what finally exercises
+it — before the region grew east, every drawn line was one contiguous piece.
 
 **Colours, names and order.** All from `routes.txt`: Muni publishes a colour and text colour per
 route (the Metro lines' own hues, `B49A36` for the F and all three cable cars) and long names in caps
@@ -1009,15 +1014,19 @@ at any of them: 149 of the 152 same-named rail pairs are inside 100 m (76 inside
 left out are genuinely different stops sharing a name (19th Ave & Randolph St is three stops spread
 over 245 m). The rule runs over both agencies together; BART's own `parent_station` collapse happens
 first, and its entrances (`location_type` 2) never appear in `stop_times` and so never reach it.
-That is **268 stations** — 260 Muni, 8 BART (Embarcadero, Montgomery, Powell, Civic Center, 16th St,
-24th St, Glen Park, Balboa Park; Daly City is in San Mateo County and outside the city).
+That is **282 stations** — 260 Muni, all in San Francisco, and 22 BART. Eight of BART's are in the
+city (Embarcadero, Montgomery, Powell, Civic Center, 16th St, 24th St, Glen Park, Balboa Park; Daly
+City is in San Mateo County and outside the region) and **fourteen are in the East Bay**: West
+Oakland, 12th Street, 19th Street, Lake Merritt, MacArthur, Rockridge, Ashby, Downtown Berkeley,
+North Berkeley, Fruitvale, Coliseum, San Leandro, Bay Fair and Oakland International Airport.
 
 **Neither feed publishes a complex.** Muni ships no `transfers.txt` at all, and BART's 40 rows are
 all platform-to-platform *inside* one station (`K10-1` to `K10-2` at MacArthur), so neither agency
 says anywhere that two of its stations are one place. Every San Francisco station record therefore
 carries complex id **0**, and the client falls back to the geometric rule for the whole city — the
 one New York no longer needs: records within 60 m, or within 160 m under the same canonical name.
-That is 268 records down to **217 markers**, unchanged by the transfer work.
+That is 282 records down to **231 markers**, unchanged by the transfer work: the fourteen East Bay
+stations are kilometres from anything and merge with nothing.
 
 What the merge does *not* fold is a place the feed gives two different names — the Metro's
 underground stations are named per direction ("Metro Powell Station/Downtown" and
@@ -1028,20 +1037,22 @@ for them would be inventing one.
 **A trap, since it cost a debugging pass:** a `route_id` is unique within a feed and **nowhere else**.
 Muni's bus routes are named 1, 2, 5, 6, 7, 8 and 12; BART's `route_id`s for Yellow, Green, Red and
 Blue are 1/2, 5/6, 7/8 and 11/12. Building the station masks against both feeds' routes at once hangs
-a BART bit on every stop of seven bus lines — 689 stations instead of 268, with the Red line calling
-at 172 of them. Each feed's trips are resolved against that feed's routes only.
+a BART bit on every stop of seven bus lines — 689 stations instead of the 268 the file then held,
+with the Red line calling at 172 of them. Each feed's trips are resolved against that feed's routes only.
 
-Over these feeds, 84 shape variants have any geometry inside the city — 41 primary, 43
-reverse-direction — and **42 lines with 6,182 vertices** are drawn from them: every primary shape but
-the one byte-identical duplicate (BART's `001E_shp`), plus **2 of the 43 reverse shapes** — the F's
+Over these feeds, 92 shape variants have any geometry inside the region — 46 primary, 46
+reverse-direction — and **54 lines with 10,000 vertices** are drawn from them: every primary shape but
+the one byte-identical duplicate (BART's `001E_shp`), plus **2 of the 46 reverse shapes** — the F's
 Jefferson Street loop at Fisherman's Wharf and the Powell-Hyde cable car's Washington Street leg, the
 two places a Muni line genuinely runs back down a different street. The threshold that picks them up
 is 5 grid cells of new track (~150 m) rather than New York's 20: San Francisco's reverse shapes
 measure 0-4 fresh cells each except three, at 7, 8 and 10 (two of which are the same Washington
 Street leg, so taking the first leaves the second retracing it), so anything from 5 to 7 selects the
 same set — and 5 is inside the 5-to-30 plateau New York's own feed has. Drawing those two cuts the
-stations sitting more than 100 m from a line of a route they are on from 12 of 367 station-route
-pairs to 5, and the five left are terminal loops and a mezzanine entrance. The file is **32.5 KiB**.
+stations sitting more than 100 m from a line of a route they are on from 12 of 404 station-route
+pairs to 5, and the five left are terminal loops and a mezzanine entrance. Both figures are measured
+over the region; BART's East Bay half adds 37 pairs and none of them are far, so the tuning this
+paragraph argues is San Francisco's and is unmoved by it. The file is **48.9 KiB**.
 
 
 ## The colour scale
@@ -1566,13 +1577,48 @@ The **point layout**: the 40-byte header, then `count` (longitude, latitude) var
 sorted by quantized (latitude, longitude) so a delta steps along a row, then a **trailing name
 blob** — per point, in that same sorted order, a `u16` UTF-8 byte length and its bytes (empty when
 the source named none). Written by the shared `encodePoints` encoder. Two sources share it under
-their own magic: `LMRK` (LPC landmarks, named by `lpc_name`) and `ARTW` (public art, named by the
-PDC `title` or the OSM `name`). The graph pass snaps each point to the nearest walking node, fans a
+their own magic: `LMRK` (designated landmarks, named by the register's own name for the building)
+and `ARTW` (public art, named by the inventory `title` or the OSM `name`). The graph pass snaps each point to the nearest walking node, fans a
 bounded shortest-path tree out from it, and deposits a network-distance-decaying discount on the
 edges it reaches — so the router mildly prefers routes that pass near them; it reads only `count`
 points from the header and **ignores the name blob**, which is client-only (the map overlay draws
 the names as labels). The blobs are served verbatim to `public/{landmarks,art}/<id>.bin` for the
 overlay.
+
+**The East Bay's landmarks are a different kind of designation**, and the difference is worth
+knowing before reading the map. New York's are the LPC's individual landmark sites and San
+Francisco's its Article 10 landmarks: both LOCAL registers, a city's own list of its own buildings.
+The East Bay has no local register to read — Oakland's designations are on none of its 1,349 ArcGIS
+services and in none of its 313 Socrata datasets, and Berkeley's 346 are a PDF list of addresses. So
+its landmarks come from the state's **Built Environment Resource Directory**, the OHP's per-county
+inventory of every evaluation anyone has filed, and what that carries here is overwhelmingly
+**federal and state** designation: the National Register, the California Historical Landmarks, and
+the ten locally-registered properties the state happened to ingest. Two things follow and both show:
+a building everyone in Oakland calls a landmark can be missing because the city's register never
+reached the state, and a nationally-listed one nobody thinks of that way is present.
+
+The status codes read are the ones meaning **listed, individually** — `1S` (National Register, by the
+Keeper), `1CL` (California Historical Landmark), `1CP` (California Point of Historical Interest),
+`1CS` (California Register, by the State commission) and `5S1` (listed in a local register). The
+survey that scoped this expected the local codes to carry it and they do not: the **Paramount
+Theatre**, of all buildings, is filed `1S` and `1CL` and is not `5S1` at all. Everything else in the
+scheme is a different claim and stays out — `1D` and `2D2` are *contributors to a district*, which is
+thousands of ordinary houses and is what `data/historic` draws as an area; category 2 is "determined
+eligible" and category 3 "appears eligible", opinions rather than designations, and `5S2`/`5S3` are
+their local halves. Reading `5S2` would roughly quadruple the count while saying "someone thinks this
+could be designated" on a map that promises "this is".
+
+**The inventory carries no coordinates at all** — it is a table of names, addresses and parcel
+numbers — so every East Bay point is a join, and a row nothing joins does not ship. Three keys are
+tried in order, each an exact match: the county's **address points** (municipality + house number +
+street name, the same layer `scripts/addresses.ts` reads), then the **parcel APN**, then the **parcel
+situs address**. Nothing is placed by proximity or by a neighbouring house number — a landmark dot is
+tapped for a name, so putting one on the building next door is worse than leaving it out. At the
+2026-08-29 read: 156 designated rows, **98 placed**, 56 unplaceable and 1 off land. The 56 are mostly
+one thing — the **UC Berkeley campus**, whose buildings the inventory records with a street name and
+no number (Sather Tower, Doe Library, the Greek Theatre, Wheeler Hall) — which is why this set is
+thinner in Berkeley than the register behind it. The names are shouted in the export and recased a
+letter-run at a time, so an initialism keeps its capitals and an apostrophe does not start a new word.
 
 **`data/legacy/<id>.bin` (`LGCY`)** is the same point layout again: businesses that have been trading
 fifty years or more, named by the register's own business name and nothing else. The founding year
@@ -1624,9 +1670,9 @@ rather than by their centroid — the city boundaries cut the water away, and a 
 past the bulkhead tests as land only where it meets the shore. Neither city lost a lot entirely at
 the last read.
 
-The two cities do not share a source, because no two cities record land use the same way, and the
-file is the whole of what they have in common: the graph pass reads polygons and never asks where
-they came from.
+No two of these places record land use the same way, so no two share a source, and the file is the
+whole of what they have in common: the graph pass reads polygons and never asks where they came
+from. The Bay Area's is San Francisco's read and the East Bay's concatenated.
 
 **New York** is PLUTO's `LandUse = '06'` (industrial & manufacturing) and nothing else: at the
 2026-08-19 read, 9,295 lots are 9,310 records, 0.31 MiB.
@@ -1644,7 +1690,47 @@ zoning**. The parcel table's `geography_type = 'analytical'` rows are dropped fi
 analysis districts (the whole Presidio, all of Treasure Island, the blocks of Mission Bay South)
 carrying modelled floor areas over polygons up to 2.1 km², and the real industrial land under them is
 in the table as ordinary parcels anyway. At the 2026-08-20 read, 2,085 parcels qualify by use and 489
-by zoning: 2,574 parcels, 2,577 records, 0.12 MiB.
+by zoning: 2,573 parcels, 2,576 records.
+
+**The East Bay** is the one place of the three where a per-parcel land-use code is simply published:
+Alameda County carries the assessor's own `UseCode` on the parcel geometry, refreshed monthly, and
+the whole read is one `where` the way New York's is (`scripts/alameda.ts`, `fetchEastBayIndustrial`).
+The industrial band is 4xxx, read off the county's published 198-row `Assessor_Office_Use_Codes`
+table: 4000 vacant industrial land, 4100–4103 warehouse and its self-storage and cold-storage kinds,
+4200–4205 light manufacturing through flex/R&D and data centres, 4300 heavy industrial, 4400
+miscellaneous improved industrial, 4600/4601 quarries and landfill, 4800 trucking terminals, 4900
+wrecking yards, and the condominium-industrial forms. Two rows inside the band are taken back out:
+**4240** is a live-work condominium, which is housing filed against industrial stock, and **4500** is
+a plant nursery, which is horticulture — SFEI's own crosswalk files nurseries under commercial. 4000,
+vacant industrial land, is deliberately IN: it is the assessor's own reading that the land is
+industrial while nothing stands on it, which is what San Francisco's zoning branch keeps.
+
+That roll has one structural hole, and it is a large one: **tax-exempt land carries no use code at
+all**. The Oakland Army Base, the rail yards along Maritime Street and the industrial half of Alameda
+Point are publicly owned, so the parcel layer passes straight over the most industrial ground in the
+region. The gap is filled from **MTC's regional Existing Land Use 2020**, compiled by SFEI
+(`services3.arcgis.com/i2dkYWmb4wHvYPda/.../sfei_elu_2020_rel1/FeatureServer/0`, 465,381 polygons
+over nine counties), read for `Ownership='Public'` and its own industrial classes only. Narrowed that
+way on purpose: this layer's private rows are the same assessor roll four years staler on coarser
+geometry, so taking them would redraw what the county already draws. `county='Alameda'` is likewise
+load-bearing — the layer covers all nine counties and the region's box takes in San Francisco, so an
+envelope query alone would hand back San Francisco's parcels for a second reading of land
+`scripts/sf.ts` has already read. Its use codes are **not** the assessor's: 5000 here is Industrial
+(General) where 5000 on a parcel is a rural homesite.
+
+Two classes are named because of what they do rather than what they are called. **6510, Harbour &
+Marine Transportation, is left out** — the class that sounds most like the port. In the East Bay it
+names marinas: its two publicly-owned polygons are the Berkeley Marina headland (Cesar Chavez Park,
+the fishing pier, the Adventure Playground), 0.64 km² of waterfront parkland that drawn as industrial
+would both look wrong and price one of the best walks in Berkeley as a nuisance. And **the Port of
+Oakland's container terminals are not in this layer at all**, which is the one gap left: TraPac,
+Hanjin, most of Maersk and APL are filed under the assessor's exempt-property code 9217 ("Welfare,
+Social Service, Low Income Housing"), and SFEI, being derived from the same roll, inherits it. The
+land beside them — the rail yards, the Army Base, Ben E. Nutter Terminal — is covered, so the streets
+a walker can actually reach still price correctly; the aprons behind the gates read as blank.
+
+At the 2026-08-29 read, 3,400 assessed parcels and 296 tax-exempt polygons: 3,696 parcels for the
+East Bay, 6,269 for the region, 6,276 records, 0.32 MiB.
 
 Two things read it. The client, served verbatim as `public/industrial/<id>.bin` by
 `serve-sources.ts`, fills every lot in one colour for the overlay. And the **graph pass** samples it
@@ -1660,7 +1746,7 @@ and its peak is a distance where what a walker minds is an amount.
 
 The **`LAND` polygon layout** exactly, under its own magic: the same 40-byte header, then `count`
 even-odd polygons of varint-delta rings, and nothing after them. Written by the shared
-`encodePolygons`. Both cities have one; a city with no source writes no file, and every edge of its
+`encodePolygons`. Both have one; a city with no source writes no file, and every edge of its
 graph then reads 0 and the slider gates itself off, so the factor lights up from the file's
 existence alone — the only thing it does not light up by itself is the hand-authored per-city
 overlay list in `src/cities.ts`.
@@ -1670,9 +1756,9 @@ splits a multi-part lot. Districts are clipped to the coastline by whether **any
 rather than by their centroid, for the reason the industrial lots are: a boundary drawn around a
 waterfront block runs out over the water, and the harbour districts (Governors Island, Ellis Island,
 South Street Seaport; Northeast Waterfront) meet the coastline only at the shore. At the 2026-08-22
-read no district in either city missed entirely: New York's 159 districts are 187 records, 23,002
-vertices, 59.4 KiB, and San Francisco's 23 are 30 records, 1,558 vertices, 4.7 KiB. Small enough to
-commit plainly — these are the one `data/*.bin` **not** tracked by git-LFS.
+read no district anywhere missed entirely: New York's 159 districts are 187 records, 23,002 vertices,
+59.4 KiB, and the Bay Area's 89 are 96 records, 20.7 KiB. Small enough to commit plainly — these are
+the one `data/*.bin` **not** tracked by git-LFS.
 
 New York's geometry comes from the **LPC's own ArcGIS FeatureServer**, not from Socrata. The
 dataset the city catalogues as "Historic Districts (Map)" (`xbvj-gfnw`) is a map *visualization*,
@@ -1713,6 +1799,33 @@ The two articles do not overlap each other, and the only intersections anywhere 
 digitizing noise — South End against Clyde and Crooks is under 2 m². Individually landmarked
 BUILDINGS are elsewhere, as in New York: Article 10 landmarks in `97yj-54sx`, Article 11 building
 ratings in `6m3x-8fu4`.
+
+**The East Bay is Oakland's alone.** Berkeley is a verified absence — its 346 designated landmarks
+and its historic districts are published as a PDF list of addresses and nothing else, with no ArcGIS
+service among its 466 and no dataset among its 66 on Socrata — and no other of the seven cities
+publishes any. Oakland designates in two registers that mean different things, and both are read
+(`scripts/alameda.ts`, `fetchEastBayHistoric`):
+
+- **`HistoricDistrict_API_shp`**, 58 **Areas of Primary Importance**: the top rating of the Oakland
+  Cultural Heritage Survey and the city's own named districts — Preservation Park, Old Oakland, the
+  Lake Merritt shore, Mountain View Cemetery, the 7th Street groups. The closest analogue Oakland has
+  to an LPC district, and 7.9 km² of it.
+- **`Combining_Zone_Set_4`** filtered to `CZ_label IN ('S-7', 'S-20')`, the 8 Preservation and
+  Historic Preservation District combining zones actually written into the zoning map: the strict
+  legal designation, 1.1 km², **four fifths of it outside any API area** (measured), which is why
+  both are read rather than one.
+
+The **341 Areas of Secondary Importance** in `HistoricDistrict_ASI_shp` are deliberately not read.
+They are the survey's second rating; they are **15.1 km²**, more historic ground than New York's 159
+LPC districts cover, over a city a fraction of the size; and their median piece is a few adjacent
+buildings rather than a neighbourhood, which is what `data/landmarks` is for. Drawn, they would read
+as speckle over half of Oakland and would discount most of its streets. The decoy here is the same
+one both other cities have: the Socrata copies on data.oaklandca.gov are 2013 snapshots of both
+layers.
+
+Note what this makes the Bay Area's file: **a designation set of two kinds**. San Francisco's is
+Planning Code articles, Oakland's is a survey rating plus a zoning overlay. The graph pass reads
+polygons and never asks.
 
 Two things read it. The client, served verbatim as `public/historic/<id>.bin` by
 `serve-sources.ts`, which fills every district in one colour for the overlay. And the graph pass,
@@ -2049,7 +2162,7 @@ name.
 
 The complex id is what the client merges records into markers on: two records sharing a non-zero id
 are one place however far apart they lie, and a pair where either carries 0 falls back to distance
-and name. New York's 496 records make **444 markers**, San Francisco's 268 make **217**.
+and name. New York's 496 records make **444 markers**, the Bay Area's 282 make **231**.
 
 At the 2026-05-26 feed: **29 routes, 93 lines, 54,908 vertices, 496 stations in 444 complexes, 956
 station-route pairs, 429 distinct names, 171,667 bytes.**
@@ -2427,6 +2540,13 @@ nothing in the query path needs a cap.
 | raw | 12.94 MB | 2.23 MB |
 | **gzipped** | **7.62 MB** | **1.30 MB** |
 
+The Bay Area column is **the last index that was built, and it is behind its sources**: since it was
+written the region gained 98 East Bay landmarks and 14 East Bay BART stations, so its 360 and 217
+should read 458 and 231. It cannot be rebuilt until the region's routing graph builds — the index
+carries the street names the graph holds and ADDR does not, so `scripts/search-index.ts` refuses to
+run without `public/routing/sf.bin`. The numbers above will move on the first `bun run
+build-tiles:graph` that succeeds.
+
 | offset | type | field |
 | --- | --- | --- |
 | 0 | u8[4] | magic `SRCH` |
@@ -2493,7 +2613,8 @@ transit stops 150, food and retail 120, generic services 80, and the `profession
 contractor / LLC tier 40. A place's tier is matched off its Overture slug; a curated point takes its set's. Two rules
 read more than the slug: an open space carrying a **house number** is a storefront named after the
 park rather than the park, and drops to 80; and a station named after the corner it stands on —
-"Judah St & 40th Ave", 182 of San Francisco's 217 Muni stops — is a kerb with a sign on it and takes
+"Judah St & 40th Ave", 182 of San Francisco's 217 Muni stops as the index was last built — is a kerb
+with a sign on it and takes
 the stop tier. The tiers are judgment, not measurement; the golden-query file that settles them is
 not written yet.
 

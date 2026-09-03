@@ -115,6 +115,13 @@ const CITY_SOURCES: Record<string, readonly DataSource[]> = {
         "SF Public Works street trees · DataSF, the Oakland Public Tree Inventory, and Berkeley's Arborwell street-tree survey",
     },
     { label: "Streets", detail: "SF Basemap Street Centerlines · DataSF" },
+    // The boats are the only way a pedestrian crosses the bay, so the feed is routing input here
+    // rather than scenery. Its ODC-BY is written down only on the operator's developer page, which
+    // makes naming WETA the whole of what the licence asks for.
+    {
+      label: "Ferries",
+      detail: "San Francisco Bay Ferry GTFS · WETA (ODC-BY)",
+    },
     // SFMTA's feed licence requires this wording verbatim on anything derived from it, so the detail
     // line carries it rather than paraphrasing.
     {
@@ -122,13 +129,24 @@ const CITY_SOURCES: Record<string, readonly DataSource[]> = {
       detail:
         "BART GTFS; Muni GTFS — reproduced with permission granted by the City and County of San Francisco, under a nonexclusive, limited and revocable license",
     },
-    { label: "Landmarks", detail: "Article 10 landmark sites · SF Planning" },
+    // The East Bay's landmarks are not a local register like San Francisco's: neither Oakland's nor
+    // Berkeley's is published as data, so they come from the state's inventory and are federal and
+    // state designations. The line says whose list it is, because the two are different claims.
+    {
+      label: "Landmarks",
+      detail:
+        "Article 10 landmark sites · SF Planning, and the Built Environment Resource Directory · California Office of Historic Preservation",
+    },
     {
       label: "Public art",
       detail:
-        "Civic Art Collection, the 1% Art Program inventory and StreetSmArts murals · DataSF",
+        "Civic Art Collection, the 1% Art Program inventory and StreetSmArts murals · DataSF, and OpenStreetMap",
     },
-    { label: "Historic districts", detail: "Historic Districts · SF Planning" },
+    {
+      label: "Historic districts",
+      detail:
+        "Historic Districts · SF Planning, and the Cultural Heritage Survey's areas of primary importance and preservation zoning · City of Oakland",
+    },
     {
       label: "Businesses",
       detail:
@@ -136,11 +154,16 @@ const CITY_SOURCES: Record<string, readonly DataSource[]> = {
     },
     {
       label: "Industrial land",
-      detail: "Land use and PDR zoning · SF Planning, via DataSF",
+      detail:
+        "Land use and PDR zoning · SF Planning via DataSF, assessor parcel use codes · Alameda County GIS, and Existing Land Use 2020 · San Francisco Estuary Institute via MTC",
     },
+    // Only San Francisco's own footprints arrive with a height on them. The East Bay's are
+    // Overture's, and their heights were measured here off the county's raw point cloud, so both the
+    // footprints' licence and the flight that supplied the heights are named.
     {
       label: "Building shade",
-      detail: "Building footprints with LiDAR heights · DataSF",
+      detail:
+        "Building footprints with LiDAR heights · DataSF, and Overture Maps Foundation footprints (ODbL) with heights measured from the USGS 3DEP 2021 Alameda County LiDAR (public domain)",
     },
     {
       label: "Elevation",
