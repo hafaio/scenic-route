@@ -196,11 +196,11 @@ function metersApart(
 // whole rather than pair by pair. A pair with one of each falls back to the same rule: an agency
 // that has said nothing about a record has not said it is separate.
 //
-// Measured against the geometry alone, the transfers move 17 places in New York and none in San
-// Francisco: they split Rector St, and they join sixteen complexes no distance could have reached —
+// Measured against the geometry alone, the transfers move 17 places in New York and none in the Bay
+// Area: they split Rector St, and they join sixteen complexes no distance could have reached —
 // the World Trade Center's four records over 435 m, Times Sq to 42 St-Port Authority, 59 St to
 // Lexington Av/59 St to Lexington Av/63 St. New York's 496 records come out as 444 markers where the
-// old geometric rule made 463, and San Francisco's 268 as 217 under either.
+// old geometric rule made 463, and the Bay Area's 282 as 231 under either.
 //
 // The surviving name is the record serving the most routes because that is the record the agency
 // treats as the station rather than the kerb beside it: it picks "Metro Civic Center Station" over

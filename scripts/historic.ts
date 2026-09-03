@@ -7,7 +7,7 @@
 // Village; Jackson Square, Telegraph Hill, Alamo Square), not the individual landmarked buildings
 // scripts/landmarks.ts reads — a different source, a different artifact, areas rather than points.
 //
-// The two cities do not share a source, and each publishes one that has to be picked past a decoy:
+// No two of these places share a source, and each publishes one that has to be picked past a decoy:
 //
 //   - **New York.** The geometry comes from the LPC's own ArcGIS FeatureServer, not from the Socrata
 //     dataset the city catalogues as "Historic Districts (Map)" (`xbvj-gfnw`): that one is a map
@@ -19,12 +19,17 @@
 //     Its "Map of Historic Districts" (`y75h-nbt2`) is the same decoy `xbvj-gfnw` is, and the
 //     dedicated "Landmark Districts" table (`knm6-5ej6`) is three years stale and has no Article 11.
 //
-// scripts/README.md has both comparisons.
+//   - **The East Bay**, the other half of the same region, is Oakland's alone — Berkeley publishes
+//     its districts as a PDF list of addresses and nothing else. Its two layers, and the third one
+//     deliberately left out, are in `scripts/alameda.ts`.
+//
+// scripts/README.md has all three comparisons.
 
 import { createHash } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import pRetry from "p-retry";
+import { fetchEastBayHistoric } from "./alameda";
 import { cached } from "./cache";
 import { encodePolygons } from "./geometry";
 import { type LandContext, loadLandContext } from "./land";
@@ -245,7 +250,17 @@ async function fetchCityDistricts(
   if (cityId === "nyc") {
     return await fetchNycDistricts(land);
   } else if (cityId === "sf") {
-    return await fetchSfDistricts(land);
+    // Two halves, two registers: San Francisco's Planning table and Oakland's own survey and zoning
+    // map. Nothing downstream reads which half a district came from.
+    const [city, eastBay] = await Promise.all([
+      fetchSfDistricts(land),
+      fetchEastBayHistoric(land),
+    ]);
+    return {
+      polygons: [...city.polygons, ...eastBay.polygons],
+      districts: city.districts + eastBay.districts,
+      offLand: city.offLand + eastBay.offLand,
+    };
   } else {
     // A city with no source throws rather than defaulting to another's, which would clip one city's
     // districts against a foreign shoreline and write a silently empty artifact.

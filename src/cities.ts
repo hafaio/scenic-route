@@ -51,9 +51,11 @@ const OVERLAYS_BY_CITY: Record<string, readonly OverlayId[]> = {
     "shade",
     "scaffolding",
   ],
-  // No scaffolding feed here to build a shed layer from, and commercial waits on its own signals
-  // being wired up. Its rail is Muni's and BART's rather than a subway, but it is the same artifact
-  // and the same layer, so it rides under the same id.
+  // No scaffolding feed here to build a shed layer from, and no legacy-business register outside San
+  // Francisco's own, so that layer stays the city register it already is. Commercial waits on the
+  // region-wide land-use, dining and open-streets artifacts the Bay Area has none of. Its rail is
+  // Muni's and BART's rather than a subway, but it is the same artifact and the same layer, so it
+  // rides under the same id.
   sf: [
     "canopy",
     "genus",

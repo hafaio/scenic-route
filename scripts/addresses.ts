@@ -39,6 +39,7 @@ import {
   packExtra,
   parseHouseNumber,
 } from "../src/search/address-format";
+import { ALAMEDA_PLACES } from "./alameda";
 import { cached, cachedFile } from "./cache";
 import { writeVarint, zigzag } from "./geometry";
 import { parseWktPoint } from "./socrata";
@@ -400,23 +401,6 @@ const SF_EAS: CsvFeed = {
 // the county's centreline: paged, ordered, and cached a page at a time.
 const ALAMEDA_ADDRESS_SERVICE =
   "https://services5.arcgis.com/ROBnTHSNjoZ2Wm1P/arcgis/rest/services/Address_Points/FeatureServer/0";
-
-// The county writes a municipality as a two-letter code, and the name a reader would say is what the
-// search box has to show. Its own `CITY` column is not that name: two Oakland-coded rows carry "San
-// Leandro", so the code is the jurisdiction and the column is a guess at the postal town.
-//
-// These are the same seven municipalities scripts/alameda.ts takes the land and the centreline from,
-// under the spellings src/search/address-format.ts's borough names are spelt in — what a person
-// would type and what a result has to read as.
-const ALAMEDA_PLACES: Readonly<Record<string, string>> = {
-  AA: "Alameda",
-  AB: "Albany",
-  BE: "Berkeley",
-  EM: "Emeryville",
-  OA: "Oakland",
-  PI: "Piedmont",
-  SL: "San Leandro",
-};
 
 // Five times the layer's own 2,000-row page, which it serves under `maxRecordCountFactor`: thirty
 // requests rather than a hundred and fifty, at two megabytes each.
