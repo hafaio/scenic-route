@@ -248,11 +248,11 @@ in its own band.
 
 | what | source | notes |
 | --- | --- | --- |
-| trees | NYC ForMS "Forestry Tree Points", Socrata `hn5i-inap` | ~899k rows at `tpstructure='Full'` — standing trees only, no stumps or empty pits; `dbh` (trunk inches) is read to size each crown |
+| trees | **NYC**: ForMS "Forestry Tree Points", Socrata `hn5i-inap`. **SF**: Public Works street trees, DataSF `tkzw-k3nq`. **East Bay**: the Oakland Public Tree Inventory (ArcGIS, live) and Berkeley's Arborwell survey (a committed copy, see below) | standing trees only — no stumps, empty pits or planting sites; a trunk diameter in inches is read to size each crown, and the species to give it a genus. Drives the genus overlay ONLY: cover and shade come from the canopy polygons |
 | streets | NYC CSCL street centerline, Socrata `inkn-q76z` | `rw_type` in 1, 5, 6, 7, 10 = street, boardwalk, path/trail, step street, alley, plus pedestrian bridges/tunnels (3, 4) where `nonped != 'V'` |
 | land | **NYC**: borough boundaries (water areas excluded), Socrata `gthc-hcne`. **Bay Area**: SF's analysis neighbourhoods, DataSF `j2bu-swwd`, unioned with seven Alameda County city limits (`Administrative_Boundaries/2`) less the Census TIGER tidal water that legal boundary runs out into | the population the cover distribution is taken over, and the clip that drops New Jersey — and, in the Bay Area, the bay itself and southern Marin |
-| canopy | NYC's 2017 LiDAR tree canopy, ArcGIS `TreeCanopy2017_Simplified_1ft` | the *measured* canopy footprint the cover field is blurred from, a committed source, magic `CNPY` — feeds the density blobs and, through them, routing; see below |
-| canopy heights | the 1 m LiDAR canopy height model of Ma et al. 2023, figshare doi `10.6084/m9.figshare.20522895` (`NY_CHM_10Int260m.tif`, CC BY 4.0) | a 243 MiB uint16 GeoTIFF of decimetres over UTM 18N, cached but never committed; `tiler ingest` samples it per canopy polygon and writes the result *into* the `CNPY` file — see below |
+| canopy | **NYC**: the 2017 LiDAR tree canopy, ArcGIS `TreeCanopy2017_Simplified_1ft`. **SF**: the 2013 Urban Forest Plan canopy analysis, DataSF `ni2e-vpbg`. **East Bay**: the Alameda / Contra Costa 1 m lidar canopy height model, thresholded and vectorized here (`scripts/alcc.ts` + `scripts/canopy-raster.ts`) | the *measured* canopy footprint the cover field is blurred from, a committed source, magic `CNPY` — feeds the density blobs and, through them, routing; see below |
+| canopy heights | **NYC**: the 1 m LiDAR canopy height model of Ma et al. 2023, figshare doi `10.6084/m9.figshare.20522895` (`NY_CHM_10Int260m.tif`, CC BY 4.0). **SF**: band 2 of the same 3DEP tiles the terrain overlay reads. **East Bay**: the Alameda / Contra Costa 1 m lidar CHM, the same raster its canopy cover is traced from | rasters cached but never committed; `tiler ingest` samples each per canopy polygon and writes the result *into* the `CNPY` file — a region may name several, and a polygon keeps the reading of whichever covered it — see below |
 | paths | OSM pedestrian/park ways (footway/path/pedestrian/steps/cycleway/bridleway/track) plus park drives (roads closed to through motor traffic), via Overpass | the park, greenway and car-free-drive network CSCL lacks; a separate committed source, magic `PATH` — see below and "Binary layouts" |
 | sidewalks | OSM `footway=sidewalk`/`crossing`/`traffic_island` ways via Overpass; the city's own survey — NYC's planimetric SIDEWALK polygons, Socrata `52n9-sdep` (`sub_code` 380000 = street right-of-way), or SF's 2014 Sidewalk Widths study; and the `sidewalk`/`sidewalk:left`/`sidewalk:right`/`sidewalk:both` tags OSM puts on the **road** | the ways are a committed source, magic `SWLK`; the three together settle the four per-side sidewalk bits of every offsetted `STRT` record, and the ways themselves are the walking network wherever they exist — see below and "Binary layouts" |
 | ferries | the two NYC ferry GTFS feeds — Staten Island Ferry (NYC DOT) and NYC Ferry (Hornblower, via Connexionz) | consolidated to a time-independent ferry graph, a committed source, magic `FERR` — OSM- and canopy-independent, read by a later phase's routing graph, not the cover pipeline; see below and "Binary layouts" |
@@ -262,7 +262,7 @@ in its own band.
 | landmarks | NYC LPC Individual Landmark Sites, Socrata `buis-pvji` | ~1.5k designated historic/touristy sites, taken at their WGS84 centroid; a committed POI source, magic `LMRK` — fanned out into a per-edge routing discount, not the cover pipeline; see "Binary layouts" |
 | art | NYC PDC Outdoor Public Art Inventory (Socrata `2pg3-gcaa`) + OSM `tourism=artwork` via Overpass | public art and murals (OSM carries the murals the PDC set is thin on), deduped by proximity; a committed POI source, magic `ARTW` — its own routing discount, distinct scenery from landmarks; see "Binary layouts" |
 | highways | OSM limited-access highways (`motorway`/`trunk` + ramps) and above-ground rail (surface, open cut, or elevated — anything not `tunnel`), via Overpass | the lines walking near is unpleasant, as polylines; a committed source, magic `HWAY` — proximity to it is a per-edge routing *penalty*; never itself routed; see "Binary layouts" |
-| buildings | NYC Building Footprints, Socrata `5zhs-2jue` (`feature_code=2100` with a positive `height_roof`, feet→metres) | 867,920 footprints with their roof heights; a committed source, magic `BLDG` — the walls the **building-shade** factor raises to cast shadows, for both the shade overlay pyramid and the signed per-edge shade routing bake; see "Binary layouts" |
+| buildings | **NYC**: NYC Building Footprints, Socrata `5zhs-2jue` (`feature_code=2100` with a positive `height_roof`, feet→metres). **SF**: DataSF `ynuv-fyni`, whose rows carry their own LiDAR height (`hgt_median_m`) and ground (`gnd_min_m`). **East Bay**: Overture's footprints (ODbL) with the heights `tiler ndsm` measures off the 2021 county LiDAR, merged by `scripts/east-bay-buildings.ts` | 867,920 footprints in New York and 426,509 in the Bay Area, each with its roof height; a committed source, magic `BLDG` — the walls the **building-shade** factor raises to cast shadows, for both the shade overlay pyramid and the signed per-edge shade routing bake; see "Binary layouts" and "The LiDAR building surface" |
 | landuse | NYC PLUTO, Socrata `64uk-42ks` (lots with `landuse` 1..5) | 788,591 tax lots, each with a land-use class byte; a committed source, magic `PLUT` — the commercial-vs-residential signal for the **commercial-area** overlay; see "Binary layouts" |
 | industrial | **NYC**: PLUTO's tax-lot polygons, DCP's MAPPLUTO ArcGIS FeatureServer (`services5.arcgis.com/.../MAPPLUTO/FeatureServer/0`), `LandUse = '06'`. **SF**: DataSF Land Use `c5ge-t6pj` + Zoning `3i4a-hu95`, the rule in `scripts/sf.ts` | industrial land as **polygons** — 9,295 lots in New York, 2,574 parcels in San Francisco; a committed source, magic `INDL` — drawn as an overlay so the city's industrial land can be seen, and sampled per edge into the graph's industrial-frontage penalty (GRPH byte 36). New York's geometry has to come from ArcGIS: the Socrata copy of PLUTO is lot centroids and its `geom` column is null on every row. See "Binary layouts" |
 | historic | **NYC**: LPC **Historic Districts** ArcGIS FeatureServer (`services5.arcgis.com/Oos4pNA2538iVFA1/.../Historic_Districts/FeatureServer/0`). **SF**: DataSF **Historic Districts** `63x5-g3m4`, filtered to `a10='Listed' OR a11='Listed'` | the designated historic districts as **polygons** — whole landmarked neighbourhoods (Park Slope, Brooklyn Heights, Greenwich Village …; Jackson Square, Telegraph Hill, Alamo Square …), not the individual buildings `landmarks` carries; 159 districts in New York, 23 in San Francisco; a committed source, magic `HDST` — drawn as an overlay, and sampled per edge into the graph's historic-district discount (GRPH byte 37). Each city's obvious Socrata copy is a decoy: see "Binary layouts" |
@@ -320,6 +320,89 @@ land-cover raster (`he6d-2qns`, 1.33 GB, class 1 = Tree Canopy) is the documente
 polygon service disappears; the GeoTIFF crate it needs is now in the tree for the height model
 below, so what keeps the polygon service preferred is only that it is the far smaller read.
 
+#### Where nobody publishes polygons: the East Bay, and the raster→polygon step
+
+New York and San Francisco are each handed canopy polygons by their city. **No Bay Area county
+publishes any.** What Alameda and Contra Costa publish — jointly, from one unified point cloud — is a
+**1 m canopy height model in feet** (AGOL item `7b57097b6b274419951ed51d0f6f20f4`), and beside it a
+canopy-cover mask that is that model cut at 15 feet. So both of the pipeline's canopy inputs come out
+of the one raster: `scripts/alcc.ts` reads it, thresholds it, and hands the mask to
+`scripts/canopy-raster.ts`, which is the county-agnostic half — give it a binary mask and its grid
+and it gives back lon/lat rings. The county's own cover product is not fetched: it would be the same
+threshold of the same cells, arriving as a second 200 MB download that could only ever disagree.
+
+The **height floor is the publisher's own**, 15 ft ≈ 4.6 m: "pixels that contain a lidar return
+greater than or equal to 15 feet above the ground". Taking it rather than inventing one means the
+polygons here *are* the county's published canopy cover, and it is also the number that separates a
+tree from the shrubs and the parked cars a point cloud sees. It has a cost worth stating: a young
+street tree is not canopy until it clears the floor, where New York's and San Francisco's sources
+have no floor at all — so the three cities' cover figures are not like for like.
+
+The raster is read through the publisher's **tiled image service** rather than the 7.1 GB zip its
+item also offers: the service caches it lossless (LERC, `maxZError` 0) on its OWN grid — NAD83(2011)
+UTM zone 10N, 1 m cells, no resampling — so a region's window costs the tiles it covers instead of
+two counties, and the bytes are the published bytes. (The zip is a single 5.9 GB member compressed
+with Deflate64, which neither Bun, macOS's `unzip` nor libarchive can read.) The grid, the zoom level
+whose cells are the raster's own metre, the cell type and the CRS are all **checked against the
+service on every run**, because a cache rebuilt on a different origin would shift every crown by a
+fraction of a tile rather than fail.
+
+Tracing runs **per 256-cell raster tile**, so no polygon spans more than 256 m. That is a deliberate
+cut: the East Bay hills carry canopy in single components kilometres across, and one polygon that
+wide would be scanned in full by every map tile and every band of the height sampler it touches.
+It costs the seams — two abutting polygons where there was one — and the cover field cannot tell the
+difference, because the union of the pieces is the same set of cells.
+
+The tracer walks the lattice of **cell corners**, not the cells, so every ring lands exactly on a
+cell boundary and the union of what comes out is the mask itself rather than an approximation of it.
+Diagonal neighbours are read 4-connected (two squares, never a bowtie), holes are nested into the
+smallest outer ring that contains them, rings are simplified with Douglas-Peucker at **0.75 m**, and
+components under **4 m²** are dropped as lidar specks — the transmission lines the publisher warns
+are mapped as vegetation are the commonest kind.
+
+Measured over the East Bay (8,505 raster tiles, 5,950 of them holding canopy): **469,286 polygons,
+10.39 M vertices, 98.5 km² of canopy**, with 816,688 specks dropped holding 1.11 km², 1.1% of the
+area. Simplifying at 0.75 m is most of what keeps that vertex count down: the rings trace
+38,245,168 vertices and keep 9,733,115, for 0.37% more area. The download is 809 MB of LERC tiles
+cached once, about four minutes on a warm connection.
+
+**License:** public domain. Pacific Veg Map, which publishes it, states verbatim: "All of the map
+data accessible via this site is in the public domain and is freely accessible to all". The item's
+own licence field carries a warranty disclaimer and no restriction. Attribution — a courtesy, not an
+obligation — is "Canopy © EBRPD / CAL FIRE / Tukman Geospatial (ALCC 1 m LiDAR)".
+
+#### The East Bay's two registers, one of them frozen
+
+Oakland publishes an "Oakland Public Tree Inventory" that is maintained and answers today —
+**70,420 rows, 68,281 of them standing trees** once the 2,139 stumps and empty plantings are
+dropped, a trunk diameter on 100% of them (median 8 in) and a real genus on 99.8%. It is read live
+and disk-cached like every other source. Its `Species___genus` values all carry a trailing space,
+which is the sort of thing that silently splits a legend in two if nothing trims it.
+
+Berkeley's is not maintained. The service the city's own hub links is token-protected, the Socrata
+copy was delisted, and the only public copy left is a layer literally named **`Trees_Test`**, last
+edited **2022-02-09**. Depending on that endpoint at build time would be depending on someone else's
+staging table, so what the build reads is a **committed copy** of it,
+`data/trees/berkeley-trees.json.gz` — 46,732 rows, 745 KiB gzipped, four values each (longitude,
+latitude, species, trunk diameter), plus the service it came from and when. That is the same
+treatment the raw ferry GTFS feeds get. `bun run scripts/east-bay-trees.ts --snapshot` rewrites it,
+reading the layer straight rather than through the disk cache — a copy served from the cache would
+carry today's date on the last copy's rows. Nothing in a build ever touches the live layer. Of its
+rows **35,585 are standing trees**, once the 10,620 vacant planting sites, the 526 stumps and one
+`#VALUE!` are dropped — a trunk on 97.7% (median 6.5 in) and a genus on 100%.
+
+Berkeley's `GENUS` column is empty on every row, so the genus is parsed out of `SPECIES`, which holds
+the scientific binomial. A named hybrid between two genera is written `x Cupressocyparis leylandii`
+or `× Chitalpa tashkentensis`, so the marker is stripped before the first word is taken.
+
+Five of the seven East Bay municipalities — Albany, Emeryville, Piedmont, Alameda and San Leandro —
+publish no register at all. The genus overlay simply thins out over them; the cover field and the
+shade do not, because neither reads these points.
+
+Neither city states a licence. Oakland's sits on its open-data hub with no terms; Berkeley's layer
+credits Arborwell and the city's Parks and IT departments and states no restriction. Both are
+credited in the About dialog as a courtesy.
+
 #### How tall each polygon is
 
 The polygons are a footprint — flat. Their **crown height** comes from a second, independent LiDAR
@@ -339,6 +422,16 @@ crown of the wrong height or a height with no crown. Recorded here because the v
 in the product's own name and it is the kind of thing a reader assumes matches its neighbour. New
 York State publishes an open 2021 point cloud that would fix it, but as 1,749 raw `.las` tiles on
 the order of 300-500 GB with no staged raster, so it is a pipeline rather than a swap.
+
+The East Bay is the one part of the Bay Area that needs neither of the compromises below: the ALCC
+CHM above **is** a canopy height model, of New York's kind rather than San Francisco's. Its publisher
+zeroes every building footprint and every water body before shipping it, so the masking this pass
+does is a second guard on it rather than the only one, and it could in principle be read unmasked.
+`scripts/alcc.ts` cuts the tiles it fetched into single-strip float32 GeoTIFFs of **metres** as it
+traces them — the one raster format the mosaic reader takes — so the cover polygons and the heights
+under them are the same cells by construction. Nothing new was needed in the tiler to read them.
+Verified against the product's own description rather than assumed: "Pixel values represent the
+height of vegetation in feet", NAD83 (2011) UTM Zone 10, buildings and water set to 0.
 
 San Francisco has no equivalent product, and takes its heights from **band 2 of the same 3DEP
 topographic tiles the terrain overlay is built from** — the surface model less the terrain model,
@@ -450,7 +543,11 @@ exactly what happens over Evans Hall. The **ground** comes from the staged 1 m b
 `CA_AlamedaCounty_2021_B21`, picked by 10 km tile out of the project's own link list, from the
 `prd-tnm` S3 mirror rather than rockyweb (24 MB/s against under 1). Both are US-government public
 domain; every node and every tile is its own permanent `.cache/` entry, so an interrupted run
-resumes where it stopped.
+resumes where it stopped. The survey stages nothing for three of the region's twelve 10 km squares —
+the bay-dominated southwest — and the flight's own ground-classified returns stand in for the DEM
+cell by cell rather than square by square, which is also what a block lying across the seam between
+two staged tiles needs: the output grid is snapped to the 500 m tile the mosaic is written in, so
+every block in this region touches two to four staged tiles and none of them holds one whole.
 
 `tiler ndsm --params .build/ndsm.json` does the rest, and reads only files. It decodes the nodes,
 keeps the returns of **class 1** — this flight carries no building or vegetation class at all, so
@@ -460,6 +557,13 @@ highest return**. Subtracting the DEM cell for cell turns that into height above
 shape of San Francisco's band 2, so the polygon sampler in `crates/tiler/src/heights.rs` reads it
 with nothing changed but the ceiling that drops a cell (65 m is a defect for a crown and the Clorox
 building for a roof). A footprint's height is then the same **75th percentile** a crown's is.
+
+The **ground** mosaic goes through the same sampler for each footprint's base elevation, and it is
+where "nothing changed" stops: an elevation is a different quantity from a height above ground, so
+the sampler is told which it is reading. A height above ground is nothing at all at ground level and
+never negative, and its floor says so at 5 cm; an elevation there is the tide line, which is exactly
+where Alameda, Bay Farm Island and the ground around Oakland airport sit. Its floor is a nodata
+cutoff instead, and its readings are counted from below sea level rather than from it.
 
 The percentile is the whole trick, and cell-max binning is what lets it work unaided. A wall return
 shares its cell with the roof edge above it and the maximum keeps the roof, so no footprint erosion
@@ -472,10 +576,32 @@ window get a height at all (the two that miss are sheds under 6 m2). Two towers 
 their tags — 1900 Broadway at 10.7 m against 120.4, Forma at 3.0 m against 73 — because they were
 building sites when the flight happened; that is the one failure the merge rule below has to catch.
 
-What is built so far is the fetch and the raster: a window, its nDSM, and the measurement. Wiring it
-into `data/buildings/<id>.bin` needs the merge rule (lidar first, an OSM-sourced height where lidar
-reads under 70% of it, an ML height never), the DEM-gap fill for the bay-side tiles the survey
-staged nothing for, and the per-city params — none of which is here yet.
+`scripts/east-bay-buildings.ts` joins the readings back to the footprints they were taken under.
+The footprints are **Overture's**, ODbL, read out of its GeoParquet the way `scripts/places.ts`
+reads the places theme and clipped to the seven municipalities' own Overture outlines — 253,948 of
+them. The merge is one rule: **the measurement wins**; an **OSM-sourced** published height replaces
+it where the measurement lands under **70%** of the tag; a **machine-learned** height never
+overrides a measurement at all. The threshold separates the one thing the flight cannot see from
+everything else — 278 buildings take the tag, and they are the sites that were still going up in
+2021 (1900 Broadway measures 9.7 m against its tagged 120.4, Forma 1.4 against 73), while the
+lowest real tower measures at 0.85 of its tag. Evans Hall comes out at 49 m rather than the model's
+25 because an ML height is never believed over a reading. A footprint with neither is dropped by the
+positive-height filter every city's buildings go through: 1,385 of them, sheds of a few square
+metres.
+
+What that buys, measured over the whole region: **250,055 of 253,948 footprints get a measured
+height, 98.5%**, against the **66.2%** Overture published one for at all, and 99.5% end up with a
+height from one source or the other. Against the 5,605 footprints whose published height is an OSM
+tag the reading is **+0.2 m median, 1.6 m mean absolute** — the citywide set is mostly houses, where
+a roof plane is unambiguous; the ±5 m of the downtown table above is the towers, where a merged
+tower-and-podium footprint has no single answer. The Ordway Building, the region's tallest, comes
+out **123.3 m against a published 123.0**.
+
+The costs, for the record: 26,610 cached point-cloud nodes and 9 staged ground tiles, 9.3 GB in
+`.cache/`; 1.20 billion points binned into 1,542 tiles of surface and ground, 2.2 GB in `.build/`;
+**32 minutes** of the tiler on half a laptop's cores, against the method's estimate of 3–5. The fetch
+that fills the cache is another ~20, once. The estimate was made over Oakland and Berkeley alone;
+the seven municipalities and the water between them are four times that ground.
 
 ### The pedestrian and park paths (`PATH` v1)
 
@@ -972,9 +1098,18 @@ message, and redraw. Nothing is rebuilt and nothing is refetched.
 bun run build-tree-data                  # every city; uses .cache/ if warm
 bun run build-tree-data:sf               # one city
 REFRESH=1 bun run build-tree-data:sf     # bypass .cache/, go back to the network
-bun run build-buildings sf               # the other ingests take a city the same way
+bun run build-east-bay-heights           # the East Bay's roof heights; see below
+bun run build-buildings sf               # after it; the other ingests take a city the same way
 bun run build-tiles                      # every city's pyramids and graphs
 ```
+
+**`build-buildings sf` needs `build-east-bay-heights` to have run first.** That is the pass that
+measures the East Bay's roofs off the LiDAR ("The LiDAR building surface", below); it writes
+`.build/east-bay-heights.json`, which is gitignored build glue and so is absent on a fresh checkout,
+and the ingest refuses to start without it rather than shipping half a city's walls. It refuses
+before it fetches anything, so finding out costs a disk read. It is not chained onto the front of
+`build-buildings` because it costs ~30 minutes of the tiler every time it runs, cache warm or cold,
+and what it writes moves only when the footprints or the flight do.
 
 The city is a script entry rather than an argument, and the refresh an environment variable rather
 than a flag, for the same reason: the ingest is a three-command chain — fetch, `tiler ingest`,
@@ -984,8 +1119,9 @@ the first. `bun run scripts/tree-data-fetch.ts --city sf --refresh` takes the fl
 Raw source reads are cached in `.cache/` (gitignored), keyed by the request itself — **including the
 Socrata host**, since two cities can publish the same 4x4 dataset id and an entry serving one city's
 rows for the other's read would parse and count as if it were right — and never expire on their own — including the rasters, which are kept as files rather than as JSON
-because the tiler reads them off disk itself: New York's 243 MiB canopy height model, and the Bay
-Area's two DEM mosaics — San Francisco's 651 tiles at 1.77 GB and the East Bay's 9 at 1.57 GB. The
+because the tiler reads them off disk itself: New York's 243 MiB canopy height model, the Bay Area's
+two DEM mosaics — San Francisco's 651 tiles at 1.77 GB and the East Bay's 9 at 1.57 GB — and the East
+Bay's canopy raster, 809 MB of LERC tiles which are then cut into 5,950 height GeoTIFFs of 1.5 GB. The
 sources move about once a year, so a re-run wants whatever it read last time — not a fresher copy it
 did not ask for.
 
@@ -1013,8 +1149,8 @@ Which is why the two passes are one command. They ran back to back over one city
 returned anything the other needed; the ingest was spawning cargo only to read a number off its
 stdout mid-pipeline. Now the numbers land in `ingest-report.json`, which is what a later link in a
 package.json chain can read. The height pass is conditional on the city naming a canopy height model
-(`ingest.json`'s `chm`, null for a city with none) rather than on TypeScript deciding whether to run
-a command.
+(`ingest.json`'s `chm`, an empty list for a city with none, two entries for the Bay Area's two
+surveys) rather than on TypeScript deciding whether to run a command.
 
 ### The build plan: `tiler build --plan <file.json>`
 
@@ -3489,7 +3625,9 @@ whole history whether or not the gate would have fired, and the gate is the back
 someone forgot, not a licence to skip one.
 
 1. Re-fetch and commit the sources — `REFRESH=1 bun run build-tree-data:<city>`, plus whichever of
-   `build-buildings`, `build-dining`, `build-landuse`, `build-openstreets` the refresh covers. These
+   `build-buildings`, `build-dining`, `build-landuse`, `build-openstreets` the refresh covers. A
+   refresh that covers `build-buildings sf` runs `bun run build-east-bay-heights` **first**: the
+   ingest refuses to start without the measurement it writes. These
    are LFS blobs: commit them with **git**, not `sl`, and push the objects (above).
 2. `bun run build-tiles` — the graph, its `version.json` hashes, the SHDB bake and every pyramid.
 3. `bun run build-sheds` — re-derives all 72,020 records against the new graph from the DOB history
