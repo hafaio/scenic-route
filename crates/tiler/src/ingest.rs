@@ -9,10 +9,11 @@
 //! the reports land in a file the manifest step reads rather than on a stdout someone has to
 //! capture.
 //!
-//! The height pass is conditional on the params naming a canopy height model, which is the shape a
-//! city with none states: San Francisco reads a band of its 3DEP tiles, New York a purpose-built
-//! CHM, and a third city may have neither — then every polygon keeps the 0 that reads as an unknown
-//! height and no tree-shade pyramid is baked.
+//! The height pass is conditional on the params naming at least one canopy height model, which is
+//! how a city with none states it: San Francisco reads a band of its 3DEP tiles, New York a
+//! purpose-built CHM, the Bay Area both that band and the East Bay's own lidar CHM, and a third city
+//! may have neither — then every polygon keeps the 0 that reads as an unknown height and no
+//! tree-shade pyramid is baked.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -56,9 +57,10 @@ impl Chm {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Params {
-    /// Null for a city with no height model, which is then simply not measured.
+    /// Empty for a city with no height model, which is then simply not measured. More than one where
+    /// a region's halves were flown by different surveys: every polygon is offered to each in turn.
     #[serde(default)]
-    chm: Option<Chm>,
+    chm: Vec<Chm>,
     #[serde(flatten)]
     densities: densities::Params,
 }
@@ -73,16 +75,24 @@ struct Report {
 
 pub fn run(params_file: &Path, report_file: &Path) -> Fallible<()> {
     let params: Params = serde_json::from_slice(&fs::read(params_file)?)?;
-    let heights = match &params.chm {
-        Some(chm) => Some(heights::run(&heights::Args {
+    let heights = if params.chm.is_empty() {
+        eprintln!("no canopy height model; every polygon keeps an unknown height");
+        None
+    } else {
+        let rasters = params
+            .chm
+            .iter()
+            .map(|chm| {
+                Ok(heights::Raster {
+                    source: chm.source()?,
+                    projection: heights::projection(&chm.crs)?,
+                })
+            })
+            .collect::<Fallible<Vec<heights::Raster>>>()?;
+        Some(heights::run(&heights::Args {
             canopy: params.densities.canopy().to_path_buf(),
-            raster: chm.source()?,
-            projection: heights::projection(&chm.crs)?,
-        })?),
-        None => {
-            eprintln!("no canopy height model; every polygon keeps an unknown height");
-            None
-        }
+            rasters,
+        })?)
     };
     let densities = densities::run(&params.densities)?;
     crate::write_report(report_file, &Report { heights, densities })

@@ -274,18 +274,24 @@ export function merge(
   return merged;
 }
 
-// The East Bay's buildings, ready to encode. Reads what `tiler ndsm` wrote, so the ingest runs after
-// it — a missing readings file is a build run out of order rather than a city with no LiDAR, and
-// saying so beats quietly writing every footprint at the height Overture guessed for it.
-export async function fetchEastBayBuildings(): Promise<HeightedBuilding[]> {
+// What `tiler ndsm` measured, off disk: the ingest runs after the measurement, so a missing file is
+// a build run out of order rather than a city with no LiDAR, and saying so beats quietly writing
+// every footprint at the height Overture guessed for it. Separate from the ingest below so a caller
+// can find that out before paying for a footprint fetch.
+export async function readEastBayHeights(): Promise<Reading[]> {
+  const readings = await readFile(READINGS_FILE, "utf-8").catch(() => {
+    throw new Error(
+      `${READINGS_FILE} is not there; run \`bun run build-east-bay-heights\` first`,
+    );
+  });
+  return JSON.parse(readings) as Reading[];
+}
+
+// The East Bay's buildings, ready to encode.
+export async function fetchEastBayBuildings(
+  readings: readonly Reading[],
+): Promise<HeightedBuilding[]> {
   const footprints = await fetchFootprints();
-  const readings = JSON.parse(
-    await readFile(READINGS_FILE, "utf-8").catch(() => {
-      throw new Error(
-        `${READINGS_FILE} is not there; run \`bun run build-east-bay-heights\` first`,
-      );
-    }),
-  ) as Reading[];
   const merged = merge(footprints, readings);
   const share = (count: number) =>
     `${((100 * count) / Math.max(1, footprints.length)).toFixed(1)}%`;

@@ -17,8 +17,8 @@
 //!
 //! Two mosaics come out, not one: the surface above ground, and the ground itself. The second is
 //! what a building's base elevation is read from, and it is where the flight's own ground returns
-//! stand in for the DEM — the survey staged no tile for the bay-dominated squares, which is where
-//! Oakland airport and Bay Farm Island are.
+//! stand in for the DEM cell by cell — the survey staged no tile at all for the bay-dominated
+//! squares, which is where Oakland airport and Bay Farm Island are.
 //!
 //! The fetcher is scripts/lidar.ts, as ever: everything here reads cached files off disk.
 
@@ -28,7 +28,7 @@ use std::fs;
 use std::fs::File;
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU32, Ordering};
 
 use las::Reader;
 use rayon::prelude::*;
@@ -50,7 +50,8 @@ const MERCATOR_HALF_WIDTH_METERS: f64 = 20_037_508.342_789_244;
 /// noise 7 and 18 — those run from -99 m to +253 m and dropping them is not optional — and there is
 /// no building or vegetation class at all.
 const SURFACE_CLASS: u8 = 1;
-/// Bare earth. Only read where the survey staged no DEM tile to subtract.
+/// Bare earth. Read for the cells the staged DEM has no ground for: the bay-dominated squares the
+/// survey staged no tile for at all, and the water it staged as nodata.
 const GROUND_CLASS: u8 = 2;
 
 const CELL_METERS: f64 = 1.0;
@@ -61,9 +62,9 @@ const CELL_METERS: f64 = 1.0;
 /// float32 each time.
 const TILE_METERS: f64 = 500.0;
 
-/// The side of the staged DEM's naming grid. One block of work is one of these squares: it is the
-/// largest area that is covered by a single staged tile, and so the largest that can be binned and
-/// differenced for one decode of one 400 MB tile.
+/// The side of one block of work. The staged DEM's naming grid, which is the largest area one
+/// decoded 400 MB tile answers for, and so the most ground a block can be differenced against
+/// without decoding the same tile twice.
 const SQUARE_METERS: f64 = 10_000.0;
 
 /// Written where no return landed or no ground was known, and below the -9000 every reader here
@@ -89,10 +90,15 @@ const IMPLAUSIBLE_ROOF_METERS: f64 = 600.0;
 /// The same filter over the ground mosaic, above the highest ground any city sits on.
 const IMPLAUSIBLE_GROUND_METERS: f64 = 4_000.0;
 
-/// How far the flight's own ground returns are carried into a cell that has none, where there is no
-/// staged DEM tile to ask instead. Ground is continuous and the returns are dense, so this only ever
-/// bridges a building's own footprint or a patch of water; past it the ground stays unknown and the
-/// surface above it is not written at all.
+/// The two mosaics are two quantities, and the sampler is told which is which: the surface is a
+/// height above ground, where a cell at ground level holds no building, and the ground is an
+/// elevation, where one holds the shoreline Alameda and Bay Farm Island are built on.
+const ROOF: heights::Quantity = heights::Quantity::above_ground(IMPLAUSIBLE_ROOF_METERS);
+const GROUND: heights::Quantity = heights::Quantity::elevation(IMPLAUSIBLE_GROUND_METERS);
+
+/// How far a known ground height is carried into a cell that has none. Ground is continuous and the
+/// returns are dense, so this only ever bridges a building's own footprint or a patch of water; past
+/// it the ground stays unknown and the surface above it is not written at all.
 const MAX_FILL_RINGS: usize = 64;
 
 /// A published height this far under the measured one is a building that did not exist when the
@@ -128,8 +134,8 @@ pub struct Params {
     /// The cached EPT nodes, decoded and binned together. Their point coverage may overlap; taking
     /// the highest return per cell is idempotent under a duplicated point, so nothing is deduped.
     nodes: Vec<Node>,
-    /// The staged bare-earth DEM tiles the surface is differenced against. A square of the window
-    /// none of them covers is filled from the cloud's own ground returns instead.
+    /// The staged bare-earth DEM tiles the surface is differenced against. A cell none of them
+    /// answers for is filled from the cloud's own ground returns instead.
     dem: Vec<PathBuf>,
     /// What heights.rs calls the projection the DEM is published on, which the surface model is
     /// binned onto so the two subtract cell for cell.
@@ -151,8 +157,9 @@ pub struct Params {
 pub struct Report {
     nodes: usize,
     squares: usize,
-    /// Squares of the window the survey staged no DEM tile for, whose ground is the flight's own.
-    filled_squares: usize,
+    /// Cells the survey's DEM had no ground for, taken from the flight's own ground returns instead
+    /// — the bay-dominated squares it staged no tile for at all, and the water it staged as nodata.
+    filled: u64,
     points: u64,
     /// Points of `SURFACE_CLASS` that landed in a grid.
     surface_points: u64,
@@ -323,10 +330,10 @@ fn reach_of(node: &Node, projection: Tmerc) -> Reach {
 struct Binned {
     /// Per cell, the highest surface return as an `ordered` key, or 0 for none.
     surface: Vec<u32>,
-    /// Per cell, the ground returns' total in decimetres and how many there were — read only where
-    /// there is no staged DEM tile, and empty otherwise. At this flight's spacing a cell holds one
-    /// or two ground returns, so their mean is their median.
-    ground_sum: Vec<u32>,
+    /// Per cell, the ground returns' total in decimetres and how many there were — read only for
+    /// the cells the staged DEM has no ground for. At this flight's spacing a cell holds one or two
+    /// ground returns, so their mean is their median, and 32 bits is room to spare for the sum.
+    ground_sum: Vec<i32>,
     ground_count: Vec<u32>,
     points: u64,
     surface_points: u64,
@@ -336,16 +343,12 @@ struct Binned {
 }
 
 /// Every reaching node's returns binned to one block of the grid: the highest surface-class return
-/// per cell, and — where the ground has to come from the cloud — the ground-class returns beside it.
-fn bin(nodes: &[&Reach], grid: &Grid, projection: Tmerc, from_cloud: bool) -> Fallible<Binned> {
+/// per cell, and the ground-class returns beside it for the cells the staged DEM has no ground for.
+fn bin(nodes: &[&Reach], grid: &Grid, projection: Tmerc) -> Fallible<Binned> {
     let cells = grid.width * grid.height;
     let surface: Vec<AtomicU32> = (0..cells).map(|_| AtomicU32::new(0)).collect();
-    let ground_sum: Vec<AtomicU32> = (0..if from_cloud { cells } else { 0 })
-        .map(|_| AtomicU32::new(0))
-        .collect();
-    let ground_count: Vec<AtomicU32> = (0..if from_cloud { cells } else { 0 })
-        .map(|_| AtomicU32::new(0))
-        .collect();
+    let ground_sum: Vec<AtomicI32> = (0..cells).map(|_| AtomicI32::new(0)).collect();
+    let ground_count: Vec<AtomicU32> = (0..cells).map(|_| AtomicU32::new(0)).collect();
     let tallies = nodes
         .par_iter()
         .map(|node| -> Fallible<(u64, u64, [u64; 256])> {
@@ -373,9 +376,8 @@ fn bin(nodes: &[&Reach], grid: &Grid, projection: Tmerc, from_cloud: bool) -> Fa
                 if class == SURFACE_CLASS {
                     counted += 1;
                     surface[cell].fetch_max(ordered(z as f32), Ordering::Relaxed);
-                } else if from_cloud && class == GROUND_CLASS {
-                    let decimetres = (z * 10.0).round().clamp(0.0, f64::from(u32::MAX / 2)) as u32;
-                    ground_sum[cell].fetch_add(decimetres, Ordering::Relaxed);
+                } else if class == GROUND_CLASS {
+                    ground_sum[cell].fetch_add(decimetres(z), Ordering::Relaxed);
                     ground_count[cell].fetch_add(1, Ordering::Relaxed);
                 }
             }
@@ -385,7 +387,7 @@ fn bin(nodes: &[&Reach], grid: &Grid, projection: Tmerc, from_cloud: bool) -> Fa
 
     let mut binned = Binned {
         surface: surface.into_iter().map(AtomicU32::into_inner).collect(),
-        ground_sum: ground_sum.into_iter().map(AtomicU32::into_inner).collect(),
+        ground_sum: ground_sum.into_iter().map(AtomicI32::into_inner).collect(),
         ground_count: ground_count
             .into_iter()
             .map(AtomicU32::into_inner)
@@ -402,6 +404,15 @@ fn bin(nodes: &[&Reach], grid: &Grid, projection: Tmerc, from_cloud: bool) -> Fa
         }
     }
     Ok(binned)
+}
+
+/// A ground return as the integer a cell's total is summed in. Signed, because the region's ground
+/// runs below sea level wherever the flight crossed reclaimed land — the airport and Bay Farm
+/// Island — which is exactly where the staged DEM has no ground and these returns are read.
+fn decimetres(height: f64) -> i32 {
+    (height * 10.0)
+        .round()
+        .clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32
 }
 
 /// Carries each known height out to the unknown cells nearest it, breadth first, so a cell with no
@@ -452,39 +463,41 @@ fn fill_nearest(values: &mut [f32], width: usize, height: usize, rings: usize) {
     }
 }
 
-/// The ground under one block: the staged DEM where the survey has one, and the flight's own
-/// ground-classified returns where it has not.
+/// The ground under one block: the staged DEM wherever it answers, and the flight's own
+/// ground-classified returns for the cells it does not. The two are merged cell by cell rather than
+/// block by block, because a block is a square of the DEM's naming grid only by size and not by
+/// alignment — the output grid is snapped to the tile the mosaic is written in — so the common case
+/// is a block reaching two staged tiles and holding the seam between them.
 fn ground_of(
     grid: &Grid,
-    staged: Option<&TileGrid>,
+    staged: &[PathBuf],
     projection: Tmerc,
     binned: &Binned,
-) -> Fallible<Vec<f32>> {
-    let mut ground = match staged {
-        Some(tile) => {
-            let mut dem = Dem::open(std::slice::from_ref(&tile.path), projection, 0)?;
-            let sampled = dem.sample_grid(
-                grid.origin_x,
-                grid.origin_y,
-                CELL_METERS,
-                grid.width,
-                grid.height,
-            )?;
-            dem.release();
-            sampled
-        }
-        None => vec![f32::NAN; grid.width * grid.height],
+) -> Fallible<(Vec<f32>, u64)> {
+    let mut ground = if staged.is_empty() {
+        vec![f32::NAN; grid.width * grid.height]
+    } else {
+        let mut dem = Dem::open(staged, projection, 0)?;
+        let sampled = dem.sample_grid(
+            grid.origin_x,
+            grid.origin_y,
+            CELL_METERS,
+            grid.width,
+            grid.height,
+        )?;
+        dem.release();
+        sampled
     };
-    if !binned.ground_count.is_empty() {
-        for (index, height) in ground.iter_mut().enumerate() {
-            let count = binned.ground_count[index];
-            if !height.is_finite() && count > 0 {
-                *height = binned.ground_sum[index] as f32 / count as f32 / 10.0;
-            }
+    let mut filled = 0u64;
+    for (index, height) in ground.iter_mut().enumerate() {
+        let count = binned.ground_count[index];
+        if !height.is_finite() && count > 0 {
+            *height = binned.ground_sum[index] as f32 / count as f32 / 10.0;
+            filled += 1;
         }
-        fill_nearest(&mut ground, grid.width, grid.height, MAX_FILL_RINGS);
     }
-    Ok(ground)
+    fill_nearest(&mut ground, grid.width, grid.height, MAX_FILL_RINGS);
+    Ok((ground, filled))
 }
 
 /// The raster, as the two tags `dem.rs` needs to georeference it and nothing else: a GeoTIFF's CRS
@@ -707,7 +720,7 @@ fn describe_errors(footprints: &[Footprint], readings: &[Vec<u16>]) {
         if sample.is_empty() {
             continue;
         }
-        let at = |percentile: f64| f64::from(heights::percentile_dm(sample, percentile)) / 10.0;
+        let at = |percentile: f64| ROOF.meters(heights::percentile_dm(sample, percentile));
         if published > CONSTRUCTION_METERS && at(0.9) < CONSTRUCTION_RATIO * published {
             construction += 1;
             continue;
@@ -743,7 +756,7 @@ fn describe_tallest(footprints: &[Footprint], readings: &[Vec<u16>], count: usiz
         .zip(readings)
         .map(|(footprint, sample)| {
             (
-                f64::from(heights::percentile_dm(sample, ROOF_PERCENTILE)) / 10.0,
+                ROOF.meters(heights::percentile_dm(sample, ROOF_PERCENTILE)),
                 footprint,
             )
         })
@@ -773,14 +786,20 @@ struct Reading {
     cells: u32,
 }
 
-/// Which staged tile covers a square whole. Not "reaches": the tiles overlap their neighbours by a
-/// few metres, so a square is inside exactly one of them, and reading a block from the one that only
-/// laps its edge would leave most of it unknown.
-fn covering<'a>(tiles: &'a [TileGrid], grid: &Grid) -> Option<&'a TileGrid> {
-    tiles.iter().find(|tile| {
-        tile.contains(grid.min_x() + 0.5, grid.max_y() - 0.5)
-            && tile.contains(grid.max_x() - 0.5, grid.min_y() + 0.5)
-    })
+/// The staged tiles a block reaches, in the order they were given. A block is read from all of them
+/// — the mosaic reader decodes one at a time and takes whichever carried a value, which is what a
+/// block lying across a seam needs.
+fn reaching_dem(tiles: &[TileGrid], grid: &Grid) -> Vec<PathBuf> {
+    tiles
+        .iter()
+        .filter(|tile| {
+            tile.min_x() < grid.max_x()
+                && tile.max_x() > grid.min_x()
+                && tile.min_y() < grid.max_y()
+                && tile.max_y() > grid.min_y()
+        })
+        .map(|tile| tile.path.clone())
+        .collect()
 }
 
 pub fn run(params_file: &Path, report_file: &Path) -> Fallible<()> {
@@ -814,7 +833,7 @@ pub fn run(params_file: &Path, report_file: &Path) -> Fallible<()> {
     let mut report = Report {
         nodes: params.nodes.len(),
         squares: 0,
-        filled_squares: 0,
+        filled: 0,
         points: 0,
         surface_points: 0,
         tiles: 0,
@@ -848,14 +867,14 @@ pub fn run(params_file: &Path, report_file: &Path) -> Fallible<()> {
                         && reach.max_y > grid.min_y()
                 })
                 .collect();
-            let cover = covering(&staged, &grid);
             if reaching.is_empty() {
                 continue;
             }
+            let cover = reaching_dem(&staged, &grid);
             report.squares += 1;
-            report.filled_squares += usize::from(cover.is_none());
-            let binned = bin(&reaching, &grid, projection, cover.is_none())?;
-            let ground = ground_of(&grid, cover, projection, &binned)?;
+            let binned = bin(&reaching, &grid, projection)?;
+            let (ground, filled) = ground_of(&grid, &cover, projection, &binned)?;
+            report.filled += filled;
             let written = write_tiles(&grid, &binned, &ground, &ndsm_dir, &ground_dir)?;
             report.points += binned.points;
             report.surface_points += binned.surface_points;
@@ -865,18 +884,15 @@ pub fn run(params_file: &Path, report_file: &Path) -> Fallible<()> {
                 *total += count;
             }
             eprintln!(
-                "  ndsm: square {}/{squares} at ({}, {}) — {} nodes, {} returned cells, {} tiles{}",
+                "  ndsm: square {}/{squares} at ({}, {}) — {} nodes, {} staged ground tiles, \
+                 {} returned cells, {filled} cells grounded from the cloud, {} tiles",
                 report.squares,
                 grid.origin_x as i64,
                 grid.origin_y as i64,
                 reaching.len(),
+                cover.len(),
                 written.returned,
                 written.ndsm.len(),
-                if cover.is_some() {
-                    ""
-                } else {
-                    ", ground from the cloud"
-                },
             );
             ndsm_tiles.extend(written.ndsm);
             ground_tiles.extend(written.ground);
@@ -892,8 +908,9 @@ pub fn run(params_file: &Path, report_file: &Path) -> Fallible<()> {
         }
     }
     eprintln!(
-        "  ndsm: {} cells hold a return, {} of them over known ground, in {} tiles",
-        report.returned, report.grounded, report.tiles
+        "  ndsm: {} cells hold a return, {} of them over known ground, {} of the ground taken from \
+         the flight's own returns, in {} tiles",
+        report.returned, report.grounded, report.filled, report.tiles
     );
 
     let footprints = match &params.footprints {
@@ -913,7 +930,7 @@ pub fn run(params_file: &Path, report_file: &Path) -> Fallible<()> {
                 band: 0,
             },
             projection,
-            IMPLAUSIBLE_ROOF_METERS,
+            ROOF,
         )?;
         let bases = heights::measure(
             &polygons,
@@ -922,7 +939,7 @@ pub fn run(params_file: &Path, report_file: &Path) -> Fallible<()> {
                 band: 0,
             },
             projection,
-            IMPLAUSIBLE_GROUND_METERS,
+            GROUND,
         )?;
         let readings: Vec<Reading> = footprints
             .iter()
@@ -932,9 +949,9 @@ pub fn run(params_file: &Path, report_file: &Path) -> Fallible<()> {
             .map(|(((footprint, roof), base), cells)| Reading {
                 feature: footprint.feature,
                 roof_meters: (!roof.is_empty())
-                    .then(|| f64::from(heights::percentile_dm(roof, ROOF_PERCENTILE)) / 10.0),
+                    .then(|| ROOF.meters(heights::percentile_dm(roof, ROOF_PERCENTILE))),
                 base_meters: (!base.is_empty())
-                    .then(|| f64::from(heights::percentile_dm(base, GROUND_PERCENTILE)) / 10.0),
+                    .then(|| GROUND.meters(heights::percentile_dm(base, GROUND_PERCENTILE))),
                 cells: *cells,
             })
             .collect();
@@ -966,7 +983,57 @@ pub fn run(params_file: &Path, report_file: &Path) -> Fallible<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{fill_nearest, from_ordered, ordered, to_degrees};
+    use std::path::PathBuf;
+
+    use super::{
+        Binned, Grid, TileGrid, decimetres, fill_nearest, from_ordered, ground_of, ordered,
+        reaching_dem, to_degrees,
+    };
+    use crate::heights::UTM_10N;
+
+    /// One staged 1 m tile of the DEM's 10 km naming grid, named for the square's north-west corner
+    /// and six pixels wider than the square on every side, which is how the survey stages them.
+    fn staged(origin_x: f64, origin_y: f64) -> TileGrid {
+        TileGrid {
+            path: PathBuf::from(format!("{origin_x}-{origin_y}.tif")),
+            width: 10_012,
+            height: 10_012,
+            origin_x,
+            origin_y,
+            cell: 1.0,
+            bands: 1,
+            mosaic: 0,
+        }
+    }
+
+    /// A block is one of the DEM's 10 km squares by size and not by alignment — the output grid is
+    /// snapped to the 500 m tile the mosaic is written in — so the ordinary block lies across the
+    /// seam between four staged tiles and has to be read from all of them. Asking instead for the
+    /// one tile holding a block whole finds none anywhere in the East Bay, and every block's ground
+    /// silently came from the flight's own returns instead of from the survey.
+    #[test]
+    fn a_block_across_a_seam_reads_every_staged_tile_it_touches() {
+        let tiles = [
+            staged(550_000.0, 4_200_000.0),
+            staged(560_000.0, 4_200_000.0),
+            staged(550_000.0, 4_190_000.0),
+            staged(560_000.0, 4_190_000.0),
+        ];
+        let block = Grid {
+            origin_x: 554_500.0,
+            origin_y: 4_196_500.0,
+            width: 10_000,
+            height: 10_000,
+        };
+        assert_eq!(reaching_dem(&tiles, &block).len(), 4);
+        assert!(
+            !tiles.iter().any(|tile| {
+                tile.contains(block.min_x() + 0.5, block.max_y() - 0.5)
+                    && tile.contains(block.max_x() - 0.5, block.min_y() + 0.5)
+            }),
+            "a block this size lands inside one staged tile after all"
+        );
+    }
 
     /// The key a cell's maximum is taken on has to order the way the heights do across zero, which
     /// the float's own bit pattern does not: -1 m and +1 m differ only in the sign bit.
@@ -1028,5 +1095,34 @@ mod tests {
         fill_nearest(&mut far, 5, 5, 2);
         assert!(far[24].is_nan(), "ground carried past the ring limit");
         assert_eq!(far[2], 1.0, "ground not carried to the ring limit");
+    }
+
+    /// The cells with no staged ground under them are the reclaimed ones — the airport and Bay Farm
+    /// Island — whose ground sits below sea level. Summing those returns unsigned reads them as sea
+    /// level, and every building standing on them comes out that much taller.
+    #[test]
+    fn ground_below_sea_level_reaches_the_cells_it_fills() {
+        let grid = Grid {
+            origin_x: 560_000.0,
+            origin_y: 4_180_000.0,
+            width: 2,
+            height: 1,
+        };
+        let binned = Binned {
+            surface: vec![0; 2],
+            ground_sum: vec![decimetres(-1.8) + decimetres(-2.2), 0],
+            ground_count: vec![2, 0],
+            points: 2,
+            surface_points: 0,
+            classes: [0u64; 256],
+        };
+        let (ground, filled) = ground_of(&grid, &[], UTM_10N, &binned).expect("ground");
+        assert_eq!(filled, 1, "the flight's own ground was not read");
+        assert!(
+            (ground[0] + 2.0).abs() < 1e-4,
+            "ground read as {} rather than -2 m",
+            ground[0]
+        );
+        assert_eq!(ground[1], ground[0], "the fill carried something else");
     }
 }

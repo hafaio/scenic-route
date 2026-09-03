@@ -19,11 +19,12 @@
 // site is in the public domain and is freely accessible to all" (read 2026-08-27). The item's own
 // licence field carries a warranty disclaimer and no restriction.
 
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { decode, load } from "lerc";
 import pRetry from "p-retry";
-import { CACHE_DIR, cachedFile } from "./cache";
+import { fetchEastBayLand } from "./alameda";
+import { CACHE_DIR, cachedFile, writeAtomic } from "./cache";
 import {
   encodeFloatTiff,
   forwardTmerc,
@@ -32,6 +33,7 @@ import {
   ringToCoords,
   UTM_10N,
 } from "./canopy-raster";
+import { boxOf } from "./geometry";
 import type { Bounds } from "./manifest";
 import type { Polygon } from "./overpass";
 
@@ -41,6 +43,10 @@ export const ALCC_ATTRIBUTION =
   "Canopy © EBRPD / CAL FIRE / Tukman Geospatial (ALCC 1 m LiDAR)";
 export const ALCC_SOURCE_URL =
   "https://www.arcgis.com/home/item.html?id=7b57097b6b274419951ed51d0f6f20f4";
+// The same raster, credited for the other thing it is read for. One item, two lines, because the
+// manifest records the cover's source and the height model's source as separate fields.
+export const ALCC_HEIGHT_ATTRIBUTION =
+  "Canopy heights © EBRPD / CAL FIRE / Tukman Geospatial (ALCC 1 m LiDAR CHM)";
 
 // The service's own cache, checked against the service on every run rather than trusted: the level
 // whose cells are the raster's own metre, the 256-cell blocks it is cut into, and the ground corner
@@ -65,9 +71,9 @@ const CANOPY_FLOOR_FEET = 15;
 const METERS_PER_FOOT = 0.3048;
 
 // How far a simplified ring may leave the cells it was traced from. A 1 m raster boundary is a
-// staircase carrying a vertex per metre; at this tolerance a crown keeps its shape and its area to
-// a percent while its vertex count falls by about four fifths. Measured over the whole window:
-// {SIMPLIFY_NOTE}
+// staircase carrying a vertex per metre; at this tolerance a crown keeps its shape and its area to a
+// percent while its vertex count falls by about three quarters. Measured over the whole East Bay:
+// 38,245,168 vertices traced, 9,733,115 kept, 0.37% more area.
 const SIMPLIFY_METERS = 0.75;
 // The smallest component kept. Below this a "crown" is a lidar speck — the transmission lines the
 // publisher warns are mapped as vegetation are the commonest kind — and it costs a polygon record
@@ -309,7 +315,7 @@ export async function fetchAlccCanopy(box: Bounds): Promise<AlccCanopy> {
     // it only through these polygons, so what lies under a crown's own cells is all it can see, and
     // a ring that simplification nudged a decimetre outside its cells still lands on a reading.
     const path = join(HEIGHT_DIR, `${row}-${column}.tif`);
-    await writeFile(
+    await writeAtomic(
       path,
       encodeFloatTiff(
         heights,
@@ -349,5 +355,22 @@ export async function fetchAlccCanopy(box: Bounds): Promise<AlccCanopy> {
     result.canopyCells += traced.cells;
     result.droppedCells += traced.droppedCells;
   }
+  console.error(
+    `  alcc: ${result.polygons.length} polygons, ${result.vertices} vertices, ` +
+      `${(result.canopyCells / 1e6).toFixed(2)} km2 of canopy over ${result.covered} of ${count} tiles ` +
+      `(${result.dropped} specks under ${MINIMUM_SQUARE_METERS} m2 dropped, holding ${(result.droppedCells / 1e6).toFixed(3)} km2)`,
+  );
   return result;
+}
+
+// The East Bay's own pass, resolved from its land rather than stated as four numbers: the window
+// asked of the raster is the ground the ingest will clip to, so the two cannot drift apart. Held,
+// because the ingest asks the same pass for two different things — the cover polygons and the paths
+// of the height tiles — and the tracing behind them is minutes of work that the tile cache does not
+// save. The tiles are cached on disk; the polygons traced from them are not.
+let eastBay: Promise<AlccCanopy> | null = null;
+
+export function eastBayCanopy(): Promise<AlccCanopy> {
+  eastBay ??= (async () => fetchAlccCanopy(boxOf(await fetchEastBayLand())))();
+  return eastBay;
 }

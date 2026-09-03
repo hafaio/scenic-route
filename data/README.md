@@ -90,5 +90,18 @@ it is a public GTFS feed published for consumption by transit apps; there is no 
 and the app attributes "NYC Ferry" as a courtesy. `ferries/nyc.bin` mixes the two, so it inherits
 neither OSM's ODbL nor any restriction.
 
+`trees/berkeley-trees.json.gz` is not an artifact but a **frozen source**: a copy of Berkeley's
+`Trees_Test` ArcGIS layer, 46,732 rows of longitude, latitude, species and trunk diameter, taken
+because the layer is an unmaintained staging table nobody should build on. `scripts/README.md`
+explains it; `bun run scripts/east-bay-trees.ts --snapshot` rewrites it. It is deliberately **not**
+in LFS — it is under a megabyte and written once.
+
+`canopy/sf.bin` holds two surveys: San Francisco's own 2013 Urban Forest Plan canopy analysis, from
+DataSF, and the East Bay's, traced from the **Alameda and Contra Costa 1-metre lidar canopy height
+model** (East Bay Regional Parks / CAL FIRE / USGS / Tukman Geospatial). The latter is **public
+domain** — Pacific Veg Map, which publishes it, states that "all of the map data accessible via this
+site is in the public domain and is freely accessible to all" — so it carries no share-alike
+obligation and the credit in the About dialog is a courtesy.
+
 Everything else here comes from **NYC Open Data**, which carries no usage restrictions (Local Law
 11 of 2012); attribution is a courtesy rather than an obligation, and the app gives it anyway.

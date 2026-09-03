@@ -27,9 +27,11 @@ function entryPath(name: string, key: string, extension: string): string {
   return join(CACHE_DIR, `${name}.${digest}.${extension}`);
 }
 
-// Renamed on, so an entry is either the whole value or absent: these run to hundreds of
-// megabytes, and an interrupted write would otherwise leave a torn one behind.
-async function writeEntry(
+// Renamed on, so a file is either whole or absent: these run to hundreds of megabytes, and an
+// interrupted write would otherwise leave a torn one behind. Exported because the build inputs cut
+// up beside the cache (scripts/alcc.ts) want the same guarantee for the same reason — a truncated
+// raster is read as a tile that would not decode rather than as an error.
+export async function writeAtomic(
   path: string,
   contents: string | Uint8Array,
 ): Promise<void> {
@@ -63,7 +65,7 @@ export async function cached<Value>(
   }
 
   const value = await read();
-  await writeEntry(path, JSON.stringify(value));
+  await writeAtomic(path, JSON.stringify(value));
   return value;
 }
 
@@ -81,6 +83,6 @@ export async function cachedFile(
     return path;
   }
 
-  await writeEntry(path, await read());
+  await writeAtomic(path, await read());
   return path;
 }
