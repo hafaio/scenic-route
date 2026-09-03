@@ -20,6 +20,7 @@ import {
   MdOutlineDirectionsWalk,
   MdPalette,
   MdSwapHoriz,
+  MdSwapVert,
   MdTurnLeft,
   MdTurnRight,
   MdTurnSlightLeft,
@@ -126,6 +127,10 @@ interface RoutePanelProps {
   destPrefill: DestPrefill | null;
   onStartClear: () => void;
   onDestClear: () => void;
+  // Exchange the two endpoints. A pure slot swap: the labels travel with the points and the route
+  // is searched again from scratch, since the costs are directional and the way back is its own
+  // question.
+  onSwap: () => void;
   onUseCurrentLocation: () => void;
   onArmStart: () => void;
   onArmDest: () => void;
@@ -257,6 +262,7 @@ export default function RoutePanel({
   destPrefill,
   onStartClear,
   onDestClear,
+  onSwap,
   onUseCurrentLocation,
   onArmStart,
   onArmDest,
@@ -486,7 +492,7 @@ export default function RoutePanel({
           their suggestions upward, out of it. */}
       <div className="flex max-h-[calc(100dvh-env(safe-area-inset-top)-4rem-max(0.75rem,env(safe-area-inset-bottom)))] flex-col rounded-2xl bg-white/85 p-4 shadow-lg ring-1 ring-black/5 backdrop-blur-md dark:bg-slate-800/80 dark:ring-white/10">
         <div className="flex items-center justify-between gap-2">
-          <p className="text-[11px] font-semibold uppercase tracking-wide text-brand-600 dark:text-brand-400">
+          <p className="min-w-0 truncate text-[11px] font-semibold uppercase tracking-wide text-brand-600 dark:text-brand-400">
             Walking directions
           </p>
           <div className="flex items-center gap-1">
@@ -507,6 +513,18 @@ export default function RoutePanel({
                 <gate.Icon />
               </button>
             ))}
+            {/* Disabled rather than hidden with nothing to exchange: hiding it would slide the
+                gates sideways the moment a first endpoint is set. */}
+            <button
+              type="button"
+              onClick={onSwap}
+              disabled={!startSet && !destSet}
+              aria-label="Swap start and destination"
+              title="Swap start and destination"
+              className="-m-1 grid h-8 w-8 place-items-center rounded-full text-slate-400 hover:bg-slate-100 disabled:pointer-events-none disabled:opacity-40 dark:hover:bg-slate-700"
+            >
+              <MdSwapVert className="h-4 w-4" aria-hidden="true" />
+            </button>
             <button
               type="button"
               onClick={onToggleMinimize}

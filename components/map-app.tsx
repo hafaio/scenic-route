@@ -1303,6 +1303,24 @@ export default function MapApp() {
     retryLocation();
   }, [retryLocation]);
 
+  // Exchange the two ends. Nothing is re-geocoded — the labels travel with their points — and the
+  // solve effect re-fires on the new pair and searches again from scratch. Deliberately NOT the
+  // reverse solver the drags use: that re-times the path it already has, and the costs are
+  // directional (hills, ferries, sun), so the way back is a different route, not this one read
+  // backwards.
+  //
+  // A start reading "My location" cannot reach here with a destination set — the promotion effect
+  // below has already pinned it to a point by then. Without a destination the swap moves the start
+  // into the empty destination box and lets the start fall back to the live fix; with only a
+  // destination it does the same in reverse, which is the way out of typing a start into the wrong
+  // box.
+  const handleSwapEndpoints = useCallback(() => {
+    setManualStart(dest);
+    setDest(manualStart);
+    setPickTarget(null);
+    forgetDestQuery();
+  }, [dest, manualStart, forgetDestQuery]);
+
   const handleArmStart = useCallback(() => {
     setPickTarget((target) => (target === "start" ? null : "start"));
   }, []);
@@ -1961,6 +1979,7 @@ export default function MapApp() {
             onDestSelect={handleDestSelect}
             onStartClear={handleClearStart}
             onDestClear={handleClearDest}
+            onSwap={handleSwapEndpoints}
             onUseCurrentLocation={handleClearStart}
             onArmStart={handleArmStart}
             onArmDest={handleArmDest}
