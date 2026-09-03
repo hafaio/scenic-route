@@ -28,8 +28,8 @@
 import { createHash } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import pRetry from "p-retry";
 import { fetchEastBayHistoric } from "./alameda";
+import { fetchArcgis } from "./arcgis";
 import { cached } from "./cache";
 import { encodePolygons } from "./geometry";
 import { type LandContext, loadLandContext } from "./land";
@@ -50,14 +50,10 @@ const SERVICE =
   "https://services5.arcgis.com/Oos4pNA2538iVFA1/arcgis/rest/services/Historic_Districts/FeatureServer/0/query";
 const PAGE_SIZE = 500;
 const MAX_ATTEMPTS = 6;
-const RETRY_BASE_MS = 5_000;
-const RETRY_CAP_MS = 30_000;
-const REQUEST_TIMEOUT_MS = 120_000;
+const RETRY_BASE_MS = 5_000; // longer than the shared ladder's: this service rate-limits
 // 159 districts at the last probe (2026-08-20). A floor, not an exact count: it catches a server-side
 // page cut that would pass for the end of the layer, but tolerates the LPC designating a few more.
 const EXPECTED_DISTRICTS = 150;
-const USER_AGENT =
-  "scenic-route/0.1 (+https://github.com/erikbrinkman/scenic-route)";
 
 // SF Planning's "Historic Districts" table: 204 areas, every one any register or survey has
 // recognised, as WGS84 MultiPolygons — populated on all of them.
@@ -80,10 +76,8 @@ interface DistrictFeature {
   geometry?: GeoJsonGeometry | null;
 }
 
-// A GeoJSON query still reports a failure the Esri way: a 200 carrying an `error` body.
 interface DistrictPage {
   features?: DistrictFeature[];
-  error?: { code: number; message: string };
 }
 
 // One page's request URL, ordered by OBJECTID so `resultOffset` paging is stable: without an order
@@ -103,33 +97,21 @@ function pageUrl(offset: number): string {
 
 async function fetchPage(url: string): Promise<DistrictPage> {
   try {
-    return await pRetry(
-      async () => {
-        const response = await fetch(url, {
-          headers: { "user-agent": USER_AGENT },
-          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-        });
-        if (!response.ok) {
-          throw new Error(`${response.status} ${response.statusText}`);
-        }
-        const body = (await response.json()) as DistrictPage;
-        if (body.error) {
-          throw new Error(`ArcGIS ${body.error.code}: ${body.error.message}`);
-        } else if (!Array.isArray(body.features)) {
-          throw new Error("no features in the response");
-        }
-        return body;
-      },
+    return await fetchArcgis<DistrictPage>(
+      url,
       {
-        retries: MAX_ATTEMPTS - 1,
-        minTimeout: RETRY_BASE_MS,
-        maxTimeout: RETRY_CAP_MS,
-        randomize: true,
+        attempts: MAX_ATTEMPTS,
+        minTimeoutMs: RETRY_BASE_MS,
         onFailedAttempt: ({ error, attemptNumber }) => {
           console.error(
             `  attempt ${attemptNumber}/${MAX_ATTEMPTS} failed: ${error}`,
           );
         },
+      },
+      ({ features }) => {
+        if (!Array.isArray(features)) {
+          throw new Error("no features in the response");
+        }
       },
     );
   } catch (error) {

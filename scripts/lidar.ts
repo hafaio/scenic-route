@@ -15,14 +15,11 @@
 
 import { mkdir, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import pRetry from "p-retry";
 import { cached, cachedFile } from "./cache";
+import { forwardTmerc, type Tmerc, UTM_10N } from "./canopy-raster";
+import { fetchBytes, fetchJson } from "./http";
 
-const USER_AGENT =
-  "scenic-route/0.1 (+https://github.com/erikbrinkman/scenic-route)";
 const MAX_ATTEMPTS = 4;
-const RETRY_BASE_MS = 2_000;
-const RETRY_CAP_MS = 30_000;
 const NODE_WORKERS = 16;
 // The side of one square of the staged DEM's naming grid: `x56y419` is the 10 km square east of
 // 560 km and south of 4 190 km.
@@ -58,92 +55,15 @@ function degrees(x: number, y: number): [number, number] {
   return [lng, lat];
 }
 
-// GRS80 and Snyder's transverse Mercator series, forward only: the same five numbers and the same
-// arithmetic as crates/tiler/src/heights.rs, which is where every raster is actually read. It is
-// here because the staged DEM names its tiles by the 10 km square of the grid they cover, so
-// deciding WHICH tiles a window wants means projecting the window — the one thing this fetcher
-// cannot ask the tiler, since the tiler is handed the tiles it fetched.
-const SEMI_MAJOR_METERS = 6_378_137.0;
-const INVERSE_FLATTENING = 298.257222101;
-
-interface Tmerc {
-  centralMeridian: number;
-  latOrigin: number;
-  scaleFactor: number;
-  falseEasting: number;
-  falseNorthing: number;
-}
-
-// Keyed by the names heights.rs resolves; a city's `crs` is one of these on both sides of the line.
+// Keyed by the names crates/tiler/src/heights.rs resolves; a city's `crs` is one of these on both
+// sides of the line. The arithmetic behind them is scripts/canopy-raster.ts's, which is where every
+// transverse Mercator in the ingest lives; it is wanted here because the staged DEM names its tiles
+// by the 10 km square of the grid they cover, so deciding WHICH tiles a window wants means
+// projecting the window — the one thing this fetcher cannot ask the tiler, since the tiler is
+// handed the tiles it fetched.
 export const PROJECTIONS = {
-  utm10n: {
-    centralMeridian: -123,
-    latOrigin: 0,
-    scaleFactor: 0.9996,
-    falseEasting: 500_000,
-    falseNorthing: 0,
-  },
+  utm10n: UTM_10N,
 } satisfies Record<string, Tmerc>;
-
-function meridianArc(phi: number, eccentricity2: number): number {
-  const e2 = eccentricity2;
-  return (
-    SEMI_MAJOR_METERS *
-    ((1 - e2 / 4 - (3 * e2 * e2) / 64 - (5 * e2 * e2 * e2) / 256) * phi -
-      ((3 * e2) / 8 + (3 * e2 * e2) / 32 + (45 * e2 * e2 * e2) / 1024) *
-        Math.sin(2 * phi) +
-      ((15 * e2 * e2) / 256 + (45 * e2 * e2 * e2) / 1024) * Math.sin(4 * phi) -
-      ((35 * e2 * e2 * e2) / 3072) * Math.sin(6 * phi))
-  );
-}
-
-export function project(
-  projection: Tmerc,
-  lng: number,
-  lat: number,
-): [number, number] {
-  const flattening = 1 / INVERSE_FLATTENING;
-  const eccentricity2 = flattening * (2 - flattening);
-  const second2 = eccentricity2 / (1 - eccentricity2);
-  const phi = (lat * Math.PI) / 180;
-  const sinPhi = Math.sin(phi);
-  const cosPhi = Math.cos(phi);
-  const tanPhi = sinPhi / cosPhi;
-  const curvature =
-    SEMI_MAJOR_METERS / Math.sqrt(1 - eccentricity2 * sinPhi * sinPhi);
-  const tan2 = tanPhi * tanPhi;
-  const eta2 = second2 * cosPhi * cosPhi;
-  const east = (((lng - projection.centralMeridian) * Math.PI) / 180) * cosPhi;
-  const east2 = east * east;
-  const meridian =
-    meridianArc(phi, eccentricity2) -
-    meridianArc((projection.latOrigin * Math.PI) / 180, eccentricity2);
-  const easting =
-    projection.scaleFactor *
-      curvature *
-      (east +
-        ((1 - tan2 + eta2) * east * east2) / 6 +
-        ((5 - 18 * tan2 + tan2 * tan2 + 72 * eta2 - 58 * second2) *
-          east *
-          east2 *
-          east2) /
-          120) +
-    projection.falseEasting;
-  const northing =
-    projection.scaleFactor *
-      (meridian +
-        curvature *
-          tanPhi *
-          (east2 / 2 +
-            ((5 - tan2 + 9 * eta2 + 4 * eta2 * eta2) * east2 * east2) / 24 +
-            ((61 - 58 * tan2 + tan2 * tan2 + 600 * eta2 - 330 * second2) *
-              east2 *
-              east2 *
-              east2) /
-              720)) +
-    projection.falseNorthing;
-  return [easting, northing];
-}
 
 export interface LidarWindow {
   west: number;
@@ -234,35 +154,6 @@ export interface EptNode {
   bounds: LidarWindow;
 }
 
-// The S3 mirror rather than rockyweb, which serves the same bytes at under a megabyte a second.
-async function download(url: string): Promise<Uint8Array> {
-  const response = await fetch(url, { headers: { "user-agent": USER_AGENT } });
-  if (!response.ok) {
-    throw new Error(`${url}: ${response.status} ${response.statusText}`);
-  }
-  return new Uint8Array(await response.arrayBuffer());
-}
-
-async function fetchJson<Value>(url: string): Promise<Value> {
-  return await pRetry(
-    async () => {
-      const response = await fetch(url, {
-        headers: { "user-agent": USER_AGENT },
-      });
-      if (!response.ok) {
-        throw new Error(`${url}: ${response.status} ${response.statusText}`);
-      }
-      return (await response.json()) as Value;
-    },
-    {
-      retries: MAX_ATTEMPTS - 1,
-      minTimeout: RETRY_BASE_MS,
-      maxTimeout: RETRY_CAP_MS,
-      randomize: true,
-    },
-  );
-}
-
 // The octree walk: every node whose cube reaches the window, from the root down to the level whose
 // spacing is fine enough. Each level is a subsample of the whole cube rather than a tier of a
 // pyramid, so the nodes visited on the way down are read too — the rasterizer takes the union.
@@ -274,7 +165,7 @@ async function walkNodes(
   const index = await cached(
     `ept-index-${root.slice(root.lastIndexOf("/") + 1)}`,
     root,
-    () => fetchJson<EptIndex>(`${root}/ept.json`),
+    () => fetchJson<EptIndex>(`${root}/ept.json`, { attempts: MAX_ATTEMPTS }),
   );
   if (index.dataType !== "laszip") {
     throw new Error(`${root}: ${index.dataType} points, not laszip`);
@@ -295,7 +186,7 @@ async function walkNodes(
     }
     const url = `${root}/ept-hierarchy/${key}.json`;
     const fetched = await cached(`ept-hierarchy-${key}`, url, () =>
-      fetchJson<Hierarchy>(url),
+      fetchJson<Hierarchy>(url, { attempts: MAX_ATTEMPTS }),
     );
     pages.set(key, fetched);
     return fetched;
@@ -374,12 +265,7 @@ async function fetchNodes(nodes: EptNode[]): Promise<string[]> {
       const url = `${root}/ept-data/${key}.laz`;
       const dataset = root.slice(root.lastIndexOf("/") + 1);
       paths[index] = await cachedFile(`ept-${dataset}-${key}`, url, () =>
-        pRetry(() => download(url), {
-          retries: MAX_ATTEMPTS - 1,
-          minTimeout: RETRY_BASE_MS,
-          maxTimeout: RETRY_CAP_MS,
-          randomize: true,
-        }),
+        fetchBytes(url, { attempts: MAX_ATTEMPTS }),
       );
       done += 1;
       if (done % PROGRESS_NODES === 0 || done === nodes.length) {
@@ -424,7 +310,7 @@ export function demSquaresOf(
   let maxY = Number.NEGATIVE_INFINITY;
   for (const lng of lngs) {
     for (const lat of lats) {
-      const [x, y] = project(projection, lng, lat);
+      const { x, y } = forwardTmerc(projection, lng, lat);
       minX = Math.min(minX, x);
       maxX = Math.max(maxX, x);
       minY = Math.min(minY, y);
@@ -456,11 +342,12 @@ export async function fetchDemTiles(
   source: LidarSource,
   window: LidarWindow,
 ): Promise<{ paths: string[]; missing: string[] }> {
+  // The S3 mirror rather than rockyweb, which serves the same bytes at under a megabyte a second.
   const listUrl = `https://prd-tnm.s3.amazonaws.com/StagedProducts/Elevation/1m/Projects/${source.demProject}/0_file_download_links.txt`;
   const links = await cached(
     `dem-links-${source.demProject}`,
     listUrl,
-    async () => new TextDecoder().decode(await download(listUrl)),
+    async () => new TextDecoder().decode(await fetchBytes(listUrl)),
   );
   const staged = new Map<string, string>();
   for (const line of links.split("\n")) {
@@ -482,12 +369,7 @@ export async function fetchDemTiles(
     console.error(`  lidar: ground tile ${tile}`);
     paths.push(
       await cachedFile(`dem-${source.demProject}-${tile}`, url, () =>
-        pRetry(() => download(url), {
-          retries: MAX_ATTEMPTS - 1,
-          minTimeout: RETRY_BASE_MS,
-          maxTimeout: RETRY_CAP_MS,
-          randomize: true,
-        }),
+        fetchBytes(url, { attempts: MAX_ATTEMPTS }),
       ),
     );
   }

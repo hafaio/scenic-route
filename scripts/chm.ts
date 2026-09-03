@@ -7,6 +7,7 @@
 import { createHash } from "node:crypto";
 import pRetry from "p-retry";
 import { cachedFile } from "./cache";
+import { USER_AGENT } from "./http";
 
 // One file of figshare doi 10.6084/m9.figshare.20522895 — NY_CHM_10Int260m.tif, the CHM behind Ma
 // et al. 2023, "Individual structure mapping over six million trees for New York City" (Scientific
@@ -18,8 +19,6 @@ const MAX_ATTEMPTS = 3;
 const RETRY_BASE_MS = 5_000;
 const RETRY_CAP_MS = 30_000;
 const PROGRESS_BYTES = 32 * 1024 * 1024;
-const USER_AGENT =
-  "scenic-route/0.1 (+https://github.com/erikbrinkman/scenic-route)";
 
 export const CHM_ATTRIBUTION = "Canopy heights © Ma et al. 2023 (CC BY 4.0)";
 export const CHM_SOURCE_URL = "https://doi.org/10.6084/m9.figshare.20522895";

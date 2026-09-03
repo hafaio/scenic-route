@@ -4,6 +4,7 @@
 
 import pRetry from "p-retry";
 import { cached } from "./cache";
+import { USER_AGENT } from "./http";
 import type { Coord } from "./socrata";
 
 // Rings of one area, filled even-odd, so a multipolygon's inner rings punch holes.
@@ -43,9 +44,6 @@ const ENDPOINTS: readonly string[] = [
   "https://overpass-api.de/api/interpreter",
   "https://overpass.private.coffee/api/interpreter",
 ];
-// Required, not politeness: a mirror 429s an anonymous client on sight.
-const USER_AGENT =
-  "scenic-route/0.1 (+https://github.com/erikbrinkman/scenic-route)";
 const ROTATIONS = 2;
 const MAX_ATTEMPTS = ROTATIONS * ENDPOINTS.length;
 const RETRY_BASE_MS = 30_000; // a busy Overpass frees a slot in minutes, not seconds

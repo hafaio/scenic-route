@@ -40,7 +40,8 @@ import {
   parseHouseNumber,
 } from "../src/search/address-format";
 import { ALAMEDA_PLACES } from "./alameda";
-import { cached, cachedFile } from "./cache";
+import { featurePages } from "./arcgis";
+import { cachedFile } from "./cache";
 import { writeVarint, zigzag } from "./geometry";
 import { parseWktPoint } from "./socrata";
 
@@ -424,11 +425,6 @@ interface AlamedaFeature {
   properties?: AlamedaRow;
 }
 
-interface AlamedaPage {
-  features?: AlamedaFeature[];
-  error?: { code: number; message: string };
-}
-
 function alamedaPageUrl(offset: number): string {
   const url = new URL(`${ALAMEDA_ADDRESS_SERVICE}/query`);
   const codes = Object.keys(ALAMEDA_PLACES)
@@ -445,22 +441,6 @@ function alamedaPageUrl(offset: number): string {
   url.searchParams.set("maxRecordCountFactor", "5");
   url.searchParams.set("f", "geojson");
   return url.toString();
-}
-
-async function fetchAlamedaPage(url: string): Promise<AlamedaFeature[]> {
-  const response = await fetch(url, {
-    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-  });
-  if (!response.ok) {
-    throw new Error(`${response.status} ${response.statusText}`);
-  }
-  const body = (await response.json()) as AlamedaPage;
-  if (body.error) {
-    throw new Error(`ArcGIS ${body.error.code}: ${body.error.message}`);
-  } else if (!Array.isArray(body.features)) {
-    throw new Error("no features in the response");
-  }
-  return body.features;
 }
 
 // The name as the county's own centreline spells it — "E 38TH ST", the four parts run together in
@@ -494,23 +474,19 @@ const ALAMEDA_ADDRESS_POINTS: Feed = {
   async collect(): Promise<Collected> {
     const rows: AddressRow[] = [];
     let total = 0;
-    for (let offset = 0; ; offset += ALAMEDA_PAGE_SIZE) {
-      const url = alamedaPageUrl(offset);
-      const page = await cached(
-        `addresses.alameda-${offset}`,
-        url,
-        () => fetchAlamedaPage(url),
-        true,
-      );
+    const pages = featurePages<AlamedaFeature>({
+      pageUrl: alamedaPageUrl,
+      pageSize: ALAMEDA_PAGE_SIZE,
+      cacheName: "addresses.alameda",
+      timeoutMs: REQUEST_TIMEOUT_MS,
+    });
+    for await (const page of pages) {
       for (const feature of page) {
         total += 1;
         const row = alamedaRow(feature);
         if (row !== null) {
           rows.push(row);
         }
-      }
-      if (page.length < ALAMEDA_PAGE_SIZE) {
-        break;
       }
       console.error(`  alameda: ${total} addresses`);
     }
