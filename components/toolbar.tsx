@@ -116,7 +116,10 @@ export default function Toolbar({
   const isAdmin = auth.kind === "signedIn" && auth.info.admin;
 
   return (
-    <div className="absolute top-3 right-3 z-[1000] flex items-center gap-2">
+    // Tighter on a phone, because this row is no longer the only thing on it: the follow toggle and
+    // the search button take the left end, and at 375px eight 40px circles do not fit a 351px strip
+    // at an 8px gap. 4px puts the toolbar's left edge at 103, clear of the search button's 100.
+    <div className="absolute top-3 right-3 z-[1000] flex items-center gap-1 sm:gap-2">
       {cityDialogOpen ? (
         <CityDialog
           city={city}

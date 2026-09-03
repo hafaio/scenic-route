@@ -30,8 +30,9 @@ import type { RouteResult } from "../src/routing/search";
 import installTilePrune from "../src/tiles/prune";
 import type { Camera } from "../src/url-state";
 import Basemap from "./basemap";
-import { savedIcon, userIcon } from "./map-icons";
+import { savedIcon, searchIcon, userIcon } from "./map-icons";
 import RouteLayer from "./route-layer";
+import { useMapTheme } from "./use-map-theme";
 
 // Every grid layer on the map inherits this, so it goes in once here rather than in each layer.
 installTilePrune();
@@ -48,6 +49,13 @@ export interface MapTarget {
 // zoom, so it waits out the double-tap window before committing.
 export type PickMode = "off" | "immediate" | "deferred";
 
+// A place found in the search panel and left on the map. One at a time, and no route of its own.
+export interface SearchPin {
+  lat: number;
+  lng: number;
+  label: string;
+}
+
 interface MapViewProps {
   city: City; // frames the map when there is no camera to restore
   pins: Pin[];
@@ -60,6 +68,7 @@ interface MapViewProps {
   routeGraph: RoutingGraph | null; // the graph routeResult's edge indices point into
   routeDest: { lat: number; lng: number } | null;
   routeStart: { lat: number; lng: number } | null;
+  searchPin: SearchPin | null;
   pickMode: PickMode;
   dragging: boolean; // an endpoint marker is being dragged; the route reframe goes zoom-out-only
   initialCamera: Camera | null; // a shared link's camera, applied once; null leaves the map alone
@@ -513,6 +522,7 @@ export default function MapView({
   routeGraph,
   routeDest,
   routeStart,
+  searchPin,
   pickMode,
   dragging,
   initialCamera,
@@ -532,6 +542,10 @@ export default function MapView({
     lng: number;
   } | null>(null);
   const cancelPendingPick = useCallback(() => setPendingDest(null), []);
+  // Rebuilt only when the theme flips, and handed to the marker as a new icon so it repaints in
+  // place: an icon built once at import keeps its old gradient until something remounts the marker.
+  const theme = useMapTheme();
+  const searchMarker = useMemo(() => searchIcon(theme), [theme]);
 
   // The wait itself, and the ways it can end without committing: the arm state changing out from under
   // it (the panel closing, a field arming explicitly, the commit landing) and unmount.
@@ -636,6 +650,16 @@ export default function MapView({
       ) : null}
       {draft ? (
         <Marker position={[draft.lat, draft.lng]} icon={draftIcon} />
+      ) : null}
+      {searchPin ? (
+        // Nothing to tap: the name is in the search panel that found it, and the panel is where the
+        // pin is cleared. Non-interactive so a tap that lands on it drops a route point on the map
+        // underneath, the way a tap beside it does.
+        <Marker
+          position={[searchPin.lat, searchPin.lng]}
+          icon={searchMarker}
+          interactive={false}
+        />
       ) : null}
       {pendingDest ? (
         // Non-interactive, unlike the committed destination: a draggable marker under the first tap

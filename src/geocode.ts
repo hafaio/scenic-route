@@ -158,10 +158,15 @@ export function exactAddressMatch(
 // `cityId` defaults to whichever city is live, which is what the search box wants — it has no city of
 // its own and asks about the one on screen. A caller that captured a city and must keep answering
 // about THAT one, however long the index takes to arrive, names it instead.
-export async function searchAddress(
+//
+// Null is the answer the index has not arrived yet, which is not the same thing as "no such place":
+// a bar that says a park does not exist because the worker is still fetching has told the reader
+// something false. `searchAddress` below flattens the two, because the route fields have no row to
+// draw the difference in.
+export async function searchPlaces(
   query: string,
   cityId: string = activeCity().id,
-): Promise<GeocodeResult[]> {
+): Promise<GeocodeResult[] | null> {
   const trimmed = query.trim();
   if (!trimmed) {
     return [];
@@ -211,12 +216,21 @@ export async function searchAddress(
       exact: hit.exact === true,
     });
   }
-  // Only a real answer is remembered: an index this device has not managed to fetch yet answers
-  // nothing, and caching that would keep answering nothing once it arrived.
-  if (indexHits !== null) {
+  if (indexHits === null) {
+    return null;
+  } else {
+    // Only a real answer is remembered: an index this device has not managed to fetch yet answers
+    // nothing, and caching that would keep answering nothing once it arrived.
     setBounded(searchCache, cacheKey, results);
+    return results;
   }
-  return results;
+}
+
+export async function searchAddress(
+  query: string,
+  cityId: string = activeCity().id,
+): Promise<GeocodeResult[]> {
+  return (await searchPlaces(query, cityId)) ?? [];
 }
 
 // What a shared query resolved to, against the city it was resolved in: the door to route straight
