@@ -19,14 +19,9 @@ import { themeName } from "./theme";
 // tunable without a rebuild. A block lights when it is commercial (>50% commercial frontage) AND
 // low-rise AND (on an Open Street OR has outdoor seating) — i.e. a charming low-rise retail strip, not
 // a Midtown office canyon. A qualifying block is drawn as one wide violet band over the street, whole
-// length — a block is on or off, never a spot, never a fade. Two render modes: a vector band at
-// z>=13, and a coarse smoothed raster at z10..12 so the city overview reads.
+// length — a block is on or off, never a spot, never a fade.
 
 const TILE_SIZE = 256;
-
-// The raster overview keeps the layer legible from z10; below that the whole city is a speck. The
-// vector band takes over at VECTOR_MIN_ZOOM, from where the bands are wide enough to read crisply.
-const VECTOR_MIN_ZOOM = 13;
 
 // The z12 STCK street chunks (geometry) and their CMRC signal siblings, fetched lazily per chunk as
 // the display tiles over them are drawn. Relative, so they pick up the deploy's basePath.
@@ -51,8 +46,8 @@ const LOW_RISE_METERS = 25;
 // and neighbouring bands overlap at corners, so it stays airy.
 const BAND_OPACITY = 0.45;
 
-// The band's stroke and the raster's pixels both want the overlay's violet as channels rather than
-// as hex, so both themes' are parsed once up front.
+// The band's stroke wants the overlay's violet as channels rather than as hex, so both themes' are
+// parsed once up front.
 function channels(hex: string): readonly [number, number, number] {
   const [red, green, blue] = [1, 3, 5].map((at) =>
     Number.parseInt(hex.slice(at, at + 2), 16),
@@ -67,7 +62,10 @@ const BAND_CHANNELS: Record<ThemeName, readonly [number, number, number]> = {
 
 // The vector band's ground width: the roadway plus the frontage lots on both sides, so it reads as the
 // commercial BLOCK strip rather than a centreline over the street. A NYC lot is ~30 m deep, the road
-// ~12 m, so ~50 m covers the street and most of the frontage each side. Floored to a visible px width.
+// ~12 m, so ~50 m covers the street and most of the frontage each side. From z13 down that comes to
+// a couple of pixels or less, so it is floored — the floor is what keeps the city overview a legible
+// wash instead of invisible hairlines, and it is narrow enough that at z10 the strips still read as
+// strips rather than one blanket.
 const BAND_METERS = 50;
 const MIN_BAND_PX = 4;
 
@@ -77,12 +75,6 @@ const MIN_BAND_PX = 4;
 // tile's. Both are tunable by eye.
 const BAND_BLUR_PX = 5;
 const BLUR_PAD = 15;
-
-// The low-zoom raster: qualifying segments are marked into this coarse grid per tile, then blitted up
-// smoothed, so the overview is a soft violet wash rather than invisible hairlines.
-const RASTER_GRID = 128;
-const RASTER_CELL_PX = TILE_SIZE / RASTER_GRID;
-const RASTER_OPACITY = 0.5;
 
 const EQUATOR_METERS_PER_PIXEL = 156_543.033_92; // web mercator, at the equator, at z0
 
@@ -235,8 +227,8 @@ async function loadTile(tileX: number, tileY: number): Promise<TileData> {
 }
 
 // The z12 chunks a display tile covers. At z>=12 a tile sits inside a single chunk (its ancestor at
-// CHUNK_ZOOM). Below z12 one tile spans a 2^(12-z) square of chunks — 4 at z11, 16 at z10 — so the
-// raster overview pulls in only the handful under it, not the whole city.
+// CHUNK_ZOOM). Below z12 one tile spans a 2^(12-z) square of chunks — 4 at z11, 16 at z10 — so an
+// overview tile pulls in only the handful under it, not the whole city.
 function coveringChunks(coords: TileCoords): { x: number; y: number }[] {
   if (coords.z >= CHUNK_ZOOM) {
     const shift = coords.z - CHUNK_ZOOM;
@@ -306,8 +298,6 @@ function load(
 // synchronously to completion — so the drawing scratch buffers are reused across every tile instead
 // of allocated per tile. Lazily created; a canvas is resized only if the device pixel ratio changes.
 let bandScratch: OffscreenCanvas | null = null;
-let rasterScratch: OffscreenCanvas | null = null;
-let rasterImage: ImageData | null = null;
 
 function sizedCanvas(
   canvas: OffscreenCanvas | null,
@@ -383,14 +373,15 @@ function compositeBand(
   context.globalAlpha = 1;
 }
 
-// z>=13: draw each qualifying block as one WIDE violet band over the street — a rectangle that reads
-// as the whole block, not a centreline. Projected at the tile's own zoom, so the band stays crisp
-// however far in the map goes. Every qualifying block goes into ONE unioned path, composited (and
-// feathered) once.
-function drawVector(
+// Draw each qualifying block as one WIDE violet band over the street — a rectangle that reads as the
+// whole block, not a centreline. Projected at the tile's own zoom, so the band stays crisp however
+// far in the map goes. Every qualifying block goes into ONE unioned path, composited (and feathered)
+// once.
+function draw(
   context: OffscreenCanvasRenderingContext2D,
   models: ChunkModel[],
   coords: TileCoords,
+  _params: CommercialParams,
   ratio: number,
 ): void {
   const originX = coords.x * TILE_SIZE;
@@ -446,109 +437,6 @@ function drawVector(
 
   if (hasBand) {
     compositeBand(context, band, width, ratio);
-  }
-}
-
-// z10..12: too far out for crisp bands, so mark each qualifying block into a coarse grid and blit it
-// up smoothed — a soft violet wash that carries the city overview. Binary on/off, like the band.
-function drawRaster(
-  context: OffscreenCanvasRenderingContext2D,
-  models: ChunkModel[],
-  coords: TileCoords,
-): void {
-  const originX = coords.x * TILE_SIZE;
-  const originY = coords.y * TILE_SIZE;
-  const grid = new Uint8Array(RASTER_GRID * RASTER_GRID);
-  const margin = RASTER_CELL_PX;
-
-  const mark = (pixelX: number, pixelY: number): void => {
-    const cellX = Math.floor(pixelX / RASTER_CELL_PX);
-    const cellY = Math.floor(pixelY / RASTER_CELL_PX);
-    if (
-      cellX >= 0 &&
-      cellX < RASTER_GRID &&
-      cellY >= 0 &&
-      cellY < RASTER_GRID
-    ) {
-      grid[cellY * RASTER_GRID + cellX] = 1;
-    }
-  };
-
-  for (const { segments, qualifies } of models) {
-    for (let index = 0; index < segments.length; index++) {
-      if (qualifies[index] === 0) {
-        continue;
-      }
-      const { lngs, lats } = segments[index];
-      let previousX = 0;
-      let previousY = 0;
-      for (let vertex = 0; vertex < lngs.length; vertex++) {
-        const pixelX = projectX(lngs[vertex], coords.z) - originX;
-        const pixelY = projectY(lats[vertex], coords.z) - originY;
-        if (vertex === 0) {
-          previousX = pixelX;
-          previousY = pixelY;
-          mark(pixelX, pixelY);
-          continue;
-        }
-        // Walk the piece in half-cell steps so every cell it crosses is marked, including off-tile
-        // ones within the margin (a block on the seam should tint both tiles). Cheap: cells are
-        // small.
-        const spanX = pixelX - previousX;
-        const spanY = pixelY - previousY;
-        const length = Math.hypot(spanX, spanY);
-        const steps = Math.max(1, Math.ceil(length / (RASTER_CELL_PX / 2)));
-        for (let step = 1; step <= steps; step++) {
-          const walkX = previousX + (spanX * step) / steps;
-          const walkY = previousY + (spanY * step) / steps;
-          if (
-            walkX >= -margin &&
-            walkX <= TILE_SIZE + margin &&
-            walkY >= -margin &&
-            walkY <= TILE_SIZE + margin
-          ) {
-            mark(walkX, walkY);
-          }
-        }
-        previousX = pixelX;
-        previousY = pixelY;
-      }
-    }
-  }
-
-  rasterImage ??= new ImageData(RASTER_GRID, RASTER_GRID);
-  const image = rasterImage;
-  image.data.fill(0); // reused across tiles: clear the previous tile's marked cells first
-  const [red, green, blue] = BAND_CHANNELS[themeName()];
-  const alpha = Math.round(255 * RASTER_OPACITY);
-  for (let cell = 0; cell < grid.length; cell++) {
-    if (grid[cell] === 0) {
-      continue;
-    }
-    const offset = cell * 4;
-    image.data[offset] = red;
-    image.data[offset + 1] = green;
-    image.data[offset + 2] = blue;
-    image.data[offset + 3] = alpha;
-  }
-  rasterScratch = sizedCanvas(rasterScratch, RASTER_GRID, RASTER_GRID);
-  rasterScratch.getContext("2d")?.putImageData(image, 0, 0);
-  context.imageSmoothingEnabled = true;
-  context.imageSmoothingQuality = "high";
-  context.drawImage(rasterScratch, 0, 0, TILE_SIZE, TILE_SIZE);
-}
-
-function draw(
-  context: OffscreenCanvasRenderingContext2D,
-  models: ChunkModel[],
-  coords: TileCoords,
-  _params: CommercialParams,
-  ratio: number,
-): void {
-  if (coords.z >= VECTOR_MIN_ZOOM) {
-    drawVector(context, models, coords, ratio);
-  } else {
-    drawRaster(context, models, coords);
   }
 }
 
